@@ -1,6 +1,10 @@
 use std::fs;
 use std::env;
 mod repl;
+mod lexer;
+mod token;
+
+
 
 fn main(){
     let args: Vec<String> = env::args().collect();

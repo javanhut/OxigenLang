@@ -40,7 +40,7 @@ pub enum TokenType {
     Lt, // <
     Gteq, // >=
     Lteq, // <= 
-
+    Arrow, // ->
     // Delimiters
     Comma, // ,
     Colon, // :
