@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 
-
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Hash, Debug, Clone, PartialEq, Eq)]
 pub enum TokenType {
     Eof,
     Illegal,
@@ -16,53 +14,52 @@ pub enum TokenType {
     Char,
     Boolean,
 
-    // Indentation Handling 
-    Indent, 
+    // Indentation Handling
+    Indent,
     Dedent,
 
     //Operators
-    Assign, // =
-    Walrus, // :=
-    Plus, // +
-    Minus, // -
-    Astrisk, // *
-    Ampersand, // &
-    At, // @
-    Mod, // %
-    Eq, // ==
-    NotEq, // != 
-    Shebang, // !
+    Assign,     // =
+    Walrus,     // :=
+    Plus,       // +
+    Minus,      // -
+    Asterisk,   // *
+    Ampersand,  // &
+    At,         // @
+    Mod,        // %
+    Eq,         // ==
+    NotEq,      // !=
+    Shebang,    // !
     DollarSign, // $
-    Hash, // #
-    Increment, // ++
+    Hash,       // #
+    Increment,  // ++
     Decrement,  // --
-    Gt, // >
-    Lt, // <
-    Gteq, // >=
-    Lteq, // <= 
-    Arrow, // ->
+    Gt,         // >
+    Lt,         // <
+    Gte,        // >=
+    Lte,        // <=
+    Arrow,      // ->
     // Delimiters
-    Comma, // ,
-    Colon, // :
+    Comma,     // ,
+    Colon,     // :
     Semicolon, // ;
-    LBrace, // [
-    RBrace, // ]
-    LBracket, // {
-    RBracket, // }
-    LParen, // (
-    RParen, // )
-    FullStop, // .
-    FSlash, // /
-    BSlash, // \
-    
+    LBrace,    // {
+    RBrace,    // }
+    LBracket,  // [
+    RBracket,  // ]
+    LParen,    // (
+    RParen,    // )
+    FullStop,  // .
+    FSlash,    // /
+    BSlash,    // \
 
     // Bitwise Operators
     LShift, // <<
     RShift, // >>
-    Xor, // ^
-    Pipe, // |
-    Tilde, // ~
-    
+    Caret,    // ^
+    Pipe,   // |
+    Tilde,  // ~
+
     // Keywords
     If,
     Else,
@@ -82,13 +79,11 @@ pub enum TokenType {
     Pattern,
 }
 
-
-#[derive(Debug,Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub token_type: TokenType,
     pub literal: String,
 }
-
 
 pub fn token_map() -> HashMap<&'static str, TokenType> {
     use TokenType::*;

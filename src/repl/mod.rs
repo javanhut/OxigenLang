@@ -8,11 +8,11 @@ pub fn run_repl() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     loop {
-        print!("{}",line_prefix);
+        print!("{}", line_prefix);
         stdout.flush().unwrap();
 
         let mut input = String::new();
-        if stdin.read_line(&mut input).is_err(){
+        if stdin.read_line(&mut input).is_err() {
             break;
         }
         let line = input.trim();
@@ -31,11 +31,9 @@ pub fn run_repl() {
         loop {
             let tok = lexer.next_token();
             println!("{:?}", tok);
-            if tok.token_type ==  TokenType::Eof {
+            if tok.token_type == TokenType::Eof {
                 break;
             }
         }
-        
-
     }
 }
