@@ -32,7 +32,7 @@ fn precedence_of(tt: &TokenType) -> Precedence {
 type PrefixParseFn = fn(&mut Parser) -> Option<Expression>;
 type InfixParseFn = fn(&mut Parser, Expression) -> Option<Expression>;
 
-struct Parser {
+pub struct Parser {
     lexer: Lexer,
     curr_token: Token,
     peek_token: Token,
@@ -109,7 +109,7 @@ impl Parser {
         };
 
         // consume ':='
-        self.expect_peek(TokenType::Assign)?;
+        self.expect_peek(TokenType::Walrus)?;
 
         // move to expression start
         self.next_token();

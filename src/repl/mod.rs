@@ -1,5 +1,5 @@
 use crate::lexer::Lexer;
-use crate::token::TokenType;
+use crate::parser::Parser;
 use std::io::{self, Write};
 
 const OXI_VERSION: &str = "0.1.0";
@@ -27,12 +27,18 @@ pub fn run_repl() {
             println!("Oxi Version {OXI_VERSION}");
         }
 
-        let mut lexer = Lexer::new(line);
-        loop {
-            let tok = lexer.next_token();
-            println!("{:?}", tok);
-            if tok.token_type == TokenType::Eof {
-                break;
+        let lexer = Lexer::new(line);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program();
+
+        let errors = parser.error();
+        if !errors.is_empty() {
+            for err in errors {
+                println!("Error: {}", err);
+            }
+        } else {
+            for stmt in &program.statements {
+                println!("{:?}", stmt);
             }
         }
     }
