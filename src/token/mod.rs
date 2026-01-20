@@ -77,6 +77,9 @@ pub enum TokenType {
     Each,
     When,
     Pattern,
+    In,
+    Not,
+
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,5 +99,13 @@ pub fn token_map() -> HashMap<&'static str, TokenType> {
         ("when", When),
         ("choose", Choose),
         ("pattern", Pattern),
+        ("in", In),
+        ("not", Not),
+        ("True", True),
+        ("False", False),
+        ("skip",Skip),
+        ("stop", Stop),
+        ("None", None),
+        ("as", As),
     ])
 }
