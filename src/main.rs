@@ -1,13 +1,20 @@
+use std::cell::RefCell;
 use std::env;
 use std::fs;
+use std::rc::Rc;
+
 mod ast;
+mod evaluator;
 mod lexer;
+mod object;
 mod parser;
 mod repl;
 mod token;
 
+use evaluator::Evaluator;
 use lexer::Lexer;
-use token::TokenType;
+use object::environment::Environment;
+use parser::Parser;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -17,21 +24,31 @@ fn main() {
         let contents =
             fs::read_to_string(file_path).expect("Should have been able to read this file");
 
-        println!("=== Lexing: {} ===\n", file_path);
+        let lexer = Lexer::new(&contents);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program();
 
-        let mut lexer = Lexer::new(&contents);
-        loop {
-            let tok = lexer.next_token();
-            let is_eof = tok.token_type == TokenType::Eof;
-
-            // Skip newlines for cleaner output
-            if tok.token_type != TokenType::Newline {
-                println!("{:?}", tok);
+        let errors = parser.error();
+        if !errors.is_empty() {
+            eprintln!("Parser errors:");
+            for err in errors {
+                eprintln!("  {}", err);
             }
+            std::process::exit(1);
+        }
 
-            if is_eof {
-                break;
+        let env = Rc::new(RefCell::new(Environment::new()));
+        let mut evaluator = Evaluator::new();
+        let result = evaluator.eval_program(&program, env);
+
+        // Print result if it's not None and not an error
+        match result.as_ref() {
+            object::Object::None => {}
+            object::Object::Error(msg) => {
+                eprintln!("Error: {}", msg);
+                std::process::exit(1);
             }
+            _ => println!("{}", result),
         }
     } else {
         repl::run_repl();

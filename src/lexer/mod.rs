@@ -140,7 +140,7 @@ impl Lexer {
                     self.read_char();
                     Token {
                         token_type: TokenType::Lte,
-                        literal: ">=".into(),
+                        literal: "<=".into(),
                     }
                 }
                 '<' => {
@@ -224,7 +224,9 @@ impl Lexer {
             '*' => self.single(TokenType::Asterisk),
             '/' => self.single(TokenType::FSlash),
             '\\' => self.single(TokenType::BSlash),
-            '"' => self.read_string(),
+            '"' => self.read_string('"'),
+            '\'' => self.read_string('\''),
+            '`' => self.read_char_literal(),
             c if c.is_ascii_digit() => return self.read_number(),
             c if is_ident_start(c) => return self.read_ident(),
             _ => {
@@ -291,26 +293,61 @@ impl Lexer {
 
     fn read_number(&mut self) -> Token {
         let start = self.position;
+        let mut is_float = false;
+
         while self.ch.is_ascii_digit() {
             self.read_char();
         }
+
+        // Check for decimal point followed by digits
+        if self.ch == '.' && self.peek_char().is_ascii_digit() {
+            is_float = true;
+            self.read_char(); // consume '.'
+            while self.ch.is_ascii_digit() {
+                self.read_char();
+            }
+        }
+
         let literal: String = self.input[start..self.position].iter().collect();
         Token {
-            token_type: TokenType::Integer,
+            token_type: if is_float { TokenType::Float } else { TokenType::Integer },
             literal,
         }
     }
 
-    fn read_string(&mut self) -> Token {
-        self.read_char(); // opening "
+    fn read_string(&mut self, delimiter: char) -> Token {
+        self.read_char(); // opening quote
         let start = self.position;
-        while self.ch != '"' && self.ch != '\0' {
+        while self.ch != delimiter && self.ch != '\0' {
             self.read_char();
         }
         let literal: String = self.input[start..self.position].iter().collect();
-        self.read_char(); // closing "
+        self.read_char(); // closing quote
         Token {
             token_type: TokenType::String,
+            literal,
+        }
+    }
+
+    fn read_char_literal(&mut self) -> Token {
+        self.read_char(); // opening `
+        let start = self.position;
+        while self.ch != '`' && self.ch != '\0' {
+            self.read_char();
+        }
+        let literal: String = self.input[start..self.position].iter().collect();
+        self.read_char(); // closing `
+
+        // Validate it's exactly one character
+        if literal.chars().count() != 1 {
+            return Token {
+                token_type: TokenType::Illegal,
+                literal: format!("invalid char literal: `{}`", literal),
+            };
+        }
+
+        Token {
+            token_type: TokenType::Char,
             literal,
         }
     }
