@@ -8,6 +8,7 @@ pub enum TypeAnnotation {
     Char,
     Bool,
     Array,
+    Struct(String),
 }
 
 impl TypeAnnotation {
@@ -23,14 +24,22 @@ impl TypeAnnotation {
         }
     }
 
-    pub fn type_name(&self) -> &'static str {
+    pub fn from_str_or_struct(s: &str) -> TypeAnnotation {
+        match Self::from_str(s) {
+            Some(ta) => ta,
+            None => TypeAnnotation::Struct(s.to_string()),
+        }
+    }
+
+    pub fn type_name(&self) -> String {
         match self {
-            TypeAnnotation::Int => "INTEGER",
-            TypeAnnotation::Str => "STRING",
-            TypeAnnotation::Float => "FLOAT",
-            TypeAnnotation::Char => "CHAR",
-            TypeAnnotation::Bool => "BOOLEAN",
-            TypeAnnotation::Array => "ARRAY",
+            TypeAnnotation::Int => "INTEGER".to_string(),
+            TypeAnnotation::Str => "STRING".to_string(),
+            TypeAnnotation::Float => "FLOAT".to_string(),
+            TypeAnnotation::Char => "CHAR".to_string(),
+            TypeAnnotation::Bool => "BOOLEAN".to_string(),
+            TypeAnnotation::Array => "ARRAY".to_string(),
+            TypeAnnotation::Struct(name) => name.clone(),
         }
     }
 }

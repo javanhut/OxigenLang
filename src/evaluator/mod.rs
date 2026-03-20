@@ -89,18 +89,44 @@ impl Evaluator {
                 Object::Array(_) => Ok(Rc::clone(obj)),
                 _ => Err(format!("cannot convert {} to ARRAY", obj.type_name())),
             },
-            _ => Err(format!("unknown target type: {}", target)),
+            _ => {
+                // Struct type: only identity conversion (value must already be that struct)
+                if let Some(stn) = obj.struct_type_name() {
+                    if stn == target {
+                        return Ok(Rc::clone(obj));
+                    }
+                }
+                Err(format!("cannot convert {} to {}", obj.effective_type_name(), target))
+            }
         }
     }
 
-    fn zero_value_for_type(type_ann: &TypeAnnotation) -> Rc<Object> {
-        match type_ann {
-            TypeAnnotation::Int => Rc::new(Object::Integer(0)),
-            TypeAnnotation::Float => Rc::new(Object::Float(0.0)),
-            TypeAnnotation::Str => Rc::new(Object::String(String::new())),
-            TypeAnnotation::Char => Rc::new(Object::Char('\0')),
-            TypeAnnotation::Bool => Rc::new(Object::Boolean(false)),
-            TypeAnnotation::Array => Rc::new(Object::Array(Vec::new())),
+    fn zero_value_for_type(type_name: &str) -> Rc<Object> {
+        match type_name {
+            "INTEGER" => Rc::new(Object::Integer(0)),
+            "FLOAT" => Rc::new(Object::Float(0.0)),
+            "STRING" => Rc::new(Object::String(String::new())),
+            "CHAR" => Rc::new(Object::Char('\0')),
+            "BOOLEAN" => Rc::new(Object::Boolean(false)),
+            "ARRAY" => Rc::new(Object::Array(Vec::new())),
+            _ => Rc::new(Object::None),
+        }
+    }
+
+    fn zero_value_for_struct(&self, struct_name: &str) -> Result<Rc<Object>, String> {
+        let def = self.struct_defs.get(struct_name)
+            .ok_or_else(|| format!("struct not found: {}", struct_name))?;
+        if let Object::StructDef { name, fields, .. } = def.as_ref() {
+            let mut instance_fields = HashMap::new();
+            for (field_name, field_type) in fields {
+                instance_fields.insert(field_name.clone(), Self::zero_value_for_type(field_type));
+            }
+            Ok(Rc::new(Object::StructInstance {
+                struct_name: name.clone(),
+                fields: Rc::new(RefCell::new(instance_fields)),
+            }))
+        } else {
+            Err(format!("{} is not a struct", struct_name))
         }
     }
 
@@ -137,12 +163,12 @@ impl Evaluator {
                         // Walrus reassignment on typed variable: strict type check
                         // Type is immutable — no implicit conversion. Use explicit
                         // typed re-declaration (x <type> := val) to change the type.
-                        if val.type_name() != target_type {
+                        if val.effective_type_name() != target_type {
                             return Rc::new(Object::Error(format!(
                                 "type mismatch: '{}' is locked to {}, got {}. use explicit type declaration to change type",
                                 name.value,
                                 target_type,
-                                val.type_name()
+                                val.effective_type_name()
                             )));
                         }
                         env.borrow_mut().update(&name.value, val.clone());
@@ -196,16 +222,16 @@ impl Evaluator {
                 }
                 let target = type_ann.type_name();
                 let final_val = if *walrus {
-                    match Self::convert_to_type(&val, target) {
+                    match Self::convert_to_type(&val, &target) {
                         Ok(converted) => converted,
                         Err(msg) => return Rc::new(Object::Error(msg)),
                     }
                 } else {
-                    if val.type_name() != target {
+                    if val.effective_type_name() != target {
                         return Rc::new(Object::Error(format!(
                             "type mismatch: expected {}, got {}",
                             target,
-                            val.type_name()
+                            val.effective_type_name()
                         )));
                     }
                     val
@@ -214,18 +240,26 @@ impl Evaluator {
                 env.borrow_mut().set_typed(
                     name.value.clone(),
                     final_val.clone(),
-                    target.to_string(),
+                    target,
                     immutable,
                 );
                 final_val
             }
             Statement::TypedDeclare { name, type_ann } => {
-                let val = Self::zero_value_for_type(type_ann);
                 let target = type_ann.type_name();
+                let val = match type_ann {
+                    TypeAnnotation::Struct(sname) => {
+                        match self.zero_value_for_struct(sname) {
+                            Ok(v) => v,
+                            Err(msg) => return Rc::new(Object::Error(msg)),
+                        }
+                    }
+                    _ => Self::zero_value_for_type(&target),
+                };
                 env.borrow_mut().set_typed(
                     name.value.clone(),
                     val.clone(),
-                    target.to_string(),
+                    target,
                     false, // as-declarations are mutable
                 );
                 val
@@ -257,11 +291,11 @@ impl Evaluator {
                 if val.is_error() {
                     return val;
                 }
-                if val.type_name() != target_type {
+                if val.effective_type_name() != target_type {
                     return Rc::new(Object::Error(format!(
                         "type mismatch: expected {}, got {}",
                         target_type,
-                        val.type_name()
+                        val.effective_type_name()
                     )));
                 }
                 env.borrow_mut().update(&name.value, val.clone());
@@ -303,7 +337,7 @@ impl Evaluator {
 
                 // Add own fields
                 for field in fields {
-                    all_fields.push((field.name.value.clone(), field.type_ann.type_name().to_string()));
+                    all_fields.push((field.name.value.clone(), field.type_ann.type_name()));
                 }
 
                 let struct_obj = Rc::new(Object::StructDef {
@@ -396,11 +430,7 @@ impl Evaluator {
                         if val.is_error() {
                             return val;
                         }
-                        let actual_type = if let Some(stn) = val.struct_type_name() {
-                            stn.to_string()
-                        } else {
-                            val.type_name().to_string()
-                        };
+                        let actual_type = val.effective_type_name();
                         if actual_type != expected_type {
                             return Rc::new(Object::Error(format!(
                                 "type mismatch: field '{}' expects {}, got {}",
@@ -560,11 +590,7 @@ impl Evaluator {
                                 let field_def = def_fields.iter().find(|(n, _)| n == field_name);
                                 match field_def {
                                     Some((_, expected_type)) => {
-                                        let actual_type = if let Some(stn) = val.struct_type_name() {
-                                            stn.to_string()
-                                        } else {
-                                            val.type_name().to_string()
-                                        };
+                                        let actual_type = val.effective_type_name();
                                         if actual_type != *expected_type {
                                             return Rc::new(Object::Error(format!(
                                                 "type mismatch for field '{}': expected {}, got {}",
@@ -974,11 +1000,7 @@ impl Evaluator {
 
                 let mut instance_fields = HashMap::new();
                 for ((field_name, expected_type), arg) in fields.iter().zip(args.iter()) {
-                    let actual_type = if let Some(stn) = arg.struct_type_name() {
-                        stn.to_string()
-                    } else {
-                        arg.type_name().to_string()
-                    };
+                    let actual_type = arg.effective_type_name();
                     if actual_type != *expected_type {
                         return Rc::new(Object::Error(format!(
                             "type mismatch for field '{}': expected {}, got {}",
@@ -2714,5 +2736,238 @@ mod tests {
             o.make_inner().val
         "#;
         test_integer(&test_eval(input), 42);
+    }
+
+    // ==================== STRUCT AS TYPE ANNOTATION TESTS ====================
+
+    #[test]
+    fn test_struct_typed_strict() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p <Person> = Person("Alice", 30)
+            p.name
+        "#;
+        test_string(&test_eval(input), "Alice");
+    }
+
+    #[test]
+    fn test_struct_typed_walrus() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p <Person> := Person("Bob", 25)
+            p.age
+        "#;
+        test_integer(&test_eval(input), 25);
+    }
+
+    #[test]
+    fn test_struct_typed_strict_wrong_type() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p <Person> = 42
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("type mismatch"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_struct_typed_reassign_same_type() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p <Person> := Person("Alice", 30)
+            p = Person("Bob", 25)
+            p.name
+        "#;
+        test_string(&test_eval(input), "Bob");
+    }
+
+    #[test]
+    fn test_struct_typed_reassign_wrong_type() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p <Person> := Person("Alice", 30)
+            p = 42
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("type mismatch"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_struct_typed_immutable() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p <Person> = Person("Alice", 30)
+            p = Person("Bob", 25)
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("cannot reassign immutable"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_struct_typed_walrus_reassign_wrong_struct() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            struct Dog {
+                name <str>
+            }
+            p <Person> := Person("Alice", 30)
+            p := Dog("Rex")
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("locked"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_struct_field_typed_as_struct() {
+        let input = r#"
+            struct Address {
+                city <str>
+            }
+            struct Person {
+                name <str>
+                addr <Address>
+            }
+            a := Address("NYC")
+            p := Person("Alice", a)
+            p.addr.city
+        "#;
+        test_string(&test_eval(input), "NYC");
+    }
+
+    #[test]
+    fn test_struct_field_typed_wrong_struct() {
+        let input = r#"
+            struct Address {
+                city <str>
+            }
+            struct Person {
+                name <str>
+                addr <Address>
+            }
+            p := Person("Alice", "not an address")
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("type mismatch"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_struct_as_declare_zero_values() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p as <Person>
+            p.name
+        "#;
+        test_string(&test_eval(input), "");
+    }
+
+    #[test]
+    fn test_struct_as_declare_zero_int() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p as <Person>
+            p.age
+        "#;
+        test_integer(&test_eval(input), 0);
+    }
+
+    #[test]
+    fn test_struct_as_declare_then_assign() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p as <Person>
+            p = Person("Alice", 30)
+            p.name
+        "#;
+        test_string(&test_eval(input), "Alice");
+    }
+
+    #[test]
+    fn test_struct_as_declare_then_assign_wrong_type() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p as <Person>
+            p = 42
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("type mismatch"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_struct_as_declare_dot_assign() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p as <Person>
+            p.name = "Bob"
+            p.age = 25
+            p.name
+        "#;
+        test_string(&test_eval(input), "Bob");
+    }
+
+    #[test]
+    fn test_struct_as_declare_type_returned() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p as <Person>
+            type(p)
+        "#;
+        test_string(&test_eval(input), "Person");
     }
 }

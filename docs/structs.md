@@ -211,6 +211,76 @@ o := Outer("test")
 println(o.make_inner().val)   # 42
 ```
 
+## Structs as Types
+
+Struct names can be used as type annotations, just like built-in types. This locks a variable to a specific struct type:
+
+### Strict Declaration
+
+```oxi
+p <Person> = Person("Alice", 30)   # immutable binding, locked to Person
+p = Person("Bob", 25)              # error: cannot reassign immutable variable
+```
+
+### Walrus Declaration
+
+```oxi
+p <Person> := Person("Alice", 30)  # mutable binding, locked to Person
+p = Person("Bob", 25)              # ok — same type
+p = 42                             # error: type mismatch: expected Person, got INTEGER
+```
+
+### As-Declaration (Zero Values)
+
+Using `as` with a struct type creates an instance with all fields set to their zero values:
+
+```oxi
+p as <Person>
+println(p.name)    # "" (empty string)
+println(p.age)     # 0
+
+# Then assign fields individually or replace the whole instance
+p.name = "Alice"
+p.age = 30
+
+# Or reassign entirely
+p = Person("Bob", 25)
+```
+
+### Struct-Typed Fields
+
+Struct fields can use other structs as their type:
+
+```oxi
+struct Address {
+    city <str>
+}
+
+struct Person {
+    name <str>
+    addr <Address>
+}
+
+a := Address("NYC")
+p := Person("Alice", a)
+println(p.addr.city)   # NYC
+
+# Type checked — wrong type is rejected
+Person("Alice", "not an address")   # error: type mismatch for field 'addr'
+```
+
+### Different Struct Types
+
+A variable locked to one struct type cannot be reassigned to a different struct:
+
+```oxi
+struct Person { name <str> }
+struct Dog { name <str> }
+
+p <Person> := Person("Alice")
+p := Dog("Rex")   # error: type mismatch, locked to Person
+```
+
 ## Introspection
 
 The `type()` built-in returns the struct name for instances:

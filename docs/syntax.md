@@ -22,6 +22,7 @@ x <int> = 10        # immutable value, locked type (strict — no conversion)
 y <int> := 3.9      # mutable value, locked type (walrus — converts to 3)
 z as <float>        # mutable value, locked type (zero value: 0.0)
 x = 20              # reassignment (typed variables only)
+p <Person> := Person("Alice", 30)   # struct names work as type annotations
 ```
 
 ## Data Types

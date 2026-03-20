@@ -12,9 +12,19 @@ OxigenLang is dynamically typed by default, but offers optional type annotations
 | Char    | `char`  | `\0`       | `` `a` ``, `` `Z` `` |
 | Boolean | `bool`  | `False`    | `True`, `False`      |
 | Array   | `array` | `[]`       | `[1, 2, 3]`          |
-| Struct  | —       | —          | `Person("Alice", 30)` |
+| Struct  | struct name | —     | `Person("Alice", 30)` |
 
-Structs are composite types with typed fields. They are defined with the `struct` keyword and have their own type identity (e.g., `type(p)` returns `"Person"`). See the [Structs](structs.md) guide for full details.
+Structs are composite types with typed fields. They are defined with the `struct` keyword and have their own type identity (e.g., `type(p)` returns `"Person"`). Struct names can be used as type annotations to lock a variable to a specific struct type:
+
+```oxi
+struct Person { name <str> age <int> }
+
+p <Person> := Person("Alice", 30)   # locked to Person
+p = Person("Bob", 25)               # ok
+p = 42                               # error: type mismatch
+```
+
+Struct types support `as` declarations — the instance is created with all fields set to their zero values (e.g., `""` for `str`, `0` for `int`). See the [Structs](structs.md) guide for full details.
 
 ## Declaration Forms
 

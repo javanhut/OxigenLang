@@ -210,13 +210,7 @@ impl Parser {
         self.expect_peek(TokenType::Ident)?;
         let type_name = self.curr_token.literal.clone();
 
-        let type_ann = match TypeAnnotation::from_str(&type_name) {
-            Some(ta) => ta,
-            None => {
-                self.errors.push(format!("unknown type annotation: {}", type_name));
-                return None;
-            }
-        };
+        let type_ann = TypeAnnotation::from_str_or_struct(&type_name);
 
         // consume '>'
         self.expect_peek(TokenType::Gt)?;
@@ -258,13 +252,7 @@ impl Parser {
         self.expect_peek(TokenType::Ident)?;
         let type_name = self.curr_token.literal.clone();
 
-        let type_ann = match TypeAnnotation::from_str(&type_name) {
-            Some(ta) => ta,
-            None => {
-                self.errors.push(format!("unknown type annotation: {}", type_name));
-                return None;
-            }
-        };
+        let type_ann = TypeAnnotation::from_str_or_struct(&type_name);
 
         // consume '>'
         self.expect_peek(TokenType::Gt)?;
@@ -955,13 +943,7 @@ impl Parser {
             self.expect_peek(TokenType::Ident)?; // type name
             let type_name = self.curr_token.literal.clone();
 
-            let type_ann = match TypeAnnotation::from_str(&type_name) {
-                Some(ta) => ta,
-                None => {
-                    self.errors.push(format!("unknown type annotation: {}", type_name));
-                    return None;
-                }
-            };
+            let type_ann = TypeAnnotation::from_str_or_struct(&type_name);
 
             self.expect_peek(TokenType::Gt)?; // '>'
 
@@ -1578,14 +1560,16 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_bad_type_annotation() {
-        let (_, errors) = parse("x <badtype> = 1");
-        assert!(!errors.is_empty(), "Expected errors for bad type annotation");
-        assert!(
-            errors.iter().any(|e| e.contains("unknown type annotation")),
-            "Expected 'unknown type annotation' error, got {:?}",
-            errors
-        );
+    fn test_parse_struct_type_annotation() {
+        // Unknown type names are now parsed as struct types (validated at eval time)
+        let program = parse_ok("x <Person> = 1");
+        match &program.statements[0] {
+            Statement::TypedLet { name, type_ann, .. } => {
+                assert_eq!(name.value, "x");
+                assert_eq!(*type_ann, TypeAnnotation::Struct("Person".to_string()));
+            }
+            other => panic!("Expected TypedLet, got {:?}", other),
+        }
     }
 
     // ==================== FUNCTION PARSING TESTS ====================

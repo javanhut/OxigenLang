@@ -92,6 +92,13 @@ impl Object {
             _ => None,
         }
     }
+
+    pub fn effective_type_name(&self) -> String {
+        match self {
+            Object::StructInstance { struct_name, .. } => struct_name.clone(),
+            other => other.type_name().to_string(),
+        }
+    }
 }
 
 impl fmt::Display for Object {
