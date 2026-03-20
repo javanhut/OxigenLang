@@ -147,6 +147,9 @@ impl Parser {
             if self.peek_token.token_type == TokenType::Lt && self.is_typed_declaration() {
                 return self.parse_typed_let_statement();
             }
+            if self.peek_token.token_type == TokenType::Lt && self.is_typed_declare_shorthand() {
+                return self.parse_typed_declare_shorthand();
+            }
             if self.peek_token.token_type == TokenType::As && self.is_as_typed_declare() {
                 return self.parse_typed_declare_statement();
             }
@@ -244,6 +247,29 @@ impl Parser {
 
         // consume 'as'
         self.expect_peek(TokenType::As)?;
+
+        // consume '<'
+        self.expect_peek(TokenType::Lt)?;
+
+        // consume type name
+        self.expect_peek(TokenType::Ident)?;
+        let type_name = self.curr_token.literal.clone();
+
+        let type_ann = TypeAnnotation::from_str_or_struct(&type_name);
+
+        // consume '>'
+        self.expect_peek(TokenType::Gt)?;
+
+        Some(Statement::TypedDeclare { name, type_ann })
+    }
+
+    /// Parses `x <Type>` — shorthand for `x as <Type>`
+    fn parse_typed_declare_shorthand(&mut self) -> Option<Statement> {
+        let name_token = self.curr_token.clone();
+        let name = Identifier {
+            token: name_token.clone(),
+            value: name_token.literal.clone(),
+        };
 
         // consume '<'
         self.expect_peek(TokenType::Lt)?;
@@ -1080,6 +1106,18 @@ impl Parser {
         let t2 = self.peek_nth(2).token_type.clone();
         let t3 = self.peek_nth(3).token_type.clone();
         t1 == TokenType::Ident && t2 == TokenType::Gt && (t3 == TokenType::Assign || t3 == TokenType::Walrus)
+    }
+
+    /// Checks if tokens form: Ident Lt Ident Gt (no Assign/Walrus after)
+    /// This is the shorthand `p <Person>` form (same as `p as <Person>`)
+    fn is_typed_declare_shorthand(&mut self) -> bool {
+        let t1 = self.peek_nth(1).token_type.clone();
+        let t2 = self.peek_nth(2).token_type.clone();
+        let t3 = self.peek_nth(3).token_type.clone();
+        t1 == TokenType::Ident
+            && t2 == TokenType::Gt
+            && t3 != TokenType::Assign
+            && t3 != TokenType::Walrus
     }
 
     /// Checks if tokens form: As Lt Ident Gt

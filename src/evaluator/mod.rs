@@ -2970,4 +2970,73 @@ mod tests {
         "#;
         test_string(&test_eval(input), "Person");
     }
+
+    // ==================== SHORTHAND TYPED DECLARE TESTS ====================
+
+    #[test]
+    fn test_shorthand_typed_declare_struct() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p <Person>
+            p.name
+        "#;
+        test_string(&test_eval(input), "");
+    }
+
+    #[test]
+    fn test_shorthand_typed_declare_struct_age() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p <Person>
+            p.age
+        "#;
+        test_integer(&test_eval(input), 0);
+    }
+
+    #[test]
+    fn test_shorthand_typed_declare_then_dot_assign() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p <Person>
+            p.name = "Alice"
+            p.age = 30
+            p.name
+        "#;
+        test_string(&test_eval(input), "Alice");
+    }
+
+    #[test]
+    fn test_shorthand_typed_declare_then_reassign() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p <Person>
+            p = Person("Bob", 25)
+            p.age
+        "#;
+        test_integer(&test_eval(input), 25);
+    }
+
+    #[test]
+    fn test_shorthand_typed_declare_builtin() {
+        let result = test_eval("x <int>\nx");
+        test_integer(&result, 0);
+    }
+
+    #[test]
+    fn test_shorthand_typed_declare_str() {
+        let result = test_eval("x <str>\nx");
+        test_string(&result, "");
+    }
 }

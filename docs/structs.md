@@ -230,12 +230,14 @@ p = Person("Bob", 25)              # ok — same type
 p = 42                             # error: type mismatch: expected Person, got INTEGER
 ```
 
-### As-Declaration (Zero Values)
+### Zero-Value Declaration
 
-Using `as` with a struct type creates an instance with all fields set to their zero values:
+Declare a typed variable with all fields set to their zero values. Both forms are equivalent:
 
 ```oxi
-p as <Person>
+p <Person>          # shorthand
+p as <Person>       # explicit form
+
 println(p.name)    # "" (empty string)
 println(p.age)     # 0
 

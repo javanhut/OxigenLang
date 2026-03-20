@@ -63,14 +63,15 @@ x <bool> := 0      # x is False (0 is falsy)
 - Type is locked — reassignments must match the type.
 - Value is mutable — `=`, `++`/`--`, and `:=` work (with type checking).
 
-### As-Declare: `x as <type>`
+### As-Declare: `x as <type>` or `x <type>`
 
-Declares a typed variable initialized to its zero value. The value is mutable.
+Declares a typed variable initialized to its zero value. The value is mutable. The shorthand form `x <type>` (without `=` or `:=`) is equivalent to `x as <type>`.
 
 ```oxi
 x as <int>    # x is 0
-x as <str>    # x is ""
+x <str>       # x is "" (shorthand)
 x as <array>  # x is []
+p <Person>    # struct with zero-value fields
 ```
 
 ## Reassignment Rules
@@ -215,3 +216,4 @@ is_type_mut(d)      # False
 | `x <int> = 10`  | no            | yes         | no          | no                 |
 | `x <int> := 10` | yes           | yes         | yes         | yes                |
 | `x as <int>`    | yes           | yes         | yes         | yes                |
+| `x <int>`       | yes           | yes         | yes         | yes                |

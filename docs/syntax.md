@@ -21,8 +21,10 @@ OxigenLang supports dynamic typing by default, meaning a variable's type can cha
 x <int> = 10        # immutable value, locked type (strict — no conversion)
 y <int> := 3.9      # mutable value, locked type (walrus — converts to 3)
 z as <float>        # mutable value, locked type (zero value: 0.0)
+z <float>           # shorthand for above
 x = 20              # reassignment (typed variables only)
 p <Person> := Person("Alice", 30)   # struct names work as type annotations
+p <Person>          # zero-value struct instance
 ```
 
 ## Data Types
