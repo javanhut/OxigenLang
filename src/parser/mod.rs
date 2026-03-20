@@ -77,6 +77,7 @@ impl Parser {
         p.register_prefix(TokenType::Minus, Parser::parse_prefix_expression);
         p.register_prefix(TokenType::Shebang, Parser::parse_prefix_expression);
         p.register_prefix(TokenType::Not, Parser::parse_prefix_expression);
+        p.register_prefix(TokenType::Function, Parser::parse_function_expression);
 
         // Infix Parse Functions
         for tt in [TokenType::Plus, TokenType::Minus] {
@@ -156,6 +157,14 @@ impl Parser {
             TokenType::If => self.parse_if_statement(),
             TokenType::Skip => Some(Statement::Skip),
             TokenType::Stop => Some(Statement::Stop),
+            TokenType::Function => {
+                if self.peek_token.token_type == TokenType::Ident {
+                    self.parse_named_function_statement()
+                } else {
+                    self.parse_expression_statement()
+                }
+            }
+            TokenType::Give => self.parse_give_statement(),
             _ => self.parse_expression_statement(),
         }
     }
@@ -381,6 +390,81 @@ impl Parser {
         let expr = self.parse_expression(Precedence::Lowest)?;
         self.expect_peek(TokenType::RParen)?;
         Some(Expression::Grouped(Box::new(expr)))
+    }
+
+    fn parse_function_expression(&mut self) -> Option<Expression> {
+        let token = self.curr_token.clone(); // 'fun'
+
+        self.expect_peek(TokenType::LParen)?;
+        let parameters = self.parse_function_parameters()?;
+
+        self.expect_peek(TokenType::LBrace)?;
+        let body = self.parse_block()?;
+
+        Some(Expression::FunctionLiteral {
+            token,
+            parameters,
+            body,
+        })
+    }
+
+    fn parse_function_parameters(&mut self) -> Option<Vec<Identifier>> {
+        let mut params = Vec::new();
+
+        if self.peek_token.token_type == TokenType::RParen {
+            self.next_token();
+            return Some(params);
+        }
+
+        self.next_token();
+        params.push(Identifier {
+            token: self.curr_token.clone(),
+            value: self.curr_token.literal.clone(),
+        });
+
+        while self.peek_token.token_type == TokenType::Comma {
+            self.next_token(); // ','
+            self.next_token(); // next param
+            params.push(Identifier {
+                token: self.curr_token.clone(),
+                value: self.curr_token.literal.clone(),
+            });
+        }
+
+        self.expect_peek(TokenType::RParen)?;
+        Some(params)
+    }
+
+    fn parse_named_function_statement(&mut self) -> Option<Statement> {
+        let fun_token = self.curr_token.clone(); // 'fun'
+
+        self.next_token(); // move to function name
+        let name = Identifier {
+            token: self.curr_token.clone(),
+            value: self.curr_token.literal.clone(),
+        };
+
+        self.expect_peek(TokenType::LParen)?;
+        let parameters = self.parse_function_parameters()?;
+
+        self.expect_peek(TokenType::LBrace)?;
+        let body = self.parse_block()?;
+
+        Some(Statement::Let {
+            name,
+            value: Expression::FunctionLiteral {
+                token: fun_token,
+                parameters,
+                body,
+            },
+        })
+    }
+
+    fn parse_give_statement(&mut self) -> Option<Statement> {
+        let token = self.curr_token.clone(); // 'give'
+        self.next_token(); // move to expression
+        let value = self.parse_expression(Precedence::Lowest)?;
+        Some(Statement::Give { token, value })
     }
 
     // ---------------- Infix parsers ----------------
@@ -1193,6 +1277,87 @@ mod tests {
             "Expected 'unknown type annotation' error, got {:?}",
             errors
         );
+    }
+
+    // ==================== FUNCTION PARSING TESTS ====================
+
+    #[test]
+    fn test_parse_anonymous_function() {
+        let program = parse_ok("fun(a, b) { a + b }");
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::Expr(Expression::FunctionLiteral { parameters, body, .. }) => {
+                assert_eq!(parameters.len(), 2);
+                assert_eq!(parameters[0].value, "a");
+                assert_eq!(parameters[1].value, "b");
+                assert_eq!(body.len(), 1);
+            }
+            other => panic!("Expected FunctionLiteral expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_named_function() {
+        let program = parse_ok("fun add(a, b) { a + b }");
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::Let { name, value } => {
+                assert_eq!(name.value, "add");
+                match value {
+                    Expression::FunctionLiteral { parameters, body, .. } => {
+                        assert_eq!(parameters.len(), 2);
+                        assert_eq!(parameters[0].value, "a");
+                        assert_eq!(parameters[1].value, "b");
+                        assert_eq!(body.len(), 1);
+                    }
+                    other => panic!("Expected FunctionLiteral value, got {:?}", other),
+                }
+            }
+            other => panic!("Expected Let statement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_zero_param_function() {
+        let program = parse_ok("fun() { 42 }");
+        match &program.statements[0] {
+            Statement::Expr(Expression::FunctionLiteral { parameters, .. }) => {
+                assert_eq!(parameters.len(), 0);
+            }
+            other => panic!("Expected FunctionLiteral, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_give_statement() {
+        let program = parse_ok("give 42");
+        match &program.statements[0] {
+            Statement::Give { value, .. } => {
+                match value {
+                    Expression::Int { value, .. } => assert_eq!(*value, 42),
+                    other => panic!("Expected Int, got {:?}", other),
+                }
+            }
+            other => panic!("Expected Give statement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_let_with_function_value() {
+        let program = parse_ok("f := fun(x) { x }");
+        match &program.statements[0] {
+            Statement::Let { name, value } => {
+                assert_eq!(name.value, "f");
+                match value {
+                    Expression::FunctionLiteral { parameters, .. } => {
+                        assert_eq!(parameters.len(), 1);
+                        assert_eq!(parameters[0].value, "x");
+                    }
+                    other => panic!("Expected FunctionLiteral, got {:?}", other),
+                }
+            }
+            other => panic!("Expected Let statement, got {:?}", other),
+        }
     }
 
     // ==================== ERROR HANDLING TESTS ====================

@@ -267,6 +267,13 @@ impl Evaluator {
             }
             Statement::Skip => Rc::new(Object::Skip),
             Statement::Stop => Rc::new(Object::Stop),
+            Statement::Give { value, .. } => {
+                let val = self.eval_expression(value, Rc::clone(&env));
+                if val.is_error() {
+                    return val;
+                }
+                Rc::new(Object::Return(val))
+            }
         }
     }
 
@@ -355,6 +362,14 @@ impl Evaluator {
             }
 
             Expression::Grouped(inner) => self.eval_expression(inner, env),
+
+            Expression::FunctionLiteral {
+                parameters, body, ..
+            } => Rc::new(Object::Function {
+                parameters: parameters.clone(),
+                body: body.clone(),
+                env: Rc::clone(&env),
+            }),
         }
     }
 
@@ -731,7 +746,7 @@ impl Evaluator {
             match result.as_ref() {
                 Object::Skip => continue,
                 Object::Stop => break,
-                Object::Error(_) => return result,
+                Object::Error(_) | Object::Return(_) => return result,
                 _ => {}
             }
         }
@@ -760,7 +775,7 @@ impl Evaluator {
             match result.as_ref() {
                 Object::Skip => continue,
                 Object::Stop => break,
-                Object::Error(_) => return result,
+                Object::Error(_) | Object::Return(_) => return result,
                 _ => {}
             }
         }
@@ -1985,5 +2000,120 @@ mod tests {
             Object::Error(msg) => assert!(msg.contains("identifier not found"), "got: {}", msg),
             _ => panic!("Expected error, got {:?}", result),
         }
+    }
+
+    // ==================== FUNCTION TESTS ====================
+
+    #[test]
+    fn test_named_function_call() {
+        let input = "fun add(a, b) { a + b }\nadd(3, 4)";
+        test_integer(&test_eval(input), 7);
+    }
+
+    #[test]
+    fn test_anonymous_function_assigned() {
+        let input = "d := fun(n) { n * 2 }\nd(5)";
+        test_integer(&test_eval(input), 10);
+    }
+
+    #[test]
+    fn test_function_implicit_return() {
+        let input = "fun double(x) { x * 2 }\ndouble(7)";
+        test_integer(&test_eval(input), 14);
+    }
+
+    #[test]
+    fn test_function_early_return_give() {
+        let input = r#"
+            fun abs(n) {
+                if n < 0 { give -n }
+                n
+            }
+            abs(-5)
+        "#;
+        test_integer(&test_eval(input), 5);
+    }
+
+    #[test]
+    fn test_give_does_not_leak() {
+        let input = r#"
+            fun e() { give 10 }
+            e() + 5
+        "#;
+        test_integer(&test_eval(input), 15);
+    }
+
+    #[test]
+    fn test_closure_captures_env() {
+        let input = "x := 10\nfun f(n) { n + x }\nf(5)";
+        test_integer(&test_eval(input), 15);
+    }
+
+    #[test]
+    fn test_higher_order_function() {
+        let input = r#"
+            fun apply(f, x) { f(x) }
+            fun double(n) { n * 2 }
+            apply(double, 5)
+        "#;
+        test_integer(&test_eval(input), 10);
+    }
+
+    #[test]
+    fn test_closure_factory() {
+        let input = r#"
+            fun make_adder(x) { fun(y) { x + y } }
+            add5 := make_adder(5)
+            add5(3)
+        "#;
+        test_integer(&test_eval(input), 8);
+    }
+
+    #[test]
+    fn test_recursion_factorial() {
+        let input = r#"
+            fun factorial(n) {
+                if n <= 1 { give 1 }
+                n * factorial(n - 1)
+            }
+            factorial(5)
+        "#;
+        test_integer(&test_eval(input), 120);
+    }
+
+    #[test]
+    fn test_function_wrong_arg_count() {
+        let input = "fun add(a, b) { a + b }\nadd(1)";
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("wrong number of arguments"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_zero_param_function() {
+        let input = "fun greet() { 42 }\ngreet()";
+        test_integer(&test_eval(input), 42);
+    }
+
+    #[test]
+    fn test_iife() {
+        let input = "fun(x) { x * x }(7)";
+        test_integer(&test_eval(input), 49);
+    }
+
+    #[test]
+    fn test_give_inside_loop_in_function() {
+        let input = r#"
+            fun find_first_even(arr) {
+                each x in arr {
+                    if x % 2 == 0 { give x }
+                }
+                -1
+            }
+            find_first_even([1, 3, 4, 6])
+        "#;
+        test_integer(&test_eval(input), 4);
     }
 }

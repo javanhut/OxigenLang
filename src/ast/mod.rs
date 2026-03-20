@@ -74,6 +74,10 @@ pub enum Statement {
     },
     Skip,
     Stop,
+    Give {
+        token: Token,
+        value: Expression,
+    },
     TypedLet {
         name: Identifier,
         type_ann: TypeAnnotation,
@@ -165,4 +169,10 @@ pub enum Expression {
     },
 
     Grouped(Box<Expression>),
+
+    FunctionLiteral {
+        token: Token,
+        parameters: Vec<Identifier>,
+        body: Vec<Statement>,
+    },
 }
