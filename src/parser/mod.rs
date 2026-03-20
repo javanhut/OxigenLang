@@ -141,12 +141,8 @@ impl Parser {
             TokenType::Pattern => self.parse_pattern_statement(),
             TokenType::Choose => self.parse_choose_statement(),
             TokenType::If => self.parse_if_statement(),
-            TokenType::Skip => {
-                Some(Statement::Skip)
-            }
-            TokenType::Stop => {
-                Some(Statement::Stop)
-            }
+            TokenType::Skip => Some(Statement::Skip),
+            TokenType::Stop => Some(Statement::Stop),
             _ => self.parse_expression_statement(),
         }
     }
@@ -981,7 +977,7 @@ mod tests {
     #[test]
     fn test_parser_errors() {
         let tests = vec![
-            ("x :=", "no prefix parse fn"), // Missing value after :=
+            ("x :=", "no prefix parse fn"),          // Missing value after :=
             ("each x in { }", "no prefix parse fn"), // Missing iterable - LBrace is not a valid expression
         ];
 
@@ -989,7 +985,9 @@ mod tests {
             let (_, errors) = parse(input);
             assert!(!errors.is_empty(), "Expected errors for '{}'", input);
             assert!(
-                errors.iter().any(|e| e.to_lowercase().contains(expected_error)),
+                errors
+                    .iter()
+                    .any(|e| e.to_lowercase().contains(expected_error)),
                 "Expected error containing '{}' for '{}', got {:?}",
                 expected_error,
                 input,

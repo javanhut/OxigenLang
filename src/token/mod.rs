@@ -56,7 +56,7 @@ pub enum TokenType {
     // Bitwise Operators
     LShift, // <<
     RShift, // >>
-    Caret,    // ^
+    Caret,  // ^
     Pipe,   // |
     Tilde,  // ~
 
@@ -79,7 +79,6 @@ pub enum TokenType {
     Pattern,
     In,
     Not,
-
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,7 +102,7 @@ pub fn token_map() -> HashMap<&'static str, TokenType> {
         ("not", Not),
         ("True", True),
         ("False", False),
-        ("skip",Skip),
+        ("skip", Skip),
         ("stop", Stop),
         ("None", None),
         ("as", As),

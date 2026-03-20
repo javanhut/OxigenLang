@@ -6,7 +6,10 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
     let mut builtins: HashMap<String, Rc<Object>> = HashMap::new();
 
     builtins.insert("print".to_string(), Rc::new(Object::Builtin(builtin_print)));
-    builtins.insert("println".to_string(), Rc::new(Object::Builtin(builtin_println)));
+    builtins.insert(
+        "println".to_string(),
+        Rc::new(Object::Builtin(builtin_println)),
+    );
     builtins.insert("len".to_string(), Rc::new(Object::Builtin(builtin_len)));
     builtins.insert("push".to_string(), Rc::new(Object::Builtin(builtin_push)));
     builtins.insert("first".to_string(), Rc::new(Object::Builtin(builtin_first)));
@@ -16,6 +19,7 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
     builtins.insert("ord".to_string(), Rc::new(Object::Builtin(builtin_ord)));
     builtins.insert("chr".to_string(), Rc::new(Object::Builtin(builtin_chr)));
     builtins.insert("str".to_string(), Rc::new(Object::Builtin(builtin_str)));
+    builtins.insert("range".to_string(), Rc::new(Object::Builtin(builtin_range)));
     builtins.insert("chars".to_string(), Rc::new(Object::Builtin(builtin_chars)));
 
     builtins
@@ -182,17 +186,11 @@ fn builtin_chr(args: Vec<Rc<Object>>) -> Rc<Object> {
     match args[0].as_ref() {
         Object::Integer(n) => {
             if *n < 0 || *n > 0x10FFFF {
-                return Rc::new(Object::Error(format!(
-                    "chr() argument out of range: {}",
-                    n
-                )));
+                return Rc::new(Object::Error(format!("chr() argument out of range: {}", n)));
             }
             match char::from_u32(*n as u32) {
                 Some(c) => Rc::new(Object::Char(c)),
-                None => Rc::new(Object::Error(format!(
-                    "invalid unicode codepoint: {}",
-                    n
-                ))),
+                None => Rc::new(Object::Error(format!("invalid unicode codepoint: {}", n))),
             }
         }
         obj => Rc::new(Object::Error(format!(
@@ -215,7 +213,9 @@ fn builtin_str(args: Vec<Rc<Object>>) -> Rc<Object> {
         Object::Char(c) => Rc::new(Object::String(c.to_string())),
         Object::Integer(n) => Rc::new(Object::String(n.to_string())),
         Object::Float(n) => Rc::new(Object::String(n.to_string())),
-        Object::Boolean(b) => Rc::new(Object::String(if *b { "True" } else { "False" }.to_string())),
+        Object::Boolean(b) => Rc::new(Object::String(
+            if *b { "True" } else { "False" }.to_string(),
+        )),
         Object::String(s) => Rc::new(Object::String(s.clone())),
         obj => Rc::new(Object::Error(format!(
             "cannot convert {} to STRING",
@@ -240,6 +240,29 @@ fn builtin_chars(args: Vec<Rc<Object>>) -> Rc<Object> {
         }
         obj => Rc::new(Object::Error(format!(
             "argument to `chars` must be STRING, got {}",
+            obj.type_name()
+        ))),
+    }
+}
+
+fn builtin_range(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!(
+            "range function requires at 1 argument. got={}, want=1",
+            args.len()
+        )));
+    }
+    match args[0].as_ref() {
+        Object::Integer(n) => {
+            let n = *n;
+            let mut num_range: Vec<Rc<Object>> = Vec::new();
+            for i in 0..n {
+                num_range.push(Rc::new(Object::Integer(i)));
+            }
+            Rc::new(Object::Array(num_range))
+        }
+        obj => Rc::new(Object::Error(format!(
+            "argument require a integer, got {}",
             obj.type_name()
         ))),
     }
