@@ -1,6 +1,6 @@
 pub mod builtins;
 
-use crate::ast::{Expression, Identifier, Program, Statement};
+use crate::ast::{Expression, Identifier, Program, Statement, TypeAnnotation};
 use crate::object::environment::{Environment, PatternRegistry};
 use crate::object::Object;
 use builtins::get_builtins;
@@ -24,6 +24,81 @@ impl Evaluator {
         Evaluator {
             builtins: get_builtins(),
             patterns: PatternRegistry::new(),
+        }
+    }
+
+    fn convert_to_type(obj: &Rc<Object>, target: &str) -> Result<Rc<Object>, String> {
+        match target {
+            "INTEGER" => match obj.as_ref() {
+                Object::Integer(_) => Ok(Rc::clone(obj)),
+                Object::Float(f) => Ok(Rc::new(Object::Integer(*f as i64))),
+                Object::String(s) => s.parse::<i64>()
+                    .map(|n| Rc::new(Object::Integer(n)))
+                    .map_err(|_| format!("cannot convert STRING \"{}\" to INTEGER", s)),
+                Object::Char(c) => Ok(Rc::new(Object::Integer(*c as i64))),
+                Object::Boolean(b) => Ok(Rc::new(Object::Integer(if *b { 1 } else { 0 }))),
+                _ => Err(format!("cannot convert {} to INTEGER", obj.type_name())),
+            },
+            "FLOAT" => match obj.as_ref() {
+                Object::Float(_) => Ok(Rc::clone(obj)),
+                Object::Integer(n) => Ok(Rc::new(Object::Float(*n as f64))),
+                Object::String(s) => s.parse::<f64>()
+                    .map(|f| Rc::new(Object::Float(f)))
+                    .map_err(|_| format!("cannot convert STRING \"{}\" to FLOAT", s)),
+                Object::Boolean(b) => Ok(Rc::new(Object::Float(if *b { 1.0 } else { 0.0 }))),
+                _ => Err(format!("cannot convert {} to FLOAT", obj.type_name())),
+            },
+            "STRING" => match obj.as_ref() {
+                Object::String(_) => Ok(Rc::clone(obj)),
+                Object::Integer(n) => Ok(Rc::new(Object::String(n.to_string()))),
+                Object::Float(f) => Ok(Rc::new(Object::String(f.to_string()))),
+                Object::Char(c) => Ok(Rc::new(Object::String(c.to_string()))),
+                Object::Boolean(b) => Ok(Rc::new(Object::String(if *b { "True".to_string() } else { "False".to_string() }))),
+                _ => Err(format!("cannot convert {} to STRING", obj.type_name())),
+            },
+            "CHAR" => match obj.as_ref() {
+                Object::Char(_) => Ok(Rc::clone(obj)),
+                Object::Integer(n) => {
+                    if let Some(c) = char::from_u32(*n as u32) {
+                        Ok(Rc::new(Object::Char(c)))
+                    } else {
+                        Err(format!("cannot convert INTEGER {} to CHAR", n))
+                    }
+                }
+                Object::String(s) => {
+                    let mut chars = s.chars();
+                    if let Some(c) = chars.next() {
+                        if chars.next().is_none() {
+                            Ok(Rc::new(Object::Char(c)))
+                        } else {
+                            Err(format!("cannot convert multi-char STRING to CHAR"))
+                        }
+                    } else {
+                        Err("cannot convert empty STRING to CHAR".to_string())
+                    }
+                }
+                _ => Err(format!("cannot convert {} to CHAR", obj.type_name())),
+            },
+            "BOOLEAN" => match obj.as_ref() {
+                Object::Boolean(_) => Ok(Rc::clone(obj)),
+                _ => Ok(Rc::new(Object::Boolean(obj.is_truthy()))),
+            },
+            "ARRAY" => match obj.as_ref() {
+                Object::Array(_) => Ok(Rc::clone(obj)),
+                _ => Err(format!("cannot convert {} to ARRAY", obj.type_name())),
+            },
+            _ => Err(format!("unknown target type: {}", target)),
+        }
+    }
+
+    fn zero_value_for_type(type_ann: &TypeAnnotation) -> Rc<Object> {
+        match type_ann {
+            TypeAnnotation::Int => Rc::new(Object::Integer(0)),
+            TypeAnnotation::Float => Rc::new(Object::Float(0.0)),
+            TypeAnnotation::Str => Rc::new(Object::String(String::new())),
+            TypeAnnotation::Char => Rc::new(Object::Char('\0')),
+            TypeAnnotation::Bool => Rc::new(Object::Boolean(false)),
+            TypeAnnotation::Array => Rc::new(Object::Array(Vec::new())),
         }
     }
 
@@ -54,6 +129,23 @@ impl Evaluator {
                 // If variable exists in any scope, update it; otherwise create new
                 let existing = env.borrow().get(&name.value);
                 if existing.is_some() {
+                    // Check if the variable has a type constraint
+                    let tc = env.borrow().get_type_constraint(&name.value);
+                    if let Some(target_type) = tc {
+                        // Walrus reassignment on typed variable: strict type check
+                        // Type is immutable — no implicit conversion. Use explicit
+                        // typed re-declaration (x <type> := val) to change the type.
+                        if val.type_name() != target_type {
+                            return Rc::new(Object::Error(format!(
+                                "type mismatch: '{}' is locked to {}, got {}. use explicit type declaration to change type",
+                                name.value,
+                                target_type,
+                                val.type_name()
+                            )));
+                        }
+                        env.borrow_mut().update(&name.value, val.clone());
+                        return val;
+                    }
                     env.borrow_mut().update(&name.value, val.clone());
                 } else {
                     env.borrow_mut().set(name.value.clone(), val.clone());
@@ -90,6 +182,89 @@ impl Evaluator {
                 alternative,
                 ..
             } => self.eval_if(condition, consequence, alternative, env),
+            Statement::TypedLet {
+                name,
+                type_ann,
+                value,
+                walrus,
+            } => {
+                let val = self.eval_expression(value, Rc::clone(&env));
+                if val.is_error() {
+                    return val;
+                }
+                let target = type_ann.type_name();
+                let final_val = if *walrus {
+                    match Self::convert_to_type(&val, target) {
+                        Ok(converted) => converted,
+                        Err(msg) => return Rc::new(Object::Error(msg)),
+                    }
+                } else {
+                    if val.type_name() != target {
+                        return Rc::new(Object::Error(format!(
+                            "type mismatch: expected {}, got {}",
+                            target,
+                            val.type_name()
+                        )));
+                    }
+                    val
+                };
+                let immutable = !*walrus;
+                env.borrow_mut().set_typed(
+                    name.value.clone(),
+                    final_val.clone(),
+                    target.to_string(),
+                    immutable,
+                );
+                final_val
+            }
+            Statement::TypedDeclare { name, type_ann } => {
+                let val = Self::zero_value_for_type(type_ann);
+                let target = type_ann.type_name();
+                env.borrow_mut().set_typed(
+                    name.value.clone(),
+                    val.clone(),
+                    target.to_string(),
+                    false, // as-declarations are mutable
+                );
+                val
+            }
+            Statement::Assign { name, value } => {
+                let existing = env.borrow().get(&name.value);
+                if existing.is_none() {
+                    return Rc::new(Object::Error(format!(
+                        "identifier not found: {}. use := to declare",
+                        name.value
+                    )));
+                }
+                let tc = env.borrow().get_type_constraint(&name.value);
+                if tc.is_none() {
+                    return Rc::new(Object::Error(format!(
+                        "= requires typed variable, use := for '{}'",
+                        name.value
+                    )));
+                }
+                // Immutable check: = cannot reassign an immutable binding
+                if env.borrow().is_immutable(&name.value) {
+                    return Rc::new(Object::Error(format!(
+                        "cannot reassign immutable variable '{}'. use := to override",
+                        name.value
+                    )));
+                }
+                let target_type = tc.unwrap();
+                let val = self.eval_expression(value, Rc::clone(&env));
+                if val.is_error() {
+                    return val;
+                }
+                if val.type_name() != target_type {
+                    return Rc::new(Object::Error(format!(
+                        "type mismatch: expected {}, got {}",
+                        target_type,
+                        val.type_name()
+                    )));
+                }
+                env.borrow_mut().update(&name.value, val.clone());
+                val
+            }
             Statement::Skip => Rc::new(Object::Skip),
             Statement::Stop => Rc::new(Object::Stop),
         }
@@ -146,6 +321,16 @@ impl Evaluator {
             } => self.eval_postfix_expression(operator, left, env),
 
             Expression::Call { function, args, .. } => {
+                // is_mut() needs the variable name, not its value
+                if let Expression::Ident(ident) = function.as_ref() {
+                    if ident.value == "is_mut" {
+                        return self.eval_is_mut(args, env);
+                    }
+                    if ident.value == "is_type_mut" {
+                        return self.eval_is_type_mut(args, env);
+                    }
+                }
+
                 let func = self.eval_expression(function, Rc::clone(&env));
                 if func.is_error() {
                     return func;
@@ -375,6 +560,14 @@ impl Evaluator {
                 )))
             }
         };
+
+        // Immutable check: ++/-- cannot mutate immutable variables
+        if env.borrow().is_immutable(&ident_name) {
+            return Rc::new(Object::Error(format!(
+                "cannot mutate immutable variable '{}'. use := to override",
+                ident_name
+            )));
+        }
 
         // Calculate new value and return original
         let (new_val, return_val) = match (operator, current.as_ref()) {
@@ -623,6 +816,53 @@ impl Evaluator {
         }
 
         Rc::new(Object::None)
+    }
+
+    fn eval_is_type_mut(&self, args: &[Expression], env: Rc<RefCell<Environment>>) -> Rc<Object> {
+        if args.len() != 1 {
+            return Rc::new(Object::Error(format!(
+                "wrong number of arguments. got={}, want=1",
+                args.len()
+            )));
+        }
+        match &args[0] {
+            Expression::Ident(ident) => {
+                if env.borrow().get(&ident.value).is_none() {
+                    return Rc::new(Object::Error(format!(
+                        "identifier not found: {}",
+                        ident.value
+                    )));
+                }
+                // A variable's type is mutable only if it has no type constraint
+                Rc::new(Object::Boolean(env.borrow().get_type_constraint(&ident.value).is_none()))
+            }
+            _ => Rc::new(Object::Error(
+                "argument to `is_type_mut` must be a variable name".to_string(),
+            )),
+        }
+    }
+
+    fn eval_is_mut(&self, args: &[Expression], env: Rc<RefCell<Environment>>) -> Rc<Object> {
+        if args.len() != 1 {
+            return Rc::new(Object::Error(format!(
+                "wrong number of arguments. got={}, want=1",
+                args.len()
+            )));
+        }
+        match &args[0] {
+            Expression::Ident(ident) => {
+                if env.borrow().get(&ident.value).is_none() {
+                    return Rc::new(Object::Error(format!(
+                        "identifier not found: {}",
+                        ident.value
+                    )));
+                }
+                Rc::new(Object::Boolean(!env.borrow().is_immutable(&ident.value)))
+            }
+            _ => Rc::new(Object::Error(
+                "argument to `is_mut` must be a variable name".to_string(),
+            )),
+        }
     }
 
     fn eval_if(
@@ -1324,5 +1564,426 @@ mod tests {
         // 1*10 + 1*20 + 2*10 + 2*20 + 3*10 + 3*20 = 10+20+20+40+30+60 = 180
         let result = test_eval(input);
         test_integer(&result, 180);
+    }
+
+    // ==================== TYPED VARIABLE TESTS ====================
+
+    // --- Typed declaration with = (immutable value + immutable type) ---
+
+    #[test]
+    fn test_typed_strict_declaration() {
+        let result = test_eval("x <int> = 10\nx");
+        test_integer(&result, 10);
+    }
+
+    #[test]
+    fn test_typed_strict_rejects_wrong_type() {
+        let result = test_eval("x <int> = \"hello\"");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("type mismatch"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    // --- Typed declaration with := (mutable value + immutable type, conversion on init) ---
+
+    #[test]
+    fn test_typed_walrus_declaration_converts_float_to_int() {
+        let result = test_eval("x <int> := 3.9\nx");
+        test_integer(&result, 3); // conversion at declaration
+    }
+
+    #[test]
+    fn test_typed_walrus_declaration_converts_int_to_str() {
+        let result = test_eval("x <str> := 42\nx");
+        test_string(&result, "42");
+    }
+
+    #[test]
+    fn test_typed_walrus_declaration_converts_str_to_int() {
+        let result = test_eval("x <int> := \"123\"\nx");
+        test_integer(&result, 123);
+    }
+
+    #[test]
+    fn test_typed_walrus_declaration_converts_bool_to_int() {
+        let result = test_eval("x <int> := True\nx");
+        test_integer(&result, 1);
+    }
+
+    #[test]
+    fn test_typed_walrus_declaration_converts_int_to_float() {
+        let result = test_eval("x <float> := 5\nx");
+        test_float(&result, 5.0);
+    }
+
+    #[test]
+    fn test_typed_walrus_declaration_converts_int_to_bool() {
+        let result = test_eval("x <bool> := 42\nx");
+        test_boolean(&result, true);
+
+        let result2 = test_eval("x <bool> := 0\nx");
+        test_boolean(&result2, false);
+    }
+
+    #[test]
+    fn test_typed_walrus_declaration_impossible_conversion() {
+        let result = test_eval("x <array> := 5");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("cannot convert"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    // --- as-declare (mutable value + immutable type, zero value) ---
+
+    #[test]
+    fn test_typed_declare_zero_values() {
+        test_integer(&test_eval("x as <int>\nx"), 0);
+        test_float(&test_eval("x as <float>\nx"), 0.0);
+        test_string(&test_eval("x as <str>\nx"), "");
+        test_char(&test_eval("x as <char>\nx"), '\0');
+        test_boolean(&test_eval("x as <bool>\nx"), false);
+
+        let arr = test_eval("x as <array>\nx");
+        match arr.as_ref() {
+            Object::Array(elements) => assert!(elements.is_empty()),
+            _ => panic!("Expected empty array, got {:?}", arr),
+        }
+    }
+
+    #[test]
+    fn test_as_declare_is_mutable() {
+        let result = test_eval("x as <int>\nx = 5\nx");
+        test_integer(&result, 5);
+    }
+
+    #[test]
+    fn test_as_declare_postfix_works() {
+        let result = test_eval("x as <int>\nx = 5\nx++\nx");
+        test_integer(&result, 6);
+    }
+
+    // --- Immutable value: = blocked, ++/-- blocked ---
+
+    #[test]
+    fn test_immutable_assign_blocked() {
+        let result = test_eval("x <int> = 10\nx = 20");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("cannot reassign immutable"), "got: {}", msg),
+            _ => panic!("Expected immutability error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_immutable_postfix_increment_blocked() {
+        let result = test_eval("x <int> = 5\nx++");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("cannot mutate immutable"), "got: {}", msg),
+            _ => panic!("Expected immutability error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_immutable_postfix_decrement_blocked() {
+        let result = test_eval("x <int> = 5\nx--");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("cannot mutate immutable"), "got: {}", msg),
+            _ => panic!("Expected immutability error, got {:?}", result),
+        }
+    }
+
+    // --- Walrus := overrides value immutability, but type stays locked ---
+
+    #[test]
+    fn test_walrus_overrides_immutable_value_same_type() {
+        // := can change the value if the type matches
+        let result = test_eval("x <int> = 10\nx := 20\nx");
+        test_integer(&result, 20);
+    }
+
+    #[test]
+    fn test_walrus_on_immutable_rejects_wrong_type() {
+        // := overrides value immutability but type is still locked
+        let result = test_eval("x <int> = 10\nx := \"hello\"");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("type mismatch") && msg.contains("locked"), "got: {}", msg),
+            _ => panic!("Expected type locked error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_walrus_on_immutable_rejects_float_no_conversion() {
+        // No implicit conversion on walrus reassignment — type is locked
+        let result = test_eval("x <int> = 10\nx := 3.7");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("type mismatch") && msg.contains("locked"), "got: {}", msg),
+            _ => panic!("Expected type locked error, got {:?}", result),
+        }
+    }
+
+    // --- Explicit re-declaration changes the type ---
+
+    #[test]
+    fn test_explicit_redeclare_changes_type() {
+        // x <str> := "20" re-declares x with new type (conversion at declaration)
+        let result = test_eval("x <int> = 10\nx <str> := \"20\"\nx");
+        test_string(&result, "20");
+    }
+
+    #[test]
+    fn test_explicit_redeclare_immutable_to_mutable() {
+        // Re-declare as mutable, then = works
+        let result = test_eval("x <int> = 10\nx <int> := 99\nx = 42\nx");
+        test_integer(&result, 42);
+    }
+
+    // --- Mutable typed (:= declares mutable value) ---
+
+    #[test]
+    fn test_mutable_typed_assign_succeeds() {
+        let result = test_eval("x <int> := 10\nx = 20\nx");
+        test_integer(&result, 20);
+    }
+
+    #[test]
+    fn test_mutable_typed_assign_rejects_wrong_type() {
+        let result = test_eval("x <int> := 10\nx = \"hello\"");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("type mismatch"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_mutable_typed_postfix_increment() {
+        let result = test_eval("x <int> := 5\nx++\nx");
+        test_integer(&result, 6);
+    }
+
+    #[test]
+    fn test_mutable_typed_postfix_decrement() {
+        let result = test_eval("x <int> := 5\nx--\nx");
+        test_integer(&result, 4);
+    }
+
+    #[test]
+    fn test_mutable_typed_walrus_reassign_same_type() {
+        // := reassignment on mutable typed: strict type check, no conversion
+        let result = test_eval("x <int> := 10\nx := 42\nx");
+        test_integer(&result, 42);
+    }
+
+    #[test]
+    fn test_mutable_typed_walrus_reassign_wrong_type() {
+        // Type is locked even on mutable typed variables
+        let result = test_eval("x <int> := 10\nx := \"hello\"");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("type mismatch") && msg.contains("locked"), "got: {}", msg),
+            _ => panic!("Expected type locked error, got {:?}", result),
+        }
+    }
+
+    // --- Untyped / undeclared errors ---
+
+    #[test]
+    fn test_assign_untyped_variable_errors() {
+        let result = test_eval("x := 10\nx = 20");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("= requires typed variable"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_assign_undeclared_variable_errors() {
+        let result = test_eval("x = 20");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("identifier not found"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    // --- Shadowing in inner scope ---
+
+    #[test]
+    fn test_typed_shadowing_inner_scope() {
+        let input = r#"
+            x <int> = 10
+            each i in [1] {
+                x <str> = "hello"
+            }
+            x
+        "#;
+        let result = test_eval(input);
+        test_integer(&result, 10);
+    }
+
+    #[test]
+    fn test_immutable_shadowed_in_inner_scope_ok() {
+        let input = r#"
+            x <int> = 10
+            each i in [1] {
+                x <int> := 99
+                x = 42
+            }
+            x
+        "#;
+        let result = test_eval(input);
+        test_integer(&result, 10);
+    }
+
+    // --- Self-conversion: re-declare a variable with typed walrus to convert in place ---
+
+    #[test]
+    fn test_self_conversion_str_to_int() {
+        // Simulates: user_input comes in as string, re-declare as int
+        let input = r#"
+            user_input := "42"
+            user_input <int> := user_input
+            user_input
+        "#;
+        let result = test_eval(input);
+        test_integer(&result, 42);
+    }
+
+    #[test]
+    fn test_self_conversion_str_to_float() {
+        let input = r#"
+            val := "3.14"
+            val <float> := val
+            val
+        "#;
+        let result = test_eval(input);
+        test_float(&result, 3.14);
+    }
+
+    #[test]
+    fn test_self_conversion_float_to_int() {
+        let input = r#"
+            x := 3.9
+            x <int> := x
+            x
+        "#;
+        let result = test_eval(input);
+        test_integer(&result, 3);
+    }
+
+    #[test]
+    fn test_self_conversion_int_to_str() {
+        let input = r#"
+            num := 100
+            num <str> := num
+            num
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "100");
+    }
+
+    #[test]
+    fn test_self_conversion_bad_string_to_int_errors() {
+        let input = r#"
+            user_input := "hello"
+            user_input <int> := user_input
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("cannot convert"), "got: {}", msg),
+            _ => panic!("Expected conversion error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_self_conversion_locks_type() {
+        // After re-declaration, type is locked
+        let input = r#"
+            x := "42"
+            x <int> := x
+            x := "hello"
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("locked"), "got: {}", msg),
+            _ => panic!("Expected type locked error, got {:?}", result),
+        }
+    }
+
+    // ==================== IS_MUT TESTS ====================
+
+    #[test]
+    fn test_is_mut_untyped_variable() {
+        let result = test_eval("x := 10\nis_mut(x)");
+        test_boolean(&result, true);
+    }
+
+    #[test]
+    fn test_is_mut_immutable_typed() {
+        let result = test_eval("x <int> = 10\nis_mut(x)");
+        test_boolean(&result, false);
+    }
+
+    #[test]
+    fn test_is_mut_mutable_typed() {
+        let result = test_eval("x <int> := 10\nis_mut(x)");
+        test_boolean(&result, true);
+    }
+
+    #[test]
+    fn test_is_mut_as_declare() {
+        let result = test_eval("x as <int>\nis_mut(x)");
+        test_boolean(&result, true);
+    }
+
+    #[test]
+    fn test_is_mut_undeclared_errors() {
+        let result = test_eval("is_mut(x)");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("identifier not found"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_is_mut_wrong_arg_count() {
+        let result = test_eval("x := 1\ny := 2\nis_mut(x, y)");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("wrong number of arguments"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    // ==================== IS_TYPE_MUT TESTS ====================
+
+    #[test]
+    fn test_is_type_mut_untyped_variable() {
+        let result = test_eval("x := 10\nis_type_mut(x)");
+        test_boolean(&result, true);
+    }
+
+    #[test]
+    fn test_is_type_mut_strict_typed() {
+        let result = test_eval("x <int> = 10\nis_type_mut(x)");
+        test_boolean(&result, false);
+    }
+
+    #[test]
+    fn test_is_type_mut_walrus_typed() {
+        let result = test_eval("x <int> := 10\nis_type_mut(x)");
+        test_boolean(&result, false);
+    }
+
+    #[test]
+    fn test_is_type_mut_as_declare() {
+        let result = test_eval("x as <int>\nis_type_mut(x)");
+        test_boolean(&result, false);
+    }
+
+    #[test]
+    fn test_is_type_mut_undeclared_errors() {
+        let result = test_eval("is_type_mut(x)");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("identifier not found"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
     }
 }

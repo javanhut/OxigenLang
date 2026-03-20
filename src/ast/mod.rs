@@ -1,6 +1,41 @@
 use crate::token::Token;
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum TypeAnnotation {
+    Int,
+    Str,
+    Float,
+    Char,
+    Bool,
+    Array,
+}
+
+impl TypeAnnotation {
+    pub fn from_str(s: &str) -> Option<TypeAnnotation> {
+        match s {
+            "int" => Some(TypeAnnotation::Int),
+            "str" => Some(TypeAnnotation::Str),
+            "float" => Some(TypeAnnotation::Float),
+            "char" => Some(TypeAnnotation::Char),
+            "bool" => Some(TypeAnnotation::Bool),
+            "array" => Some(TypeAnnotation::Array),
+            _ => None,
+        }
+    }
+
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            TypeAnnotation::Int => "INTEGER",
+            TypeAnnotation::Str => "STRING",
+            TypeAnnotation::Float => "FLOAT",
+            TypeAnnotation::Char => "CHAR",
+            TypeAnnotation::Bool => "BOOLEAN",
+            TypeAnnotation::Array => "ARRAY",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub statements: Vec<Statement>,
 }
@@ -39,6 +74,20 @@ pub enum Statement {
     },
     Skip,
     Stop,
+    TypedLet {
+        name: Identifier,
+        type_ann: TypeAnnotation,
+        value: Expression,
+        walrus: bool,
+    },
+    TypedDeclare {
+        name: Identifier,
+        type_ann: TypeAnnotation,
+    },
+    Assign {
+        name: Identifier,
+        value: Expression,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

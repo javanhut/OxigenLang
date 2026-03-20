@@ -1,11 +1,14 @@
 use super::Object;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub struct Environment {
     store: HashMap<String, Rc<Object>>,
+    type_constraints: HashMap<String, String>,
+    immutable_vars: HashSet<String>,
     outer: Option<Rc<RefCell<Environment>>>,
 }
 
@@ -13,6 +16,8 @@ impl Environment {
     pub fn new() -> Self {
         Environment {
             store: HashMap::new(),
+            type_constraints: HashMap::new(),
+            immutable_vars: HashSet::new(),
             outer: None,
         }
     }
@@ -20,6 +25,8 @@ impl Environment {
     pub fn new_enclosed(outer: Rc<RefCell<Environment>>) -> Self {
         Environment {
             store: HashMap::new(),
+            type_constraints: HashMap::new(),
+            immutable_vars: HashSet::new(),
             outer: Some(outer),
         }
     }
@@ -37,6 +44,37 @@ impl Environment {
     pub fn set(&mut self, name: String, val: Rc<Object>) -> Rc<Object> {
         self.store.insert(name, Rc::clone(&val));
         val
+    }
+
+    pub fn set_typed(&mut self, name: String, val: Rc<Object>, type_name: String, immutable: bool) -> Rc<Object> {
+        self.store.insert(name.clone(), Rc::clone(&val));
+        self.type_constraints.insert(name.clone(), type_name);
+        if immutable {
+            self.immutable_vars.insert(name);
+        } else {
+            self.immutable_vars.remove(&name);
+        }
+        val
+    }
+
+    pub fn is_immutable(&self, name: &str) -> bool {
+        if self.store.contains_key(name) {
+            return self.immutable_vars.contains(name);
+        }
+        match &self.outer {
+            Some(outer) => outer.borrow().is_immutable(name),
+            None => false,
+        }
+    }
+
+    pub fn get_type_constraint(&self, name: &str) -> Option<String> {
+        match self.type_constraints.get(name) {
+            Some(tc) => Some(tc.clone()),
+            None => match &self.outer {
+                Some(outer) => outer.borrow().get_type_constraint(name),
+                None => None,
+            },
+        }
     }
 
     /// Update an existing variable in this scope or any outer scope

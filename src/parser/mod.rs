@@ -1,7 +1,8 @@
-use crate::ast::{ChooseArm, Expression, Identifier, Program, Statement};
+use crate::ast::{ChooseArm, Expression, Identifier, Program, Statement, TypeAnnotation};
 use crate::lexer::Lexer;
 use crate::token::{Token, TokenType};
 use std::collections::HashMap;
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Precedence {
@@ -42,6 +43,7 @@ pub struct Parser {
     errors: Vec<String>,
     prefix_fns: HashMap<TokenType, PrefixParseFn>,
     infix_fns: HashMap<TokenType, InfixParseFn>,
+    lookahead_buffer: VecDeque<Token>,
 }
 
 impl Parser {
@@ -58,6 +60,7 @@ impl Parser {
             errors: Vec::new(),
             prefix_fns: HashMap::new(),
             infix_fns: HashMap::new(),
+            lookahead_buffer: VecDeque::new(),
         };
 
         // Prefix Parse Functions
@@ -131,11 +134,21 @@ impl Parser {
     }
 
     pub fn parse_statement(&mut self) -> Option<Statement> {
-        match self.curr_token.token_type {
-            // bind name := expr
-            TokenType::Ident if self.peek_token.token_type == TokenType::Walrus => {
-                self.parse_let_statement()
+        if self.curr_token.token_type == TokenType::Ident {
+            if self.peek_token.token_type == TokenType::Walrus {
+                return self.parse_let_statement();
             }
+            if self.peek_token.token_type == TokenType::Lt && self.is_typed_declaration() {
+                return self.parse_typed_let_statement();
+            }
+            if self.peek_token.token_type == TokenType::As && self.is_as_typed_declare() {
+                return self.parse_typed_declare_statement();
+            }
+            if self.peek_token.token_type == TokenType::Assign {
+                return self.parse_assign_statement();
+            }
+        }
+        match self.curr_token.token_type {
             TokenType::Each => self.parse_each_statement(),
             TokenType::Repeat => self.parse_repeat_statement(),
             TokenType::Pattern => self.parse_pattern_statement(),
@@ -163,6 +176,99 @@ impl Parser {
         let value = self.parse_expression(Precedence::Lowest)?;
 
         Some(Statement::Let { name, value })
+    }
+
+    fn parse_typed_let_statement(&mut self) -> Option<Statement> {
+        let name_token = self.curr_token.clone();
+        let name = Identifier {
+            token: name_token.clone(),
+            value: name_token.literal.clone(),
+        };
+
+        // consume '<'
+        self.expect_peek(TokenType::Lt)?;
+
+        // consume type name
+        self.expect_peek(TokenType::Ident)?;
+        let type_name = self.curr_token.literal.clone();
+
+        let type_ann = match TypeAnnotation::from_str(&type_name) {
+            Some(ta) => ta,
+            None => {
+                self.errors.push(format!("unknown type annotation: {}", type_name));
+                return None;
+            }
+        };
+
+        // consume '>'
+        self.expect_peek(TokenType::Gt)?;
+
+        // determine walrus or strict assign
+        let walrus = self.peek_token.token_type == TokenType::Walrus;
+        if walrus {
+            self.expect_peek(TokenType::Walrus)?;
+        } else {
+            self.expect_peek(TokenType::Assign)?;
+        }
+
+        // move to expression start
+        self.next_token();
+        let value = self.parse_expression(Precedence::Lowest)?;
+
+        Some(Statement::TypedLet {
+            name,
+            type_ann,
+            value,
+            walrus,
+        })
+    }
+
+    fn parse_typed_declare_statement(&mut self) -> Option<Statement> {
+        let name_token = self.curr_token.clone();
+        let name = Identifier {
+            token: name_token.clone(),
+            value: name_token.literal.clone(),
+        };
+
+        // consume 'as'
+        self.expect_peek(TokenType::As)?;
+
+        // consume '<'
+        self.expect_peek(TokenType::Lt)?;
+
+        // consume type name
+        self.expect_peek(TokenType::Ident)?;
+        let type_name = self.curr_token.literal.clone();
+
+        let type_ann = match TypeAnnotation::from_str(&type_name) {
+            Some(ta) => ta,
+            None => {
+                self.errors.push(format!("unknown type annotation: {}", type_name));
+                return None;
+            }
+        };
+
+        // consume '>'
+        self.expect_peek(TokenType::Gt)?;
+
+        Some(Statement::TypedDeclare { name, type_ann })
+    }
+
+    fn parse_assign_statement(&mut self) -> Option<Statement> {
+        let name_token = self.curr_token.clone();
+        let name = Identifier {
+            token: name_token.clone(),
+            value: name_token.literal.clone(),
+        };
+
+        // consume '='
+        self.expect_peek(TokenType::Assign)?;
+
+        // move to expression start
+        self.next_token();
+        let value = self.parse_expression(Precedence::Lowest)?;
+
+        Some(Statement::Assign { name, value })
     }
 
     fn parse_expression_statement(&mut self) -> Option<Statement> {
@@ -568,7 +674,50 @@ impl Parser {
 
     fn next_token(&mut self) {
         self.curr_token = self.peek_token.clone();
-        self.peek_token = self.lexer.next_token();
+        if let Some(buffered) = self.lookahead_buffer.pop_front() {
+            self.peek_token = buffered;
+        } else {
+            self.peek_token = self.lexer.next_token();
+        }
+    }
+
+    fn peek_nth(&mut self, n: usize) -> &Token {
+        // peek_nth(0) is peek_token, peek_nth(1) is one past peek_token, etc.
+        if n == 0 {
+            return &self.peek_token;
+        }
+        let needed = n; // how many tokens past peek_token
+        while self.lookahead_buffer.len() < needed {
+            let tok = self.lexer.next_token();
+            self.lookahead_buffer.push_back(tok);
+        }
+        &self.lookahead_buffer[needed - 1]
+    }
+
+    /// Checks if tokens form: Ident Lt Ident Gt (Assign|Walrus)
+    /// Called when curr=Ident, peek=Lt
+    fn is_typed_declaration(&mut self) -> bool {
+        // peek_nth(0) = Lt (already known)
+        // peek_nth(1) should be Ident (type name)
+        // peek_nth(2) should be Gt
+        // peek_nth(3) should be Assign or Walrus
+        let t1 = self.peek_nth(1).token_type.clone();
+        let t2 = self.peek_nth(2).token_type.clone();
+        let t3 = self.peek_nth(3).token_type.clone();
+        t1 == TokenType::Ident && t2 == TokenType::Gt && (t3 == TokenType::Assign || t3 == TokenType::Walrus)
+    }
+
+    /// Checks if tokens form: As Lt Ident Gt
+    /// Called when curr=Ident, peek=As
+    fn is_as_typed_declare(&mut self) -> bool {
+        // peek_nth(0) = As (already known)
+        // peek_nth(1) should be Lt
+        // peek_nth(2) should be Ident (type name)
+        // peek_nth(3) should be Gt
+        let t1 = self.peek_nth(1).token_type.clone();
+        let t2 = self.peek_nth(2).token_type.clone();
+        let t3 = self.peek_nth(3).token_type.clone();
+        t1 == TokenType::Lt && t2 == TokenType::Ident && t3 == TokenType::Gt
     }
 
     fn register_prefix(&mut self, tt: TokenType, f: PrefixParseFn) {
@@ -970,6 +1119,80 @@ mod tests {
         for (input, _expected) in tests {
             let _ = parse_ok(input);
         }
+    }
+
+    // ==================== TYPED DECLARATION TESTS ====================
+
+    #[test]
+    fn test_parse_typed_let_strict() {
+        let program = parse_ok("x <int> = 10");
+        match &program.statements[0] {
+            Statement::TypedLet { name, type_ann, walrus, .. } => {
+                assert_eq!(name.value, "x");
+                assert_eq!(*type_ann, TypeAnnotation::Int);
+                assert!(!walrus);
+            }
+            other => panic!("Expected TypedLet, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_typed_let_walrus() {
+        let program = parse_ok("x <str> := \"hi\"");
+        match &program.statements[0] {
+            Statement::TypedLet { name, type_ann, walrus, .. } => {
+                assert_eq!(name.value, "x");
+                assert_eq!(*type_ann, TypeAnnotation::Str);
+                assert!(walrus);
+            }
+            other => panic!("Expected TypedLet, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_typed_declare() {
+        let program = parse_ok("x as <float>");
+        match &program.statements[0] {
+            Statement::TypedDeclare { name, type_ann } => {
+                assert_eq!(name.value, "x");
+                assert_eq!(*type_ann, TypeAnnotation::Float);
+            }
+            other => panic!("Expected TypedDeclare, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_assign() {
+        let program = parse_ok("x = 20");
+        match &program.statements[0] {
+            Statement::Assign { name, .. } => {
+                assert_eq!(name.value, "x");
+            }
+            other => panic!("Expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_less_than_not_typed() {
+        // x < 10 should still parse as infix comparison, not typed declaration
+        let program = parse_ok("x < 10");
+        match &program.statements[0] {
+            Statement::Expr(Expression::Infix { operator, .. }) => {
+                assert_eq!(operator, "<");
+            }
+            other => panic!("Expected infix expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_bad_type_annotation() {
+        let (_, errors) = parse("x <badtype> = 1");
+        assert!(!errors.is_empty(), "Expected errors for bad type annotation");
+        assert!(
+            errors.iter().any(|e| e.contains("unknown type annotation")),
+            "Expected 'unknown type annotation' error, got {:?}",
+            errors
+        );
     }
 
     // ==================== ERROR HANDLING TESTS ====================
