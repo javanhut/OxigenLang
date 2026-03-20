@@ -42,6 +42,7 @@ cargo run
 For detailed information, see the [docs](docs/) directory:
 
 - [Syntax Overview](docs/syntax.md)
+- [Type System](docs/type_system.md)
 - [Built-in Functions](docs/builtins.md)
 - [Getting Started Guide](docs/getting_started.md)
 

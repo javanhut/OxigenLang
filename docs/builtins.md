@@ -63,6 +63,15 @@ Returns a new array containing all elements except the first one.
 rest([1, 2, 3]) # Returns [2, 3]
 ```
 
+### `range(integer)`
+
+Returns an array of integers from `0` up to (but not including) the given value.
+
+```oxi
+range(5) # Returns [0, 1, 2, 3, 4]
+range(0) # Returns []
+```
+
 ## Conversions
 
 ### `ord(char)`
@@ -109,3 +118,32 @@ type(42)    # Returns "INTEGER"
 type("abc") # Returns "STRING"
 type(None)  # Returns "NONE"
 ```
+
+### `is_mut(variable)`
+
+Returns `True` if the variable's value is mutable, `False` if it is immutable. The argument must be a variable name.
+
+```oxi
+x := 10
+is_mut(x)           # True (untyped variables are mutable)
+
+y <int> = 10
+is_mut(y)           # False (strict typed declaration is immutable)
+
+z <int> := 10
+is_mut(z)           # True (walrus typed declaration is mutable)
+```
+
+### `is_type_mut(variable)`
+
+Returns `True` if the variable's type can change (no type constraint), `False` if the type is locked. The argument must be a variable name.
+
+```oxi
+x := 10
+is_type_mut(x)      # True (untyped — type can change freely)
+
+y <int> := 10
+is_type_mut(y)      # False (any typed declaration locks the type)
+```
+
+See the [Type System](type_system.md) guide for full details on mutability and type constraints.
