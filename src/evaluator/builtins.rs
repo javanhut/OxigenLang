@@ -153,6 +153,9 @@ fn builtin_type(args: Vec<Rc<Object>>) -> Rc<Object> {
         )));
     }
 
+    if let Some(name) = args[0].struct_type_name() {
+        return Rc::new(Object::String(name.to_string()));
+    }
     Rc::new(Object::String(args[0].type_name().to_string()))
 }
 

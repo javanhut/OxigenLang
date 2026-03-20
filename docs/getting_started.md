@@ -83,3 +83,41 @@ Run it using:
 ```bash
 cargo run -- pattern_match.oxi
 ```
+
+## Structs Example
+
+```oxi
+# structs.oxi
+struct Person {
+    name <str>
+    age <int>
+}
+
+Person contains {
+    fun greet() { println("Hi, I'm " + name) }
+    fun is_adult() { age >= 18 }
+}
+
+p := Person("Alice", 30)
+p.greet()                     # Hi, I'm Alice
+println(p.is_adult())         # True
+
+# Mutation
+p.age = 15
+println(p.is_adult())         # False
+
+# Inheritance
+struct Student(Person) {
+    school <str>
+}
+
+s := Student("Bob", 20, "MIT")
+s.greet()                     # Hi, I'm Bob — inherited from Person
+println(s.school)             # MIT
+```
+
+Run it using:
+
+```bash
+cargo run -- structs.oxi
+```

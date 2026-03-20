@@ -29,6 +29,7 @@ fn precedence_of(tt: &TokenType) -> Precedence {
         Increment | Decrement => Postfix,
         LParen => Call,
         LBracket => Index,
+        FullStop => Index,
         _ => Lowest,
     }
 }
@@ -107,6 +108,10 @@ impl Parser {
         // Index
         p.register_infix(TokenType::LBracket, Parser::parse_index_expression);
 
+        // Dot access
+        p.register_infix(TokenType::FullStop, Parser::parse_dot_expression);
+
+
         p.next_token();
         p.next_token();
         p
@@ -148,8 +153,12 @@ impl Parser {
             if self.peek_token.token_type == TokenType::Assign {
                 return self.parse_assign_statement();
             }
+            if self.peek_token.token_type == TokenType::Contains {
+                return self.parse_contains_statement();
+            }
         }
         match self.curr_token.token_type {
+            TokenType::Struct => self.parse_struct_definition(),
             TokenType::Each => self.parse_each_statement(),
             TokenType::Repeat => self.parse_repeat_statement(),
             TokenType::Pattern => self.parse_pattern_statement(),
@@ -282,6 +291,25 @@ impl Parser {
 
     fn parse_expression_statement(&mut self) -> Option<Statement> {
         let expr = self.parse_expression(Precedence::Lowest)?;
+
+        // Check for dot-assign: expr.field = value
+        if let Expression::DotAccess { token, left, field } = &expr {
+            if self.peek_token.token_type == TokenType::Assign {
+                let tok = token.clone();
+                let obj = *left.clone();
+                let fld = field.clone();
+                self.next_token(); // consume '='
+                self.next_token(); // move to value expression
+                let value = self.parse_expression(Precedence::Lowest)?;
+                return Some(Statement::DotAssign {
+                    token: tok,
+                    object: obj,
+                    field: fld,
+                    value,
+                });
+            }
+        }
+
         Some(Statement::Expr(expr))
     }
 
@@ -318,10 +346,44 @@ impl Parser {
 
     fn parse_identifier(&mut self) -> Option<Expression> {
         let tok = self.curr_token.clone();
-        Some(Expression::Ident(Identifier {
+        let ident = Identifier {
             token: tok.clone(),
             value: tok.literal,
-        }))
+        };
+
+        // Check for struct literal: Name { field: value, ... }
+        if self.peek_token.token_type == TokenType::LBrace {
+            // Lookahead past any newlines after '{' to see if it's Ident ':' or '}'
+            let mut lookahead_idx = 1;
+            loop {
+                let t = self.peek_nth(lookahead_idx).token_type.clone();
+                if t == TokenType::Newline {
+                    lookahead_idx += 1;
+                    continue;
+                }
+                if t == TokenType::RBrace {
+                    // Empty struct literal: Name {}
+                    self.next_token(); // consume '{'
+                    self.next_token(); // consume '}'
+                    return Some(Expression::StructLiteral {
+                        token: self.curr_token.clone(),
+                        struct_name: ident.value,
+                        field_values: Vec::new(),
+                    });
+                }
+                if t == TokenType::Ident {
+                    let t2 = self.peek_nth(lookahead_idx + 1).token_type.clone();
+                    if t2 == TokenType::Colon {
+                        // This is a struct literal
+                        self.next_token(); // consume to '{'
+                        return self.parse_struct_literal_from_ident(ident);
+                    }
+                }
+                break;
+            }
+        }
+
+        Some(Expression::Ident(ident))
     }
 
     fn parse_integer(&mut self) -> Option<Expression> {
@@ -523,6 +585,82 @@ impl Parser {
             token: tok,
             left: Box::new(left),
             index: Box::new(index),
+        })
+    }
+
+    fn parse_dot_expression(&mut self, left: Expression) -> Option<Expression> {
+        let tok = self.curr_token.clone(); // '.'
+        self.next_token(); // move to field name
+        let field = Identifier {
+            token: self.curr_token.clone(),
+            value: self.curr_token.literal.clone(),
+        };
+        Some(Expression::DotAccess {
+            token: tok,
+            left: Box::new(left),
+            field,
+        })
+    }
+
+    fn parse_struct_literal_from_ident(&mut self, ident: Identifier) -> Option<Expression> {
+        let struct_name = ident.value;
+        let tok = self.curr_token.clone(); // '{'
+
+        let mut field_values = Vec::new();
+
+        // Skip newlines after '{'
+        while self.peek_token.token_type == TokenType::Newline {
+            self.next_token();
+        }
+
+        if self.peek_token.token_type == TokenType::RBrace {
+            self.next_token(); // consume '}'
+            return Some(Expression::StructLiteral {
+                token: tok,
+                struct_name,
+                field_values,
+            });
+        }
+
+        // Parse field: value pairs
+        loop {
+            self.next_token(); // move to field name
+
+            // Skip newlines
+            while self.curr_token.token_type == TokenType::Newline {
+                self.next_token();
+            }
+
+            if self.curr_token.token_type == TokenType::RBrace {
+                break;
+            }
+
+            let field_name = self.curr_token.literal.clone();
+            self.expect_peek(TokenType::Colon)?; // ':'
+            self.next_token(); // move to value expression
+            let value = self.parse_expression(Precedence::Lowest)?;
+            field_values.push((field_name, value));
+
+            // Skip comma if present
+            if self.peek_token.token_type == TokenType::Comma {
+                self.next_token();
+            }
+
+            // Skip newlines
+            while self.peek_token.token_type == TokenType::Newline {
+                self.next_token();
+            }
+
+            if self.peek_token.token_type == TokenType::RBrace {
+                self.next_token(); // consume '}'
+                break;
+            }
+        }
+
+        Some(Expression::StructLiteral {
+            token: tok,
+            struct_name,
+            field_values,
         })
     }
 
@@ -752,6 +890,177 @@ impl Parser {
         }
 
         Some(statements)
+    }
+
+    // ---------------- Struct parsers ----------------
+
+    fn parse_struct_definition(&mut self) -> Option<Statement> {
+        let token = self.curr_token.clone(); // 'struct'
+
+        self.next_token(); // move to struct name
+        let name = Identifier {
+            token: self.curr_token.clone(),
+            value: self.curr_token.literal.clone(),
+        };
+
+        // Optional parent: struct American(Person)
+        let parent = if self.peek_token.token_type == TokenType::LParen {
+            self.next_token(); // consume '('
+            self.next_token(); // move to parent name
+            let parent_ident = Identifier {
+                token: self.curr_token.clone(),
+                value: self.curr_token.literal.clone(),
+            };
+            self.expect_peek(TokenType::RParen)?; // consume ')'
+            Some(parent_ident)
+        } else {
+            None
+        };
+
+        self.expect_peek(TokenType::LBrace)?; // '{'
+
+        let mut fields = Vec::new();
+
+        // Skip newlines after '{'
+        while self.peek_token.token_type == TokenType::Newline {
+            self.next_token();
+        }
+
+        // Parse fields: name <type>
+        while self.peek_token.token_type != TokenType::RBrace
+            && self.peek_token.token_type != TokenType::Eof
+        {
+            self.next_token(); // move to field name
+
+            // Skip newlines
+            while self.curr_token.token_type == TokenType::Newline {
+                self.next_token();
+            }
+
+            if self.curr_token.token_type == TokenType::RBrace {
+                return Some(Statement::StructDef {
+                    token,
+                    name,
+                    parent,
+                    fields,
+                });
+            }
+
+            let field_name = Identifier {
+                token: self.curr_token.clone(),
+                value: self.curr_token.literal.clone(),
+            };
+
+            self.expect_peek(TokenType::Lt)?; // '<'
+            self.expect_peek(TokenType::Ident)?; // type name
+            let type_name = self.curr_token.literal.clone();
+
+            let type_ann = match TypeAnnotation::from_str(&type_name) {
+                Some(ta) => ta,
+                None => {
+                    self.errors.push(format!("unknown type annotation: {}", type_name));
+                    return None;
+                }
+            };
+
+            self.expect_peek(TokenType::Gt)?; // '>'
+
+            fields.push(crate::ast::StructField {
+                name: field_name,
+                type_ann,
+            });
+
+            // Skip newlines
+            while self.peek_token.token_type == TokenType::Newline {
+                self.next_token();
+            }
+        }
+
+        self.expect_peek(TokenType::RBrace)?; // '}'
+
+        Some(Statement::StructDef {
+            token,
+            name,
+            parent,
+            fields,
+        })
+    }
+
+    fn parse_contains_statement(&mut self) -> Option<Statement> {
+        let struct_name = Identifier {
+            token: self.curr_token.clone(),
+            value: self.curr_token.literal.clone(),
+        };
+        let token = self.curr_token.clone();
+
+        self.expect_peek(TokenType::Contains)?; // 'contains'
+        self.expect_peek(TokenType::LBrace)?; // '{'
+
+        let mut methods = Vec::new();
+
+        // Skip newlines after '{'
+        while self.peek_token.token_type == TokenType::Newline {
+            self.next_token();
+        }
+
+        // Parse methods: fun name(params) { body }
+        while self.peek_token.token_type != TokenType::RBrace
+            && self.peek_token.token_type != TokenType::Eof
+        {
+            self.next_token(); // move to 'fun'
+
+            // Skip newlines
+            while self.curr_token.token_type == TokenType::Newline {
+                self.next_token();
+            }
+
+            if self.curr_token.token_type == TokenType::RBrace {
+                break;
+            }
+
+            if self.curr_token.token_type != TokenType::Function {
+                self.errors.push(format!(
+                    "expected 'fun' inside contains block, got {:?}",
+                    self.curr_token.token_type
+                ));
+                return None;
+            }
+
+            let fun_token = self.curr_token.clone();
+
+            self.next_token(); // move to method name
+            let method_name = Identifier {
+                token: self.curr_token.clone(),
+                value: self.curr_token.literal.clone(),
+            };
+
+            self.expect_peek(TokenType::LParen)?;
+            let parameters = self.parse_function_parameters()?;
+
+            self.expect_peek(TokenType::LBrace)?;
+            let body = self.parse_block()?;
+
+            let func_expr = Expression::FunctionLiteral {
+                token: fun_token,
+                parameters,
+                body,
+            };
+
+            methods.push((method_name, func_expr));
+
+            // Skip newlines
+            while self.peek_token.token_type == TokenType::Newline {
+                self.next_token();
+            }
+        }
+
+        self.expect_peek(TokenType::RBrace)?; // '}'
+
+        Some(Statement::ContainsDef {
+            token,
+            struct_name,
+            methods,
+        })
     }
 
     // ---------------- Helpers ----------------
@@ -1381,6 +1690,101 @@ mod tests {
                 input,
                 errors
             );
+        }
+    }
+
+    // ==================== STRUCT PARSING TESTS ====================
+
+    #[test]
+    fn test_parse_struct_definition() {
+        let program = parse_ok("struct Person {\n    name <str>\n    age <int>\n}");
+        match &program.statements[0] {
+            Statement::StructDef { name, parent, fields, .. } => {
+                assert_eq!(name.value, "Person");
+                assert!(parent.is_none());
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name.value, "name");
+                assert_eq!(fields[0].type_ann, TypeAnnotation::Str);
+                assert_eq!(fields[1].name.value, "age");
+                assert_eq!(fields[1].type_ann, TypeAnnotation::Int);
+            }
+            other => panic!("Expected StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_struct_with_parent() {
+        let program = parse_ok("struct American(Person) {\n    nationality <str>\n}");
+        match &program.statements[0] {
+            Statement::StructDef { name, parent, fields, .. } => {
+                assert_eq!(name.value, "American");
+                assert!(parent.is_some());
+                assert_eq!(parent.as_ref().unwrap().value, "Person");
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].name.value, "nationality");
+            }
+            other => panic!("Expected StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_contains_def() {
+        let program = parse_ok("Person contains {\n    fun greet() { 42 }\n}");
+        match &program.statements[0] {
+            Statement::ContainsDef { struct_name, methods, .. } => {
+                assert_eq!(struct_name.value, "Person");
+                assert_eq!(methods.len(), 1);
+                assert_eq!(methods[0].0.value, "greet");
+            }
+            other => panic!("Expected ContainsDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dot_access() {
+        let program = parse_ok("p.name");
+        match &program.statements[0] {
+            Statement::Expr(Expression::DotAccess { left, field, .. }) => {
+                match left.as_ref() {
+                    Expression::Ident(ident) => assert_eq!(ident.value, "p"),
+                    _ => panic!("Expected Ident as left"),
+                }
+                assert_eq!(field.value, "name");
+            }
+            other => panic!("Expected DotAccess expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_dot_assign() {
+        let program = parse_ok("p.name = \"Jane\"");
+        match &program.statements[0] {
+            Statement::DotAssign { object, field, value, .. } => {
+                match object {
+                    Expression::Ident(ident) => assert_eq!(ident.value, "p"),
+                    _ => panic!("Expected Ident as object"),
+                }
+                assert_eq!(field.value, "name");
+                match value {
+                    Expression::Str { value, .. } => assert_eq!(value, "Jane"),
+                    _ => panic!("Expected string value"),
+                }
+            }
+            other => panic!("Expected DotAssign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_struct_literal() {
+        let program = parse_ok("Person { name: \"Alice\", age: 30 }");
+        match &program.statements[0] {
+            Statement::Expr(Expression::StructLiteral { struct_name, field_values, .. }) => {
+                assert_eq!(struct_name, "Person");
+                assert_eq!(field_values.len(), 2);
+                assert_eq!(field_values[0].0, "name");
+                assert_eq!(field_values[1].0, "age");
+            }
+            other => panic!("Expected StructLiteral expression, got {:?}", other),
         }
     }
 }

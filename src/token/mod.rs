@@ -80,6 +80,8 @@ pub enum TokenType {
     Pattern,
     In,
     Not,
+    Struct,
+    Contains,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,5 +110,7 @@ pub fn token_map() -> HashMap<&'static str, TokenType> {
         ("stop", Stop),
         ("None", None),
         ("as", As),
+        ("struct", Struct),
+        ("contains", Contains),
     ])
 }

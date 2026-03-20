@@ -11,6 +11,7 @@ use std::rc::Rc;
 pub struct Evaluator {
     builtins: HashMap<String, Rc<Object>>,
     patterns: PatternRegistry,
+    struct_defs: HashMap<String, Rc<Object>>,
 }
 
 impl Default for Evaluator {
@@ -24,6 +25,7 @@ impl Evaluator {
         Evaluator {
             builtins: get_builtins(),
             patterns: PatternRegistry::new(),
+            struct_defs: HashMap::new(),
         }
     }
 
@@ -274,6 +276,146 @@ impl Evaluator {
                 }
                 Rc::new(Object::Return(val))
             }
+            Statement::StructDef {
+                name, parent, fields, ..
+            } => {
+                // If parent specified, get parent's fields
+                let mut all_fields: Vec<(String, String)> = Vec::new();
+                let parent_name = if let Some(parent_ident) = parent {
+                    let parent_def = self.struct_defs.get(&parent_ident.value);
+                    match parent_def {
+                        Some(def) => {
+                            if let Object::StructDef { fields: parent_fields, .. } = def.as_ref() {
+                                all_fields.extend(parent_fields.clone());
+                            }
+                        }
+                        None => {
+                            return Rc::new(Object::Error(format!(
+                                "parent struct not found: {}",
+                                parent_ident.value
+                            )));
+                        }
+                    }
+                    Some(parent_ident.value.clone())
+                } else {
+                    None
+                };
+
+                // Add own fields
+                for field in fields {
+                    all_fields.push((field.name.value.clone(), field.type_ann.type_name().to_string()));
+                }
+
+                let struct_obj = Rc::new(Object::StructDef {
+                    name: name.value.clone(),
+                    fields: all_fields,
+                    methods: HashMap::new(),
+                    parent: parent_name,
+                });
+
+                self.struct_defs.insert(name.value.clone(), Rc::clone(&struct_obj));
+                env.borrow_mut().set(name.value.clone(), Rc::clone(&struct_obj));
+                struct_obj
+            }
+            Statement::ContainsDef {
+                struct_name, methods, ..
+            } => {
+                let existing = self.struct_defs.get(&struct_name.value).cloned();
+                match existing {
+                    Some(def) => {
+                        if let Object::StructDef {
+                            name, fields, methods: existing_methods, parent,
+                        } = def.as_ref()
+                        {
+                            let mut new_methods = existing_methods.clone();
+                            let sname = name.clone();
+                            let sfields = fields.clone();
+                            let sparent = parent.clone();
+                            for (method_name, func_expr) in methods {
+                                let func_obj = self.eval_expression(func_expr, Rc::clone(&env));
+                                if func_obj.is_error() {
+                                    return func_obj;
+                                }
+                                new_methods.insert(method_name.value.clone(), func_obj);
+                            }
+                            let updated = Rc::new(Object::StructDef {
+                                name: sname,
+                                fields: sfields,
+                                methods: new_methods,
+                                parent: sparent,
+                            });
+                            self.struct_defs.insert(struct_name.value.clone(), Rc::clone(&updated));
+                            env.borrow_mut().set(struct_name.value.clone(), Rc::clone(&updated));
+                            updated
+                        } else {
+                            Rc::new(Object::Error(format!(
+                                "{} is not a struct",
+                                struct_name.value
+                            )))
+                        }
+                    }
+                    None => Rc::new(Object::Error(format!(
+                        "struct not found: {}",
+                        struct_name.value
+                    ))),
+                }
+            }
+            Statement::DotAssign {
+                object, field, value, ..
+            } => {
+                let obj = self.eval_expression(object, Rc::clone(&env));
+                if obj.is_error() {
+                    return obj;
+                }
+                match obj.as_ref() {
+                    Object::StructInstance { struct_name, fields } => {
+                        // Look up struct def and find the expected type for this field
+                        let expected_type = {
+                            let def = self.struct_defs.get(struct_name);
+                            if let Some(def) = def {
+                                if let Object::StructDef { fields: def_fields, .. } = def.as_ref() {
+                                    let field_def = def_fields.iter().find(|(n, _)| n == &field.value);
+                                    match field_def {
+                                        Some((_, et)) => Some(et.clone()),
+                                        None => {
+                                            return Rc::new(Object::Error(format!(
+                                                "struct {} has no field '{}'",
+                                                struct_name, field.value
+                                            )));
+                                        }
+                                    }
+                                } else {
+                                    return Rc::new(Object::Error(format!("{} is not a struct", struct_name)));
+                                }
+                            } else {
+                                return Rc::new(Object::Error(format!("struct definition not found: {}", struct_name)));
+                            }
+                        };
+                        let expected_type = expected_type.unwrap();
+                        let val = self.eval_expression(value, Rc::clone(&env));
+                        if val.is_error() {
+                            return val;
+                        }
+                        let actual_type = if let Some(stn) = val.struct_type_name() {
+                            stn.to_string()
+                        } else {
+                            val.type_name().to_string()
+                        };
+                        if actual_type != expected_type {
+                            return Rc::new(Object::Error(format!(
+                                "type mismatch: field '{}' expects {}, got {}",
+                                field.value, expected_type, actual_type
+                            )));
+                        }
+                        fields.borrow_mut().insert(field.value.clone(), val.clone());
+                        val
+                    }
+                    _ => Rc::new(Object::Error(format!(
+                        "cannot assign field on non-struct: {}",
+                        obj.type_name()
+                    ))),
+                }
+            }
         }
     }
 
@@ -370,6 +512,140 @@ impl Evaluator {
                 body: body.clone(),
                 env: Rc::clone(&env),
             }),
+
+            Expression::DotAccess { left, field, .. } => {
+                let obj = self.eval_expression(left, Rc::clone(&env));
+                if obj.is_error() {
+                    return obj;
+                }
+                match obj.as_ref() {
+                    Object::StructInstance { struct_name, fields } => {
+                        // Check fields first
+                        if let Some(val) = fields.borrow().get(&field.value) {
+                            return Rc::clone(val);
+                        }
+                        // Check methods
+                        self.find_method(struct_name, &field.value, &fields)
+                    }
+                    _ => Rc::new(Object::Error(format!(
+                        "cannot access field '{}' on {}",
+                        field.value,
+                        obj.type_name()
+                    ))),
+                }
+            }
+
+            Expression::StructLiteral {
+                struct_name, field_values, ..
+            } => {
+                let def = self.struct_defs.get(struct_name);
+                match def {
+                    Some(def) => {
+                        let def = Rc::clone(def);
+                        if let Object::StructDef { fields: def_fields, name, .. } = def.as_ref() {
+                            // Verify all fields provided
+                            if field_values.len() != def_fields.len() {
+                                return Rc::new(Object::Error(format!(
+                                    "struct {} has {} fields, got {}",
+                                    name, def_fields.len(), field_values.len()
+                                )));
+                            }
+                            let mut instance_fields = HashMap::new();
+                            for (field_name, expr) in field_values {
+                                let val = self.eval_expression(expr, Rc::clone(&env));
+                                if val.is_error() {
+                                    return val;
+                                }
+                                // Find field in definition
+                                let field_def = def_fields.iter().find(|(n, _)| n == field_name);
+                                match field_def {
+                                    Some((_, expected_type)) => {
+                                        let actual_type = if let Some(stn) = val.struct_type_name() {
+                                            stn.to_string()
+                                        } else {
+                                            val.type_name().to_string()
+                                        };
+                                        if actual_type != *expected_type {
+                                            return Rc::new(Object::Error(format!(
+                                                "type mismatch for field '{}': expected {}, got {}",
+                                                field_name, expected_type, actual_type
+                                            )));
+                                        }
+                                        instance_fields.insert(field_name.clone(), val);
+                                    }
+                                    None => {
+                                        return Rc::new(Object::Error(format!(
+                                            "unknown field '{}' for struct {}",
+                                            field_name, name
+                                        )));
+                                    }
+                                }
+                            }
+                            Rc::new(Object::StructInstance {
+                                struct_name: name.clone(),
+                                fields: Rc::new(RefCell::new(instance_fields)),
+                            })
+                        } else {
+                            Rc::new(Object::Error(format!("{} is not a struct", struct_name)))
+                        }
+                    }
+                    None => Rc::new(Object::Error(format!(
+                        "struct not found: {}",
+                        struct_name
+                    ))),
+                }
+            }
+        }
+    }
+
+    fn find_method(
+        &self,
+        struct_name: &str,
+        method_name: &str,
+        instance_fields: &Rc<RefCell<HashMap<String, Rc<Object>>>>,
+    ) -> Rc<Object> {
+        let mut current_name = struct_name.to_string();
+        loop {
+            let def = self.struct_defs.get(&current_name);
+            match def {
+                Some(def) => {
+                    if let Object::StructDef { methods, parent, .. } = def.as_ref() {
+                        if let Some(method) = methods.get(method_name) {
+                            // Bind method: create new env with instance fields injected
+                            if let Object::Function { parameters, body, env } = method.as_ref() {
+                                let bound_env = Rc::new(RefCell::new(
+                                    Environment::new_enclosed(Rc::clone(env)),
+                                ));
+                                // Inject all instance fields
+                                for (k, v) in instance_fields.borrow().iter() {
+                                    bound_env.borrow_mut().set(k.clone(), Rc::clone(v));
+                                }
+                                return Rc::new(Object::Function {
+                                    parameters: parameters.clone(),
+                                    body: body.clone(),
+                                    env: bound_env,
+                                });
+                            }
+                            return Rc::clone(method);
+                        }
+                        // Walk parent chain
+                        if let Some(p) = parent {
+                            current_name = p.clone();
+                            continue;
+                        }
+                    }
+                    return Rc::new(Object::Error(format!(
+                        "method '{}' not found on struct {}",
+                        method_name, struct_name
+                    )));
+                }
+                None => {
+                    return Rc::new(Object::Error(format!(
+                        "struct definition not found: {}",
+                        current_name
+                    )));
+                }
+            }
         }
     }
 
@@ -684,6 +960,38 @@ impl Evaluator {
                     Object::Return(val) => Rc::clone(val),
                     _ => result,
                 }
+            }
+            Object::StructDef { name, fields, .. } => {
+                // Positional instantiation: Person("Alice", 30)
+                if args.len() != fields.len() {
+                    return Rc::new(Object::Error(format!(
+                        "struct {} has {} fields, got {} arguments",
+                        name,
+                        fields.len(),
+                        args.len()
+                    )));
+                }
+
+                let mut instance_fields = HashMap::new();
+                for ((field_name, expected_type), arg) in fields.iter().zip(args.iter()) {
+                    let actual_type = if let Some(stn) = arg.struct_type_name() {
+                        stn.to_string()
+                    } else {
+                        arg.type_name().to_string()
+                    };
+                    if actual_type != *expected_type {
+                        return Rc::new(Object::Error(format!(
+                            "type mismatch for field '{}': expected {}, got {}",
+                            field_name, expected_type, actual_type
+                        )));
+                    }
+                    instance_fields.insert(field_name.clone(), Rc::clone(arg));
+                }
+
+                Rc::new(Object::StructInstance {
+                    struct_name: name.clone(),
+                    fields: Rc::new(RefCell::new(instance_fields)),
+                })
             }
             _ => Rc::new(Object::Error(format!(
                 "not a function: {}",
@@ -2115,5 +2423,296 @@ mod tests {
             find_first_even([1, 3, 4, 6])
         "#;
         test_integer(&test_eval(input), 4);
+    }
+
+    #[test]
+    fn test_function_indent_mode() {
+        let input = "#[indent]\nfun add(a, b):\n    a + b\nadd(3, 4)\n";
+        test_integer(&test_eval(input), 7);
+    }
+
+    #[test]
+    fn test_function_indent_mode_with_give() {
+        let input = "#[indent]\nfun abs(n):\n    if n < 0:\n        give -n\n    n\nabs(-5)\n";
+        test_integer(&test_eval(input), 5);
+    }
+
+    // ==================== STRUCT TESTS ====================
+
+    #[test]
+    fn test_struct_positional_instantiation() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p := Person("Alice", 30)
+            p.name
+        "#;
+        test_string(&test_eval(input), "Alice");
+    }
+
+    #[test]
+    fn test_struct_positional_field_access() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p := Person("Alice", 30)
+            p.age
+        "#;
+        test_integer(&test_eval(input), 30);
+    }
+
+    #[test]
+    fn test_struct_named_instantiation() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p := Person { name: "Bob", age: 25 }
+            p.name
+        "#;
+        test_string(&test_eval(input), "Bob");
+    }
+
+    #[test]
+    fn test_struct_named_field_access() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p := Person { name: "Bob", age: 25 }
+            p.age
+        "#;
+        test_integer(&test_eval(input), 25);
+    }
+
+    #[test]
+    fn test_struct_dot_assign() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p := Person("Alice", 30)
+            p.age = 31
+            p.age
+        "#;
+        test_integer(&test_eval(input), 31);
+    }
+
+    #[test]
+    fn test_struct_dot_assign_type_mismatch() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p := Person("Alice", 30)
+            p.age = "thirty"
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("type mismatch"), "got: {}", msg),
+            _ => panic!("Expected type mismatch error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_struct_method_implicit_self() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            Person contains {
+                fun greet() { name }
+            }
+            p := Person("Alice", 30)
+            p.greet()
+        "#;
+        test_string(&test_eval(input), "Alice");
+    }
+
+    #[test]
+    fn test_struct_method_is_adult() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            Person contains {
+                fun is_adult() { age >= 18 }
+            }
+            p := Person("Alice", 30)
+            p.is_adult()
+        "#;
+        test_boolean(&test_eval(input), true);
+    }
+
+    #[test]
+    fn test_struct_inheritance_fields() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            struct American(Person) {
+                nationality <str>
+            }
+            a := American("John", 25, "USA")
+            a.nationality
+        "#;
+        test_string(&test_eval(input), "USA");
+    }
+
+    #[test]
+    fn test_struct_inheritance_parent_fields() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            struct American(Person) {
+                nationality <str>
+            }
+            a := American("John", 25, "USA")
+            a.name
+        "#;
+        test_string(&test_eval(input), "John");
+    }
+
+    #[test]
+    fn test_struct_inheritance_inherits_methods() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            Person contains {
+                fun greet() { name }
+            }
+            struct American(Person) {
+                nationality <str>
+            }
+            a := American("John", 25, "USA")
+            a.greet()
+        "#;
+        test_string(&test_eval(input), "John");
+    }
+
+    #[test]
+    fn test_struct_method_override() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            Person contains {
+                fun greet() { name }
+            }
+            struct American(Person) {
+                nationality <str>
+            }
+            American contains {
+                fun greet() { name + " from " + nationality }
+            }
+            a := American("John", 25, "USA")
+            a.greet()
+        "#;
+        test_string(&test_eval(input), "John from USA");
+    }
+
+    #[test]
+    fn test_struct_wrong_arg_count() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p := Person("Alice")
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("2 fields, got 1"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_struct_unknown_field_named() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p := Person { name: "Alice", height: 170 }
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("unknown field"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_struct_type_builtin() {
+        let input = r#"
+            struct Person {
+                name <str>
+                age <int>
+            }
+            p := Person("Alice", 30)
+            type(p)
+        "#;
+        test_string(&test_eval(input), "Person");
+    }
+
+    #[test]
+    fn test_struct_zero_fields() {
+        let input = r#"
+            struct Empty {
+            }
+            e := Empty()
+            type(e)
+        "#;
+        test_string(&test_eval(input), "Empty");
+    }
+
+    #[test]
+    fn test_struct_method_with_give() {
+        let input = r#"
+            struct Counter {
+                count <int>
+            }
+            Counter contains {
+                fun get_double() { give count * 2 }
+            }
+            c := Counter(5)
+            c.get_double()
+        "#;
+        test_integer(&test_eval(input), 10);
+    }
+
+    #[test]
+    fn test_struct_dot_chaining() {
+        let input = r#"
+            struct Inner {
+                val <int>
+            }
+            struct Outer {
+                name <str>
+            }
+            Outer contains {
+                fun make_inner() { Inner(42) }
+            }
+            o := Outer("test")
+            o.make_inner().val
+        "#;
+        test_integer(&test_eval(input), 42);
     }
 }

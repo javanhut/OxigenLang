@@ -111,12 +111,16 @@ chars("abc") # Returns [`a`, `b`, `c`]
 
 ### `type(value)`
 
-Returns the string name of the value's type.
+Returns the string name of the value's type. For struct instances, returns the struct name.
 
 ```oxi
 type(42)    # Returns "INTEGER"
 type("abc") # Returns "STRING"
 type(None)  # Returns "NONE"
+
+struct Person { name <str> age <int> }
+p := Person("Alice", 30)
+type(p)     # Returns "Person"
 ```
 
 ### `is_mut(variable)`

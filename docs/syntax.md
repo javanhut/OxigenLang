@@ -97,6 +97,57 @@ choose val {
 }
 ```
 
+## Structs
+
+OxigenLang supports structs for grouping data with typed fields, inheritance, and methods.
+
+### Defining and Using Structs
+
+```oxi
+struct Person {
+    name <str>
+    age <int>
+}
+
+# Positional instantiation
+p := Person("Alice", 30)
+
+# Named instantiation
+p := Person { name: "Alice", age: 30 }
+
+# Field access and mutation
+println(p.name)    # Alice
+p.age = 31
+```
+
+### Methods
+
+Attach methods using `contains`. Fields are accessible by name inside methods (implicit self):
+
+```oxi
+Person contains {
+    fun greet() { "Hello, " + name }
+}
+
+p := Person("Alice", 30)
+println(p.greet())   # Hello, Alice
+```
+
+### Inheritance
+
+A child struct inherits all parent fields and methods:
+
+```oxi
+struct American(Person) {
+    nationality <str>
+}
+
+a := American("John", 25, "USA")
+println(a.greet())   # Hello, John — inherited from Person
+```
+
+For full details, see the [Structs](structs.md) guide.
+
 ## Block Styles
 
 OxigenLang supports two different ways to define blocks:

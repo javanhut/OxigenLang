@@ -92,12 +92,35 @@ pub enum Statement {
         name: Identifier,
         value: Expression,
     },
+    StructDef {
+        token: Token,
+        name: Identifier,
+        parent: Option<Identifier>,
+        fields: Vec<StructField>,
+    },
+    ContainsDef {
+        token: Token,
+        struct_name: Identifier,
+        methods: Vec<(Identifier, Expression)>,
+    },
+    DotAssign {
+        token: Token,
+        object: Expression,
+        field: Identifier,
+        value: Expression,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChooseArm {
     pub pattern_name: String, // "ten", "eleven", or "else"
     pub body: Expression,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StructField {
+    pub name: Identifier,
+    pub type_ann: TypeAnnotation,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,5 +197,15 @@ pub enum Expression {
         token: Token,
         parameters: Vec<Identifier>,
         body: Vec<Statement>,
+    },
+    StructLiteral {
+        token: Token,
+        struct_name: String,
+        field_values: Vec<(String, Expression)>,
+    },
+    DotAccess {
+        token: Token,
+        left: Box<Expression>,
+        field: Identifier,
     },
 }

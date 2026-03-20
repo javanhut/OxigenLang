@@ -3,6 +3,7 @@ pub mod environment;
 use crate::ast::{Expression, Identifier, Statement};
 use environment::Environment;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
@@ -26,6 +27,16 @@ pub enum Object {
         parameters: Vec<Identifier>,
         condition: Expression,
     },
+    StructDef {
+        name: String,
+        fields: Vec<(String, String)>,
+        methods: HashMap<String, Rc<Object>>,
+        parent: Option<String>,
+    },
+    StructInstance {
+        struct_name: String,
+        fields: Rc<RefCell<HashMap<String, Rc<Object>>>>,
+    },
     Builtin(BuiltinFunction),
     Return(Rc<Object>),
     Skip,
@@ -45,6 +56,7 @@ impl Object {
             Object::String(s) => !s.is_empty(),
             Object::Array(arr) => !arr.is_empty(),
             Object::Error(_) => false,
+            Object::StructInstance { .. } => true,
             _ => true,
         }
     }
@@ -63,12 +75,21 @@ impl Object {
             Object::Array(_) => "ARRAY",
             Object::Function { .. } => "FUNCTION",
             Object::Pattern { .. } => "PATTERN",
+            Object::StructDef { .. } => "STRUCT_DEF",
+            Object::StructInstance { .. } => "STRUCT",
             Object::Builtin(_) => "BUILTIN",
             Object::Return(_) => "RETURN",
             Object::Skip => "SKIP",
             Object::Stop => "STOP",
             Object::None => "NONE",
             Object::Error(_) => "ERROR",
+        }
+    }
+
+    pub fn struct_type_name(&self) -> Option<&str> {
+        match self {
+            Object::StructInstance { struct_name, .. } => Some(struct_name),
+            _ => None,
         }
     }
 }
@@ -90,6 +111,15 @@ impl fmt::Display for Object {
                 write!(f, "fun({})", params.join(", "))
             }
             Object::Pattern { name, .. } => write!(f, "pattern {}", name),
+            Object::StructDef { name, .. } => write!(f, "struct {}", name),
+            Object::StructInstance { struct_name, fields } => {
+                let fields_ref = fields.borrow();
+                let items: Vec<String> = fields_ref
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .collect();
+                write!(f, "{} {{ {} }}", struct_name, items.join(", "))
+            }
             Object::Builtin(_) => write!(f, "builtin function"),
             Object::Return(val) => write!(f, "{}", val),
             Object::Skip => write!(f, "skip"),
@@ -113,6 +143,10 @@ impl fmt::Debug for Object {
                 write!(f, "Function({:?})", parameters)
             }
             Object::Pattern { name, .. } => write!(f, "Pattern({})", name),
+            Object::StructDef { name, .. } => write!(f, "StructDef({})", name),
+            Object::StructInstance { struct_name, fields } => {
+                write!(f, "StructInstance({}, {:?})", struct_name, fields.borrow())
+            }
             Object::Builtin(_) => write!(f, "Builtin"),
             Object::Return(val) => write!(f, "Return({:?})", val),
             Object::Skip => write!(f, "Skip"),
@@ -133,6 +167,10 @@ impl PartialEq for Object {
             (Object::Boolean(a), Object::Boolean(b)) => a == b,
             (Object::None, Object::None) => true,
             (Object::Array(a), Object::Array(b)) => a == b,
+            (Object::StructInstance { struct_name: a_name, fields: a_fields },
+             Object::StructInstance { struct_name: b_name, fields: b_fields }) => {
+                a_name == b_name && *a_fields.borrow() == *b_fields.borrow()
+            }
             _ => false,
         }
     }
