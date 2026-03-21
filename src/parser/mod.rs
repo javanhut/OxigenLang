@@ -1105,8 +1105,8 @@ impl Parser {
                 let body = if self.curr_token.token_type == TokenType::LBrace {
                     self.parse_block()?
                 } else {
-                    let body_expr = self.parse_expression(Precedence::Lowest)?;
-                    vec![Statement::Expr(body_expr)]
+                    let stmt = self.parse_statement()?;
+                    vec![stmt]
                 };
 
                 arms.push(OptionArm {
