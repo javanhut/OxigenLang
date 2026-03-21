@@ -17,6 +17,7 @@ The compiled binary will be at `target/release/oxigen` (or you can run directly 
 Save the following code in a file named `hello.oxi`:
 
 ```oxi
+// My first OxigenLang program
 name := "Explorer"
 println("Hello", name, "!")
 println("OxigenLang is a modern, lightweight, interpreted programming language.")

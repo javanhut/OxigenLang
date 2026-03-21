@@ -612,6 +612,36 @@ impl Evaluator {
                 right,
                 ..
             } => {
+                // Short-circuit for logical operators
+                if operator == "and" {
+                    let left_val = self.eval_expression(left, Rc::clone(&env));
+                    if left_val.is_error() {
+                        return left_val;
+                    }
+                    if !left_val.is_truthy() {
+                        return Rc::new(Object::Boolean(false));
+                    }
+                    let right_val = self.eval_expression(right, env);
+                    if right_val.is_error() {
+                        return right_val;
+                    }
+                    return Rc::new(Object::Boolean(right_val.is_truthy()));
+                }
+                if operator == "or" {
+                    let left_val = self.eval_expression(left, Rc::clone(&env));
+                    if left_val.is_error() {
+                        return left_val;
+                    }
+                    if left_val.is_truthy() {
+                        return Rc::new(Object::Boolean(true));
+                    }
+                    let right_val = self.eval_expression(right, env);
+                    if right_val.is_error() {
+                        return right_val;
+                    }
+                    return Rc::new(Object::Boolean(right_val.is_truthy()));
+                }
+
                 let left_val = self.eval_expression(left, Rc::clone(&env));
                 if left_val.is_error() {
                     return left_val;

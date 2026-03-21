@@ -14,7 +14,9 @@ Operators are evaluated in the following order, from highest to lowest precedenc
 | &darr;     | `*` `/` `%`                    | Multiplication        |
 | &darr;     | `+` `-`                        | Addition              |
 | &darr;     | `<` `>` `<=` `>=`             | Relational comparison |
-| Lowest     | `==` `!=`                      | Equality              |
+| &darr;     | `==` `!=`                      | Equality              |
+| &darr;     | `and`                          | Logical AND           |
+| Lowest     | `or`                           | Logical OR            |
 
 Parentheses can be used to override precedence:
 
@@ -173,7 +175,46 @@ not ""
 not (x == 5)
 ```
 
-Note: OxigenLang does not have `&&` (and) or `||` (or) operators. Use `option` blocks or nested conditionals for compound logic. See the [Control Flow](control_flow.md) guide.
+### `and` (Keyword)
+
+Returns `True` if both sides are truthy. Short-circuits — if the left side is falsy, the right side is not evaluated:
+
+```oxi
+True and True
+True and False
+x > 0 and x < 100
+```
+
+### `or` (Keyword)
+
+Returns `True` if either side is truthy. Short-circuits — if the left side is truthy, the right side is not evaluated:
+
+```oxi
+False or True
+False or False
+x == 0 or x == 1
+```
+
+### Combining `and` / `or`
+
+`and` binds tighter than `or`, so `a or b and c` is evaluated as `a or (b and c)`. Use parentheses to override:
+
+```oxi
+logged_in and is_admin or is_superuser
+(logged_in or is_guest) and has_permission
+```
+
+### Short-Circuit Evaluation
+
+Both `and` and `or` use short-circuit evaluation — the right-hand side is only evaluated when necessary:
+
+```oxi
+// safe: division only happens if x != 0
+x != 0 and (100 / x > 10)
+
+// safe: expensive_check() is skipped if cached is truthy
+cached or expensive_check()
+```
 
 ## Unary Operators
 
@@ -278,9 +319,31 @@ See the [Structs](structs.md) guide for full details.
 | `==` `!=`     | yes     | yes   | yes    | yes  | yes     | yes   | yes   | yes | yes |
 | `<` `>` `<=` `>=` | yes | yes  | —      | yes  | —       | —     | —     | —   | —   |
 | `!` / `not`   | truthy  | truthy| truthy | truthy| yes    | truthy| truthy| truthy| truthy|
+| `and` / `or`  | truthy  | truthy| truthy | truthy| yes    | truthy| truthy| truthy| truthy|
 | `++` `--`     | yes     | —     | —      | —    | —       | —     | —     | —   | —   |
 | `[]` index    | —       | —     | yes    | —    | —       | yes   | yes   | yes | —   |
 | `[:]` slice   | —       | —     | yes    | —    | —       | yes   | yes   | —   | —   |
+
+## Comments
+
+### Single-Line Comments
+
+Use `//` to comment out the rest of a line:
+
+```oxi
+x := 10  // this is a comment
+// this whole line is a comment
+```
+
+### Multi-Line Comments
+
+Use `/* */` to comment out a block of text spanning multiple lines:
+
+```oxi
+/* This is a
+   multi-line comment */
+x := 10
+```
 
 See also:
 - [Data Types](data_types.md) — detailed description of each type

@@ -7,6 +7,8 @@ use std::collections::VecDeque;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Precedence {
     Lowest,
+    LogicalOr,   // or
+    LogicalAnd,  // and
     Equals,      // == !=
     LessGreater, // <,>,<=,>=
     Sum,         // + -
@@ -22,6 +24,8 @@ fn precedence_of(tt: &TokenType) -> Precedence {
     use TokenType::*;
 
     match tt {
+        Or => LogicalOr,
+        And => LogicalAnd,
         Eq | NotEq => Equals,
         Lt | Lte | Gt | Gte => LessGreater,
         Plus | Minus => Sum,
@@ -87,6 +91,10 @@ impl Parser {
         for tt in [TokenType::Plus, TokenType::Minus] {
             p.register_infix(tt, Parser::parse_infix_expression);
         }
+
+        // Logical operators
+        p.register_infix(TokenType::And, Parser::parse_infix_expression);
+        p.register_infix(TokenType::Or, Parser::parse_infix_expression);
 
         // Comparison operators
         p.register_infix(TokenType::Eq, Parser::parse_infix_expression);

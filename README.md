@@ -5,7 +5,7 @@ OxigenLang is a modern, lightweight, interpreted programming language implemente
 ## Features
 
 - **Flexible Block Styles**: Choose between traditional brace-based blocks or Python-style indentation blocks with the `#[indent]` directive.
-- **Conditional Expressions**: Multi-arm `option` blocks, ternary shorthand, `unless` inverse conditionals, and `when`/`unless` postfix guards.
+- **Conditional Expressions**: Multi-arm `option` blocks, ternary shorthand, `unless` inverse conditionals, `when`/`unless` postfix guards, and short-circuit `and`/`or` logical operators.
 - **Pattern Matching**: Define reusable patterns with the `pattern` keyword and match against them with `choose`. Supports both top-level and inline pattern definitions.
 - **Rich Type System**: Dynamic typing by default with optional type annotations for locking types and controlling mutability. Four declaration forms give precise control over value and type mutability.
 - **Data Types**: Integers, Floats, Strings, Characters, Booleans, Arrays, Bytes, Uints, Tuples, Maps, Sets, and `None`.

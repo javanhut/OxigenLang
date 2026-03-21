@@ -272,7 +272,7 @@ each i in range(5):
 
 ## Combining Control Flow
 
-Control flow constructs can be nested and combined freely:
+Control flow constructs can be nested and combined freely. Use `and` / `or` for compound conditions:
 
 ```oxi
 logged_in := False
@@ -280,7 +280,7 @@ max_retries <int> = 9
 retry <int>
 
 repeat when True {
-    println("Not logged in") when logged_in == False
+    println("Not logged in") when not logged_in
     println("Current number of retries: ", retry)
 
     unless logged_in {
@@ -291,8 +291,7 @@ repeat when True {
         retry == 8 -> logged_in := True
     }
 
-    stop when logged_in == True
-    stop when retry > max_retries
+    stop when logged_in or retry > max_retries
     retry++
 }
 

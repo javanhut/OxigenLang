@@ -79,6 +79,8 @@ pub enum TokenType {
     Unless,
     Hide,
     SelfKw,
+    And,
+    Or,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,5 +113,7 @@ pub fn token_map() -> HashMap<&'static str, TokenType> {
         ("contains", Contains),
         ("hide", Hide),
         ("self", SelfKw),
+        ("and", And),
+        ("or", Or),
     ])
 }
