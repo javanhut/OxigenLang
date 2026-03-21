@@ -138,6 +138,8 @@ pub enum Statement {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChooseArm {
     pub pattern_name: String, // "ten", "eleven", or "else"
+    pub inline_params: Option<Vec<Identifier>>,
+    pub inline_condition: Option<Expression>,
     pub body: Expression,
 }
 

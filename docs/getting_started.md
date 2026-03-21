@@ -64,6 +64,8 @@ None
 
 ## Pattern Matching Example
 
+Patterns can be defined as top-level statements and referenced by name:
+
 ```oxi
 # pattern_match.oxi
 pattern is_even(n) when n % 2 == 0
@@ -74,6 +76,19 @@ each n in nums {
     choose n {
         is_even -> println(n, "is even"),
         is_odd -> println(n, "is odd")
+    }
+}
+```
+
+Or defined inline directly within `choose` arms:
+
+```oxi
+# inline_pattern.oxi
+nums := [1, 2, 3, 4, 5]
+each n in nums {
+    choose n {
+        pattern is_even(x) when x % 2 == 0 -> println(n, "is even"),
+        pattern is_odd(x) when x % 2 != 0 -> println(n, "is odd")
     }
 }
 ```

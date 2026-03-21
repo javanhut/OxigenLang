@@ -958,14 +958,63 @@ impl Parser {
                 break;
             }
 
-            let pattern_name = self.curr_token.literal.clone();
+            if self.curr_token.token_type == TokenType::Pattern {
+                // Inline pattern definition
+                self.next_token(); // move to pattern name
+                let pattern_name = self.curr_token.literal.clone();
 
-            self.expect_peek(TokenType::Arrow)?; // '->'
-            self.next_token(); // move to body expression
+                self.expect_peek(TokenType::LParen)?; // '('
 
-            let body = self.parse_expression(Precedence::Lowest)?;
+                let mut params = Vec::new();
+                if self.peek_token.token_type != TokenType::RParen {
+                    self.next_token();
+                    params.push(Identifier {
+                        token: self.curr_token.clone(),
+                        value: self.curr_token.literal.clone(),
+                    });
+                    while self.peek_token.token_type == TokenType::Comma {
+                        self.next_token(); // ','
+                        self.next_token(); // next param
+                        params.push(Identifier {
+                            token: self.curr_token.clone(),
+                            value: self.curr_token.literal.clone(),
+                        });
+                    }
+                }
+                self.expect_peek(TokenType::RParen)?; // ')'
 
-            arms.push(ChooseArm { pattern_name, body });
+                self.expect_peek(TokenType::When)?; // 'when'
+                self.next_token(); // move to condition
+
+                let condition = self.parse_expression(Precedence::Lowest)?;
+
+                self.expect_peek(TokenType::Arrow)?; // '->'
+                self.next_token(); // move to body expression
+
+                let body = self.parse_expression(Precedence::Lowest)?;
+
+                arms.push(ChooseArm {
+                    pattern_name,
+                    inline_params: Some(params),
+                    inline_condition: Some(condition),
+                    body,
+                });
+            } else {
+                // Reference to pre-defined pattern
+                let pattern_name = self.curr_token.literal.clone();
+
+                self.expect_peek(TokenType::Arrow)?; // '->'
+                self.next_token(); // move to body expression
+
+                let body = self.parse_expression(Precedence::Lowest)?;
+
+                arms.push(ChooseArm {
+                    pattern_name,
+                    inline_params: None,
+                    inline_condition: None,
+                    body,
+                });
+            }
 
             // Skip comma if present
             if self.peek_token.token_type == TokenType::Comma {

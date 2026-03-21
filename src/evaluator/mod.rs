@@ -1435,6 +1435,12 @@ impl Evaluator {
                 return self.eval_expression(&arm.body, Rc::clone(&env));
             }
 
+            // If inline pattern, register it on the fly
+            if let (Some(params), Some(condition)) = (&arm.inline_params, &arm.inline_condition) {
+                let param_names: Vec<String> = params.iter().map(|p| p.value.clone()).collect();
+                self.patterns.register(arm.pattern_name.clone(), param_names, condition.clone());
+            }
+
             // Look up pattern
             let pattern = match self.patterns.get(&arm.pattern_name) {
                 Some(p) => p.clone(),
@@ -2003,6 +2009,35 @@ mod tests {
         "#;
         let result = test_eval(input);
         test_integer(&result, 99);
+    }
+
+    #[test]
+    fn test_choose_inline_pattern() {
+        let input = r#"
+            y := 10
+            choose y {
+                pattern is_ten(x) when x == 10 -> 1,
+                pattern is_twenty(x) when x == 20 -> 2,
+                else -> 3
+            }
+        "#;
+        let result = test_eval(input);
+        test_integer(&result, 1);
+    }
+
+    #[test]
+    fn test_choose_mixed_inline_and_predefined() {
+        let input = r#"
+            pattern is_ten(x) when x == 10
+            y := 20
+            choose y {
+                is_ten -> 1,
+                pattern is_twenty(x) when x == 20 -> 2,
+                else -> 3
+            }
+        "#;
+        let result = test_eval(input);
+        test_integer(&result, 2);
     }
 
     // ==================== BUILTIN FUNCTION TESTS ====================

@@ -120,6 +120,8 @@ OxigenLang features a powerful pattern-matching system using the `pattern` and `
 
 ### Defining Patterns
 
+Patterns can be defined as top-level statements and referenced by name in `choose` blocks:
+
 ```oxi
 pattern is_even(n) when n % 2 == 0
 pattern is_large(n) when n > 100
@@ -132,6 +134,32 @@ val := 42
 choose val {
     is_even -> print("Even"),
     is_large -> print("Large"),
+    else -> print("Neither")
+}
+```
+
+### Inline Patterns
+
+Patterns can also be defined inline directly within `choose` arms:
+
+```oxi
+val := 42
+choose val {
+    pattern is_even(n) when n % 2 == 0 -> print("Even"),
+    pattern is_large(n) when n > 100 -> print("Large"),
+    else -> print("Neither")
+}
+```
+
+You can mix pre-defined and inline patterns in the same `choose` block:
+
+```oxi
+pattern is_even(n) when n % 2 == 0
+
+val := 42
+choose val {
+    is_even -> print("Even"),
+    pattern is_large(n) when n > 100 -> print("Large"),
     else -> print("Neither")
 }
 ```
