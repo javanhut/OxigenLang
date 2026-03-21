@@ -1072,32 +1072,6 @@ impl Parser {
         })
     }
 
-    // if condition { ... } else { ... }
-    fn parse_if_statement(&mut self) -> Option<Statement> {
-        let token = self.curr_token.clone(); // 'if'
-
-        self.next_token(); // move to condition
-        let condition = self.parse_expression(Precedence::Lowest)?;
-
-        self.expect_peek(TokenType::LBrace)?; // '{'
-        let consequence = self.parse_block()?;
-
-        let alternative = if self.peek_token.token_type == TokenType::Else {
-            self.next_token(); // 'else'
-            self.expect_peek(TokenType::LBrace)?; // '{'
-            Some(self.parse_block()?)
-        } else {
-            None
-        };
-
-        Some(Statement::If {
-            token,
-            condition,
-            consequence,
-            alternative,
-        })
-    }
-
     fn parse_option_expression(&mut self) -> Option<Expression> {
         let token = self.curr_token.clone(); // 'option'
         self.expect_peek(TokenType::LBrace)?; // '{'

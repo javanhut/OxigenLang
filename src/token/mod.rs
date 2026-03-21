@@ -12,11 +12,6 @@ pub enum TokenType {
     String,
     Float,
     Char,
-    Boolean,
-
-    // Indentation Handling
-    Indent,
-    Dedent,
 
     //Operators
     Assign,     // =
@@ -62,7 +57,6 @@ pub enum TokenType {
 
     // Keywords
     If,
-    Else,
     Function,
     True,
     False,
@@ -71,9 +65,7 @@ pub enum TokenType {
     Skip,
     Stop,
     Choose,
-    Case,
     As,
-    Super,
     Repeat,
     Each,
     When,

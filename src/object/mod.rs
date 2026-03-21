@@ -1,6 +1,6 @@
 pub mod environment;
 
-use crate::ast::{Expression, Identifier, Statement, TypedParam};
+use crate::ast::{Statement, TypedParam};
 use environment::Environment;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -21,11 +21,6 @@ pub enum Object {
         parameters: Vec<TypedParam>,
         body: Vec<Statement>,
         env: Rc<RefCell<Environment>>,
-    },
-    Pattern {
-        name: String,
-        parameters: Vec<Identifier>,
-        condition: Expression,
     },
     StructDef {
         name: String,
@@ -91,7 +86,6 @@ impl Object {
             Object::Boolean(_) => "BOOLEAN",
             Object::Array(_) => "ARRAY",
             Object::Function { .. } => "FUNCTION",
-            Object::Pattern { .. } => "PATTERN",
             Object::StructDef { .. } => "STRUCT_DEF",
             Object::StructInstance { .. } => "STRUCT",
             Object::BoundMethod { .. } => "FUNCTION",
@@ -140,7 +134,6 @@ impl fmt::Display for Object {
                 let params: Vec<String> = parameters.iter().map(|p| p.ident.value.clone()).collect();
                 write!(f, "fun({})", params.join(", "))
             }
-            Object::Pattern { name, .. } => write!(f, "pattern {}", name),
             Object::StructDef { name, .. } => write!(f, "struct {}", name),
             Object::StructInstance { struct_name, fields } => {
                 let fields_ref = fields.borrow();
@@ -197,7 +190,6 @@ impl fmt::Debug for Object {
             Object::Function { parameters, .. } => {
                 write!(f, "Function({:?})", parameters)
             }
-            Object::Pattern { name, .. } => write!(f, "Pattern({})", name),
             Object::StructDef { name, .. } => write!(f, "StructDef({})", name),
             Object::StructInstance { struct_name, fields } => {
                 write!(f, "StructInstance({}, {:?})", struct_name, fields.borrow())

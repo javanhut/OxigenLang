@@ -106,7 +106,6 @@ pub struct PatternRegistry {
 
 #[derive(Debug, Clone)]
 pub struct PatternDef {
-    pub name: String,
     pub parameters: Vec<String>,
     pub condition: crate::ast::Expression,
 }
@@ -119,8 +118,7 @@ impl PatternRegistry {
     }
 
     pub fn register(&mut self, name: String, parameters: Vec<String>, condition: crate::ast::Expression) {
-        self.patterns.insert(name.clone(), PatternDef {
-            name,
+        self.patterns.insert(name, PatternDef {
             parameters,
             condition,
         });
