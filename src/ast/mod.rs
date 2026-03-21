@@ -136,6 +136,12 @@ pub enum Statement {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct OptionArm {
+    pub condition: Expression,
+    pub body: Vec<Statement>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ChooseArm {
     pub pattern_name: String, // "ten", "eleven", or "else"
     pub inline_params: Option<Vec<Identifier>>,
@@ -247,5 +253,10 @@ pub enum Expression {
     MapLiteral {
         token: Token,
         entries: Vec<(Expression, Expression)>,
+    },
+    Option {
+        token: Token,
+        arms: Vec<OptionArm>,
+        default: Option<Vec<Statement>>,
     },
 }

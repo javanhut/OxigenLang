@@ -82,6 +82,8 @@ pub enum TokenType {
     Not,
     Struct,
     Contains,
+    OptionKw,
+    Unless,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,8 +95,8 @@ pub struct Token {
 pub fn token_map() -> HashMap<&'static str, TokenType> {
     use TokenType::*;
     HashMap::from([
-        ("if", If),
-        ("else", Else),
+        ("option", OptionKw),
+        ("unless", Unless),
         ("fun", Function),
         ("repeat", Repeat),
         ("each", Each),

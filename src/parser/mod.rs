@@ -1,4 +1,4 @@
-use crate::ast::{ChooseArm, Expression, Identifier, Program, Statement, TypeAnnotation};
+use crate::ast::{ChooseArm, Expression, Identifier, OptionArm, Program, Statement, TypeAnnotation};
 use crate::lexer::Lexer;
 use crate::token::{Token, TokenType};
 use std::collections::HashMap;
@@ -80,6 +80,7 @@ impl Parser {
         p.register_prefix(TokenType::Not, Parser::parse_prefix_expression);
         p.register_prefix(TokenType::Function, Parser::parse_function_expression);
         p.register_prefix(TokenType::LBrace, Parser::parse_map_literal);
+        p.register_prefix(TokenType::OptionKw, Parser::parse_option_expression);
 
         // Infix Parse Functions
         for tt in [TokenType::Plus, TokenType::Minus] {
@@ -141,6 +142,11 @@ impl Parser {
     }
 
     pub fn parse_statement(&mut self) -> Option<Statement> {
+        let stmt = self.parse_statement_inner()?;
+        self.try_postfix_guard(stmt)
+    }
+
+    fn parse_statement_inner(&mut self) -> Option<Statement> {
         if self.curr_token.token_type == TokenType::Ident {
             if self.peek_token.token_type == TokenType::Walrus {
                 return self.parse_let_statement();
@@ -167,7 +173,8 @@ impl Parser {
             TokenType::Repeat => self.parse_repeat_statement(),
             TokenType::Pattern => self.parse_pattern_statement(),
             TokenType::Choose => self.parse_choose_statement(),
-            TokenType::If => self.parse_if_statement(),
+            TokenType::Unless => self.parse_unless_statement(),
+            TokenType::OptionKw => self.parse_expression_statement(),
             TokenType::Skip => Some(Statement::Skip),
             TokenType::Stop => Some(Statement::Stop),
             TokenType::Function => {
@@ -1062,6 +1069,184 @@ impl Parser {
         })
     }
 
+    fn parse_option_expression(&mut self) -> Option<Expression> {
+        let token = self.curr_token.clone(); // 'option'
+        self.expect_peek(TokenType::LBrace)?; // '{'
+
+        let mut arms = Vec::new();
+        let mut default: Option<Vec<Statement>> = None;
+
+        // Skip newlines after '{'
+        while self.peek_token.token_type == TokenType::Newline {
+            self.next_token();
+        }
+
+        while self.peek_token.token_type != TokenType::RBrace
+            && self.peek_token.token_type != TokenType::Eof
+        {
+            self.next_token(); // move to condition/default expression
+
+            // Skip newlines
+            while self.curr_token.token_type == TokenType::Newline {
+                self.next_token();
+            }
+
+            if self.curr_token.token_type == TokenType::RBrace {
+                break;
+            }
+
+            let expr = self.parse_expression(Precedence::Lowest)?;
+
+            if self.peek_token.token_type == TokenType::Arrow {
+                // condition arm: expr -> body
+                self.next_token(); // consume '->'
+                self.next_token(); // move to body
+
+                let body = if self.curr_token.token_type == TokenType::LBrace {
+                    self.parse_block()?
+                } else {
+                    let body_expr = self.parse_expression(Precedence::Lowest)?;
+                    vec![Statement::Expr(body_expr)]
+                };
+
+                arms.push(OptionArm {
+                    condition: expr,
+                    body,
+                });
+            } else if arms.is_empty() && self.peek_token.token_type == TokenType::Comma {
+                // Ternary form: option { cond, true_val, false_val }
+                self.next_token(); // consume ','
+                self.next_token(); // move to true value
+                let true_expr = self.parse_expression(Precedence::Lowest)?;
+
+                self.expect_peek(TokenType::Comma)?; // ','
+                self.next_token(); // move to false value
+                let false_expr = self.parse_expression(Precedence::Lowest)?;
+
+                arms.push(OptionArm {
+                    condition: expr,
+                    body: vec![Statement::Expr(true_expr)],
+                });
+                default = Some(vec![Statement::Expr(false_expr)]);
+                break;
+            } else {
+                // bare default (no ->)
+                default = Some(vec![Statement::Expr(expr)]);
+                // Skip comma if present
+                if self.peek_token.token_type == TokenType::Comma {
+                    self.next_token();
+                }
+                // Skip newlines
+                while self.peek_token.token_type == TokenType::Newline {
+                    self.next_token();
+                }
+                break;
+            }
+
+            // Skip comma if present
+            if self.peek_token.token_type == TokenType::Comma {
+                self.next_token();
+            }
+
+            // Skip newlines
+            while self.peek_token.token_type == TokenType::Newline {
+                self.next_token();
+            }
+        }
+
+        self.expect_peek(TokenType::RBrace)?; // '}'
+
+        Some(Expression::Option {
+            token,
+            arms,
+            default,
+        })
+    }
+
+    fn parse_unless_statement(&mut self) -> Option<Statement> {
+        let token = self.curr_token.clone(); // 'unless'
+
+        self.next_token(); // move to condition
+        let condition = self.parse_expression(Precedence::Lowest)?;
+
+        // Negate the condition
+        let negated = Expression::Prefix {
+            token: Token {
+                token_type: TokenType::Shebang,
+                literal: "!".to_string(),
+            },
+            operator: "!".to_string(),
+            right: Box::new(condition),
+        };
+
+        self.expect_peek(TokenType::LBrace)?; // '{'
+        let consequence = self.parse_block()?;
+
+        Some(Statement::If {
+            token,
+            condition: negated,
+            consequence,
+            alternative: None,
+        })
+    }
+
+    fn try_postfix_guard(&mut self, stmt: Statement) -> Option<Statement> {
+        // Check if the statement is eligible for postfix guards
+        let eligible = matches!(
+            &stmt,
+            Statement::Expr(_)
+                | Statement::Give { .. }
+                | Statement::Skip
+                | Statement::Stop
+                | Statement::Assign { .. }
+                | Statement::DotAssign { .. }
+        );
+
+        if !eligible {
+            return Some(stmt);
+        }
+
+        if self.peek_token.token_type == TokenType::When {
+            self.next_token(); // consume 'when'
+            self.next_token(); // move to condition
+            let condition = self.parse_expression(Precedence::Lowest)?;
+            return Some(Statement::If {
+                token: Token {
+                    token_type: TokenType::If,
+                    literal: "if".to_string(),
+                },
+                condition,
+                consequence: vec![stmt],
+                alternative: None,
+            });
+        }
+
+        if self.peek_token.token_type == TokenType::Unless {
+            self.next_token(); // consume 'unless'
+            self.next_token(); // move to condition
+            let condition = self.parse_expression(Precedence::Lowest)?;
+            let negated = Expression::Prefix {
+                token: Token {
+                    token_type: TokenType::Shebang,
+                    literal: "!".to_string(),
+                },
+                operator: "!".to_string(),
+                right: Box::new(condition),
+            };
+            return Some(Statement::If {
+                token: Token {
+                    token_type: TokenType::If,
+                    literal: "if".to_string(),
+                },
+                condition: negated,
+                consequence: vec![stmt],
+                alternative: None,
+            });
+        }
+
+        Some(stmt)
+    }
+
     // Parse a block of statements between { and }
     fn parse_block(&mut self) -> Option<Vec<Statement>> {
         let mut statements = Vec::new();
@@ -1671,8 +1856,25 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_if_statement() {
-        let program = parse_ok("if x > 0 { 1 } else { 2 }");
+    fn test_parse_option_expression() {
+        let program = parse_ok("option { x > 0 -> 1, 2 }");
+        match &program.statements[0] {
+            Statement::Expr(Expression::Option { arms, default, .. }) => {
+                assert_eq!(arms.len(), 1);
+                match &arms[0].condition {
+                    Expression::Infix { operator, .. } => assert_eq!(operator, ">"),
+                    _ => panic!("Expected infix condition"),
+                }
+                assert_eq!(arms[0].body.len(), 1);
+                assert!(default.is_some());
+            }
+            other => panic!("Expected option expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_unless_statement() {
+        let program = parse_ok("unless valid { 42 }");
         match &program.statements[0] {
             Statement::If {
                 condition,
@@ -1680,15 +1882,32 @@ mod tests {
                 alternative,
                 ..
             } => {
+                // condition should be negated (prefix !)
                 match condition {
-                    Expression::Infix { operator, .. } => assert_eq!(operator, ">"),
-                    _ => panic!("Expected infix condition"),
+                    Expression::Prefix { operator, .. } => assert_eq!(operator, "!"),
+                    _ => panic!("Expected negated condition"),
                 }
                 assert_eq!(consequence.len(), 1);
-                assert!(alternative.is_some());
-                assert_eq!(alternative.as_ref().unwrap().len(), 1);
+                assert!(alternative.is_none());
             }
-            _ => panic!("Expected if statement"),
+            other => panic!("Expected if statement (desugared unless), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_postfix_when_guard() {
+        let program = parse_ok("x = 5 when True");
+        match &program.statements[0] {
+            Statement::If {
+                consequence,
+                alternative,
+                ..
+            } => {
+                assert_eq!(consequence.len(), 1);
+                assert!(matches!(&consequence[0], Statement::Assign { .. }));
+                assert!(alternative.is_none());
+            }
+            other => panic!("Expected if statement (desugared when guard), got {:?}", other),
         }
     }
 

@@ -746,6 +746,22 @@ impl Evaluator {
                 }
                 Rc::new(Object::Map(map_entries))
             }
+
+            Expression::Option { arms, default, .. } => {
+                for arm in arms {
+                    let cond = self.eval_expression(&arm.condition, Rc::clone(&env));
+                    if cond.is_error() {
+                        return cond;
+                    }
+                    if cond.is_truthy() {
+                        return self.eval_block(&arm.body, Rc::clone(&env));
+                    }
+                }
+                match default {
+                    Some(stmts) => self.eval_block(stmts, Rc::clone(&env)),
+                    None => Rc::new(Object::None),
+                }
+            }
         }
     }
 
@@ -1847,17 +1863,17 @@ mod tests {
         test_integer(&result, 5);
     }
 
-    // ==================== IF STATEMENT TESTS ====================
+    // ==================== OPTION EXPRESSION TESTS ====================
 
     #[test]
-    fn test_if_statements() {
+    fn test_option_expressions() {
         let tests = vec![
-            ("if True { 10 }", Some(10)),
-            ("if False { 10 }", None),
-            ("if 1 < 2 { 10 }", Some(10)),
-            ("if 1 > 2 { 10 }", None),
-            ("if 1 > 2 { 10 } else { 20 }", Some(20)),
-            ("if 1 < 2 { 10 } else { 20 }", Some(10)),
+            ("option { True -> 10 }", Some(10)),
+            ("option { False -> 10 }", None),
+            ("option { 1 < 2 -> 10 }", Some(10)),
+            ("option { 1 > 2 -> 10 }", None),
+            ("option { 1 > 2 -> 10, 20 }", Some(20)),
+            ("option { 1 < 2 -> 10, 20 }", Some(10)),
         ];
 
         for (input, expected) in tests {
@@ -1867,6 +1883,112 @@ mod tests {
                 None => test_none(&result),
             }
         }
+    }
+
+    #[test]
+    fn test_option_simple_two_arm() {
+        let result = test_eval("x := option { True -> 10, 20 }");
+        test_integer(&result, 10);
+        let result = test_eval("x := option { False -> 10, 20 }");
+        test_integer(&result, 20);
+    }
+
+    #[test]
+    fn test_option_multi_arm() {
+        let input = r#"
+            x := 2
+            option { x == 1 -> "one", x == 2 -> "two", "other" }
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "two");
+    }
+
+    #[test]
+    fn test_option_no_match_no_default() {
+        let result = test_eval("option { False -> 1 }");
+        test_none(&result);
+    }
+
+    #[test]
+    fn test_option_as_value() {
+        let input = r#"
+            y := 42
+            result := option { y > 100 -> "big", y > 10 -> "medium", "small" }
+            result
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "medium");
+    }
+
+    #[test]
+    fn test_option_block_bodies() {
+        let input = "option { True -> { x := 5\n x * 2 }, 0 }";
+        let result = test_eval(input);
+        test_integer(&result, 10);
+    }
+
+    #[test]
+    fn test_option_ternary() {
+        let input = r#"
+            num := 10
+            print_str := option { num > 5, "greater than 5", "less than 5" }
+            print_str
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "greater than 5");
+
+        let input = r#"
+            num := 3
+            print_str := option { num > 5, "greater than 5", "less than 5" }
+            print_str
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "less than 5");
+    }
+
+    // ==================== UNLESS TESTS ====================
+
+    #[test]
+    fn test_unless_statement() {
+        let result = test_eval("unless False { 42 }");
+        test_integer(&result, 42);
+        let result = test_eval("unless True { 42 }");
+        test_none(&result);
+    }
+
+    // ==================== POSTFIX GUARD TESTS ====================
+
+    #[test]
+    fn test_postfix_when_guard() {
+        let input = r#"
+            x <int> := 0
+            x = 5 when True
+            x
+        "#;
+        let result = test_eval(input);
+        test_integer(&result, 5);
+    }
+
+    #[test]
+    fn test_postfix_when_guard_false() {
+        let input = r#"
+            x <int> := 0
+            x = 99 when False
+            x
+        "#;
+        let result = test_eval(input);
+        test_integer(&result, 0);
+    }
+
+    #[test]
+    fn test_postfix_unless_guard() {
+        let input = r#"
+            x <int> := 0
+            x = 5 unless False
+            x
+        "#;
+        let result = test_eval(input);
+        test_integer(&result, 5);
     }
 
     // ==================== EACH LOOP TESTS ====================
@@ -1904,9 +2026,7 @@ mod tests {
         let input = r#"
             sum := 0
             each x in [1, 2, 3, 4, 5] {
-                if x == 3 {
-                    stop
-                }
+                stop when x == 3
                 sum := sum + x
             }
             sum
@@ -1920,9 +2040,7 @@ mod tests {
         let input = r#"
             sum := 0
             each x in [1, 2, 3, 4, 5] {
-                if x == 3 {
-                    skip
-                }
+                skip when x == 3
                 sum := sum + x
             }
             sum
@@ -1967,9 +2085,7 @@ mod tests {
             x := 0
             repeat when True {
                 x := x + 1
-                if x == 5 {
-                    stop
-                }
+                stop when x == 5
             }
             x
         "#;
@@ -2183,7 +2299,7 @@ mod tests {
 
     #[test]
     fn test_none_is_falsy() {
-        let result = test_eval("if None { 1 } else { 2 }");
+        let result = test_eval("option { None -> 1, 2 }");
         test_integer(&result, 2);
     }
 
@@ -2194,7 +2310,7 @@ mod tests {
         // Truthy values
         let truthy = vec!["1", "-1", "3.14", "`a`", "\"hello\"", "[1]", "True"];
         for input in truthy {
-            let test_input = format!("if {} {{ 1 }} else {{ 0 }}", input);
+            let test_input = format!("option {{ {} -> 1, 0 }}", input);
             let result = test_eval(&test_input);
             test_integer(&result, 1);
         }
@@ -2202,7 +2318,7 @@ mod tests {
         // Falsy values
         let falsy = vec!["0", "0.0", "\"\"", "[]", "False", "None"];
         for input in falsy {
-            let test_input = format!("if {} {{ 1 }} else {{ 0 }}", input);
+            let test_input = format!("option {{ {} -> 1, 0 }}", input);
             let result = test_eval(&test_input);
             test_integer(&result, 0);
         }
@@ -2723,7 +2839,7 @@ mod tests {
     fn test_function_early_return_give() {
         let input = r#"
             fun abs(n) {
-                if n < 0 { give -n }
+                give -n when n < 0
                 n
             }
             abs(-5)
@@ -2770,7 +2886,7 @@ mod tests {
     fn test_recursion_factorial() {
         let input = r#"
             fun factorial(n) {
-                if n <= 1 { give 1 }
+                give 1 when n <= 1
                 n * factorial(n - 1)
             }
             factorial(5)
@@ -2805,7 +2921,7 @@ mod tests {
         let input = r#"
             fun find_first_even(arr) {
                 each x in arr {
-                    if x % 2 == 0 { give x }
+                    give x when x % 2 == 0
                 }
                 -1
             }
@@ -2822,7 +2938,7 @@ mod tests {
 
     #[test]
     fn test_function_indent_mode_with_give() {
-        let input = "#[indent]\nfun abs(n):\n    if n < 0:\n        give -n\n    n\nabs(-5)\n";
+        let input = "#[indent]\nfun abs(n):\n    give -n when n < 0\n    n\nabs(-5)\n";
         test_integer(&test_eval(input), 5);
     }
 

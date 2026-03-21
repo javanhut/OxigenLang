@@ -27,11 +27,13 @@ OxigenLang also supports Python-style indentation blocks. Save this in `indent.o
 #[indent]
 # Indentation-based block syntax
 x := 10
-if x > 0:
-    println(x, "is positive")
-    
-    each i in [1, 2, 3]:
-        println("Iteration", i)
+result := option:
+    x > 0 -> "positive",
+    "not positive"
+println(x, "is", result)
+
+each i in [1, 2, 3]:
+    println("Iteration", i)
 ```
 
 Run it using:

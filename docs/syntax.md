@@ -44,15 +44,73 @@ p <Person>          # zero-value struct instance
 
 ## Control Flow
 
-### If Expressions
+### `option` — Conditional Expressions
+
+`option` is a multi-arm conditional expression:
 
 ```oxi
-if x > 10 {
-    print("Large")
-} else {
-    print("Small")
+# Simple two-arm
+option {
+    age >= 18 -> "adult",
+    "minor"
+}
+
+# Multi-arm
+ticket := option {
+    age < 5  -> 0,
+    age < 12 -> 5,
+    age < 65 -> 15,
+    10
+}
+
+# Block bodies (for multi-statement arms)
+option {
+    x > 100 -> {
+        log("large value")
+        process(x)
+    },
+    {
+        log("normal value")
+        x
+    }
+}
+
+# Ternary form (shorthand for single condition)
+print_str := option { num > 5, "greater than 5", "less than 5" }
+
+# No default — returns None when nothing matches
+option { x == 1 -> "one" }
+```
+
+### `unless` — Inverse Conditional
+
+Runs a block only when the condition is **false**. No `else` branch allowed:
+
+```oxi
+unless logged_in {
+    redirect("/login")
+}
+
+unless valid {
+    give error("bad input")
 }
 ```
+
+### Postfix Guards
+
+Append `when` or `unless` after a statement for inline conditional execution:
+
+```oxi
+print("welcome") when logged_in
+give x when x > 0
+skip when i % 2 == 0
+stop when count >= limit
+print("error") unless valid
+x = cached when cache_hit
+```
+
+Postfix guards work on: expression statements, `give`, `skip`, `stop`, `=` (assign), and `.field =` (dot-assign).
+They do NOT work on: declarations (`:=`), loops, or blocks.
 
 ### Loops
 
@@ -222,8 +280,11 @@ OxigenLang supports two different ways to define blocks:
 ### Brace-based Blocks (Default)
 
 ```oxi
-if x > 0 {
-    print(x)
+each num in range(10) {
+    option {
+        num % 2 == 0 -> println("even"),
+        println("odd")
+    }
 }
 ```
 
@@ -233,8 +294,10 @@ Enable indentation mode by adding the `#[indent]` directive at the top of your f
 
 ```oxi
 #[indent]
-if x > 0:
-    print(x)
+each num in range(10):
+    option:
+        num % 2 == 0 -> println("even"),
+        println("odd")
 ```
 
 In indentation mode, a colon `:` at the end of a line starts a new block, and subsequent lines must be indented. Returning to a previous indentation level closes the block.
