@@ -1,6 +1,6 @@
 pub mod environment;
 
-use crate::ast::{Expression, Identifier, Statement};
+use crate::ast::{Expression, Identifier, Statement, TypedParam};
 use environment::Environment;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -18,7 +18,7 @@ pub enum Object {
     Boolean(bool),
     Array(Vec<Rc<Object>>),
     Function {
-        parameters: Vec<Identifier>,
+        parameters: Vec<TypedParam>,
         body: Vec<Statement>,
         env: Rc<RefCell<Environment>>,
     },
@@ -29,7 +29,7 @@ pub enum Object {
     },
     StructDef {
         name: String,
-        fields: Vec<(String, String)>,
+        fields: Vec<(String, String, bool)>,
         methods: HashMap<String, Rc<Object>>,
         parent: Option<String>,
     },
@@ -43,7 +43,7 @@ pub enum Object {
     Map(Vec<(Rc<Object>, Rc<Object>)>),
     Set(Vec<Rc<Object>>),
     BoundMethod {
-        parameters: Vec<Identifier>,
+        parameters: Vec<TypedParam>,
         body: Vec<Statement>,
         env: Rc<RefCell<Environment>>,
         instance_fields: Rc<RefCell<HashMap<String, Rc<Object>>>>,
@@ -137,7 +137,7 @@ impl fmt::Display for Object {
                 write!(f, "[{}]", items.join(", "))
             }
             Object::Function { parameters, .. } => {
-                let params: Vec<String> = parameters.iter().map(|p| p.value.clone()).collect();
+                let params: Vec<String> = parameters.iter().map(|p| p.ident.value.clone()).collect();
                 write!(f, "fun({})", params.join(", "))
             }
             Object::Pattern { name, .. } => write!(f, "pattern {}", name),
@@ -151,7 +151,7 @@ impl fmt::Display for Object {
                 write!(f, "{} {{ {} }}", struct_name, items.join(", "))
             }
             Object::BoundMethod { parameters, .. } => {
-                let params: Vec<String> = parameters.iter().map(|p| p.value.clone()).collect();
+                let params: Vec<String> = parameters.iter().map(|p| p.ident.value.clone()).collect();
                 write!(f, "fun({})", params.join(", "))
             }
             Object::Byte(n) => write!(f, "{}", n),

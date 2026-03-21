@@ -84,6 +84,8 @@ pub enum TokenType {
     Contains,
     OptionKw,
     Unless,
+    Hide,
+    SelfKw,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,5 +116,7 @@ pub fn token_map() -> HashMap<&'static str, TokenType> {
         ("as", As),
         ("struct", Struct),
         ("contains", Contains),
+        ("hide", Hide),
+        ("self", SelfKw),
     ])
 }

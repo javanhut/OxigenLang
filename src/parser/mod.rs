@@ -1,4 +1,4 @@
-use crate::ast::{ChooseArm, Expression, Identifier, OptionArm, Program, Statement, TypeAnnotation};
+use crate::ast::{ChooseArm, Expression, Identifier, OptionArm, Program, Statement, TypeAnnotation, TypedParam};
 use crate::lexer::Lexer;
 use crate::token::{Token, TokenType};
 use std::collections::HashMap;
@@ -81,6 +81,7 @@ impl Parser {
         p.register_prefix(TokenType::Function, Parser::parse_function_expression);
         p.register_prefix(TokenType::LBrace, Parser::parse_map_literal);
         p.register_prefix(TokenType::OptionKw, Parser::parse_option_expression);
+        p.register_prefix(TokenType::SelfKw, Parser::parse_self_expression);
 
         // Infix Parse Functions
         for tt in [TokenType::Plus, TokenType::Minus] {
@@ -408,6 +409,14 @@ impl Parser {
         Some(Expression::Ident(ident))
     }
 
+    fn parse_self_expression(&mut self) -> Option<Expression> {
+        let tok = self.curr_token.clone();
+        Some(Expression::Ident(Identifier {
+            token: tok,
+            value: "self".to_string(),
+        }))
+    }
+
     fn parse_integer(&mut self) -> Option<Expression> {
         let tok = self.curr_token.clone();
         let value = tok.literal.parse::<i64>().ok()?;
@@ -579,7 +588,7 @@ impl Parser {
         })
     }
 
-    fn parse_function_parameters(&mut self) -> Option<Vec<Identifier>> {
+    fn parse_function_parameters(&mut self) -> Option<Vec<TypedParam>> {
         let mut params = Vec::new();
 
         if self.peek_token.token_type == TokenType::RParen {
@@ -588,18 +597,38 @@ impl Parser {
         }
 
         self.next_token();
-        params.push(Identifier {
+        let ident = Identifier {
             token: self.curr_token.clone(),
             value: self.curr_token.literal.clone(),
-        });
+        };
+        let type_ann = if self.peek_token.token_type == TokenType::Lt {
+            self.next_token(); // '<'
+            self.expect_peek(TokenType::Ident)?;
+            let ta = TypeAnnotation::from_str_or_struct(&self.curr_token.literal);
+            self.expect_peek(TokenType::Gt)?; // '>'
+            Some(ta)
+        } else {
+            None
+        };
+        params.push(TypedParam { ident, type_ann });
 
         while self.peek_token.token_type == TokenType::Comma {
             self.next_token(); // ','
             self.next_token(); // next param
-            params.push(Identifier {
+            let ident = Identifier {
                 token: self.curr_token.clone(),
                 value: self.curr_token.literal.clone(),
-            });
+            };
+            let type_ann = if self.peek_token.token_type == TokenType::Lt {
+                self.next_token(); // '<'
+                self.expect_peek(TokenType::Ident)?;
+                let ta = TypeAnnotation::from_str_or_struct(&self.curr_token.literal);
+                self.expect_peek(TokenType::Gt)?; // '>'
+                Some(ta)
+            } else {
+                None
+            };
+            params.push(TypedParam { ident, type_ann });
         }
 
         self.expect_peek(TokenType::RParen)?;
@@ -1329,6 +1358,13 @@ impl Parser {
                 });
             }
 
+            let hidden = if self.curr_token.token_type == TokenType::Hide {
+                self.next_token(); // consume 'hide', now at field name
+                true
+            } else {
+                false
+            };
+
             let field_name = Identifier {
                 token: self.curr_token.clone(),
                 value: self.curr_token.literal.clone(),
@@ -1345,6 +1381,7 @@ impl Parser {
             fields.push(crate::ast::StructField {
                 name: field_name,
                 type_ann,
+                hidden,
             });
 
             // Skip newlines
@@ -2022,8 +2059,8 @@ mod tests {
         match &program.statements[0] {
             Statement::Expr(Expression::FunctionLiteral { parameters, body, .. }) => {
                 assert_eq!(parameters.len(), 2);
-                assert_eq!(parameters[0].value, "a");
-                assert_eq!(parameters[1].value, "b");
+                assert_eq!(parameters[0].ident.value, "a");
+                assert_eq!(parameters[1].ident.value, "b");
                 assert_eq!(body.len(), 1);
             }
             other => panic!("Expected FunctionLiteral expression, got {:?}", other),
@@ -2040,8 +2077,8 @@ mod tests {
                 match value {
                     Expression::FunctionLiteral { parameters, body, .. } => {
                         assert_eq!(parameters.len(), 2);
-                        assert_eq!(parameters[0].value, "a");
-                        assert_eq!(parameters[1].value, "b");
+                        assert_eq!(parameters[0].ident.value, "a");
+                        assert_eq!(parameters[1].ident.value, "b");
                         assert_eq!(body.len(), 1);
                     }
                     other => panic!("Expected FunctionLiteral value, got {:?}", other),
@@ -2085,7 +2122,7 @@ mod tests {
                 match value {
                     Expression::FunctionLiteral { parameters, .. } => {
                         assert_eq!(parameters.len(), 1);
-                        assert_eq!(parameters[0].value, "x");
+                        assert_eq!(parameters[0].ident.value, "x");
                     }
                     other => panic!("Expected FunctionLiteral, got {:?}", other),
                 }
@@ -2276,6 +2313,58 @@ mod tests {
                 assert_eq!(entries.len(), 0);
             }
             other => panic!("Expected empty MapLiteral, got {:?}", other),
+        }
+    }
+
+    // ==================== HIDE / SELF / TYPED PARAM PARSER TESTS ====================
+
+    #[test]
+    fn test_parse_hide_struct_field() {
+        let program = parse_ok("struct Person {\n    hide name <str>\n    age <int>\n}");
+        match &program.statements[0] {
+            Statement::StructDef { fields, .. } => {
+                assert_eq!(fields.len(), 2);
+                assert!(fields[0].hidden);
+                assert_eq!(fields[0].name.value, "name");
+                assert!(!fields[1].hidden);
+                assert_eq!(fields[1].name.value, "age");
+            }
+            other => panic!("Expected StructDef, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_self_dot_access() {
+        let program = parse_ok("self.field");
+        match &program.statements[0] {
+            Statement::Expr(Expression::DotAccess { left, field, .. }) => {
+                match left.as_ref() {
+                    Expression::Ident(ident) => assert_eq!(ident.value, "self"),
+                    _ => panic!("Expected Ident('self') as left"),
+                }
+                assert_eq!(field.value, "field");
+            }
+            other => panic!("Expected DotAccess expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_typed_function_parameters() {
+        let program = parse_ok("fun f(x <int>, y) { x }");
+        match &program.statements[0] {
+            Statement::Let { value, .. } => {
+                match value {
+                    Expression::FunctionLiteral { parameters, .. } => {
+                        assert_eq!(parameters.len(), 2);
+                        assert_eq!(parameters[0].ident.value, "x");
+                        assert_eq!(parameters[0].type_ann, Some(TypeAnnotation::Int));
+                        assert_eq!(parameters[1].ident.value, "y");
+                        assert_eq!(parameters[1].type_ann, None);
+                    }
+                    other => panic!("Expected FunctionLiteral, got {:?}", other),
+                }
+            }
+            other => panic!("Expected Let, got {:?}", other),
         }
     }
 }

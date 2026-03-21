@@ -189,7 +189,7 @@ impl Evaluator {
             .ok_or_else(|| format!("struct not found: {}", struct_name))?;
         if let Object::StructDef { name, fields, .. } = def.as_ref() {
             let mut instance_fields = HashMap::new();
-            for (field_name, field_type) in fields {
+            for (field_name, field_type, _) in fields {
                 instance_fields.insert(field_name.clone(), Self::zero_value_for_type(field_type));
             }
             Ok(Rc::new(Object::StructInstance {
@@ -385,7 +385,7 @@ impl Evaluator {
                 name, parent, fields, ..
             } => {
                 // If parent specified, get parent's fields
-                let mut all_fields: Vec<(String, String)> = Vec::new();
+                let mut all_fields: Vec<(String, String, bool)> = Vec::new();
                 let parent_name = if let Some(parent_ident) = parent {
                     let parent_def = self.struct_defs.get(&parent_ident.value);
                     match parent_def {
@@ -408,7 +408,7 @@ impl Evaluator {
 
                 // Add own fields
                 for field in fields {
-                    all_fields.push((field.name.value.clone(), field.type_ann.type_name()));
+                    all_fields.push((field.name.value.clone(), field.type_ann.type_name(), field.hidden));
                 }
 
                 let struct_obj = Rc::new(Object::StructDef {
@@ -468,6 +468,7 @@ impl Evaluator {
             Statement::DotAssign {
                 object, field, value, ..
             } => {
+                let is_self_access = matches!(object, Expression::Ident(id) if id.value == "self");
                 let obj = self.eval_expression(object, Rc::clone(&env));
                 if obj.is_error() {
                     return obj;
@@ -475,13 +476,13 @@ impl Evaluator {
                 match obj.as_ref() {
                     Object::StructInstance { struct_name, fields } => {
                         // Look up struct def and find the expected type for this field
-                        let expected_type = {
+                        let (expected_type, hidden) = {
                             let def = self.struct_defs.get(struct_name);
                             if let Some(def) = def {
                                 if let Object::StructDef { fields: def_fields, .. } = def.as_ref() {
-                                    let field_def = def_fields.iter().find(|(n, _)| n == &field.value);
+                                    let field_def = def_fields.iter().find(|(n, _, _)| n == &field.value);
                                     match field_def {
-                                        Some((_, et)) => Some(et.clone()),
+                                        Some((_, et, h)) => (et.clone(), *h),
                                         None => {
                                             return Rc::new(Object::Error(format!(
                                                 "struct {} has no field '{}'",
@@ -496,7 +497,12 @@ impl Evaluator {
                                 return Rc::new(Object::Error(format!("struct definition not found: {}", struct_name)));
                             }
                         };
-                        let expected_type = expected_type.unwrap();
+                        if hidden && !is_self_access {
+                            return Rc::new(Object::Error(format!(
+                                "field '{}' is hidden on struct {}",
+                                field.value, struct_name
+                            )));
+                        }
                         let val = self.eval_expression(value, Rc::clone(&env));
                         if val.is_error() {
                             return val;
@@ -509,6 +515,9 @@ impl Evaluator {
                             )));
                         }
                         fields.borrow_mut().insert(field.value.clone(), val.clone());
+                        if is_self_access {
+                            env.borrow_mut().set(field.value.clone(), val.clone());
+                        }
                         val
                     }
                     _ => Rc::new(Object::Error(format!(
@@ -645,6 +654,7 @@ impl Evaluator {
             }),
 
             Expression::DotAccess { left, field, .. } => {
+                let is_self_access = matches!(left.as_ref(), Expression::Ident(id) if id.value == "self");
                 let obj = self.eval_expression(left, Rc::clone(&env));
                 if obj.is_error() {
                     return obj;
@@ -653,6 +663,19 @@ impl Evaluator {
                     Object::StructInstance { struct_name, fields } => {
                         // Check fields first
                         if let Some(val) = fields.borrow().get(&field.value) {
+                            // Enforce hide: block external access to hidden fields
+                            if !is_self_access {
+                                if let Some(def) = self.struct_defs.get(struct_name) {
+                                    if let Object::StructDef { fields: def_fields, .. } = def.as_ref() {
+                                        if let Some((_, _, true)) = def_fields.iter().find(|(n, _, _)| n == &field.value) {
+                                            return Rc::new(Object::Error(format!(
+                                                "field '{}' is hidden on struct {}",
+                                                field.value, struct_name
+                                            )));
+                                        }
+                                    }
+                                }
+                            }
                             return Rc::clone(val);
                         }
                         // Check methods
@@ -688,9 +711,9 @@ impl Evaluator {
                                     return val;
                                 }
                                 // Find field in definition
-                                let field_def = def_fields.iter().find(|(n, _)| n == field_name);
+                                let field_def = def_fields.iter().find(|(n, _, _)| n == field_name);
                                 match field_def {
-                                    Some((_, expected_type)) => {
+                                    Some((_, expected_type, _)) => {
                                         let actual_type = val.effective_type_name();
                                         if actual_type != *expected_type {
                                             return Rc::new(Object::Error(format!(
@@ -786,6 +809,12 @@ impl Evaluator {
                                 for (k, v) in instance_fields.borrow().iter() {
                                     bound_env.borrow_mut().set(k.clone(), Rc::clone(v));
                                 }
+                                // Inject `self` so methods can use self.field
+                                let self_obj = Rc::new(Object::StructInstance {
+                                    struct_name: struct_name.to_string(),
+                                    fields: Rc::clone(instance_fields),
+                                });
+                                bound_env.borrow_mut().set("self".to_string(), self_obj);
                                 return Rc::new(Object::BoundMethod {
                                     parameters: parameters.clone(),
                                     body: body.clone(),
@@ -1259,7 +1288,17 @@ impl Evaluator {
 
                 let extended_env = Rc::new(RefCell::new(Environment::new_enclosed(Rc::clone(env))));
                 for (param, arg) in parameters.iter().zip(args.iter()) {
-                    extended_env.borrow_mut().set(param.value.clone(), Rc::clone(arg));
+                    if let Some(ref expected_ta) = param.type_ann {
+                        let expected = expected_ta.type_name();
+                        let actual = arg.effective_type_name();
+                        if actual != expected {
+                            return Rc::new(Object::Error(format!(
+                                "type mismatch for parameter '{}': expected {}, got {}",
+                                param.ident.value, expected, actual
+                            )));
+                        }
+                    }
+                    extended_env.borrow_mut().set(param.ident.value.clone(), Rc::clone(arg));
                 }
 
                 let result = self.eval_block(body, extended_env);
@@ -1285,7 +1324,17 @@ impl Evaluator {
 
                 let extended_env = Rc::new(RefCell::new(Environment::new_enclosed(Rc::clone(env))));
                 for (param, arg) in parameters.iter().zip(args.iter()) {
-                    extended_env.borrow_mut().set(param.value.clone(), Rc::clone(arg));
+                    if let Some(ref expected_ta) = param.type_ann {
+                        let expected = expected_ta.type_name();
+                        let actual = arg.effective_type_name();
+                        if actual != expected {
+                            return Rc::new(Object::Error(format!(
+                                "type mismatch for parameter '{}': expected {}, got {}",
+                                param.ident.value, expected, actual
+                            )));
+                        }
+                    }
+                    extended_env.borrow_mut().set(param.ident.value.clone(), Rc::clone(arg));
                 }
 
                 let result = self.eval_block(body, Rc::clone(&extended_env));
@@ -1314,7 +1363,7 @@ impl Evaluator {
                 }
 
                 let mut instance_fields = HashMap::new();
-                for ((field_name, expected_type), arg) in fields.iter().zip(args.iter()) {
+                for ((field_name, expected_type, _), arg) in fields.iter().zip(args.iter()) {
                     let actual_type = arg.effective_type_name();
                     if actual_type != *expected_type {
                         return Rc::new(Object::Error(format!(
@@ -4053,5 +4102,197 @@ mod tests {
             }
             _ => panic!("Expected Array, got {:?}", result),
         }
+    }
+
+    // ==================== HIDE / SELF / TYPED PARAM TESTS ====================
+
+    #[test]
+    fn test_hidden_field_blocked_externally() {
+        let input = r#"
+            struct Person {
+                hide name <str>
+                age <int>
+            }
+            p <Person>
+            p.name
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("hidden"), "Expected hidden error, got: {}", msg),
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_non_hidden_field_accessible() {
+        let input = r#"
+            struct Person {
+                hide name <str>
+                age <int>
+            }
+            p <Person>
+            p.age
+        "#;
+        let result = test_eval(input);
+        test_integer(&result, 0);
+    }
+
+    #[test]
+    fn test_hidden_field_accessible_via_self() {
+        let input = r#"
+            struct Person {
+                hide name <str>
+            }
+            Person contains {
+                fun get_name() { self.name }
+            }
+            p <Person>
+            p.get_name()
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "");
+    }
+
+    #[test]
+    fn test_self_field_mutation_persists() {
+        let input = r#"
+            struct Person {
+                hide name <str>
+            }
+            Person contains {
+                fun set_name(n <str>) { self.name = n }
+                fun get_name() { self.name }
+            }
+            p <Person>
+            p.set_name("Alice")
+            p.get_name()
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "Alice");
+    }
+
+    #[test]
+    fn test_hidden_field_blocks_external_dot_assign() {
+        let input = r#"
+            struct Person {
+                hide name <str>
+            }
+            p <Person>
+            p.name = "test"
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("hidden"), "Expected hidden error, got: {}", msg),
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_typed_param_enforced() {
+        let input = r#"
+            struct Person {
+                hide name <str>
+            }
+            Person contains {
+                fun set_name(n <str>) { self.name = n }
+            }
+            p <Person>
+            p.set_name(42)
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("type mismatch"), "Expected type mismatch error, got: {}", msg),
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_untyped_params_still_work() {
+        let input = r#"
+            fun add(a, b) { a + b }
+            add(3, 4)
+        "#;
+        let result = test_eval(input);
+        test_integer(&result, 7);
+    }
+
+    #[test]
+    fn test_mixed_typed_untyped_params() {
+        let input = r#"
+            fun greet(name <str>, times) { name + name }
+            greet("hi", 2)
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "hihi");
+    }
+
+    #[test]
+    fn test_inheritance_with_hide() {
+        let input = r#"
+            struct Person {
+                hide fname <str>
+                hide lname <str>
+            }
+            Person contains {
+                fun set_name(fn <str>, ln <str>) {
+                    self.fname = fn
+                    self.lname = ln
+                }
+                fun get_fname() { self.fname }
+            }
+            struct American(Person) {
+                state <str>
+            }
+            a <American>
+            a.set_name("John", "Hancock")
+            a.state = "Virginia"
+            a.get_fname()
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "John");
+    }
+
+    #[test]
+    fn test_struct_example_runs() {
+        let input = r#"
+            struct Person {
+                hide fname <str>
+                hide lname <str>
+                hide age <int>
+            }
+            Person contains {
+                fun set_name(fn <str>, ln <str>) {
+                    self.fname = fn
+                    self.lname = ln
+                }
+                fun set_age(age <int>) {
+                    self.age = age
+                }
+            }
+            struct Nationality(Person) {
+                hide country <str>
+                hide title <str>
+            }
+            Nationality contains {
+                fun set_country(country <str>) {
+                    self.country = country
+                }
+                fun set_title(title <str>) {
+                    self.title = title
+                }
+            }
+            struct American(Nationality) {
+                state <str>
+            }
+            a <American>
+            a.set_name("John","Hancock")
+            a.set_age(29)
+            a.set_country("USA")
+            a.set_title("American")
+            a.state = "Virginia"
+            a.state
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "Virginia");
     }
 }

@@ -153,6 +153,13 @@ pub struct ChooseArm {
 pub struct StructField {
     pub name: Identifier,
     pub type_ann: TypeAnnotation,
+    pub hidden: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedParam {
+    pub ident: Identifier,
+    pub type_ann: Option<TypeAnnotation>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -227,7 +234,7 @@ pub enum Expression {
 
     FunctionLiteral {
         token: Token,
-        parameters: Vec<Identifier>,
+        parameters: Vec<TypedParam>,
         body: Vec<Statement>,
     },
     StructLiteral {
