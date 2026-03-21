@@ -83,6 +83,37 @@ repeat when i < 5 {
 - `skip`: Skips the rest of the current iteration (like `continue`).
 - `stop`: Terminates the loop (like `break`).
 
+## Indexing and Slicing
+
+### Indexing
+
+Access elements by position using `[index]`:
+
+```oxi
+arr := [10, 20, 30]
+arr[0]           # 10
+"hello"[1]       # "e"
+(1, 2, 3)[2]     # 3
+{"a": 1}["a"]    # 1
+```
+
+### Slicing
+
+Extract a sub-range using `[start:end]`. Works on arrays, strings, and tuples:
+
+```oxi
+arr := [10, 20, 30, 40, 50]
+arr[1:3]         # [20, 30]
+arr[2:]          # [30, 40, 50]
+arr[:2]          # [10, 20]
+arr[:]           # [10, 20, 30, 40, 50] (full copy)
+
+"hello world"[0:5]   # "hello"
+(1, 2, 3, 4)[1:3]   # (2, 3)
+```
+
+Start and end can be any expression. Out-of-bounds values are clamped silently.
+
 ## Patterns and Choose
 
 OxigenLang features a powerful pattern-matching system using the `pattern` and `choose` keywords.

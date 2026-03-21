@@ -142,8 +142,25 @@ When using typed walrus declarations (`x <type> := value`), OxigenLang attempts 
 | `char`  | chr        | —          | single chr | identity  | —         |
 | `bool`  | truthy     | truthy     | truthy     | truthy    | identity  |
 | `array` | —          | —          | —          | —         | —         |
+| `byte`  | 0-255      | —          | —          | as u8     | 0/1       |
+| `uint`  | >= 0       | truncate   | parse      | —         | 0/1       |
 
 A `—` means the conversion is not supported and will produce an error.
+
+## Indexing and Slicing
+
+Arrays, strings, and tuples support indexing (`[i]`) and slicing (`[start:end]`). Maps support key-based indexing (`m[key]`).
+
+```oxi
+arr := [10, 20, 30, 40, 50]
+arr[0]       # 10
+arr[1:3]     # [20, 30]
+arr[2:]      # [30, 40, 50]
+arr[:2]      # [10, 20]
+
+"hello"[1:4] # "ell"
+(1, 2, 3)[0:2]  # (1, 2)
+```
 
 ## In-Place Type Conversion
 

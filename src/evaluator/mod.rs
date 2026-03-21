@@ -91,6 +91,13 @@ impl Evaluator {
             },
             "ARRAY" => match obj.as_ref() {
                 Object::Array(_) => Ok(Rc::clone(obj)),
+                Object::String(s) => {
+                    let elements: Vec<Rc<Object>> = s
+                        .chars()
+                        .map(|c| Rc::new(Object::String(c.to_string())))
+                        .collect();
+                    Ok(Rc::new(Object::Array(elements)))
+                }
                 _ => Err(format!("cannot convert {} to ARRAY", obj.type_name())),
             },
             "BYTE" => match obj.as_ref() {
@@ -2283,6 +2290,25 @@ mod tests {
         match result.as_ref() {
             Object::Error(msg) => assert!(msg.contains("cannot convert"), "got: {}", msg),
             _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_typed_walrus_string_to_array() {
+        let result = test_eval("list_str <array> := \"hello\"\nlist_str");
+        match result.as_ref() {
+            Object::Array(elements) => {
+                assert_eq!(elements.len(), 5);
+                match elements[0].as_ref() {
+                    Object::String(s) => assert_eq!(s, "h"),
+                    other => panic!("Expected String(\"h\"), got {:?}", other),
+                }
+                match elements[4].as_ref() {
+                    Object::String(s) => assert_eq!(s, "o"),
+                    other => panic!("Expected String(\"o\"), got {:?}", other),
+                }
+            }
+            _ => panic!("Expected array, got {:?}", result),
         }
     }
 
