@@ -37,6 +37,18 @@ pub enum Object {
         struct_name: String,
         fields: Rc<RefCell<HashMap<String, Rc<Object>>>>,
     },
+    Byte(u8),
+    Uint(u64),
+    Tuple(Vec<Rc<Object>>),
+    Map(Vec<(Rc<Object>, Rc<Object>)>),
+    Set(Vec<Rc<Object>>),
+    BoundMethod {
+        parameters: Vec<Identifier>,
+        body: Vec<Statement>,
+        env: Rc<RefCell<Environment>>,
+        instance_fields: Rc<RefCell<HashMap<String, Rc<Object>>>>,
+        field_names: Vec<String>,
+    },
     Builtin(BuiltinFunction),
     Return(Rc<Object>),
     Skip,
@@ -57,6 +69,11 @@ impl Object {
             Object::Array(arr) => !arr.is_empty(),
             Object::Error(_) => false,
             Object::StructInstance { .. } => true,
+            Object::Byte(n) => *n != 0,
+            Object::Uint(n) => *n != 0,
+            Object::Tuple(t) => !t.is_empty(),
+            Object::Map(m) => !m.is_empty(),
+            Object::Set(s) => !s.is_empty(),
             _ => true,
         }
     }
@@ -77,6 +94,12 @@ impl Object {
             Object::Pattern { .. } => "PATTERN",
             Object::StructDef { .. } => "STRUCT_DEF",
             Object::StructInstance { .. } => "STRUCT",
+            Object::BoundMethod { .. } => "FUNCTION",
+            Object::Byte(_) => "BYTE",
+            Object::Uint(_) => "UINT",
+            Object::Tuple(_) => "TUPLE",
+            Object::Map(_) => "MAP",
+            Object::Set(_) => "SET",
             Object::Builtin(_) => "BUILTIN",
             Object::Return(_) => "RETURN",
             Object::Skip => "SKIP",
@@ -127,6 +150,31 @@ impl fmt::Display for Object {
                     .collect();
                 write!(f, "{} {{ {} }}", struct_name, items.join(", "))
             }
+            Object::BoundMethod { parameters, .. } => {
+                let params: Vec<String> = parameters.iter().map(|p| p.value.clone()).collect();
+                write!(f, "fun({})", params.join(", "))
+            }
+            Object::Byte(n) => write!(f, "{}", n),
+            Object::Uint(n) => write!(f, "{}", n),
+            Object::Tuple(elements) => {
+                let items: Vec<String> = elements.iter().map(|e| e.to_string()).collect();
+                if elements.len() == 1 {
+                    write!(f, "({},)", items[0])
+                } else {
+                    write!(f, "({})", items.join(", "))
+                }
+            }
+            Object::Map(entries) => {
+                let items: Vec<String> = entries
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .collect();
+                write!(f, "{{{}}}", items.join(", "))
+            }
+            Object::Set(elements) => {
+                let items: Vec<String> = elements.iter().map(|e| e.to_string()).collect();
+                write!(f, "set({})", items.join(", "))
+            }
             Object::Builtin(_) => write!(f, "builtin function"),
             Object::Return(val) => write!(f, "{}", val),
             Object::Skip => write!(f, "skip"),
@@ -154,6 +202,12 @@ impl fmt::Debug for Object {
             Object::StructInstance { struct_name, fields } => {
                 write!(f, "StructInstance({}, {:?})", struct_name, fields.borrow())
             }
+            Object::BoundMethod { parameters, .. } => write!(f, "BoundMethod({:?})", parameters),
+            Object::Byte(n) => write!(f, "Byte({})", n),
+            Object::Uint(n) => write!(f, "Uint({})", n),
+            Object::Tuple(elements) => write!(f, "Tuple({:?})", elements),
+            Object::Map(entries) => write!(f, "Map({:?})", entries),
+            Object::Set(elements) => write!(f, "Set({:?})", elements),
             Object::Builtin(_) => write!(f, "Builtin"),
             Object::Return(val) => write!(f, "Return({:?})", val),
             Object::Skip => write!(f, "Skip"),
@@ -174,6 +228,13 @@ impl PartialEq for Object {
             (Object::Boolean(a), Object::Boolean(b)) => a == b,
             (Object::None, Object::None) => true,
             (Object::Array(a), Object::Array(b)) => a == b,
+            (Object::Byte(a), Object::Byte(b)) => a == b,
+            (Object::Uint(a), Object::Uint(b)) => a == b,
+            (Object::Tuple(a), Object::Tuple(b)) => a == b,
+            (Object::Map(a), Object::Map(b)) => a == b,
+            (Object::Set(a), Object::Set(b)) => {
+                a.len() == b.len() && a.iter().all(|item| b.iter().any(|bitem| item == bitem))
+            }
             (Object::StructInstance { struct_name: a_name, fields: a_fields },
              Object::StructInstance { struct_name: b_name, fields: b_fields }) => {
                 a_name == b_name && *a_fields.borrow() == *b_fields.borrow()

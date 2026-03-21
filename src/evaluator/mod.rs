@@ -39,6 +39,8 @@ impl Evaluator {
                     .map_err(|_| format!("cannot convert STRING \"{}\" to INTEGER", s)),
                 Object::Char(c) => Ok(Rc::new(Object::Integer(*c as i64))),
                 Object::Boolean(b) => Ok(Rc::new(Object::Integer(if *b { 1 } else { 0 }))),
+                Object::Byte(n) => Ok(Rc::new(Object::Integer(*n as i64))),
+                Object::Uint(n) => Ok(Rc::new(Object::Integer(*n as i64))),
                 _ => Err(format!("cannot convert {} to INTEGER", obj.type_name())),
             },
             "FLOAT" => match obj.as_ref() {
@@ -48,6 +50,8 @@ impl Evaluator {
                     .map(|f| Rc::new(Object::Float(f)))
                     .map_err(|_| format!("cannot convert STRING \"{}\" to FLOAT", s)),
                 Object::Boolean(b) => Ok(Rc::new(Object::Float(if *b { 1.0 } else { 0.0 }))),
+                Object::Byte(n) => Ok(Rc::new(Object::Float(*n as f64))),
+                Object::Uint(n) => Ok(Rc::new(Object::Float(*n as f64))),
                 _ => Err(format!("cannot convert {} to FLOAT", obj.type_name())),
             },
             "STRING" => match obj.as_ref() {
@@ -89,6 +93,61 @@ impl Evaluator {
                 Object::Array(_) => Ok(Rc::clone(obj)),
                 _ => Err(format!("cannot convert {} to ARRAY", obj.type_name())),
             },
+            "BYTE" => match obj.as_ref() {
+                Object::Byte(_) => Ok(Rc::clone(obj)),
+                Object::Integer(n) => {
+                    if *n < 0 || *n > 255 {
+                        Err(format!("cannot convert INTEGER {} to BYTE (0-255)", n))
+                    } else {
+                        Ok(Rc::new(Object::Byte(*n as u8)))
+                    }
+                }
+                Object::Uint(n) => {
+                    if *n > 255 {
+                        Err(format!("cannot convert UINT {} to BYTE (0-255)", n))
+                    } else {
+                        Ok(Rc::new(Object::Byte(*n as u8)))
+                    }
+                }
+                Object::Char(c) => Ok(Rc::new(Object::Byte(*c as u8))),
+                Object::Boolean(b) => Ok(Rc::new(Object::Byte(if *b { 1 } else { 0 }))),
+                _ => Err(format!("cannot convert {} to BYTE", obj.type_name())),
+            },
+            "UINT" => match obj.as_ref() {
+                Object::Uint(_) => Ok(Rc::clone(obj)),
+                Object::Integer(n) => {
+                    if *n < 0 {
+                        Err(format!("cannot convert negative INTEGER {} to UINT", n))
+                    } else {
+                        Ok(Rc::new(Object::Uint(*n as u64)))
+                    }
+                }
+                Object::Float(f) => {
+                    if *f < 0.0 {
+                        Err(format!("cannot convert negative FLOAT {} to UINT", f))
+                    } else {
+                        Ok(Rc::new(Object::Uint(*f as u64)))
+                    }
+                }
+                Object::Byte(n) => Ok(Rc::new(Object::Uint(*n as u64))),
+                Object::Boolean(b) => Ok(Rc::new(Object::Uint(if *b { 1 } else { 0 }))),
+                Object::String(s) => s.parse::<u64>()
+                    .map(|n| Rc::new(Object::Uint(n)))
+                    .map_err(|_| format!("cannot convert STRING \"{}\" to UINT", s)),
+                _ => Err(format!("cannot convert {} to UINT", obj.type_name())),
+            },
+            "TUPLE" => match obj.as_ref() {
+                Object::Tuple(_) => Ok(Rc::clone(obj)),
+                _ => Err(format!("cannot convert {} to TUPLE", obj.type_name())),
+            },
+            "MAP" => match obj.as_ref() {
+                Object::Map(_) => Ok(Rc::clone(obj)),
+                _ => Err(format!("cannot convert {} to MAP", obj.type_name())),
+            },
+            "SET" => match obj.as_ref() {
+                Object::Set(_) => Ok(Rc::clone(obj)),
+                _ => Err(format!("cannot convert {} to SET", obj.type_name())),
+            },
             _ => {
                 // Struct type: only identity conversion (value must already be that struct)
                 if let Some(stn) = obj.struct_type_name() {
@@ -109,6 +168,11 @@ impl Evaluator {
             "CHAR" => Rc::new(Object::Char('\0')),
             "BOOLEAN" => Rc::new(Object::Boolean(false)),
             "ARRAY" => Rc::new(Object::Array(Vec::new())),
+            "BYTE" => Rc::new(Object::Byte(0)),
+            "UINT" => Rc::new(Object::Uint(0)),
+            "TUPLE" => Rc::new(Object::Tuple(Vec::new())),
+            "MAP" => Rc::new(Object::Map(Vec::new())),
+            "SET" => Rc::new(Object::Set(Vec::new())),
             _ => Rc::new(Object::None),
         }
     }
@@ -533,6 +597,36 @@ impl Evaluator {
                 self.eval_index_expression(left_val, index_val)
             }
 
+            Expression::Slice { left, start, end, .. } => {
+                let left_val = self.eval_expression(left, Rc::clone(&env));
+                if left_val.is_error() {
+                    return left_val;
+                }
+                let start_val = match start {
+                    Some(s) => {
+                        let v = self.eval_expression(s, Rc::clone(&env));
+                        if v.is_error() { return v; }
+                        match v.as_ref() {
+                            Object::Integer(n) => Some(*n as usize),
+                            _ => return Rc::new(Object::Error("slice start must be an integer".to_string())),
+                        }
+                    }
+                    None => None,
+                };
+                let end_val = match end {
+                    Some(e) => {
+                        let v = self.eval_expression(e, Rc::clone(&env));
+                        if v.is_error() { return v; }
+                        match v.as_ref() {
+                            Object::Integer(n) => Some(*n as usize),
+                            _ => return Rc::new(Object::Error("slice end must be an integer".to_string())),
+                        }
+                    }
+                    None => None,
+                };
+                self.eval_slice(left_val, start_val, end_val)
+            }
+
             Expression::Grouped(inner) => self.eval_expression(inner, env),
 
             Expression::FunctionLiteral {
@@ -621,6 +715,30 @@ impl Evaluator {
                     ))),
                 }
             }
+
+            Expression::TupleLiteral { elements, .. } => {
+                let elems = self.eval_expressions(elements, Rc::clone(&env));
+                if elems.len() == 1 && elems[0].is_error() {
+                    return Rc::clone(&elems[0]);
+                }
+                Rc::new(Object::Tuple(elems))
+            }
+
+            Expression::MapLiteral { entries, .. } => {
+                let mut map_entries = Vec::new();
+                for (key_expr, val_expr) in entries {
+                    let key = self.eval_expression(key_expr, Rc::clone(&env));
+                    if key.is_error() {
+                        return key;
+                    }
+                    let val = self.eval_expression(val_expr, Rc::clone(&env));
+                    if val.is_error() {
+                        return val;
+                    }
+                    map_entries.push((key, val));
+                }
+                Rc::new(Object::Map(map_entries))
+            }
         }
     }
 
@@ -637,24 +755,24 @@ impl Evaluator {
                 Some(def) => {
                     if let Object::StructDef { methods, parent, .. } = def.as_ref() {
                         if let Some(method) = methods.get(method_name) {
-                            // Bind method: create new env with instance fields injected
                             if let Object::Function { parameters, body, env } = method.as_ref() {
                                 let bound_env = Rc::new(RefCell::new(
                                     Environment::new_enclosed(Rc::clone(env)),
                                 ));
-                                // Inject all instance fields
+                                let field_names: Vec<String> = instance_fields.borrow().keys().cloned().collect();
                                 for (k, v) in instance_fields.borrow().iter() {
                                     bound_env.borrow_mut().set(k.clone(), Rc::clone(v));
                                 }
-                                return Rc::new(Object::Function {
+                                return Rc::new(Object::BoundMethod {
                                     parameters: parameters.clone(),
                                     body: body.clone(),
                                     env: bound_env,
+                                    instance_fields: Rc::clone(instance_fields),
+                                    field_names,
                                 });
                             }
                             return Rc::clone(method);
                         }
-                        // Walk parent chain
                         if let Some(p) = parent {
                             current_name = p.clone();
                             continue;
@@ -754,6 +872,59 @@ impl Evaluator {
                     ))),
                 }
             }
+            // Byte arithmetic — promote to int
+            (Object::Byte(l), Object::Byte(r)) => {
+                self.eval_integer_infix(operator, *l as i64, *r as i64)
+            }
+            (Object::Byte(l), Object::Integer(r)) => {
+                self.eval_integer_infix(operator, *l as i64, *r)
+            }
+            (Object::Integer(l), Object::Byte(r)) => {
+                self.eval_integer_infix(operator, *l, *r as i64)
+            }
+            (Object::Byte(l), Object::Float(r)) => {
+                self.eval_float_infix(operator, *l as f64, *r)
+            }
+            (Object::Float(l), Object::Byte(r)) => {
+                self.eval_float_infix(operator, *l, *r as f64)
+            }
+            // Uint arithmetic
+            (Object::Uint(l), Object::Uint(r)) => {
+                self.eval_uint_infix(operator, *l, *r)
+            }
+            (Object::Uint(l), Object::Integer(r)) => {
+                self.eval_integer_infix(operator, *l as i64, *r)
+            }
+            (Object::Integer(l), Object::Uint(r)) => {
+                self.eval_integer_infix(operator, *l, *r as i64)
+            }
+            (Object::Uint(l), Object::Float(r)) => {
+                self.eval_float_infix(operator, *l as f64, *r)
+            }
+            (Object::Float(l), Object::Uint(r)) => {
+                self.eval_float_infix(operator, *l, *r as f64)
+            }
+            (Object::Uint(l), Object::Byte(r)) => {
+                self.eval_uint_infix(operator, *l, *r as u64)
+            }
+            (Object::Byte(l), Object::Uint(r)) => {
+                self.eval_uint_infix(operator, *l as u64, *r)
+            }
+            // Tuple concatenation
+            (Object::Tuple(l), Object::Tuple(r)) => {
+                match operator {
+                    "+" => {
+                        let mut new = l.clone();
+                        new.extend(r.clone());
+                        Rc::new(Object::Tuple(new))
+                    }
+                    "==" => Rc::new(Object::Boolean(l == r)),
+                    "!=" => Rc::new(Object::Boolean(l != r)),
+                    _ => Rc::new(Object::Error(format!(
+                        "unknown operator: TUPLE {} TUPLE", operator
+                    ))),
+                }
+            }
             _ => {
                 if operator == "==" {
                     Rc::new(Object::Boolean(left == right))
@@ -799,6 +970,43 @@ impl Evaluator {
             _ => Rc::new(Object::Error(format!(
                 "unknown operator: INTEGER {} INTEGER",
                 operator
+            ))),
+        }
+    }
+
+    fn eval_uint_infix(&self, operator: &str, left: u64, right: u64) -> Rc<Object> {
+        match operator {
+            "+" => Rc::new(Object::Uint(left.wrapping_add(right))),
+            "-" => {
+                if right > left {
+                    Rc::new(Object::Error("unsigned integer underflow".to_string()))
+                } else {
+                    Rc::new(Object::Uint(left - right))
+                }
+            }
+            "*" => Rc::new(Object::Uint(left.wrapping_mul(right))),
+            "/" => {
+                if right == 0 {
+                    Rc::new(Object::Error("division by zero".to_string()))
+                } else {
+                    Rc::new(Object::Uint(left / right))
+                }
+            }
+            "%" => {
+                if right == 0 {
+                    Rc::new(Object::Error("modulo by zero".to_string()))
+                } else {
+                    Rc::new(Object::Uint(left % right))
+                }
+            }
+            "<" => Rc::new(Object::Boolean(left < right)),
+            ">" => Rc::new(Object::Boolean(left > right)),
+            "<=" => Rc::new(Object::Boolean(left <= right)),
+            ">=" => Rc::new(Object::Boolean(left >= right)),
+            "==" => Rc::new(Object::Boolean(left == right)),
+            "!=" => Rc::new(Object::Boolean(left != right)),
+            _ => Rc::new(Object::Error(format!(
+                "unknown operator: UINT {} UINT", operator
             ))),
         }
     }
@@ -929,10 +1137,60 @@ impl Evaluator {
                     Rc::new(Object::String(s.chars().nth(idx).unwrap().to_string()))
                 }
             }
+            (Object::Tuple(elements), Object::Integer(idx)) => {
+                let idx = *idx as usize;
+                if idx >= elements.len() {
+                    Rc::new(Object::None)
+                } else {
+                    Rc::clone(&elements[idx])
+                }
+            }
+            (Object::Map(entries), _) => {
+                for (k, v) in entries {
+                    if *k == index {
+                        return Rc::clone(v);
+                    }
+                }
+                Rc::new(Object::None)
+            }
             _ => Rc::new(Object::Error(format!(
                 "index operator not supported: {}[{}]",
                 left.type_name(),
                 index.type_name()
+            ))),
+        }
+    }
+
+    fn eval_slice(&self, left: Rc<Object>, start: Option<usize>, end: Option<usize>) -> Rc<Object> {
+        match left.as_ref() {
+            Object::Array(arr) => {
+                let s = start.unwrap_or(0);
+                let e = end.unwrap_or(arr.len()).min(arr.len());
+                if s > e || s > arr.len() {
+                    return Rc::new(Object::Array(Vec::new()));
+                }
+                Rc::new(Object::Array(arr[s..e].to_vec()))
+            }
+            Object::String(string) => {
+                let chars: Vec<char> = string.chars().collect();
+                let s = start.unwrap_or(0);
+                let e = end.unwrap_or(chars.len()).min(chars.len());
+                if s > e || s > chars.len() {
+                    return Rc::new(Object::String(String::new()));
+                }
+                Rc::new(Object::String(chars[s..e].iter().collect()))
+            }
+            Object::Tuple(elements) => {
+                let s = start.unwrap_or(0);
+                let e = end.unwrap_or(elements.len()).min(elements.len());
+                if s > e || s > elements.len() {
+                    return Rc::new(Object::Tuple(Vec::new()));
+                }
+                Rc::new(Object::Tuple(elements[s..e].to_vec()))
+            }
+            _ => Rc::new(Object::Error(format!(
+                "slice not supported on {}",
+                left.type_name()
             ))),
         }
     }
@@ -982,6 +1240,40 @@ impl Evaluator {
                 }
 
                 let result = self.eval_block(body, extended_env);
+                match result.as_ref() {
+                    Object::Return(val) => Rc::clone(val),
+                    _ => result,
+                }
+            }
+            Object::BoundMethod {
+                parameters,
+                body,
+                env,
+                instance_fields,
+                field_names,
+            } => {
+                if parameters.len() != args.len() {
+                    return Rc::new(Object::Error(format!(
+                        "wrong number of arguments: expected {}, got {}",
+                        parameters.len(),
+                        args.len()
+                    )));
+                }
+
+                let extended_env = Rc::new(RefCell::new(Environment::new_enclosed(Rc::clone(env))));
+                for (param, arg) in parameters.iter().zip(args.iter()) {
+                    extended_env.borrow_mut().set(param.value.clone(), Rc::clone(arg));
+                }
+
+                let result = self.eval_block(body, Rc::clone(&extended_env));
+
+                // Write back any changed field values to the instance
+                for field_name in field_names {
+                    if let Some(val) = extended_env.borrow().get(field_name) {
+                        instance_fields.borrow_mut().insert(field_name.clone(), val);
+                    }
+                }
+
                 match result.as_ref() {
                     Object::Return(val) => Rc::clone(val),
                     _ => result,
@@ -1056,6 +1348,12 @@ impl Evaluator {
             Object::String(s) => s
                 .chars()
                 .map(|c| Rc::new(Object::String(c.to_string())))
+                .collect(),
+            Object::Tuple(t) => t.clone(),
+            Object::Set(s) => s.clone(),
+            Object::Map(entries) => entries
+                .iter()
+                .map(|(k, v)| Rc::new(Object::Tuple(vec![Rc::clone(k), Rc::clone(v)])))
                 .collect(),
             _ => {
                 return Rc::new(Object::Error(format!(
@@ -1181,6 +1479,10 @@ impl Evaluator {
                 // A variable's type is mutable only if it has no type constraint
                 Rc::new(Object::Boolean(env.borrow().get_type_constraint(&ident.value).is_none()))
             }
+            Expression::DotAccess { .. } => {
+                // Struct fields have locked types
+                Rc::new(Object::Boolean(false))
+            }
             _ => Rc::new(Object::Error(
                 "argument to `is_type_mut` must be a variable name".to_string(),
             )),
@@ -1203,6 +1505,10 @@ impl Evaluator {
                     )));
                 }
                 Rc::new(Object::Boolean(!env.borrow().is_immutable(&ident.value)))
+            }
+            Expression::DotAccess { .. } => {
+                // Struct fields are always mutable
+                Rc::new(Object::Boolean(true))
             }
             _ => Rc::new(Object::Error(
                 "argument to `is_mut` must be a variable name".to_string(),
@@ -2721,6 +3027,42 @@ mod tests {
     }
 
     #[test]
+    fn test_struct_method_mutates_field() {
+        let input = r#"
+            struct Bag {
+                items <array>
+            }
+            Bag contains {
+                fun add(item) { items := push(items, item) }
+            }
+            b := Bag([])
+            b.add(1)
+            b.add(2)
+            b.add(3)
+            len(b.items)
+        "#;
+        test_integer(&test_eval(input), 3);
+    }
+
+    #[test]
+    fn test_struct_method_mutates_counter() {
+        let input = r#"
+            struct Counter {
+                count <int>
+            }
+            Counter contains {
+                fun inc() { count := count + 1 }
+            }
+            c := Counter(0)
+            c.inc()
+            c.inc()
+            c.inc()
+            c.count
+        "#;
+        test_integer(&test_eval(input), 3);
+    }
+
+    #[test]
     fn test_struct_dot_chaining() {
         let input = r#"
             struct Inner {
@@ -3038,5 +3380,501 @@ mod tests {
     fn test_shorthand_typed_declare_str() {
         let result = test_eval("x <str>\nx");
         test_string(&result, "");
+    }
+
+    // ==================== BYTE TESTS ====================
+
+    #[test]
+    fn test_byte_builtin() {
+        let result = test_eval("byte(65)");
+        match result.as_ref() {
+            Object::Byte(n) => assert_eq!(*n, 65),
+            _ => panic!("Expected Byte, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_byte_type() {
+        test_string(&test_eval("type(byte(0))"), "BYTE");
+    }
+
+    #[test]
+    fn test_byte_typed_declare() {
+        let result = test_eval("x <byte>\nx");
+        match result.as_ref() {
+            Object::Byte(n) => assert_eq!(*n, 0),
+            _ => panic!("Expected Byte(0), got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_byte_arithmetic_promotes_to_int() {
+        test_integer(&test_eval("byte(10) + byte(20)"), 30);
+    }
+
+    #[test]
+    fn test_byte_out_of_range() {
+        let result = test_eval("byte(256)");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("out of range"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_byte_walrus_conversion() {
+        let result = test_eval("x <byte> := 65\nx");
+        match result.as_ref() {
+            Object::Byte(n) => assert_eq!(*n, 65),
+            _ => panic!("Expected Byte(65), got {:?}", result),
+        }
+    }
+
+    // ==================== UINT TESTS ====================
+
+    #[test]
+    fn test_uint_builtin() {
+        let result = test_eval("uint(42)");
+        match result.as_ref() {
+            Object::Uint(n) => assert_eq!(*n, 42),
+            _ => panic!("Expected Uint, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_uint_type() {
+        test_string(&test_eval("type(uint(0))"), "UINT");
+    }
+
+    #[test]
+    fn test_uint_typed_declare() {
+        let result = test_eval("x <uint>\nx");
+        match result.as_ref() {
+            Object::Uint(n) => assert_eq!(*n, 0),
+            _ => panic!("Expected Uint(0), got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_uint_arithmetic() {
+        let result = test_eval("uint(10) + uint(20)");
+        match result.as_ref() {
+            Object::Uint(n) => assert_eq!(*n, 30),
+            _ => panic!("Expected Uint(30), got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_uint_negative_error() {
+        let result = test_eval("uint(-1)");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("negative"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_uint_underflow_error() {
+        let result = test_eval("uint(1) - uint(2)");
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("underflow"), "got: {}", msg),
+            _ => panic!("Expected error, got {:?}", result),
+        }
+    }
+
+    // ==================== TUPLE TESTS ====================
+
+    #[test]
+    fn test_tuple_literal() {
+        let result = test_eval("(1, 2, 3)");
+        match result.as_ref() {
+            Object::Tuple(elements) => {
+                assert_eq!(elements.len(), 3);
+                test_integer(&elements[0], 1);
+                test_integer(&elements[1], 2);
+                test_integer(&elements[2], 3);
+            }
+            _ => panic!("Expected Tuple, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_tuple_empty() {
+        let result = test_eval("()");
+        match result.as_ref() {
+            Object::Tuple(elements) => assert_eq!(elements.len(), 0),
+            _ => panic!("Expected empty Tuple, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_tuple_single_trailing_comma() {
+        let result = test_eval("(42,)");
+        match result.as_ref() {
+            Object::Tuple(elements) => {
+                assert_eq!(elements.len(), 1);
+                test_integer(&elements[0], 42);
+            }
+            _ => panic!("Expected single-element Tuple, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_tuple_index() {
+        test_integer(&test_eval("(10, 20, 30)[1]"), 20);
+    }
+
+    #[test]
+    fn test_tuple_type() {
+        test_string(&test_eval("type((1, 2))"), "TUPLE");
+    }
+
+    #[test]
+    fn test_tuple_len() {
+        test_integer(&test_eval("len((1, 2, 3))"), 3);
+    }
+
+    #[test]
+    fn test_tuple_concat() {
+        let result = test_eval("(1, 2) + (3, 4)");
+        match result.as_ref() {
+            Object::Tuple(elements) => {
+                assert_eq!(elements.len(), 4);
+                test_integer(&elements[0], 1);
+                test_integer(&elements[3], 4);
+            }
+            _ => panic!("Expected Tuple, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_tuple_equality() {
+        test_boolean(&test_eval("(1, 2) == (1, 2)"), true);
+        test_boolean(&test_eval("(1, 2) == (1, 3)"), false);
+        test_boolean(&test_eval("(1, 2) != (1, 3)"), true);
+    }
+
+    #[test]
+    fn test_tuple_typed_declare() {
+        let result = test_eval("t <tuple>\nlen(t)");
+        test_integer(&result, 0);
+    }
+
+    #[test]
+    fn test_tuple_each() {
+        let input = r#"
+            sum := 0
+            each x in (1, 2, 3) {
+                sum := sum + x
+            }
+            sum
+        "#;
+        test_integer(&test_eval(input), 6);
+    }
+
+    #[test]
+    fn test_tuple_has() {
+        test_boolean(&test_eval("has((1, 2, 3), 2)"), true);
+        test_boolean(&test_eval("has((1, 2, 3), 5)"), false);
+    }
+
+    // ==================== MAP TESTS ====================
+
+    #[test]
+    fn test_map_literal() {
+        let result = test_eval("{\"a\": 1, \"b\": 2}");
+        match result.as_ref() {
+            Object::Map(entries) => assert_eq!(entries.len(), 2),
+            _ => panic!("Expected Map, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_map_empty() {
+        let result = test_eval("{}");
+        match result.as_ref() {
+            Object::Map(entries) => assert_eq!(entries.len(), 0),
+            _ => panic!("Expected empty Map, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_map_index() {
+        test_integer(&test_eval("{\"a\": 10, \"b\": 20}[\"b\"]"), 20);
+    }
+
+    #[test]
+    fn test_map_index_missing() {
+        test_none(&test_eval("{\"a\": 1}[\"z\"]"));
+    }
+
+    #[test]
+    fn test_map_type() {
+        test_string(&test_eval("type({})"), "MAP");
+    }
+
+    #[test]
+    fn test_map_len() {
+        test_integer(&test_eval("len({\"a\": 1, \"b\": 2})"), 2);
+    }
+
+    #[test]
+    fn test_map_keys() {
+        let result = test_eval("keys({\"x\": 1, \"y\": 2})");
+        match result.as_ref() {
+            Object::Array(elements) => assert_eq!(elements.len(), 2),
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_map_values() {
+        let result = test_eval("values({\"x\": 10, \"y\": 20})");
+        match result.as_ref() {
+            Object::Array(elements) => assert_eq!(elements.len(), 2),
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_map_insert() {
+        test_integer(&test_eval("m := {\"a\": 1}\nm := insert(m, \"b\", 2)\nm[\"b\"]"), 2);
+    }
+
+    #[test]
+    fn test_map_remove() {
+        test_integer(&test_eval("m := {\"a\": 1, \"b\": 2}\nm := remove(m, \"a\")\nlen(m)"), 1);
+    }
+
+    #[test]
+    fn test_map_has() {
+        test_boolean(&test_eval("has({\"a\": 1}, \"a\")"), true);
+        test_boolean(&test_eval("has({\"a\": 1}, \"z\")"), false);
+    }
+
+    #[test]
+    fn test_map_typed_declare() {
+        let result = test_eval("m <map>\nlen(m)");
+        test_integer(&result, 0);
+    }
+
+    #[test]
+    fn test_map_integer_keys() {
+        test_string(&test_eval("{1: \"one\", 2: \"two\"}[1]"), "one");
+    }
+
+    #[test]
+    fn test_map_each_iterates_tuples() {
+        let input = r#"
+            sum := 0
+            each entry in {1: 10, 2: 20} {
+                sum := sum + entry[1]
+            }
+            sum
+        "#;
+        test_integer(&test_eval(input), 30);
+    }
+
+    // ==================== SET TESTS ====================
+
+    #[test]
+    fn test_set_builtin() {
+        let result = test_eval("set(1, 2, 3)");
+        match result.as_ref() {
+            Object::Set(elements) => assert_eq!(elements.len(), 3),
+            _ => panic!("Expected Set, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_set_empty() {
+        let result = test_eval("set()");
+        match result.as_ref() {
+            Object::Set(elements) => assert_eq!(elements.len(), 0),
+            _ => panic!("Expected empty Set, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_set_deduplicates() {
+        let result = test_eval("set(1, 2, 2, 3, 3)");
+        match result.as_ref() {
+            Object::Set(elements) => assert_eq!(elements.len(), 3),
+            _ => panic!("Expected Set with 3 elements, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_set_type() {
+        test_string(&test_eval("type(set())"), "SET");
+    }
+
+    #[test]
+    fn test_set_len() {
+        test_integer(&test_eval("len(set(1, 2, 3))"), 3);
+    }
+
+    #[test]
+    fn test_set_has() {
+        test_boolean(&test_eval("has(set(1, 2, 3), 2)"), true);
+        test_boolean(&test_eval("has(set(1, 2, 3), 5)"), false);
+    }
+
+    #[test]
+    fn test_set_remove() {
+        test_integer(&test_eval("s := set(1, 2, 3)\ns := remove(s, 2)\nlen(s)"), 2);
+    }
+
+    #[test]
+    fn test_set_typed_declare() {
+        let result = test_eval("s <set>\nlen(s)");
+        test_integer(&result, 0);
+    }
+
+    #[test]
+    fn test_set_each() {
+        let input = r#"
+            sum := 0
+            each x in set(10, 20, 30) {
+                sum := sum + x
+            }
+            sum
+        "#;
+        test_integer(&test_eval(input), 60);
+    }
+
+    // ==================== ARRAY ZERO VALUE TEST ====================
+
+    #[test]
+    fn test_array_typed_declare() {
+        let result = test_eval("arr <array>\narr");
+        match result.as_ref() {
+            Object::Array(elements) => assert!(elements.is_empty()),
+            _ => panic!("Expected empty array, got {:?}", result),
+        }
+    }
+
+    // ==================== CROSS-TYPE TESTS ====================
+
+    #[test]
+    fn test_byte_int_arithmetic() {
+        test_integer(&test_eval("byte(10) + 5"), 15);
+    }
+
+    #[test]
+    fn test_uint_int_arithmetic() {
+        test_integer(&test_eval("uint(10) + 5"), 15);
+    }
+
+    #[test]
+    fn test_has_on_array() {
+        test_boolean(&test_eval("has([1, 2, 3], 2)"), true);
+        test_boolean(&test_eval("has([1, 2, 3], 5)"), false);
+    }
+
+    // ==================== SLICE TESTS ====================
+
+    #[test]
+    fn test_array_slice_start_end() {
+        let result = test_eval("[10, 20, 30, 40, 50][1:3]");
+        match result.as_ref() {
+            Object::Array(arr) => {
+                assert_eq!(arr.len(), 2);
+                test_integer(&arr[0], 20);
+                test_integer(&arr[1], 30);
+            }
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_slice_start_only() {
+        let result = test_eval("[10, 20, 30, 40][2:]");
+        match result.as_ref() {
+            Object::Array(arr) => {
+                assert_eq!(arr.len(), 2);
+                test_integer(&arr[0], 30);
+                test_integer(&arr[1], 40);
+            }
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_slice_end_only() {
+        let result = test_eval("[10, 20, 30, 40][:2]");
+        match result.as_ref() {
+            Object::Array(arr) => {
+                assert_eq!(arr.len(), 2);
+                test_integer(&arr[0], 10);
+                test_integer(&arr[1], 20);
+            }
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_slice_full() {
+        let result = test_eval("[10, 20, 30][:]");
+        match result.as_ref() {
+            Object::Array(arr) => assert_eq!(arr.len(), 3),
+            _ => panic!("Expected Array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_slice_empty_result() {
+        let result = test_eval("[10, 20, 30][2:2]");
+        match result.as_ref() {
+            Object::Array(arr) => assert_eq!(arr.len(), 0),
+            _ => panic!("Expected empty Array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_string_slice() {
+        test_string(&test_eval("\"hello world\"[0:5]"), "hello");
+    }
+
+    #[test]
+    fn test_string_slice_from() {
+        test_string(&test_eval("\"hello world\"[6:]"), "world");
+    }
+
+    #[test]
+    fn test_string_slice_to() {
+        test_string(&test_eval("\"hello\"[:3]"), "hel");
+    }
+
+    #[test]
+    fn test_tuple_slice() {
+        let result = test_eval("(10, 20, 30, 40)[1:3]");
+        match result.as_ref() {
+            Object::Tuple(elements) => {
+                assert_eq!(elements.len(), 2);
+                test_integer(&elements[0], 20);
+                test_integer(&elements[1], 30);
+            }
+            _ => panic!("Expected Tuple, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_slice_with_variable() {
+        let input = r#"
+            arr := [1, 2, 3, 4, 5]
+            start := 1
+            end := 4
+            arr[start:end]
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Array(arr) => {
+                assert_eq!(arr.len(), 3);
+                test_integer(&arr[0], 2);
+                test_integer(&arr[2], 4);
+            }
+            _ => panic!("Expected Array, got {:?}", result),
+        }
     }
 }

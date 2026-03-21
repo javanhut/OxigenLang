@@ -35,6 +35,11 @@ p <Person>          # zero-value struct instance
 - **Character**: `` `a` ``, `` `Z` `` (enclosed in backticks)
 - **Boolean**: `True`, `False`
 - **Array**: `[1, 2, 3]`, `["apple", "banana"]`
+- **Byte**: `byte(65)` — unsigned 8-bit integer (0-255)
+- **Uint**: `uint(42)` — unsigned 64-bit integer
+- **Tuple**: `(1, "hello", True)` — fixed-size, immutable ordered collection
+- **Map**: `{"key": "value", 1: True}` — key-value pairs
+- **Set**: `set(1, 2, 3)` — unique unordered collection
 - **None**: Represents the absence of a value.
 
 ## Control Flow

@@ -79,6 +79,7 @@ impl Parser {
         p.register_prefix(TokenType::Shebang, Parser::parse_prefix_expression);
         p.register_prefix(TokenType::Not, Parser::parse_prefix_expression);
         p.register_prefix(TokenType::Function, Parser::parse_function_expression);
+        p.register_prefix(TokenType::LBrace, Parser::parse_map_literal);
 
         // Infix Parse Functions
         for tt in [TokenType::Plus, TokenType::Minus] {
@@ -461,11 +462,98 @@ impl Parser {
     }
 
     fn parse_grouped_expression(&mut self) -> Option<Expression> {
-        // curr_token is '('
+        let tok = self.curr_token.clone(); // '('
         self.next_token(); // enter group
-        let expr = self.parse_expression(Precedence::Lowest)?;
+
+        // Empty tuple: ()
+        if self.curr_token.token_type == TokenType::RParen {
+            return Some(Expression::TupleLiteral {
+                token: tok,
+                elements: Vec::new(),
+            });
+        }
+
+        let first = self.parse_expression(Precedence::Lowest)?;
+
+        // If comma follows, it's a tuple
+        if self.peek_token.token_type == TokenType::Comma {
+            let mut elements = vec![first];
+            while self.peek_token.token_type == TokenType::Comma {
+                self.next_token(); // consume ','
+                // Trailing comma: (a,)
+                if self.peek_token.token_type == TokenType::RParen {
+                    break;
+                }
+                self.next_token(); // move to next element
+                elements.push(self.parse_expression(Precedence::Lowest)?);
+            }
+            self.expect_peek(TokenType::RParen)?;
+            return Some(Expression::TupleLiteral {
+                token: tok,
+                elements,
+            });
+        }
+
         self.expect_peek(TokenType::RParen)?;
-        Some(Expression::Grouped(Box::new(expr)))
+        Some(Expression::Grouped(Box::new(first)))
+    }
+
+    fn parse_map_literal(&mut self) -> Option<Expression> {
+        let tok = self.curr_token.clone(); // '{'
+        let mut entries = Vec::new();
+
+        // Skip newlines
+        while self.peek_token.token_type == TokenType::Newline {
+            self.next_token();
+        }
+
+        // Empty map: {}
+        if self.peek_token.token_type == TokenType::RBrace {
+            self.next_token();
+            return Some(Expression::MapLiteral {
+                token: tok,
+                entries,
+            });
+        }
+
+        loop {
+            self.next_token(); // move to key
+
+            // Skip newlines
+            while self.curr_token.token_type == TokenType::Newline {
+                self.next_token();
+            }
+
+            if self.curr_token.token_type == TokenType::RBrace {
+                break;
+            }
+
+            let key = self.parse_expression(Precedence::Lowest)?;
+            self.expect_peek(TokenType::Colon)?;
+            self.next_token(); // move to value
+            let value = self.parse_expression(Precedence::Lowest)?;
+            entries.push((key, value));
+
+            // Skip comma if present
+            if self.peek_token.token_type == TokenType::Comma {
+                self.next_token();
+            }
+
+            // Skip newlines
+            while self.peek_token.token_type == TokenType::Newline {
+                self.next_token();
+            }
+
+            if self.peek_token.token_type == TokenType::RBrace {
+                self.next_token();
+                break;
+            }
+        }
+
+        Some(Expression::MapLiteral {
+            token: tok,
+            entries,
+        })
     }
 
     fn parse_function_expression(&mut self) -> Option<Expression> {
@@ -592,7 +680,54 @@ impl Parser {
         let tok = self.curr_token.clone(); // '['
         self.next_token(); // move past '['
 
+        // Check for slice: [:end], [:]
+        if self.curr_token.token_type == TokenType::Colon {
+            // No start — [:end] or [:]
+            if self.peek_token.token_type == TokenType::RBracket {
+                self.next_token(); // consume ']'
+                return Some(Expression::Slice {
+                    token: tok,
+                    left: Box::new(left),
+                    start: None,
+                    end: None,
+                });
+            }
+            self.next_token(); // move to end expression
+            let end = self.parse_expression(Precedence::Lowest)?;
+            self.expect_peek(TokenType::RBracket)?;
+            return Some(Expression::Slice {
+                token: tok,
+                left: Box::new(left),
+                start: None,
+                end: Some(Box::new(end)),
+            });
+        }
+
         let index = self.parse_expression(Precedence::Lowest)?;
+
+        // Check for slice: [start:end] or [start:]
+        if self.peek_token.token_type == TokenType::Colon {
+            self.next_token(); // consume ':'
+            if self.peek_token.token_type == TokenType::RBracket {
+                self.next_token(); // consume ']'
+                return Some(Expression::Slice {
+                    token: tok,
+                    left: Box::new(left),
+                    start: Some(Box::new(index)),
+                    end: None,
+                });
+            }
+            self.next_token(); // move to end expression
+            let end = self.parse_expression(Precedence::Lowest)?;
+            self.expect_peek(TokenType::RBracket)?;
+            return Some(Expression::Slice {
+                token: tok,
+                left: Box::new(left),
+                start: Some(Box::new(index)),
+                end: Some(Box::new(end)),
+            });
+        }
+
         self.expect_peek(TokenType::RBracket)?;
 
         Some(Expression::Index {
@@ -1697,7 +1832,7 @@ mod tests {
     fn test_parser_errors() {
         let tests = vec![
             ("x :=", "no prefix parse fn"),          // Missing value after :=
-            ("each x in { }", "no prefix parse fn"), // Missing iterable - LBrace is not a valid expression
+            ("each x in { }", "expected next token"), // {} parses as empty map, then block '{' is missing
         ];
 
         for (input, expected_error) in tests {
@@ -1807,6 +1942,72 @@ mod tests {
                 assert_eq!(field_values[1].0, "age");
             }
             other => panic!("Expected StructLiteral expression, got {:?}", other),
+        }
+    }
+
+    // ==================== TUPLE AND MAP PARSING TESTS ====================
+
+    #[test]
+    fn test_parse_tuple_literal() {
+        let program = parse_ok("(1, 2, 3)");
+        match &program.statements[0] {
+            Statement::Expr(Expression::TupleLiteral { elements, .. }) => {
+                assert_eq!(elements.len(), 3);
+            }
+            other => panic!("Expected TupleLiteral, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_empty_tuple() {
+        let program = parse_ok("()");
+        match &program.statements[0] {
+            Statement::Expr(Expression::TupleLiteral { elements, .. }) => {
+                assert_eq!(elements.len(), 0);
+            }
+            other => panic!("Expected empty TupleLiteral, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_single_tuple() {
+        let program = parse_ok("(1,)");
+        match &program.statements[0] {
+            Statement::Expr(Expression::TupleLiteral { elements, .. }) => {
+                assert_eq!(elements.len(), 1);
+            }
+            other => panic!("Expected single-element TupleLiteral, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_grouped_not_tuple() {
+        let program = parse_ok("(1 + 2)");
+        match &program.statements[0] {
+            Statement::Expr(Expression::Grouped(_)) => {}
+            other => panic!("Expected Grouped expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_map_literal() {
+        let program = parse_ok("{\"a\": 1, \"b\": 2}");
+        match &program.statements[0] {
+            Statement::Expr(Expression::MapLiteral { entries, .. }) => {
+                assert_eq!(entries.len(), 2);
+            }
+            other => panic!("Expected MapLiteral, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_empty_map() {
+        let program = parse_ok("{}");
+        match &program.statements[0] {
+            Statement::Expr(Expression::MapLiteral { entries, .. }) => {
+                assert_eq!(entries.len(), 0);
+            }
+            other => panic!("Expected empty MapLiteral, got {:?}", other),
         }
     }
 }

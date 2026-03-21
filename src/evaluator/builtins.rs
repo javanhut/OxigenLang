@@ -21,6 +21,15 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
     builtins.insert("str".to_string(), Rc::new(Object::Builtin(builtin_str)));
     builtins.insert("range".to_string(), Rc::new(Object::Builtin(builtin_range)));
     builtins.insert("chars".to_string(), Rc::new(Object::Builtin(builtin_chars)));
+    builtins.insert("byte".to_string(), Rc::new(Object::Builtin(builtin_byte)));
+    builtins.insert("uint".to_string(), Rc::new(Object::Builtin(builtin_uint)));
+    builtins.insert("set".to_string(), Rc::new(Object::Builtin(builtin_set)));
+    builtins.insert("keys".to_string(), Rc::new(Object::Builtin(builtin_keys)));
+    builtins.insert("values".to_string(), Rc::new(Object::Builtin(builtin_values)));
+    builtins.insert("insert".to_string(), Rc::new(Object::Builtin(builtin_insert)));
+    builtins.insert("remove".to_string(), Rc::new(Object::Builtin(builtin_remove)));
+    builtins.insert("has".to_string(), Rc::new(Object::Builtin(builtin_has)));
+    builtins.insert("tuple".to_string(), Rc::new(Object::Builtin(builtin_tuple)));
 
     builtins
 }
@@ -48,6 +57,9 @@ fn builtin_len(args: Vec<Rc<Object>>) -> Rc<Object> {
     match args[0].as_ref() {
         Object::String(s) => Rc::new(Object::Integer(s.len() as i64)),
         Object::Array(arr) => Rc::new(Object::Integer(arr.len() as i64)),
+        Object::Tuple(t) => Rc::new(Object::Integer(t.len() as i64)),
+        Object::Map(m) => Rc::new(Object::Integer(m.len() as i64)),
+        Object::Set(s) => Rc::new(Object::Integer(s.len() as i64)),
         obj => Rc::new(Object::Error(format!(
             "argument to `len` not supported, got {}",
             obj.type_name()
@@ -220,6 +232,8 @@ fn builtin_str(args: Vec<Rc<Object>>) -> Rc<Object> {
             if *b { "True" } else { "False" }.to_string(),
         )),
         Object::String(s) => Rc::new(Object::String(s.clone())),
+        Object::Byte(n) => Rc::new(Object::String(n.to_string())),
+        Object::Uint(n) => Rc::new(Object::String(n.to_string())),
         obj => Rc::new(Object::Error(format!(
             "cannot convert {} to STRING",
             obj.type_name()
@@ -267,6 +281,195 @@ fn builtin_range(args: Vec<Rc<Object>>) -> Rc<Object> {
         obj => Rc::new(Object::Error(format!(
             "argument require a integer, got {}",
             obj.type_name()
+        ))),
+    }
+}
+
+fn builtin_byte(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!(
+            "wrong number of arguments. got={}, want=1",
+            args.len()
+        )));
+    }
+    match args[0].as_ref() {
+        Object::Byte(_) => Rc::clone(&args[0]),
+        Object::Integer(n) => {
+            if *n < 0 || *n > 255 {
+                Rc::new(Object::Error(format!("byte() argument out of range (0-255): {}", n)))
+            } else {
+                Rc::new(Object::Byte(*n as u8))
+            }
+        }
+        Object::Uint(n) => {
+            if *n > 255 {
+                Rc::new(Object::Error(format!("byte() argument out of range (0-255): {}", n)))
+            } else {
+                Rc::new(Object::Byte(*n as u8))
+            }
+        }
+        Object::Char(c) => Rc::new(Object::Byte(*c as u8)),
+        obj => Rc::new(Object::Error(format!(
+            "cannot convert {} to BYTE", obj.type_name()
+        ))),
+    }
+}
+
+fn builtin_uint(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!(
+            "wrong number of arguments. got={}, want=1",
+            args.len()
+        )));
+    }
+    match args[0].as_ref() {
+        Object::Uint(_) => Rc::clone(&args[0]),
+        Object::Integer(n) => {
+            if *n < 0 {
+                Rc::new(Object::Error(format!("uint() cannot convert negative: {}", n)))
+            } else {
+                Rc::new(Object::Uint(*n as u64))
+            }
+        }
+        Object::Byte(n) => Rc::new(Object::Uint(*n as u64)),
+        Object::Float(f) => {
+            if *f < 0.0 {
+                Rc::new(Object::Error(format!("uint() cannot convert negative: {}", f)))
+            } else {
+                Rc::new(Object::Uint(*f as u64))
+            }
+        }
+        Object::String(s) => match s.parse::<u64>() {
+            Ok(n) => Rc::new(Object::Uint(n)),
+            Err(_) => Rc::new(Object::Error(format!("cannot convert \"{}\" to UINT", s))),
+        },
+        obj => Rc::new(Object::Error(format!(
+            "cannot convert {} to UINT", obj.type_name()
+        ))),
+    }
+}
+
+fn builtin_set(args: Vec<Rc<Object>>) -> Rc<Object> {
+    let mut elements = Vec::new();
+    for arg in &args {
+        if !elements.iter().any(|e: &Rc<Object>| e == arg) {
+            elements.push(Rc::clone(arg));
+        }
+    }
+    Rc::new(Object::Set(elements))
+}
+
+fn builtin_tuple(args: Vec<Rc<Object>>) -> Rc<Object> {
+    Rc::new(Object::Tuple(args))
+}
+
+fn builtin_keys(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!(
+            "wrong number of arguments. got={}, want=1",
+            args.len()
+        )));
+    }
+    match args[0].as_ref() {
+        Object::Map(entries) => {
+            let keys: Vec<Rc<Object>> = entries.iter().map(|(k, _)| Rc::clone(k)).collect();
+            Rc::new(Object::Array(keys))
+        }
+        obj => Rc::new(Object::Error(format!(
+            "argument to `keys` must be MAP, got {}", obj.type_name()
+        ))),
+    }
+}
+
+fn builtin_values(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!(
+            "wrong number of arguments. got={}, want=1",
+            args.len()
+        )));
+    }
+    match args[0].as_ref() {
+        Object::Map(entries) => {
+            let vals: Vec<Rc<Object>> = entries.iter().map(|(_, v)| Rc::clone(v)).collect();
+            Rc::new(Object::Array(vals))
+        }
+        obj => Rc::new(Object::Error(format!(
+            "argument to `values` must be MAP, got {}", obj.type_name()
+        ))),
+    }
+}
+
+fn builtin_insert(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 3 {
+        return Rc::new(Object::Error(format!(
+            "wrong number of arguments. got={}, want=3",
+            args.len()
+        )));
+    }
+    match args[0].as_ref() {
+        Object::Map(entries) => {
+            let mut new_entries = entries.clone();
+            let key = Rc::clone(&args[1]);
+            let val = Rc::clone(&args[2]);
+            // Update existing or append
+            if let Some(entry) = new_entries.iter_mut().find(|(k, _)| *k == key) {
+                entry.1 = val;
+            } else {
+                new_entries.push((key, val));
+            }
+            Rc::new(Object::Map(new_entries))
+        }
+        obj => Rc::new(Object::Error(format!(
+            "argument to `insert` must be MAP, got {}", obj.type_name()
+        ))),
+    }
+}
+
+fn builtin_remove(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 2 {
+        return Rc::new(Object::Error(format!(
+            "wrong number of arguments. got={}, want=2",
+            args.len()
+        )));
+    }
+    match args[0].as_ref() {
+        Object::Map(entries) => {
+            let key = &args[1];
+            let new_entries: Vec<_> = entries.iter()
+                .filter(|(k, _)| k != key)
+                .cloned()
+                .collect();
+            Rc::new(Object::Map(new_entries))
+        }
+        Object::Set(elements) => {
+            let val = &args[1];
+            let new_elements: Vec<_> = elements.iter()
+                .filter(|e| e != &val)
+                .cloned()
+                .collect();
+            Rc::new(Object::Set(new_elements))
+        }
+        obj => Rc::new(Object::Error(format!(
+            "argument to `remove` must be MAP or SET, got {}", obj.type_name()
+        ))),
+    }
+}
+
+fn builtin_has(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 2 {
+        return Rc::new(Object::Error(format!(
+            "wrong number of arguments. got={}, want=2",
+            args.len()
+        )));
+    }
+    let val = &args[1];
+    match args[0].as_ref() {
+        Object::Array(arr) => Rc::new(Object::Boolean(arr.iter().any(|e| e == val))),
+        Object::Set(elements) => Rc::new(Object::Boolean(elements.iter().any(|e| e == val))),
+        Object::Map(entries) => Rc::new(Object::Boolean(entries.iter().any(|(k, _)| k == val))),
+        Object::Tuple(elements) => Rc::new(Object::Boolean(elements.iter().any(|e| e == val))),
+        obj => Rc::new(Object::Error(format!(
+            "argument to `has` must be a collection, got {}", obj.type_name()
         ))),
     }
 }

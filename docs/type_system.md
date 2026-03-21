@@ -12,6 +12,11 @@ OxigenLang is dynamically typed by default, but offers optional type annotations
 | Char    | `char`  | `\0`       | `` `a` ``, `` `Z` `` |
 | Boolean | `bool`  | `False`    | `True`, `False`      |
 | Array   | `array` | `[]`       | `[1, 2, 3]`          |
+| Byte    | `byte`  | `0`        | `byte(65)`            |
+| Uint    | `uint`  | `0`        | `uint(42)`            |
+| Tuple   | `tuple` | `()`       | `(1, "hello")`        |
+| Map     | `map`   | `{}`       | `{"a": 1}`            |
+| Set     | `set`   | `set()`    | `set(1, 2, 3)`        |
 | Struct  | struct name | —     | `Person("Alice", 30)` |
 
 Structs are composite types with typed fields. They are defined with the `struct` keyword and have their own type identity (e.g., `type(p)` returns `"Person"`). Struct names can be used as type annotations to lock a variable to a specific struct type:

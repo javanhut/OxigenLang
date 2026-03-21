@@ -6,7 +6,7 @@ OxigenLang is a modern, lightweight, interpreted programming language implemente
 
 - **Unique Syntax**: Choose between traditional brace-based blocks or Python-style indentation blocks.
 - **Pattern Matching**: Define patterns using the `pattern` keyword and use them in `choose` expressions.
-- **Data Types**: Integers, Floats, Strings, Characters, Booleans, Arrays, and `None`.
+- **Data Types**: Integers, Floats, Strings, Characters, Booleans, Arrays, Bytes, Uints, Tuples, Maps, Sets, and `None`.
 - **Structs**: Composite data types with typed fields, inheritance, methods, and dot-access.
 - **First-Class Functions**: Define and pass functions as values.
 - **Built-in Functions**: Comprehensive set of built-ins for array manipulation, string handling, and more.

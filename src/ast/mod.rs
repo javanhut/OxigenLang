@@ -8,6 +8,11 @@ pub enum TypeAnnotation {
     Char,
     Bool,
     Array,
+    Byte,
+    Uint,
+    Tuple,
+    Map,
+    Set,
     Struct(String),
 }
 
@@ -20,6 +25,11 @@ impl TypeAnnotation {
             "char" => Some(TypeAnnotation::Char),
             "bool" => Some(TypeAnnotation::Bool),
             "array" => Some(TypeAnnotation::Array),
+            "byte" => Some(TypeAnnotation::Byte),
+            "uint" => Some(TypeAnnotation::Uint),
+            "tuple" => Some(TypeAnnotation::Tuple),
+            "map" => Some(TypeAnnotation::Map),
+            "set" => Some(TypeAnnotation::Set),
             _ => None,
         }
     }
@@ -39,6 +49,11 @@ impl TypeAnnotation {
             TypeAnnotation::Char => "CHAR".to_string(),
             TypeAnnotation::Bool => "BOOLEAN".to_string(),
             TypeAnnotation::Array => "ARRAY".to_string(),
+            TypeAnnotation::Byte => "BYTE".to_string(),
+            TypeAnnotation::Uint => "UINT".to_string(),
+            TypeAnnotation::Tuple => "TUPLE".to_string(),
+            TypeAnnotation::Map => "MAP".to_string(),
+            TypeAnnotation::Set => "SET".to_string(),
             TypeAnnotation::Struct(name) => name.clone(),
         }
     }
@@ -216,5 +231,19 @@ pub enum Expression {
         token: Token,
         left: Box<Expression>,
         field: Identifier,
+    },
+    Slice {
+        token: Token,
+        left: Box<Expression>,
+        start: Option<Box<Expression>>,
+        end: Option<Box<Expression>>,
+    },
+    TupleLiteral {
+        token: Token,
+        elements: Vec<Expression>,
+    },
+    MapLiteral {
+        token: Token,
+        entries: Vec<(Expression, Expression)>,
     },
 }

@@ -24,11 +24,14 @@ println("Welcome to OxigenLang")
 
 ### `len(arg)`
 
-Returns the length of an array or string.
+Returns the length of a string, array, tuple, map, or set.
 
 ```oxi
-len("OxigenLang") # Returns 10
-len([1, 2, 3])   # Returns 3
+len("OxigenLang")    # Returns 10
+len([1, 2, 3])       # Returns 3
+len((1, 2))          # Returns 2
+len({"a": 1})        # Returns 1
+len(set(1, 2, 3))    # Returns 3
 ```
 
 ### `push(array, element)`
@@ -105,6 +108,93 @@ Converts a string into an array of its characters.
 
 ```oxi
 chars("abc") # Returns [`a`, `b`, `c`]
+```
+
+## Type Constructors
+
+### `byte(value)`
+
+Converts an integer (0-255) to a byte.
+
+```oxi
+byte(65)      # byte value 65
+byte(256)     # error: out of range
+```
+
+### `uint(value)`
+
+Converts a value to an unsigned integer.
+
+```oxi
+uint(42)      # unsigned 42
+uint(-1)      # error: cannot convert negative
+uint(3.7)     # unsigned 3
+```
+
+### `set(values...)`
+
+Creates a set from the given values. Duplicates are removed.
+
+```oxi
+set(1, 2, 3)       # {1, 2, 3}
+set(1, 1, 2, 2)    # {1, 2}
+set()               # empty set
+```
+
+### `tuple(values...)`
+
+Creates a tuple from the given values.
+
+```oxi
+tuple(1, 2, 3)     # (1, 2, 3)
+tuple()             # ()
+```
+
+## Map Operations
+
+### `keys(map)`
+
+Returns an array of all keys in the map.
+
+```oxi
+keys({"a": 1, "b": 2})    # ["a", "b"]
+```
+
+### `values(map)`
+
+Returns an array of all values in the map.
+
+```oxi
+values({"a": 1, "b": 2})  # [1, 2]
+```
+
+### `insert(map, key, value)`
+
+Returns a new map with the key-value pair added or updated.
+
+```oxi
+m := {"a": 1}
+m := insert(m, "b", 2)    # {"a": 1, "b": 2}
+```
+
+### `remove(collection, key)`
+
+Returns a new map without the given key, or a new set without the given value.
+
+```oxi
+remove({"a": 1, "b": 2}, "a")   # {"b": 2}
+remove(set(1, 2, 3), 2)         # set(1, 3)
+```
+
+### `has(collection, value)`
+
+Returns `True` if the collection contains the value. Works on arrays, tuples, sets, and maps (checks keys).
+
+```oxi
+has([1, 2, 3], 2)              # True
+has(set(1, 2, 3), 5)           # False
+has({"a": 1}, "a")             # True
+has((10, 20), 10)              # True
 ```
 
 ## Introspection
