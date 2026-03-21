@@ -13,6 +13,9 @@ pub enum TypeAnnotation {
     Tuple,
     Map,
     Set,
+    Generic,
+    NoneType,
+    Union(Vec<TypeAnnotation>),
     Struct(String),
 }
 
@@ -30,6 +33,8 @@ impl TypeAnnotation {
             "tuple" => Some(TypeAnnotation::Tuple),
             "map" => Some(TypeAnnotation::Map),
             "set" => Some(TypeAnnotation::Set),
+            "generic" => Some(TypeAnnotation::Generic),
+            "None" => Some(TypeAnnotation::NoneType),
             _ => None,
         }
     }
@@ -54,9 +59,15 @@ impl TypeAnnotation {
             TypeAnnotation::Tuple => "TUPLE".to_string(),
             TypeAnnotation::Map => "MAP".to_string(),
             TypeAnnotation::Set => "SET".to_string(),
+            TypeAnnotation::Generic => "GENERIC".to_string(),
+            TypeAnnotation::NoneType => "NONE".to_string(),
+            TypeAnnotation::Union(types) => {
+                types.iter().map(|t| t.type_name()).collect::<Vec<_>>().join(" || ")
+            }
             TypeAnnotation::Struct(name) => name.clone(),
         }
     }
+
 }
 
 #[derive(Debug, Clone, PartialEq)]

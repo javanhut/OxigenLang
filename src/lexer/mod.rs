@@ -211,7 +211,14 @@ impl Lexer {
             '%' => self.single(TokenType::Mod),
             '&' => self.single(TokenType::Ampersand),
             '.' => self.single(TokenType::FullStop),
-            '|' => self.single(TokenType::Pipe),
+            '|' => match self.peek_char() {
+                '|' => {
+                    self.read_char();
+                    self.read_char();
+                    Token { token_type: TokenType::DoublePipe, literal: "||".into() }
+                }
+                _ => self.single(TokenType::Pipe)
+            },
             '^' => self.single(TokenType::Caret),
             '~' => self.single(TokenType::Tilde),
             ';' => self.single(TokenType::Semicolon),
@@ -222,7 +229,17 @@ impl Lexer {
             '(' => self.single(TokenType::LParen),
             ')' => self.single(TokenType::RParen),
             '*' => self.single(TokenType::Asterisk),
-            '/' => self.single(TokenType::FSlash),
+            '/' => match self.peek_char() {
+                '/' => {
+                    self.skip_line_comment();
+                    return self.next_token();
+                }
+                '*' => {
+                    self.skip_block_comment();
+                    return self.next_token();
+                }
+                _ => self.single(TokenType::FSlash),
+            },
             '\\' => self.single(TokenType::BSlash),
             '"' => self.read_string('"'),
             '\'' => self.read_string('\''),
@@ -270,6 +287,31 @@ impl Lexer {
 
     fn skip_whitespace_except_newline(&mut self) {
         while self.ch.is_whitespace() && self.ch != '\n' {
+            self.read_char();
+        }
+    }
+
+    fn skip_line_comment(&mut self) {
+        self.read_char(); // skip first '/'
+        self.read_char(); // skip second '/'
+        while self.ch != '\n' && self.ch != '\0' {
+            self.read_char();
+        }
+        // Leave self.ch at '\n' or '\0' so next_token handles it
+    }
+
+    fn skip_block_comment(&mut self) {
+        self.read_char(); // skip '/'
+        self.read_char(); // skip '*'
+        loop {
+            if self.ch == '\0' {
+                break;
+            }
+            if self.ch == '*' && self.peek_char() == '/' {
+                self.read_char(); // skip '*'
+                self.read_char(); // skip '/'
+                break;
+            }
             self.read_char();
         }
     }
@@ -360,6 +402,10 @@ impl Lexer {
         while pos < self.input.len() {
             let c = self.input[pos];
             if c == '\n' || c == '\0' {
+                return true;
+            }
+            // A // comment counts as end of line
+            if c == '/' && pos + 1 < self.input.len() && self.input[pos + 1] == '/' {
                 return true;
             }
             if !c.is_whitespace() {

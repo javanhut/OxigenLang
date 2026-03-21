@@ -124,6 +124,48 @@ impl Parser {
         &self.errors
     }
 
+    fn is_type_name_token(tt: &TokenType) -> bool {
+        matches!(tt, TokenType::Ident | TokenType::None)
+    }
+
+    /// Parses a type annotation after `<` has already been consumed.
+    /// Expects curr_token to be `<`. Consumes through closing `>` and any `|| <type>` continuations.
+    fn parse_type_annotation(&mut self) -> Option<TypeAnnotation> {
+        // curr_token is '<', consume type name (Ident or None keyword)
+        if !Self::is_type_name_token(&self.peek_token.token_type) {
+            self.errors.push(format!(
+                "expected type name, got {:?} (literal={:?})",
+                self.peek_token.token_type, self.peek_token.literal
+            ));
+            return None;
+        }
+        self.next_token();
+        let first = TypeAnnotation::from_str_or_struct(&self.curr_token.literal);
+        self.expect_peek(TokenType::Gt)?; // '>'
+
+        // Check for || <type> continuations
+        if self.peek_token.token_type == TokenType::DoublePipe {
+            let mut types = vec![first];
+            while self.peek_token.token_type == TokenType::DoublePipe {
+                self.next_token(); // consume '||'
+                self.expect_peek(TokenType::Lt)?; // '<'
+                if !Self::is_type_name_token(&self.peek_token.token_type) {
+                    self.errors.push(format!(
+                        "expected type name, got {:?} (literal={:?})",
+                        self.peek_token.token_type, self.peek_token.literal
+                    ));
+                    return None;
+                }
+                self.next_token();
+                types.push(TypeAnnotation::from_str_or_struct(&self.curr_token.literal));
+                self.expect_peek(TokenType::Gt)?; // '>'
+            }
+            Some(TypeAnnotation::Union(types))
+        } else {
+            Some(first)
+        }
+    }
+
     pub fn parse_program(&mut self) -> Program {
         let mut program = Program {
             statements: Vec::new(),
@@ -215,17 +257,9 @@ impl Parser {
             value: name_token.literal.clone(),
         };
 
-        // consume '<'
+        // consume '<type>' (and any || continuations)
         self.expect_peek(TokenType::Lt)?;
-
-        // consume type name
-        self.expect_peek(TokenType::Ident)?;
-        let type_name = self.curr_token.literal.clone();
-
-        let type_ann = TypeAnnotation::from_str_or_struct(&type_name);
-
-        // consume '>'
-        self.expect_peek(TokenType::Gt)?;
+        let type_ann = self.parse_type_annotation()?;
 
         // determine walrus or strict assign
         let walrus = self.peek_token.token_type == TokenType::Walrus;
@@ -257,17 +291,9 @@ impl Parser {
         // consume 'as'
         self.expect_peek(TokenType::As)?;
 
-        // consume '<'
+        // consume '<type>' (and any || continuations)
         self.expect_peek(TokenType::Lt)?;
-
-        // consume type name
-        self.expect_peek(TokenType::Ident)?;
-        let type_name = self.curr_token.literal.clone();
-
-        let type_ann = TypeAnnotation::from_str_or_struct(&type_name);
-
-        // consume '>'
-        self.expect_peek(TokenType::Gt)?;
+        let type_ann = self.parse_type_annotation()?;
 
         Some(Statement::TypedDeclare { name, type_ann })
     }
@@ -280,17 +306,9 @@ impl Parser {
             value: name_token.literal.clone(),
         };
 
-        // consume '<'
+        // consume '<type>' (and any || continuations)
         self.expect_peek(TokenType::Lt)?;
-
-        // consume type name
-        self.expect_peek(TokenType::Ident)?;
-        let type_name = self.curr_token.literal.clone();
-
-        let type_ann = TypeAnnotation::from_str_or_struct(&type_name);
-
-        // consume '>'
-        self.expect_peek(TokenType::Gt)?;
+        let type_ann = self.parse_type_annotation()?;
 
         Some(Statement::TypedDeclare { name, type_ann })
     }
@@ -602,11 +620,8 @@ impl Parser {
             value: self.curr_token.literal.clone(),
         };
         let type_ann = if self.peek_token.token_type == TokenType::Lt {
-            self.next_token(); // '<'
-            self.expect_peek(TokenType::Ident)?;
-            let ta = TypeAnnotation::from_str_or_struct(&self.curr_token.literal);
-            self.expect_peek(TokenType::Gt)?; // '>'
-            Some(ta)
+            self.next_token(); // move to '<'
+            Some(self.parse_type_annotation()?)
         } else {
             None
         };
@@ -620,11 +635,8 @@ impl Parser {
                 value: self.curr_token.literal.clone(),
             };
             let type_ann = if self.peek_token.token_type == TokenType::Lt {
-                self.next_token(); // '<'
-                self.expect_peek(TokenType::Ident)?;
-                let ta = TypeAnnotation::from_str_or_struct(&self.curr_token.literal);
-                self.expect_peek(TokenType::Gt)?; // '>'
-                Some(ta)
+                self.next_token(); // move to '<'
+                Some(self.parse_type_annotation()?)
             } else {
                 None
             };
@@ -903,10 +915,25 @@ impl Parser {
     fn parse_repeat_statement(&mut self) -> Option<Statement> {
         let token = self.curr_token.clone(); // 'repeat'
 
-        self.expect_peek(TokenType::When)?; // 'when'
+        let negate = self.peek_token.token_type == TokenType::Unless;
+        if negate {
+            self.expect_peek(TokenType::Unless)?;
+        } else {
+            self.expect_peek(TokenType::When)?;
+        }
         self.next_token(); // move to condition
 
-        let condition = self.parse_expression(Precedence::Lowest)?;
+        let raw_condition = self.parse_expression(Precedence::Lowest)?;
+
+        let condition = if negate {
+            Expression::Prefix {
+                token: Token { token_type: TokenType::Not, literal: "not".into() },
+                operator: "not".to_string(),
+                right: Box::new(raw_condition),
+            }
+        } else {
+            raw_condition
+        };
 
         self.expect_peek(TokenType::LBrace)?; // '{'
         let body = self.parse_block()?;
@@ -1095,6 +1122,21 @@ impl Parser {
             }
 
             if self.curr_token.token_type == TokenType::RBrace {
+                break;
+            }
+
+            // If current token is '{', treat as a block default arm
+            // (not a map literal) since bare '{' in option position is a block.
+            if self.curr_token.token_type == TokenType::LBrace {
+                default = Some(self.parse_block()?);
+                // Skip comma if present
+                if self.peek_token.token_type == TokenType::Comma {
+                    self.next_token();
+                }
+                // Skip newlines
+                while self.peek_token.token_type == TokenType::Newline {
+                    self.next_token();
+                }
                 break;
             }
 
@@ -1345,12 +1387,7 @@ impl Parser {
             };
 
             self.expect_peek(TokenType::Lt)?; // '<'
-            self.expect_peek(TokenType::Ident)?; // type name
-            let type_name = self.curr_token.literal.clone();
-
-            let type_ann = TypeAnnotation::from_str_or_struct(&type_name);
-
-            self.expect_peek(TokenType::Gt)?; // '>'
+            let type_ann = self.parse_type_annotation()?;
 
             fields.push(crate::ast::StructField {
                 name: field_name,
@@ -1475,42 +1512,52 @@ impl Parser {
         &self.lookahead_buffer[needed - 1]
     }
 
-    /// Checks if tokens form: Ident Lt Ident Gt (Assign|Walrus)
-    /// Called when curr=Ident, peek=Lt
+    /// Scans past a type annotation starting at peek_nth(offset).
+    /// Expects: Lt Ident Gt [|| Lt Ident Gt]*
+    /// Returns the offset of the token AFTER the full type annotation.
+    fn skip_type_annotation(&mut self, start: usize) -> Option<usize> {
+        if self.peek_nth(start).token_type != TokenType::Lt {
+            return None;
+        }
+        if !Self::is_type_name_token(&self.peek_nth(start + 1).token_type) {
+            return None;
+        }
+        if self.peek_nth(start + 2).token_type != TokenType::Gt {
+            return None;
+        }
+        let mut pos = start + 3;
+        while self.peek_nth(pos).token_type == TokenType::DoublePipe {
+            if self.peek_nth(pos + 1).token_type != TokenType::Lt
+                || !Self::is_type_name_token(&self.peek_nth(pos + 2).token_type)
+                || self.peek_nth(pos + 3).token_type != TokenType::Gt
+            {
+                break;
+            }
+            pos += 4;
+        }
+        Some(pos)
+    }
+
     fn is_typed_declaration(&mut self) -> bool {
-        // peek_nth(0) = Lt (already known)
-        // peek_nth(1) should be Ident (type name)
-        // peek_nth(2) should be Gt
-        // peek_nth(3) should be Assign or Walrus
-        let t1 = self.peek_nth(1).token_type.clone();
-        let t2 = self.peek_nth(2).token_type.clone();
-        let t3 = self.peek_nth(3).token_type.clone();
-        t1 == TokenType::Ident && t2 == TokenType::Gt && (t3 == TokenType::Assign || t3 == TokenType::Walrus)
+        if let Some(after) = self.skip_type_annotation(0) {
+            let t = self.peek_nth(after).token_type.clone();
+            t == TokenType::Assign || t == TokenType::Walrus
+        } else {
+            false
+        }
     }
 
-    /// Checks if tokens form: Ident Lt Ident Gt (no Assign/Walrus after)
-    /// This is the shorthand `p <Person>` form (same as `p as <Person>`)
     fn is_typed_declare_shorthand(&mut self) -> bool {
-        let t1 = self.peek_nth(1).token_type.clone();
-        let t2 = self.peek_nth(2).token_type.clone();
-        let t3 = self.peek_nth(3).token_type.clone();
-        t1 == TokenType::Ident
-            && t2 == TokenType::Gt
-            && t3 != TokenType::Assign
-            && t3 != TokenType::Walrus
+        if let Some(after) = self.skip_type_annotation(0) {
+            let t = self.peek_nth(after).token_type.clone();
+            t != TokenType::Assign && t != TokenType::Walrus
+        } else {
+            false
+        }
     }
 
-    /// Checks if tokens form: As Lt Ident Gt
-    /// Called when curr=Ident, peek=As
     fn is_as_typed_declare(&mut self) -> bool {
-        // peek_nth(0) = As (already known)
-        // peek_nth(1) should be Lt
-        // peek_nth(2) should be Ident (type name)
-        // peek_nth(3) should be Gt
-        let t1 = self.peek_nth(1).token_type.clone();
-        let t2 = self.peek_nth(2).token_type.clone();
-        let t3 = self.peek_nth(3).token_type.clone();
-        t1 == TokenType::Lt && t2 == TokenType::Ident && t3 == TokenType::Gt
+        self.skip_type_annotation(1).is_some()
     }
 
     fn register_prefix(&mut self, tt: TokenType, f: PrefixParseFn) {

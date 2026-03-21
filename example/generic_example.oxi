@@ -1,0 +1,35 @@
+struct Container {
+    data <generic>
+    label <str>
+}
+
+Container contains {
+    fun show() { println(label + ":", self.data) }
+}
+
+c1 := Container(42, "number")
+c1.show()
+
+c2 := Container("hello world", "text")
+c2.show()
+
+c3 := Container([1, 2, 3], "list")
+c3.show()
+
+c1.data = "now a string"
+c1.show()
+
+c1.data = True
+c1.show()
+
+fun identity(x <generic>) { x }
+println(identity(42))
+println(identity("hello"))
+println(identity([1, 2, 3]))
+
+x <generic> := 10
+println(x)
+x = "switched to string"
+println(x)
+x = [1, 2, 3]
+println(x)

@@ -52,7 +52,8 @@ pub enum TokenType {
     LShift, // <<
     RShift, // >>
     Caret,  // ^
-    Pipe,   // |
+    Pipe,       // |
+    DoublePipe, // ||
     Tilde,  // ~
 
     // Keywords

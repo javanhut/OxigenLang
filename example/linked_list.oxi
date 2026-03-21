@@ -1,0 +1,47 @@
+struct Node {
+  data <generic>
+  next <Node> || <None>
+}
+
+
+struct LinkedList {
+  head <Node> || <None>
+}
+
+LinkedList contains {
+  fun add(data <generic>) {
+    new_node <Node> := Node { data: data, next:  None}
+    option {
+      self.head == None -> self.head = new_node,
+      self.append_node(new_node)
+    }
+  }
+
+  fun append_node(new_node <Node>) {
+    current <Node> || <None> := self.head
+    repeat unless current.next == None {
+      current = current.next
+    }
+    current.next = new_node
+  }
+
+  fun print_list() {
+    current <Node> || <None> := self.head
+    option {
+      current == None -> println("Linked List is empty."),
+      {
+
+        repeat unless current == None {
+          println(current.data)
+          current = current.next
+        }
+      }
+    }
+  }
+}
+
+ll <LinkedList>
+ll.add(10)
+ll.add(20)
+ll.add(30)
+ll.print_list()

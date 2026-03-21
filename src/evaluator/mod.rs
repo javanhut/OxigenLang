@@ -14,6 +14,19 @@ pub struct Evaluator {
     struct_defs: HashMap<String, Rc<Object>>,
 }
 
+/// Checks if `actual_type` satisfies the type constraint `expected`.
+/// Handles GENERIC (accepts anything) and union types like "INTEGER || STRING".
+fn type_matches(expected: &str, actual: &str) -> bool {
+    if expected == "GENERIC" {
+        return true;
+    }
+    if expected.contains(" || ") {
+        expected.split(" || ").any(|t| t == "GENERIC" || t == actual)
+    } else {
+        expected == actual
+    }
+}
+
 impl Default for Evaluator {
     fn default() -> Self {
         Self::new()
@@ -31,6 +44,25 @@ impl Evaluator {
 
     fn convert_to_type(obj: &Rc<Object>, target: &str) -> Result<Rc<Object>, String> {
         match target {
+            "GENERIC" => Ok(Rc::clone(obj)),
+            "NONE" => match obj.as_ref() {
+                Object::None => Ok(Rc::clone(obj)),
+                _ => Err(format!("cannot convert {} to NONE", obj.type_name())),
+            },
+            t if t.contains(" || ") => {
+                // Union type: accept value if it already matches any member type
+                let actual = obj.effective_type_name();
+                if t.split(" || ").any(|member| member == actual) {
+                    return Ok(Rc::clone(obj));
+                }
+                // Try converting to each member type in order
+                for member in t.split(" || ") {
+                    if let Ok(converted) = Self::convert_to_type(obj, member) {
+                        return Ok(converted);
+                    }
+                }
+                Err(format!("cannot convert {} to {}", actual, t))
+            }
             "INTEGER" => match obj.as_ref() {
                 Object::Integer(_) => Ok(Rc::clone(obj)),
                 Object::Float(f) => Ok(Rc::new(Object::Integer(*f as i64))),
@@ -180,6 +212,13 @@ impl Evaluator {
             "TUPLE" => Rc::new(Object::Tuple(Vec::new())),
             "MAP" => Rc::new(Object::Map(Vec::new())),
             "SET" => Rc::new(Object::Set(Vec::new())),
+            "GENERIC" => Rc::new(Object::None),
+            "NONE" => Rc::new(Object::None),
+            t if t.contains(" || ") => {
+                // Union type: use the first member's zero value
+                let first = t.split(" || ").next().unwrap();
+                Self::zero_value_for_type(first)
+            }
             _ => Rc::new(Object::None),
         }
     }
@@ -234,7 +273,7 @@ impl Evaluator {
                         // Walrus reassignment on typed variable: strict type check
                         // Type is immutable — no implicit conversion. Use explicit
                         // typed re-declaration (x <type> := val) to change the type.
-                        if val.effective_type_name() != target_type {
+                        if !type_matches(&target_type, &val.effective_type_name()) {
                             return Rc::new(Object::Error(format!(
                                 "type mismatch: '{}' is locked to {}, got {}. use explicit type declaration to change type",
                                 name.value,
@@ -298,7 +337,7 @@ impl Evaluator {
                         Err(msg) => return Rc::new(Object::Error(msg)),
                     }
                 } else {
-                    if val.effective_type_name() != target {
+                    if !type_matches(&target, &val.effective_type_name()) {
                         return Rc::new(Object::Error(format!(
                             "type mismatch: expected {}, got {}",
                             target,
@@ -308,12 +347,17 @@ impl Evaluator {
                     val
                 };
                 let immutable = !*walrus;
-                env.borrow_mut().set_typed(
-                    name.value.clone(),
-                    final_val.clone(),
-                    target,
-                    immutable,
-                );
+                if *type_ann == TypeAnnotation::NoneType {
+                    // <None> is type-mutable: no type constraint set
+                    env.borrow_mut().set(name.value.clone(), final_val.clone());
+                } else {
+                    env.borrow_mut().set_typed(
+                        name.value.clone(),
+                        final_val.clone(),
+                        target,
+                        immutable,
+                    );
+                }
                 final_val
             }
             Statement::TypedDeclare { name, type_ann } => {
@@ -327,12 +371,16 @@ impl Evaluator {
                     }
                     _ => Self::zero_value_for_type(&target),
                 };
-                env.borrow_mut().set_typed(
-                    name.value.clone(),
-                    val.clone(),
-                    target,
-                    false, // as-declarations are mutable
-                );
+                if *type_ann == TypeAnnotation::NoneType {
+                    env.borrow_mut().set(name.value.clone(), val.clone());
+                } else {
+                    env.borrow_mut().set_typed(
+                        name.value.clone(),
+                        val.clone(),
+                        target,
+                        false, // as-declarations are mutable
+                    );
+                }
                 val
             }
             Statement::Assign { name, value } => {
@@ -362,7 +410,7 @@ impl Evaluator {
                 if val.is_error() {
                     return val;
                 }
-                if val.effective_type_name() != target_type {
+                if !type_matches(&target_type, &val.effective_type_name()) {
                     return Rc::new(Object::Error(format!(
                         "type mismatch: expected {}, got {}",
                         target_type,
@@ -508,7 +556,7 @@ impl Evaluator {
                             return val;
                         }
                         let actual_type = val.effective_type_name();
-                        if actual_type != expected_type {
+                        if !type_matches(&expected_type, &actual_type) {
                             return Rc::new(Object::Error(format!(
                                 "type mismatch: field '{}' expects {}, got {}",
                                 field.value, expected_type, actual_type
@@ -715,7 +763,7 @@ impl Evaluator {
                                 match field_def {
                                     Some((_, expected_type, _)) => {
                                         let actual_type = val.effective_type_name();
-                                        if actual_type != *expected_type {
+                                        if !type_matches(expected_type, &actual_type) {
                                             return Rc::new(Object::Error(format!(
                                                 "type mismatch for field '{}': expected {}, got {}",
                                                 field_name, expected_type, actual_type
@@ -1291,7 +1339,7 @@ impl Evaluator {
                     if let Some(ref expected_ta) = param.type_ann {
                         let expected = expected_ta.type_name();
                         let actual = arg.effective_type_name();
-                        if actual != expected {
+                        if !type_matches(&expected, &actual) {
                             return Rc::new(Object::Error(format!(
                                 "type mismatch for parameter '{}': expected {}, got {}",
                                 param.ident.value, expected, actual
@@ -1327,7 +1375,7 @@ impl Evaluator {
                     if let Some(ref expected_ta) = param.type_ann {
                         let expected = expected_ta.type_name();
                         let actual = arg.effective_type_name();
-                        if actual != expected {
+                        if !type_matches(&expected, &actual) {
                             return Rc::new(Object::Error(format!(
                                 "type mismatch for parameter '{}': expected {}, got {}",
                                 param.ident.value, expected, actual
@@ -1365,7 +1413,7 @@ impl Evaluator {
                 let mut instance_fields = HashMap::new();
                 for ((field_name, expected_type, _), arg) in fields.iter().zip(args.iter()) {
                     let actual_type = arg.effective_type_name();
-                    if actual_type != *expected_type {
+                    if !type_matches(expected_type, &actual_type) {
                         return Rc::new(Object::Error(format!(
                             "type mismatch for field '{}': expected {}, got {}",
                             field_name, expected_type, actual_type

@@ -1,0 +1,18 @@
+fun enumerate(arr <array>) {
+  count_arr <array>
+  count <int>
+  each val in arr {
+    count_arr = push(count_arr, (count, val))
+    count++
+  }
+  count_arr
+}
+
+
+test_arr <array> := "my name is oxigen"
+result_arr <array> := enumerate(test_arr)
+each tup in result_arr {
+  idx := tup[0]
+  val := tup[1]
+  println("Index: ", idx, "Value: ", val)
+}
