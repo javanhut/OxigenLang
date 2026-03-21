@@ -35,14 +35,26 @@ p := Person { name: "Alice", age: 30 }
 
 Both forms perform strict type checking — the values must match the declared field types.
 
+### Zero-Value Instantiation
+
+Declare a struct-typed variable without providing values. All fields are initialized to their type's zero value:
+
+```oxi
+p <Person>
+println(p.name)
+println(p.age)
+```
+
+See [Zero-Value Declaration](#structs-as-types) below for full details.
+
 ## Accessing Fields
 
 Use dot notation to access fields:
 
 ```oxi
 p := Person("Alice", 30)
-println(p.name)    # Alice
-println(p.age)     # 30
+println(p.name)
+println(p.age)
 ```
 
 ## Mutating Fields
@@ -52,15 +64,47 @@ Assign to a field using dot notation with `=`:
 ```oxi
 p := Person("Alice", 30)
 p.age = 31
-println(p.age)     # 31
+println(p.age)
 ```
 
 Field mutation is type-checked — assigning a value of the wrong type produces an error:
 
 ```oxi
 p := Person("Alice", 30)
-p.age = "thirty"   # error: type mismatch: field 'age' expects INTEGER, got STRING
+p.age = "thirty"
 ```
+
+Field mutation works with postfix guards:
+
+```oxi
+p.name = "Bob" when should_update
+```
+
+## Hidden Fields
+
+The `hide` keyword marks a field as internal. Hidden fields are accessible inside methods but not from outside the struct:
+
+```oxi
+struct Person {
+    hide fname <str>
+    hide lname <str>
+    hide age <int>
+}
+
+Person contains {
+    fun set_name(fn <str>, ln <str>) {
+        self.fname = fn
+        self.lname = ln
+    }
+    fun get_name() { self.fname + " " + self.lname }
+}
+
+p <Person>
+p.set_name("John", "Doe")
+println(p.get_name())
+```
+
+Use `hide` to encapsulate implementation details and control access through methods.
 
 ## Methods
 
@@ -75,7 +119,7 @@ Person contains {
 
 ### Implicit Self
 
-Inside a method, all fields of the instance are accessible directly by name — there is no explicit `self` parameter. When you call `p.greet()`, the method body can reference `name` and `age` as if they were local variables.
+Inside a method, all fields of the instance are accessible directly by name — there is no explicit `self` parameter. When you call `p.greet()`, the method body can reference `name` and `age` as if they were local variables:
 
 ```oxi
 struct Person {
@@ -88,8 +132,29 @@ Person contains {
 }
 
 p := Person("Alice", 30)
-println(p.greet())   # Alice is 30 years old
+println(p.greet())
 ```
+
+### Explicit `self`
+
+You can also use `self` to explicitly reference the instance. This is required when you want to assign to a field within a method:
+
+```oxi
+Person contains {
+    fun set_name(new_name <str>) {
+        self.name = new_name
+    }
+    fun set_age(new_age <int>) {
+        self.age = new_age
+    }
+}
+
+p <Person>
+p.set_name("Alice")
+p.set_age(30)
+```
+
+Use `self.field = value` to mutate the instance's field from within a method. Plain field access (`name`, `age`) reads the field value; `self.field = value` writes to it.
 
 ### Methods with Parameters
 
@@ -101,7 +166,7 @@ Person contains {
 }
 
 p := Person("Alice", 30)
-println(p.greet_with("Hello"))   # Hello, Alice
+println(p.greet_with("Hello"))
 ```
 
 ### Returning Values
@@ -114,7 +179,7 @@ Person contains {
 }
 
 p := Person("Alice", 30)
-println(p.birth_year(2026))   # 1996
+println(p.birth_year(2026))
 ```
 
 ## Inheritance
@@ -136,8 +201,8 @@ The child struct gets all parent fields first, followed by its own. Instantiatio
 
 ```oxi
 a := American("John", 25, "USA")
-println(a.name)          # John
-println(a.nationality)   # USA
+println(a.name)
+println(a.nationality)
 ```
 
 Named instantiation works the same way:
@@ -145,6 +210,29 @@ Named instantiation works the same way:
 ```oxi
 a := American { name: "John", age: 25, nationality: "USA" }
 ```
+
+### Multi-Level Inheritance
+
+Inheritance can chain through multiple levels:
+
+```oxi
+struct Person {
+    hide fname <str>
+    hide lname <str>
+    hide age <int>
+}
+
+struct Nationality(Person) {
+    hide country <str>
+    hide title <str>
+}
+
+struct American(Nationality) {
+    state <str>
+}
+```
+
+`American` inherits all fields from `Nationality`, which inherits all fields from `Person`. The full field order is: `fname`, `lname`, `age`, `country`, `title`, `state`.
 
 ### Inheriting Methods
 
@@ -160,7 +248,7 @@ struct American(Person) {
 }
 
 a := American("John", 25, "USA")
-println(a.greet())   # John — inherited from Person
+println(a.greet())
 ```
 
 ### Overriding Methods
@@ -173,10 +261,38 @@ American contains {
 }
 
 a := American("John", 25, "USA")
-println(a.greet())   # John from USA — overridden method
+println(a.greet())
 ```
 
-The child's `contains` block only affects the child. The parent's methods remain unchanged.
+The child's `contains` block only affects the child. The parent's methods remain unchanged for parent instances.
+
+### Adding Methods at Each Level
+
+Each level in an inheritance chain can define its own methods:
+
+```oxi
+Person contains {
+    fun set_name(fn <str>, ln <str>) {
+        self.fname = fn
+        self.lname = ln
+    }
+}
+
+Nationality contains {
+    fun set_country(country <str>) {
+        self.country = country
+    }
+}
+
+American contains {
+    fun print_info() {
+        println("Name: ", self.fname, self.lname)
+        println("Age: ", self.age)
+        println("Country: ", self.country)
+        println("State: ", self.state)
+    }
+}
+```
 
 ## Zero-Field Structs
 
@@ -187,7 +303,7 @@ struct Empty {
 }
 
 e := Empty()
-println(type(e))   # Empty
+println(type(e))
 ```
 
 ## Dot Chaining
@@ -208,26 +324,26 @@ Outer contains {
 }
 
 o := Outer("test")
-println(o.make_inner().val)   # 42
+println(o.make_inner().val)
 ```
 
 ## Structs as Types
 
-Struct names can be used as type annotations, just like built-in types. This locks a variable to a specific struct type:
+Struct names can be used as type annotations, just like built-in types. This locks a variable to a specific struct type.
 
 ### Strict Declaration
 
 ```oxi
-p <Person> = Person("Alice", 30)   # immutable binding, locked to Person
-p = Person("Bob", 25)              # error: cannot reassign immutable variable
+p <Person> = Person("Alice", 30)
+p = Person("Bob", 25)
 ```
 
 ### Walrus Declaration
 
 ```oxi
-p <Person> := Person("Alice", 30)  # mutable binding, locked to Person
-p = Person("Bob", 25)              # ok — same type
-p = 42                             # error: type mismatch: expected Person, got INTEGER
+p <Person> := Person("Alice", 30)
+p = Person("Bob", 25)
+p = 42
 ```
 
 ### Zero-Value Declaration
@@ -235,18 +351,28 @@ p = 42                             # error: type mismatch: expected Person, got 
 Declare a typed variable with all fields set to their zero values. Both forms are equivalent:
 
 ```oxi
-p <Person>          # shorthand
-p as <Person>       # explicit form
+p <Person>
+p as <Person>
 
-println(p.name)    # "" (empty string)
-println(p.age)     # 0
+println(p.name)
+println(p.age)
 
-# Then assign fields individually or replace the whole instance
 p.name = "Alice"
 p.age = 30
 
-# Or reassign entirely
 p = Person("Bob", 25)
+```
+
+### Different Struct Types
+
+A variable locked to one struct type cannot be reassigned to a different struct:
+
+```oxi
+struct Person { name <str> }
+struct Dog { name <str> }
+
+p <Person> := Person("Alice")
+p := Dog("Rex")
 ```
 
 ### Struct-Typed Fields
@@ -265,22 +391,7 @@ struct Person {
 
 a := Address("NYC")
 p := Person("Alice", a)
-println(p.addr.city)   # NYC
-
-# Type checked — wrong type is rejected
-Person("Alice", "not an address")   # error: type mismatch for field 'addr'
-```
-
-### Different Struct Types
-
-A variable locked to one struct type cannot be reassigned to a different struct:
-
-```oxi
-struct Person { name <str> }
-struct Dog { name <str> }
-
-p <Person> := Person("Alice")
-p := Dog("Rex")   # error: type mismatch, locked to Person
+println(p.addr.city)
 ```
 
 ## Introspection
@@ -294,7 +405,15 @@ struct Person {
 }
 
 p := Person("Alice", 30)
-println(type(p))    # Person
+println(type(p))
+```
+
+Use `is_mut()` and `is_type_mut()` on fields:
+
+```oxi
+m <Math> = Math { num_one: 10, num_two: 20 }
+println(is_mut(m.num_one))
+println(is_type_mut(m.num_one))
 ```
 
 ## Error Handling
@@ -302,18 +421,10 @@ println(type(p))    # Person
 OxigenLang produces clear errors for common mistakes:
 
 ```oxi
-# Wrong number of arguments
-Person("Alice")              # error: struct Person has 2 fields, got 1 arguments
-
-# Unknown field in named instantiation
-Person { name: "Alice", height: 170 }   # error: unknown field 'height' for struct Person
-
-# Type mismatch on field assignment
-p := Person("Alice", 30)
-p.age = "thirty"            # error: type mismatch: field 'age' expects INTEGER, got STRING
-
-# Type mismatch on instantiation
-Person("Alice", "thirty")   # error: type mismatch for field 'age': expected INTEGER, got STRING
+Person("Alice")
+Person { name: "Alice", height: 170 }
+p.age = "thirty"
+Person("Alice", "thirty")
 ```
 
 ## Indentation Mode
@@ -322,6 +433,7 @@ Structs and `contains` blocks work with indentation mode:
 
 ```oxi
 #[indent]
+
 struct Person:
     name <str>
     age <int>
@@ -334,7 +446,6 @@ Person contains:
 ## Complete Example
 
 ```oxi
-# Define structs
 struct Animal {
     name <str>
     sound <str>
@@ -344,7 +455,6 @@ struct Dog(Animal) {
     breed <str>
 }
 
-# Add methods
 Animal contains {
     fun speak() { name + " says " + sound }
 }
@@ -353,12 +463,15 @@ Dog contains {
     fun info() { name + " (" + breed + ")" }
 }
 
-# Create instances
 dog := Dog("Rex", "Woof", "Labrador")
-println(dog.speak())   # Rex says Woof — inherited from Animal
-println(dog.info())    # Rex (Labrador) — Dog's own method
+println(dog.speak())
+println(dog.info())
 
-# Mutate fields
 dog.sound = "Bark"
-println(dog.speak())   # Rex says Bark
+println(dog.speak())
 ```
+
+See also:
+- [Type System](type_system.md) — type annotations and zero values
+- [Functions](functions.md) — function syntax used in methods
+- [Variables and Assignments](variables.md) — typed variable declarations

@@ -4,14 +4,15 @@ OxigenLang is a modern, lightweight, interpreted programming language implemente
 
 ## Features
 
-- **Unique Syntax**: Choose between traditional brace-based blocks or Python-style indentation blocks.
+- **Flexible Block Styles**: Choose between traditional brace-based blocks or Python-style indentation blocks with the `#[indent]` directive.
 - **Conditional Expressions**: Multi-arm `option` blocks, ternary shorthand, `unless` inverse conditionals, and `when`/`unless` postfix guards.
-- **Pattern Matching**: Define patterns using the `pattern` keyword and use them in `choose` expressions. Patterns can be defined at the top level or inline within `choose` arms.
+- **Pattern Matching**: Define reusable patterns with the `pattern` keyword and match against them with `choose`. Supports both top-level and inline pattern definitions.
+- **Rich Type System**: Dynamic typing by default with optional type annotations for locking types and controlling mutability. Four declaration forms give precise control over value and type mutability.
 - **Data Types**: Integers, Floats, Strings, Characters, Booleans, Arrays, Bytes, Uints, Tuples, Maps, Sets, and `None`.
-- **Structs**: Composite data types with typed fields, inheritance, methods, and dot-access.
-- **First-Class Functions**: Define and pass functions as values.
-- **Built-in Functions**: Comprehensive set of built-ins for array manipulation, string handling, and more.
-- **REPL**: Interactive shell for quick experimentation.
+- **Structs**: Composite data types with typed fields, single-inheritance, methods via `contains` blocks, implicit self, hidden fields, and dot-chaining.
+- **First-Class Functions**: Named and anonymous functions, closures, typed parameters, and implicit/explicit returns.
+- **Built-in Functions**: 22 built-in functions for I/O, collection manipulation, type conversion, and introspection.
+- **REPL**: Interactive shell for quick experimentation with persistent state across lines.
 
 ## Getting Started
 
@@ -25,7 +26,7 @@ cargo build --release
 
 ### Running Scripts
 
-You can run OxigenLang scripts (`.oxi`) using the interpreter:
+Run OxigenLang scripts (`.oxi`) using the interpreter:
 
 ```bash
 cargo run -- path/to/script.oxi
@@ -33,21 +34,62 @@ cargo run -- path/to/script.oxi
 
 ### REPL
 
-To start the interactive REPL, simply run:
+Start the interactive REPL:
 
 ```bash
 cargo run
+```
+
+## Quick Example
+
+```oxi
+struct Person {
+    name <str>
+    age <int>
+}
+
+Person contains {
+    fun greet() { "Hello, " + name }
+    fun is_adult() { age >= 18 }
+}
+
+p := Person("Alice", 30)
+println(p.greet())
+println(p.is_adult())
+
+pattern is_even(n) when n % 2 == 0
+
+each i in range(6) {
+    choose i {
+        is_even -> println(i, "is even"),
+        else -> println(i, "is odd")
+    }
+}
+
+status := option {
+    p.is_adult() -> "adult",
+    "minor"
+}
+println(p.name, "is an", status)
 ```
 
 ## Documentation
 
 For detailed information, see the [docs](docs/) directory:
 
-- [Syntax Overview](docs/syntax.md)
-- [Type System](docs/type_system.md)
-- [Structs](docs/structs.md)
-- [Built-in Functions](docs/builtins.md)
-- [Getting Started Guide](docs/getting_started.md)
+| Guide | Description |
+|-------|-------------|
+| [Getting Started](docs/getting_started.md) | Installation, first program, REPL usage |
+| [Syntax Quick Reference](docs/syntax.md) | Concise syntax overview with links |
+| [Variables and Assignments](docs/variables.md) | Declaration forms, mutability, reassignment |
+| [Data Types](docs/data_types.md) | All supported types and their operations |
+| [Operators](docs/operators.md) | Arithmetic, comparison, logical, and postfix operators |
+| [Control Flow](docs/control_flow.md) | Conditionals, loops, guards, and block styles |
+| [Functions](docs/functions.md) | Named/anonymous functions, closures, typed parameters |
+| [Pattern Matching](docs/pattern_matching.md) | Patterns, choose expressions, inline patterns |
+| [Structs](docs/structs.md) | Fields, methods, inheritance, hidden fields |
+| [Type System](docs/type_system.md) | Type annotations, conversions, mutability control |
+| [Built-in Functions](docs/builtins.md) | Complete reference for all 22 built-ins |
 
 ## License
 

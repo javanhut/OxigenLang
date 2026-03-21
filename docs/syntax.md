@@ -1,303 +1,129 @@
-# OxigenLang Syntax Guide
+# OxigenLang Syntax Quick Reference
 
-OxigenLang provides a modern and flexible syntax for writing clean and expressive code.
+This is a concise reference for OxigenLang syntax. For detailed explanations, follow the links to the individual guides.
 
-## Variables and Assignments
-
-Variables are bound using the walrus operator `:=`:
+## Variables — [Full Guide](variables.md)
 
 ```oxi
-x := 10
-y := 5.5
-name := "OxigenLang"
-is_active := True
+x := 10                    # untyped, mutable
+x <int> = 10               # typed, immutable value
+x <int> := 10              # typed, mutable value
+x as <int>                 # typed, zero-value init
+x <int>                    # shorthand for above
 ```
 
-OxigenLang supports dynamic typing by default, meaning a variable's type can change at runtime. You can optionally add type annotations to lock a variable's type. See the [Type System](type_system.md) guide for full details.
+## Data Types — [Full Guide](data_types.md)
 
-### Typed Variables
+| Type    | Example                    | Type Keyword |
+|---------|----------------------------|--------------|
+| Integer | `42`, `-7`                 | `int`        |
+| Float   | `3.14`, `-0.5`             | `float`      |
+| String  | `"hello"`, `'world'`       | `str`        |
+| Char    | `` `a` ``, `` `Z` ``      | `char`       |
+| Boolean | `True`, `False`            | `bool`       |
+| Array   | `[1, 2, 3]`               | `array`      |
+| Tuple   | `(1, "hello", True)`       | `tuple`      |
+| Map     | `{"key": "value"}`         | `map`        |
+| Set     | `set(1, 2, 3)`             | `set`        |
+| Byte    | `byte(65)`                 | `byte`       |
+| Uint    | `uint(42)`                 | `uint`       |
+| None    | `None`                     | —            |
+
+## Operators — [Full Guide](operators.md)
 
 ```oxi
-x <int> = 10        # immutable value, locked type (strict — no conversion)
-y <int> := 3.9      # mutable value, locked type (walrus — converts to 3)
-z as <float>        # mutable value, locked type (zero value: 0.0)
-z <float>           # shorthand for above
-x = 20              # reassignment (typed variables only)
-p <Person> := Person("Alice", 30)   # struct names work as type annotations
-p <Person>          # zero-value struct instance
+x + y    x - y    x * y    x / y    x % y       # arithmetic
+x == y   x != y   x < y    x > y    x <= y  x >= y  # comparison
+!x       not x    -x                             # prefix
+x++      x--                                     # postfix
+arr[0]   arr[1:3]   obj.field                    # access
 ```
 
-## Data Types
-
-- **Integer**: `42`, `-7`
-- **Float**: `3.14`, `-0.5`
-- **String**: `"hello"`, `'world'`
-- **Character**: `` `a` ``, `` `Z` `` (enclosed in backticks)
-- **Boolean**: `True`, `False`
-- **Array**: `[1, 2, 3]`, `["apple", "banana"]`
-- **Byte**: `byte(65)` — unsigned 8-bit integer (0-255)
-- **Uint**: `uint(42)` — unsigned 64-bit integer
-- **Tuple**: `(1, "hello", True)` — fixed-size, immutable ordered collection
-- **Map**: `{"key": "value", 1: True}` — key-value pairs
-- **Set**: `set(1, 2, 3)` — unique unordered collection
-- **None**: Represents the absence of a value.
-
-## Control Flow
-
-### `option` — Conditional Expressions
-
-`option` is a multi-arm conditional expression:
+## Control Flow — [Full Guide](control_flow.md)
 
 ```oxi
-# Simple two-arm
-option {
-    age >= 18 -> "adult",
-    "minor"
-}
-
-# Multi-arm
-ticket := option {
-    age < 5  -> 0,
-    age < 12 -> 5,
-    age < 65 -> 15,
-    10
-}
-
-# Block bodies (for multi-statement arms)
-option {
-    x > 100 -> {
-        log("large value")
-        process(x)
-    },
-    {
-        log("normal value")
-        x
-    }
-}
-
-# Ternary form (shorthand for single condition)
-print_str := option { num > 5, "greater than 5", "less than 5" }
-
-# No default — returns None when nothing matches
-option { x == 1 -> "one" }
+option { cond -> value, default }                # conditional expression
+option { cond, true_val, false_val }             # ternary shorthand
+unless condition { body }                        # inverse conditional
+println("hi") when condition                     # postfix when guard
+println("hi") unless condition                   # postfix unless guard
+each item in collection { body }                 # iteration
+repeat when condition { body }                   # while loop
+skip                                             # continue
+stop                                             # break
 ```
 
-### `unless` — Inverse Conditional
-
-Runs a block only when the condition is **false**. No `else` branch allowed:
+## Functions — [Full Guide](functions.md)
 
 ```oxi
-unless logged_in {
-    redirect("/login")
-}
+fun name(a, b) { a + b }                        # named function
+f := fun(x) { x * 2 }                           # anonymous function
+fun add(a <int>, b <int>) { a + b }             # typed parameters
+give value                                       # return
+give value when condition                        # conditional return
+```
 
-unless valid {
-    give error("bad input")
+## Pattern Matching — [Full Guide](pattern_matching.md)
+
+```oxi
+pattern is_even(n) when n % 2 == 0              # define pattern
+
+choose val {                                      # match against patterns
+    is_even -> println("even"),
+    pattern is_odd(n) when n % 2 != 0 -> println("odd"),
+    else -> println("fallback")
 }
 ```
 
-### Postfix Guards
-
-Append `when` or `unless` after a statement for inline conditional execution:
+## Structs — [Full Guide](structs.md)
 
 ```oxi
-print("welcome") when logged_in
-give x when x > 0
-skip when i % 2 == 0
-stop when count >= limit
-print("error") unless valid
-x = cached when cache_hit
-```
+struct Person { name <str>  age <int> }          # definition
+p := Person("Alice", 30)                         # positional
+p := Person { name: "Alice", age: 30 }           # named
+p.name                                           # field access
+p.age = 31                                       # field mutation
 
-Postfix guards work on: expression statements, `give`, `skip`, `stop`, `=` (assign), and `.field =` (dot-assign).
-They do NOT work on: declarations (`:=`), loops, or blocks.
-
-### Loops
-
-#### `each` Loop
-
-Iterate over arrays or strings:
-
-```oxi
-each item in [1, 2, 3] {
-    print(item)
-}
-```
-
-#### `repeat` Loop
-
-Equivalent to a `while` loop:
-
-```oxi
-i := 0
-repeat when i < 5 {
-    print(i)
-    i++
-}
-```
-
-#### Loop Control
-
-- `skip`: Skips the rest of the current iteration (like `continue`).
-- `stop`: Terminates the loop (like `break`).
-
-## Indexing and Slicing
-
-### Indexing
-
-Access elements by position using `[index]`:
-
-```oxi
-arr := [10, 20, 30]
-arr[0]           # 10
-"hello"[1]       # "e"
-(1, 2, 3)[2]     # 3
-{"a": 1}["a"]    # 1
-```
-
-### Slicing
-
-Extract a sub-range using `[start:end]`. Works on arrays, strings, and tuples:
-
-```oxi
-arr := [10, 20, 30, 40, 50]
-arr[1:3]         # [20, 30]
-arr[2:]          # [30, 40, 50]
-arr[:2]          # [10, 20]
-arr[:]           # [10, 20, 30, 40, 50] (full copy)
-
-"hello world"[0:5]   # "hello"
-(1, 2, 3, 4)[1:3]   # (2, 3)
-```
-
-Start and end can be any expression. Out-of-bounds values are clamped silently.
-
-## Patterns and Choose
-
-OxigenLang features a powerful pattern-matching system using the `pattern` and `choose` keywords.
-
-### Defining Patterns
-
-Patterns can be defined as top-level statements and referenced by name in `choose` blocks:
-
-```oxi
-pattern is_even(n) when n % 2 == 0
-pattern is_large(n) when n > 100
-```
-
-### Choosing Based on Patterns
-
-```oxi
-val := 42
-choose val {
-    is_even -> print("Even"),
-    is_large -> print("Large"),
-    else -> print("Neither")
-}
-```
-
-### Inline Patterns
-
-Patterns can also be defined inline directly within `choose` arms:
-
-```oxi
-val := 42
-choose val {
-    pattern is_even(n) when n % 2 == 0 -> print("Even"),
-    pattern is_large(n) when n > 100 -> print("Large"),
-    else -> print("Neither")
-}
-```
-
-You can mix pre-defined and inline patterns in the same `choose` block:
-
-```oxi
-pattern is_even(n) when n % 2 == 0
-
-val := 42
-choose val {
-    is_even -> print("Even"),
-    pattern is_large(n) when n > 100 -> print("Large"),
-    else -> print("Neither")
-}
-```
-
-## Structs
-
-OxigenLang supports structs for grouping data with typed fields, inheritance, and methods.
-
-### Defining and Using Structs
-
-```oxi
-struct Person {
-    name <str>
-    age <int>
-}
-
-# Positional instantiation
-p := Person("Alice", 30)
-
-# Named instantiation
-p := Person { name: "Alice", age: 30 }
-
-# Field access and mutation
-println(p.name)    # Alice
-p.age = 31
-```
-
-### Methods
-
-Attach methods using `contains`. Fields are accessible by name inside methods (implicit self):
-
-```oxi
-Person contains {
+Person contains {                                # methods
     fun greet() { "Hello, " + name }
 }
 
-p := Person("Alice", 30)
-println(p.greet())   # Hello, Alice
+struct Student(Person) { school <str> }          # inheritance
 ```
 
-### Inheritance
-
-A child struct inherits all parent fields and methods:
+## Type System — [Full Guide](type_system.md)
 
 ```oxi
-struct American(Person) {
-    nationality <str>
-}
-
-a := American("John", 25, "USA")
-println(a.greet())   # Hello, John — inherited from Person
+x <int> = 10               # strict (immutable, no conversion)
+x <int> := 3.9             # walrus (mutable, converts to 3)
+x as <int>                 # as-declare (zero value)
+type(x)                    # type introspection
+is_mut(x)                  # value mutability check
+is_type_mut(x)             # type mutability check
 ```
-
-For full details, see the [Structs](structs.md) guide.
 
 ## Block Styles
 
-OxigenLang supports two different ways to define blocks:
-
-### Brace-based Blocks (Default)
-
 ```oxi
-each num in range(10) {
-    option {
-        num % 2 == 0 -> println("even"),
-        println("odd")
-    }
+each i in [1, 2, 3] {      # brace-based (default)
+    println(i)
 }
 ```
 
-### Indentation-based Blocks (Python-style)
-
-Enable indentation mode by adding the `#[indent]` directive at the top of your file:
-
 ```oxi
-#[indent]
-each num in range(10):
-    option:
-        num % 2 == 0 -> println("even"),
-        println("odd")
+#[indent]                   # indentation-based
+each i in [1, 2, 3]:
+    println(i)
 ```
 
-In indentation mode, a colon `:` at the end of a line starts a new block, and subsequent lines must be indented. Returning to a previous indentation level closes the block.
+## Built-in Functions — [Full Guide](builtins.md)
+
+| Category     | Functions                                          |
+|--------------|----------------------------------------------------|
+| I/O          | `print`, `println`                                 |
+| Collections  | `len`, `push`, `first`, `last`, `rest`, `has`      |
+| Iteration    | `range`                                            |
+| Conversion   | `ord`, `chr`, `str`, `chars`                       |
+| Constructors | `byte`, `uint`, `set`, `tuple`                     |
+| Map          | `keys`, `values`, `insert`, `remove`               |
+| Introspection| `type`, `is_mut`, `is_type_mut`                    |
