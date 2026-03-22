@@ -277,4 +277,14 @@ pub enum Expression {
         arms: Vec<OptionArm>,
         default: Option<Vec<Statement>>,
     },
+    StringInterp {
+        token: Token,
+        parts: Vec<StringInterpPart>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StringInterpPart {
+    Literal(String),
+    Expr(Expression),
 }

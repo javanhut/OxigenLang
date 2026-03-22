@@ -1,0 +1,14 @@
+x := 10
+y := "14"
+
+option {
+  (is_type(x, int) and is_type(y, int)) -> {
+    println("Both {x} and {y} are of type int")
+  },
+  {
+    println("x is not type int") unless is_type(x, int)
+    println("y is not type int") unless is_type(y, int)
+  }
+}
+
+

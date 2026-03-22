@@ -359,16 +359,143 @@ impl Lexer {
 
     fn read_string(&mut self, delimiter: char) -> Token {
         self.read_char(); // opening quote
-        let start = self.position;
+
+        // Check if this string contains interpolation
+        let has_interp = self.string_has_interpolation(delimiter);
+
+        if !has_interp {
+            // Simple string, no interpolation
+            let start = self.position;
+            while self.ch != delimiter && self.ch != '\0' {
+                self.read_char();
+            }
+            let literal: String = self.input[start..self.position].iter().collect();
+            self.read_char(); // closing quote
+            return Token {
+                token_type: TokenType::String,
+                literal,
+            };
+        }
+
+        // String has interpolation — emit InterpStart, then queue all parts
+        // Collect literal parts and expression tokens
+        let mut literal_buf = std::string::String::new();
+
         while self.ch != delimiter && self.ch != '\0' {
-            self.read_char();
+            if self.ch == '{' {
+                // Emit any accumulated literal as a String token
+                if !literal_buf.is_empty() {
+                    self.pending_tokens.push_back(Token {
+                        token_type: TokenType::String,
+                        literal: literal_buf.clone(),
+                    });
+                    literal_buf.clear();
+                }
+
+                // Emit InterpExprStart
+                self.pending_tokens.push_back(Token {
+                    token_type: TokenType::InterpExprStart,
+                    literal: "{".into(),
+                });
+
+                self.read_char(); // skip '{'
+
+                // Lex tokens inside {} using a brace depth counter
+                let mut brace_depth = 1;
+                while brace_depth > 0 && self.ch != '\0' {
+                    if self.ch == '{' {
+                        brace_depth += 1;
+                    } else if self.ch == '}' {
+                        brace_depth -= 1;
+                        if brace_depth == 0 {
+                            break;
+                        }
+                    }
+
+                    // Skip whitespace inside interpolation
+                    self.skip_whitespace_except_newline();
+                    if self.ch == '}' {
+                        continue;
+                    }
+
+                    // Lex one token from inside the interpolation
+                    let inner_tok = match self.ch {
+                        c if c.is_ascii_digit() => self.read_number(),
+                        c if is_ident_start(c) => self.read_ident(),
+                        '"' => self.read_string('"'),
+                        '\'' => self.read_string('\''),
+                        '(' => self.single(TokenType::LParen),
+                        ')' => self.single(TokenType::RParen),
+                        ',' => self.single(TokenType::Comma),
+                        '+' => self.single(TokenType::Plus),
+                        '-' => self.single(TokenType::Minus),
+                        '*' => self.single(TokenType::Asterisk),
+                        '/' => self.single(TokenType::FSlash),
+                        '.' => self.single(TokenType::FullStop),
+                        '[' => self.single(TokenType::LBracket),
+                        ']' => self.single(TokenType::RBracket),
+                        _ => {
+                            let lit = self.ch.to_string();
+                            self.read_char();
+                            Token {
+                                token_type: TokenType::Illegal,
+                                literal: lit,
+                            }
+                        }
+                    };
+                    self.pending_tokens.push_back(inner_tok);
+                }
+
+                // Emit InterpExprEnd
+                self.pending_tokens.push_back(Token {
+                    token_type: TokenType::InterpExprEnd,
+                    literal: "}".into(),
+                });
+
+                self.read_char(); // skip closing '}'
+            } else {
+                literal_buf.push(self.ch);
+                self.read_char();
+            }
         }
-        let literal: String = self.input[start..self.position].iter().collect();
+
+        // Emit any trailing literal
+        if !literal_buf.is_empty() {
+            self.pending_tokens.push_back(Token {
+                token_type: TokenType::String,
+                literal: literal_buf,
+            });
+        }
+
+        // Emit InterpEnd
+        self.pending_tokens.push_back(Token {
+            token_type: TokenType::InterpEnd,
+            literal: "".into(),
+        });
+
         self.read_char(); // closing quote
+
+        // Return InterpStart as the first token
         Token {
-            token_type: TokenType::String,
-            literal,
+            token_type: TokenType::InterpStart,
+            literal: "".into(),
         }
+    }
+
+    /// Look ahead to check if a string contains `{` before its closing delimiter
+    fn string_has_interpolation(&self, delimiter: char) -> bool {
+        let mut pos = self.position;
+        while pos < self.input.len() {
+            let c = self.input[pos];
+            if c == delimiter || c == '\0' {
+                return false;
+            }
+            if c == '{' {
+                return true;
+            }
+            pos += 1;
+        }
+        false
     }
 
     fn read_char_literal(&mut self) -> Token {

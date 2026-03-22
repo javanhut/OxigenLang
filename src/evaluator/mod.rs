@@ -1,6 +1,6 @@
 pub mod builtins;
 
-use crate::ast::{Expression, Identifier, Program, Statement, TypeAnnotation};
+use crate::ast::{Expression, Identifier, Program, Statement, StringInterpPart, TypeAnnotation};
 use crate::object::environment::{Environment, PatternRegistry};
 use crate::object::Object;
 use builtins::get_builtins;
@@ -591,6 +591,22 @@ impl Evaluator {
             Expression::Float { value, .. } => Rc::new(Object::Float(*value)),
             Expression::Char { value, .. } => Rc::new(Object::Char(*value)),
             Expression::Str { value, .. } => Rc::new(Object::String(value.clone())),
+            Expression::StringInterp { parts, .. } => {
+                let mut result = std::string::String::new();
+                for part in parts {
+                    match part {
+                        StringInterpPart::Literal(s) => result.push_str(s),
+                        StringInterpPart::Expr(expr) => {
+                            let val = self.eval_expression(expr, Rc::clone(&env));
+                            if val.is_error() {
+                                return val;
+                            }
+                            result.push_str(&val.to_string());
+                        }
+                    }
+                }
+                Rc::new(Object::String(result))
+            }
             Expression::Boolean { value, .. } => Rc::new(Object::Boolean(*value)),
             Expression::NoneExpr { .. } => Rc::new(Object::None),
 
@@ -692,6 +708,9 @@ impl Evaluator {
                 if let Expression::Ident(ident) = function.as_ref() {
                     if ident.value == "is_mut" {
                         return self.eval_is_mut(args, env);
+                    }
+                    if ident.value == "is_type" {
+                        return self.eval_is_type(args, env);
                     }
                     if ident.value == "is_type_mut" {
                         return self.eval_is_type_mut(args, env);
@@ -1688,6 +1707,50 @@ impl Evaluator {
         }
 
         Rc::new(Object::None)
+    }
+
+    fn eval_is_type(&mut self, args: &[Expression], env: Rc<RefCell<Environment>>) -> Rc<Object> {
+        if args.len() != 2 {
+            return Rc::new(Object::Error(format!(
+                "wrong number of arguments. got={}, want=2",
+                args.len()
+            )));
+        }
+
+        let val = self.eval_expression(&args[0], Rc::clone(&env));
+        if val.is_error() {
+            return val;
+        }
+
+        // Second argument should be a type name identifier (e.g., int, str, float)
+        let type_name = match &args[1] {
+            Expression::Ident(ident) => ident.value.as_str(),
+            _ => {
+                return Rc::new(Object::Error(
+                    "second argument to `is_type` must be a type name".to_string(),
+                ));
+            }
+        };
+
+        let matches = match (val.as_ref(), type_name) {
+            (Object::Integer(_), "int") => true,
+            (Object::Float(_), "float") => true,
+            (Object::String(_), "str") => true,
+            (Object::Char(_), "char") => true,
+            (Object::Boolean(_), "bool") => true,
+            (Object::Array(_), "array") => true,
+            (Object::Byte(_), "byte") => true,
+            (Object::Uint(_), "uint") => true,
+            (Object::Tuple(_), "tuple") => true,
+            (Object::Map(_), "map") => true,
+            (Object::Set(_), "set") => true,
+            (Object::None, "None") => true,
+            (Object::Function { .. }, "fun") => true,
+            (Object::StructInstance { struct_name: stn, .. }, name) => stn == name,
+            _ => false,
+        };
+
+        Rc::new(Object::Boolean(matches))
     }
 
     fn eval_is_type_mut(&self, args: &[Expression], env: Rc<RefCell<Environment>>) -> Rc<Object> {
@@ -4445,5 +4508,63 @@ mod tests {
         "#;
         let result = test_eval(input);
         test_string(&result, "Virginia");
+    }
+
+    #[test]
+    fn test_string_interpolation_variable() {
+        let input = r#"
+            name := "world"
+            "hello {name}"
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "hello world");
+    }
+
+    #[test]
+    fn test_string_interpolation_expression() {
+        let input = r#"
+            x := 5
+            "x is {x + 1}"
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "x is 6");
+    }
+
+    #[test]
+    fn test_string_interpolation_function_call() {
+        let input = r#"
+            x := 42
+            "the answer is {str(x)}"
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "the answer is 42");
+    }
+
+    #[test]
+    fn test_string_interpolation_multiple() {
+        let input = r#"
+            a := "hello"
+            b := "world"
+            "{a} {b}!"
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "hello world!");
+    }
+
+    #[test]
+    fn test_string_no_interpolation() {
+        let result = test_eval("\"hello world\"");
+        test_string(&result, "hello world");
+    }
+
+    #[test]
+    fn test_string_interpolation_integer() {
+        let input = r#"
+            x := 10
+            y := 14
+            "Both {x} and {y} are of type int"
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "Both 10 and 14 are of type int");
     }
 }

@@ -336,6 +336,43 @@ m <Math> = Math { num_one: 10, num_two: 20 }
 is_mut(m.num_one)
 ```
 
+### `is_type(value, type_name)`
+
+Returns `True` if the value matches the given type, `False` otherwise. The second argument is a type keyword — not a string.
+
+```oxi
+is_type(42, int)
+is_type("hello", str)
+is_type(3.14, float)
+is_type(`a`, char)
+is_type(True, bool)
+is_type([1, 2], array)
+is_type(byte(65), byte)
+is_type(uint(42), uint)
+is_type((1, 2), tuple)
+is_type({"a": 1}, map)
+is_type(set(1), set)
+is_type(None, None)
+```
+
+For struct instances, use the struct name as the type keyword:
+
+```oxi
+struct Dog { name <str> }
+d := Dog("Rex")
+is_type(d, Dog)
+```
+
+Works well with logical operators for multi-type checks:
+
+```oxi
+x := 10
+y := 14
+is_type(x, int) and is_type(y, int)
+```
+
+**Supported type keywords:** `int`, `str`, `float`, `char`, `bool`, `array`, `byte`, `uint`, `tuple`, `map`, `set`, `fun`, `None`, or any struct name.
+
 ### `is_type_mut(variable)`
 
 Returns `True` if the variable's **type** can change (no type constraint), `False` if the type is locked. The argument must be a variable name.
@@ -380,6 +417,7 @@ is_type_mut(m.num_one)
 | `insert`    | `(map, key, value)`    | `Map`        | New map with entry added/updated      |
 | `remove`    | `(map\|set, key\|val)` | `Map`/`Set`  | New collection without entry          |
 | `type`      | `(value)`              | `String`     | Type name (struct name for instances) |
+| `is_type`   | `(value, type_name)`   | `Boolean`    | Runtime type check                    |
 | `is_mut`    | `(variable)`           | `Boolean`    | Value mutability check                |
 | `is_type_mut`| `(variable)`          | `Boolean`    | Type mutability check                 |
 

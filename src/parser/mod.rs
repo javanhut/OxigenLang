@@ -1,4 +1,4 @@
-use crate::ast::{ChooseArm, Expression, Identifier, OptionArm, Program, Statement, TypeAnnotation, TypedParam};
+use crate::ast::{ChooseArm, Expression, Identifier, OptionArm, Program, Statement, StringInterpPart, TypeAnnotation, TypedParam};
 use crate::lexer::Lexer;
 use crate::token::{Token, TokenType};
 use std::collections::HashMap;
@@ -86,6 +86,7 @@ impl Parser {
         p.register_prefix(TokenType::LBrace, Parser::parse_map_literal);
         p.register_prefix(TokenType::OptionKw, Parser::parse_option_expression);
         p.register_prefix(TokenType::SelfKw, Parser::parse_self_expression);
+        p.register_prefix(TokenType::InterpStart, Parser::parse_string_interp);
 
         // Infix Parse Functions
         for tt in [TokenType::Plus, TokenType::Minus] {
@@ -461,6 +462,50 @@ impl Parser {
             token: tok.clone(),
             value: tok.literal,
         })
+    }
+
+    fn parse_string_interp(&mut self) -> Option<Expression> {
+        let token = self.curr_token.clone();
+        let mut parts: Vec<StringInterpPart> = Vec::new();
+
+        // curr_token is InterpStart, advance past it
+        self.next_token();
+
+        loop {
+            match self.curr_token.token_type {
+                TokenType::InterpEnd => break,
+                TokenType::String => {
+                    parts.push(StringInterpPart::Literal(self.curr_token.literal.clone()));
+                    self.next_token();
+                }
+                TokenType::InterpExprStart => {
+                    // Advance past InterpExprStart
+                    self.next_token();
+                    // Parse the expression inside {}
+                    if let Some(expr) = self.parse_expression(Precedence::Lowest) {
+                        parts.push(StringInterpPart::Expr(expr));
+                    }
+                    // After parse_expression, curr is last expr token, peek should be InterpExprEnd
+                    if self.peek_token.token_type == TokenType::InterpExprEnd {
+                        self.next_token(); // move to InterpExprEnd
+                    }
+                    self.next_token(); // move past InterpExprEnd
+                }
+                TokenType::Eof => {
+                    self.errors.push("unterminated string interpolation".to_string());
+                    break;
+                }
+                _ => {
+                    self.errors.push(format!(
+                        "unexpected token in string interpolation: {:?}",
+                        self.curr_token
+                    ));
+                    self.next_token();
+                }
+            }
+        }
+
+        Some(Expression::StringInterp { token, parts })
     }
 
     fn parse_char(&mut self) -> Option<Expression> {
@@ -2394,6 +2439,60 @@ mod tests {
                 }
             }
             other => panic!("Expected Let, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_string_interpolation() {
+        let program = parse_ok("\"hello {name}\"");
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::Expr(Expression::StringInterp { parts, .. }) => {
+                assert_eq!(parts.len(), 2);
+                match &parts[0] {
+                    StringInterpPart::Literal(s) => assert_eq!(s, "hello "),
+                    _ => panic!("Expected literal part"),
+                }
+                match &parts[1] {
+                    StringInterpPart::Expr(Expression::Ident(ident)) => {
+                        assert_eq!(ident.value, "name");
+                    }
+                    _ => panic!("Expected ident expr part"),
+                }
+            }
+            _ => panic!("Expected StringInterp expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_string_interpolation_with_function_call() {
+        let program = parse_ok("\"result: {str(x)}\"");
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::Expr(Expression::StringInterp { parts, .. }) => {
+                assert_eq!(parts.len(), 2);
+                match &parts[0] {
+                    StringInterpPart::Literal(s) => assert_eq!(s, "result: "),
+                    _ => panic!("Expected literal part"),
+                }
+                match &parts[1] {
+                    StringInterpPart::Expr(Expression::Call { .. }) => {}
+                    other => panic!("Expected call expr part, got {:?}", other),
+                }
+            }
+            _ => panic!("Expected StringInterp expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_string_no_interpolation() {
+        // No braces means plain string, not interpolation
+        let program = parse_ok("\"hello world\"");
+        match &program.statements[0] {
+            Statement::Expr(Expression::Str { value, .. }) => {
+                assert_eq!(value, "hello world");
+            }
+            _ => panic!("Expected plain Str expression"),
         }
     }
 }

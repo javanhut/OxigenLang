@@ -48,6 +48,31 @@ Type keyword: `str`. Zero value: `""` (empty string).
   full := "hello" + " " + "world"
   ```
 
+- **String Interpolation**: Use `{}` inside any string to embed expressions. The expression is evaluated and its result is converted to a string automatically:
+
+  ```oxi
+  name := "world"
+  println("hello {name}")
+
+  x := 10
+  y := 20
+  println("{x} + {y} = {x + y}")
+  ```
+
+  Interpolation works with variables, function calls, arithmetic, and any valid expression:
+
+  ```oxi
+  age := 25
+  println("Next year you will be {age + 1}")
+
+  items := [1, 2, 3]
+  println("There are {len(items)} items")
+
+  println("Type: {type(42)}")
+  ```
+
+  Strings without `{}` remain plain strings — no special syntax is needed to opt out. Both double-quoted and single-quoted strings support interpolation.
+
 - **Indexing**: Access individual characters by position (returns a string):
 
   ```oxi
@@ -350,6 +375,14 @@ For struct instances, `type()` returns the struct name instead of a generic type
 struct Person { name <str> }
 p := Person("Alice")
 type(p)
+```
+
+Use `is_type()` to check a value's type directly against a type keyword:
+
+```oxi
+is_type(42, int)
+is_type("hello", str)
+is_type(3.14, float)
 ```
 
 See also:

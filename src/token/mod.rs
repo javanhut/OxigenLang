@@ -81,6 +81,12 @@ pub enum TokenType {
     SelfKw,
     And,
     Or,
+
+    // String interpolation
+    InterpStart,  // marks beginning of an interpolated string
+    InterpEnd,    // marks end of an interpolated string
+    InterpExprStart, // marks start of an interpolation expression {
+    InterpExprEnd,   // marks end of an interpolation expression }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
