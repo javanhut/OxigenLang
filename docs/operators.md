@@ -216,6 +216,41 @@ x != 0 and (100 / x > 10)
 cached or expensive_check()
 ```
 
+### Distributed Comparison
+
+When you parenthesize an `or` or `and` group on one side of a comparison, the comparison is distributed to each element. This lets you write natural multi-value checks without repeating the operator:
+
+```oxi
+x := 5
+y := 10
+
+// (x or y) == 10  →  x == 10 or y == 10  →  True
+(x or y) == 10
+
+// (x and y) > 3  →  x > 3 and y > 3  →  True
+(x and y) > 3
+```
+
+This works with all comparison operators (`==`, `!=`, `<`, `>`, `<=`, `>=`) and with chained values:
+
+```oxi
+// any of the three equal 42?
+(a or b or c) == 42
+
+// all of them greater than 0?
+(a and b and c) > 0
+
+// value on either side
+5 == (x or y)
+```
+
+Without parentheses, `x or y == 10` uses normal precedence — `==` binds tighter, so it means `x or (y == 10)` and `x` is evaluated for truthiness:
+
+```oxi
+x or y == 10       // normal: truthy(x) or (y == 10)
+(x or y) == 10     // distributed: x == 10 or y == 10
+```
+
 ## Unary Operators
 
 ### Unary Minus `-`

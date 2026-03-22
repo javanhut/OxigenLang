@@ -35,6 +35,7 @@ x <int>                    // shorthand for above
 x + y    x - y    x * y    x / y    x % y       // arithmetic
 x == y   x != y   x < y    x > y    x <= y  x >= y  // comparison
 x and y  x or y                                  // logical
+(x or y) == val                                  // distributed comparison
 !x       not x    -x                             // prefix
 x++      x--                                     // postfix
 arr[0]   arr[1:3]   obj.field                    // access

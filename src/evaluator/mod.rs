@@ -14,6 +14,14 @@ pub struct Evaluator {
     struct_defs: HashMap<String, Rc<Object>>,
 }
 
+/// Unwraps nested `Grouped(...)` wrappers to get the inner expression.
+fn unwrap_grouped(expr: &Expression) -> &Expression {
+    match expr {
+        Expression::Grouped(inner) => unwrap_grouped(inner),
+        other => other,
+    }
+}
+
 /// Checks if `actual_type` satisfies the type constraint `expected`.
 /// Handles GENERIC (accepts anything) and union types like "INTEGER || STRING".
 fn type_matches(expected: &str, actual: &str) -> bool {
@@ -612,6 +620,28 @@ impl Evaluator {
                 right,
                 ..
             } => {
+                // Distributed comparison: (a or b) == c  →  a == c or b == c
+                if matches!(operator.as_str(), "==" | "!=" | "<" | ">" | "<=" | ">=") {
+                    let left_inner = unwrap_grouped(left);
+                    let right_inner = unwrap_grouped(right);
+                    let left_is_logical = matches!(left_inner,
+                        Expression::Infix { operator: op, .. } if op == "or" || op == "and"
+                    );
+                    let right_is_logical = matches!(right_inner,
+                        Expression::Infix { operator: op, .. } if op == "or" || op == "and"
+                    );
+                    if left_is_logical && !right_is_logical {
+                        let cmp_val = self.eval_expression(right, Rc::clone(&env));
+                        if cmp_val.is_error() { return cmp_val; }
+                        return self.distribute_comparison(operator, left_inner, &cmp_val, true, &env);
+                    }
+                    if right_is_logical && !left_is_logical {
+                        let cmp_val = self.eval_expression(left, Rc::clone(&env));
+                        if cmp_val.is_error() { return cmp_val; }
+                        return self.distribute_comparison(operator, right_inner, &cmp_val, false, &env);
+                    }
+                }
+
                 // Short-circuit for logical operators
                 if operator == "and" {
                     let left_val = self.eval_expression(left, Rc::clone(&env));
@@ -964,6 +994,49 @@ impl Evaluator {
                 "unknown operator: -{}",
                 right.type_name()
             ))),
+        }
+    }
+
+    /// Distributes a comparison across an `or`/`and` group.
+    /// `(a or b) == val`  →  `(a == val) or (b == val)`
+    /// `(a and b) > val`  →  `(a > val) and (b > val)`
+    fn distribute_comparison(
+        &mut self,
+        cmp_op: &str,
+        expr: &Expression,
+        cmp_value: &Rc<Object>,
+        value_on_right: bool,
+        env: &Rc<RefCell<Environment>>,
+    ) -> Rc<Object> {
+        if let Expression::Infix { operator, left, right, .. } = expr {
+            if operator == "or" {
+                let left_result = self.distribute_comparison(cmp_op, left, cmp_value, value_on_right, env);
+                if left_result.is_error() { return left_result; }
+                if left_result.is_truthy() {
+                    return Rc::new(Object::Boolean(true));
+                }
+                let right_result = self.distribute_comparison(cmp_op, right, cmp_value, value_on_right, env);
+                if right_result.is_error() { return right_result; }
+                return Rc::new(Object::Boolean(right_result.is_truthy()));
+            }
+            if operator == "and" {
+                let left_result = self.distribute_comparison(cmp_op, left, cmp_value, value_on_right, env);
+                if left_result.is_error() { return left_result; }
+                if !left_result.is_truthy() {
+                    return Rc::new(Object::Boolean(false));
+                }
+                let right_result = self.distribute_comparison(cmp_op, right, cmp_value, value_on_right, env);
+                if right_result.is_error() { return right_result; }
+                return Rc::new(Object::Boolean(right_result.is_truthy()));
+            }
+        }
+        // Leaf: evaluate the expression and apply the comparison
+        let val = self.eval_expression(expr, Rc::clone(env));
+        if val.is_error() { return val; }
+        if value_on_right {
+            self.eval_infix_expression(cmp_op, val, Rc::clone(cmp_value))
+        } else {
+            self.eval_infix_expression(cmp_op, Rc::clone(cmp_value), val)
         }
     }
 
