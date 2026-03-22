@@ -1,0 +1,50 @@
+// Execute a shell command. Returns a map with "stdout", "stderr", and "code".
+exec := fun(cmd) { __exec(cmd) }
+
+// Get the operating system name (e.g. "linux", "macos", "windows")
+name := fun() { __os_name() }
+
+// Get the CPU architecture (e.g. "x86_64", "aarch64")
+arch := fun() { __os_arch() }
+
+// Get an environment variable. Returns None if not set.
+env_get := fun(key) { __env_get(key) }
+
+// Set an environment variable.
+env_set := fun(key, val) { __env_set(key, val) }
+
+// Get all environment variables as a map.
+env_vars := fun() { __env_vars() }
+
+// Get the current working directory.
+cwd := fun() { __cwd() }
+
+// Change the current working directory.
+chdir := fun(path) { __chdir(path) }
+
+// List entries in a directory (non-recursive). Returns array of paths.
+list_dir := fun(path) { __list_dir(path) }
+
+// Recursively walk a directory tree. Returns array of all paths.
+walk_dir := fun(path) { __walk_dir(path) }
+
+// Create a directory (and parents if needed).
+mkdir := fun(path) { __mkdir(path) }
+
+// Remove a directory and all its contents.
+rmdir := fun(path) { __rmdir(path) }
+
+// Remove a file.
+remove_file := fun(path) { __remove(path) }
+
+// Check if a path is a directory.
+is_dir := fun(path) { __is_dir(path) }
+
+// Check if a path is a file.
+is_file := fun(path) { __is_file(path) }
+
+// Exit the process with an optional exit code (default 0).
+exit := fun(code) { __exit(code) }
+
+// Get the current process ID.
+pid := fun() { __pid() }

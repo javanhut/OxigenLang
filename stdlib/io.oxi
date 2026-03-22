@@ -1,0 +1,4 @@
+read_file := fun(path) { __read_file(path) }
+write_file := fun(path, content) { __write_file(path, content) }
+append_file := fun(path, content) { __append_file(path, content) }
+file_exists := fun(path) { __file_exists(path) }

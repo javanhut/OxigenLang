@@ -90,6 +90,11 @@ impl Environment {
 
         None
     }
+
+    #[allow(dead_code)]
+    pub fn get_all(&self) -> &HashMap<String, Rc<Object>> {
+        &self.store
+    }
 }
 
 impl Default for Environment {

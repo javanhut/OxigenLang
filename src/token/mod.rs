@@ -81,6 +81,8 @@ pub enum TokenType {
     SelfKw,
     And,
     Or,
+    Introduce,
+    From,
 
     // String interpolation
     InterpStart,  // marks beginning of an interpolated string
@@ -121,5 +123,8 @@ pub fn token_map() -> HashMap<&'static str, TokenType> {
         ("self", SelfKw),
         ("and", And),
         ("or", Or),
+        ("introduce", Introduce),
+        ("intro", Introduce),
+        ("from", From),
     ])
 }

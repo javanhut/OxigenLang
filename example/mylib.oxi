@@ -1,0 +1,9 @@
+greet := fun(name) {
+    "Hello, {name}!"
+}
+
+add := fun(a, b) {
+    a + b
+}
+
+PI := 3.14159

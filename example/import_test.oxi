@@ -1,0 +1,51 @@
+// Test stdlib namespace import
+introduce math
+println(math.sqrt(16))
+println(math.abs(-42))
+println(math.min(3, 7))
+println(math.max(3, 7))
+println(math.pow(2, 10))
+println(math.clamp(15, 0, 10))
+println(math.floor(3.7))
+println(math.ceil(3.2))
+println(math.round(3.5))
+println(math.sign(-99))
+
+// Test selective import
+introduce {upper, lower, trim} from strings
+println(upper("hello world"))
+println(lower("HELLO WORLD"))
+println(trim("  spaces  "))
+
+// Test array module
+introduce array
+result := array.map([1, 2, 3, 4], fun(x) { x * 2 })
+println(result)
+
+filtered := array.filter([1, 2, 3, 4, 5], fun(x) { x > 2 })
+println(filtered)
+
+sum := array.reduce([1, 2, 3, 4], 0, fun(acc, x) { acc + x })
+println(sum)
+
+reversed := array.reverse([1, 2, 3])
+println(reversed)
+
+sorted := array.sort([3, 1, 4, 1, 5])
+println(sorted)
+
+println(array.includes([1, 2, 3], 2))
+println(array.includes([1, 2, 3], 9))
+
+// Test intro alias
+intro {split, join} from strings
+parts := split("a,b,c", ",")
+println(parts)
+println(join(parts, " - "))
+
+// Test string functions
+introduce strings
+println(strings.starts_with("hello", "hel"))
+println(strings.ends_with("hello", "llo"))
+println(strings.contains_str("hello world", "world"))
+println(strings.replace("hello world", "world", "oxigen"))

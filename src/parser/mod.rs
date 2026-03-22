@@ -1,4 +1,4 @@
-use crate::ast::{ChooseArm, Expression, Identifier, OptionArm, Program, Statement, StringInterpPart, TypeAnnotation, TypedParam};
+use crate::ast::{ChooseArm, Expression, Identifier, ModulePath, OptionArm, Program, Statement, StringInterpPart, TypeAnnotation, TypedParam};
 use crate::lexer::Lexer;
 use crate::token::{Token, TokenType};
 use std::collections::HashMap;
@@ -237,6 +237,7 @@ impl Parser {
                 }
             }
             TokenType::Give => self.parse_give_statement(),
+            TokenType::Introduce => self.parse_introduce_statement(),
             _ => self.parse_expression_statement(),
         }
     }
@@ -730,6 +731,104 @@ impl Parser {
         self.next_token(); // move to expression
         let value = self.parse_expression(Precedence::Lowest)?;
         Some(Statement::Give { token, value })
+    }
+
+    fn parse_introduce_statement(&mut self) -> Option<Statement> {
+        let token = self.curr_token.clone(); // 'introduce' or 'intro'
+
+        if self.peek_token.token_type == TokenType::LBrace {
+            // Selective import: introduce {name1, name2} from module
+            self.next_token(); // consume '{'
+            let mut names = Vec::new();
+            // Parse comma-separated identifiers
+            if self.peek_token.token_type != TokenType::RBrace {
+                self.next_token(); // move to first name
+                names.push(Identifier {
+                    token: self.curr_token.clone(),
+                    value: self.curr_token.literal.clone(),
+                });
+                while self.peek_token.token_type == TokenType::Comma {
+                    self.next_token(); // consume ','
+                    self.next_token(); // move to next name
+                    names.push(Identifier {
+                        token: self.curr_token.clone(),
+                        value: self.curr_token.literal.clone(),
+                    });
+                }
+            }
+            self.expect_peek(TokenType::RBrace)?; // consume '}'
+            self.expect_peek(TokenType::From)?; // consume 'from'
+            let path = self.parse_module_path()?;
+            Some(Statement::Introduce {
+                token,
+                path,
+                selective: Some(names),
+            })
+        } else {
+            // Whole-module import: introduce math / introduce .utils
+            let path = self.parse_module_path()?;
+            Some(Statement::Introduce {
+                token,
+                path,
+                selective: None,
+            })
+        }
+    }
+
+    fn parse_module_path(&mut self) -> Option<ModulePath> {
+        let mut is_relative = false;
+        let mut parent_levels: usize = 0;
+        let mut segments = Vec::new();
+
+        // Count leading dots
+        if self.peek_token.token_type == TokenType::FullStop {
+            is_relative = true;
+            // Count dots: first dot means current dir (parent_levels=0)
+            // additional dots increment parent_levels
+            let mut dot_count = 0;
+            while self.peek_token.token_type == TokenType::FullStop {
+                self.next_token(); // consume '.'
+                dot_count += 1;
+                // Check if next is also a dot (consecutive dots)
+                // But we need to distinguish ".name" from "..name"
+                // After consuming a dot, if peek is Ident, we stop counting dots
+                if self.peek_token.token_type == TokenType::Ident {
+                    break;
+                }
+            }
+            if dot_count > 1 {
+                parent_levels = dot_count - 1;
+            }
+        }
+
+        // Now consume ident segments separated by dots
+        if self.peek_token.token_type == TokenType::Ident {
+            self.next_token(); // consume first ident
+            segments.push(self.curr_token.literal.clone());
+
+            while self.peek_token.token_type == TokenType::FullStop {
+                self.next_token(); // consume '.'
+                if self.peek_token.token_type == TokenType::Ident {
+                    self.next_token(); // consume next ident
+                    segments.push(self.curr_token.literal.clone());
+                } else {
+                    self.errors.push("expected identifier after '.' in module path".to_string());
+                    return None;
+                }
+            }
+        } else {
+            self.errors.push(format!(
+                "expected module name, got {:?}",
+                self.peek_token.token_type
+            ));
+            return None;
+        }
+
+        Some(ModulePath {
+            segments,
+            is_relative,
+            parent_levels,
+        })
     }
 
     // ---------------- Infix parsers ----------------

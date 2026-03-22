@@ -144,6 +144,18 @@ pub enum Statement {
         field: Identifier,
         value: Expression,
     },
+    Introduce {
+        token: Token,
+        path: ModulePath,
+        selective: Option<Vec<Identifier>>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModulePath {
+    pub segments: Vec<String>,
+    pub is_relative: bool,
+    pub parent_levels: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]

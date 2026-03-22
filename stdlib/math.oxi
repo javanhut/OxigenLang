@@ -1,0 +1,42 @@
+abs := fun(x) {
+    option { x >= 0 -> x, -x }
+}
+
+min := fun(a, b) {
+    option { a <= b -> a, b }
+}
+
+max := fun(a, b) {
+    option { a >= b -> a, b }
+}
+
+pow := fun(base, exp) {
+    result := 1
+    i := 0
+    repeat when i < exp {
+        result := result * base
+        i++
+    }
+    result
+}
+
+clamp := fun(x, lo, hi) {
+    option {
+        x < lo -> lo
+        x > hi -> hi
+        x
+    }
+}
+
+sign := fun(x) {
+    option {
+        x > 0 -> 1
+        x < 0 -> -1
+        0
+    }
+}
+
+sqrt := fun(x) { __sqrt(x) }
+floor := fun(x) { __floor(x) }
+ceil := fun(x) { __ceil(x) }
+round := fun(x) { __round(x) }

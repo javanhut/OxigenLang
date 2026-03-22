@@ -1,17 +1,24 @@
 pub mod builtins;
 
-use crate::ast::{Expression, Identifier, Program, Statement, StringInterpPart, TypeAnnotation};
+use crate::ast::{Expression, Identifier, ModulePath, Program, Statement, StringInterpPart, TypeAnnotation};
+use crate::lexer::Lexer;
 use crate::object::environment::{Environment, PatternRegistry};
 use crate::object::Object;
+use crate::parser::Parser;
 use builtins::get_builtins;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 pub struct Evaluator {
     builtins: HashMap<String, Rc<Object>>,
     patterns: PatternRegistry,
     struct_defs: HashMap<String, Rc<Object>>,
+    current_file: Option<PathBuf>,
+    stdlib_path: PathBuf,
+    module_cache: HashMap<PathBuf, Rc<Object>>,
+    import_stack: Vec<PathBuf>,
 }
 
 /// Unwraps nested `Grouped(...)` wrappers to get the inner expression.
@@ -47,7 +54,42 @@ impl Evaluator {
             builtins: get_builtins(),
             patterns: PatternRegistry::new(),
             struct_defs: HashMap::new(),
+            current_file: None,
+            stdlib_path: Self::find_stdlib_path(),
+            module_cache: HashMap::new(),
+            import_stack: Vec::new(),
         }
+    }
+
+    pub fn new_with_path(file_path: PathBuf) -> Self {
+        Evaluator {
+            builtins: get_builtins(),
+            patterns: PatternRegistry::new(),
+            struct_defs: HashMap::new(),
+            current_file: Some(file_path),
+            stdlib_path: Self::find_stdlib_path(),
+            module_cache: HashMap::new(),
+            import_stack: Vec::new(),
+        }
+    }
+
+    fn find_stdlib_path() -> PathBuf {
+        // Check relative to executable
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                let candidate = exe_dir.join("stdlib");
+                if candidate.is_dir() {
+                    return candidate;
+                }
+            }
+        }
+        // Check current working directory
+        let candidate = PathBuf::from("stdlib");
+        if candidate.is_dir() {
+            return candidate;
+        }
+        // Fallback
+        PathBuf::from("stdlib")
     }
 
     fn convert_to_type(obj: &Rc<Object>, target: &str) -> Result<Rc<Object>, String> {
@@ -582,6 +624,183 @@ impl Evaluator {
                     ))),
                 }
             }
+
+            Statement::Introduce { path, selective, .. } => {
+                self.eval_introduce(path, selective, Rc::clone(&env))
+            }
+        }
+    }
+
+    // ── Module / Import system ──
+
+    fn eval_introduce(
+        &mut self,
+        path: &ModulePath,
+        selective: &Option<Vec<Identifier>>,
+        env: Rc<RefCell<Environment>>,
+    ) -> Rc<Object> {
+        // 1. Resolve module path
+        let resolved = match self.resolve_module_path(path) {
+            Ok(p) => p,
+            Err(msg) => return Rc::new(Object::Error(msg)),
+        };
+
+        // 2. Check cache
+        if let Some(module) = self.module_cache.get(&resolved) {
+            let module = Rc::clone(module);
+            return self.bind_module(&module, path, selective, env);
+        }
+
+        // 3. Circular import detection
+        if self.import_stack.contains(&resolved) {
+            return Rc::new(Object::Error(format!(
+                "circular import detected: {}",
+                resolved.display()
+            )));
+        }
+
+        // 4. Read the module file
+        let source = match std::fs::read_to_string(&resolved) {
+            Ok(s) => s,
+            Err(e) => {
+                return Rc::new(Object::Error(format!(
+                    "could not read module '{}': {}",
+                    resolved.display(),
+                    e
+                )))
+            }
+        };
+
+        // 5. Lex and parse
+        let lexer = Lexer::new(&source);
+        let mut parser = Parser::new(lexer);
+        let program = parser.parse_program();
+
+        let errors = parser.error();
+        if !errors.is_empty() {
+            return Rc::new(Object::Error(format!(
+                "parse errors in module '{}': {}",
+                resolved.display(),
+                errors.join(", ")
+            )));
+        }
+
+        // 6. Evaluate in a fresh environment
+        let module_env = Rc::new(RefCell::new(Environment::new()));
+
+        let saved_file = self.current_file.take();
+        self.current_file = Some(resolved.clone());
+        self.import_stack.push(resolved.clone());
+
+        let result = self.eval_program(&program, Rc::clone(&module_env));
+
+        self.import_stack.pop();
+        self.current_file = saved_file;
+
+        if result.is_error() {
+            return result;
+        }
+
+        // 7. Create Module object and cache
+        let module_name = path
+            .segments
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let module = Rc::new(Object::Module {
+            name: module_name,
+            env: module_env,
+        });
+
+        self.module_cache.insert(resolved, Rc::clone(&module));
+
+        // 8. Bind into current scope
+        self.bind_module(&module, path, selective, env)
+    }
+
+    fn resolve_module_path(&self, path: &ModulePath) -> Result<PathBuf, String> {
+        if path.is_relative {
+            let current = self
+                .current_file
+                .as_ref()
+                .ok_or_else(|| "cannot use relative import without a file context".to_string())?;
+            let mut base = current
+                .parent()
+                .ok_or_else(|| "cannot determine parent directory".to_string())?
+                .to_path_buf();
+
+            for _ in 0..path.parent_levels {
+                base = base
+                    .parent()
+                    .ok_or_else(|| "relative path goes above root".to_string())?
+                    .to_path_buf();
+            }
+
+            for segment in &path.segments {
+                base = base.join(segment);
+            }
+            base.set_extension("oxi");
+
+            base.canonicalize().map_err(|e| {
+                format!("module not found: {} ({})", base.display(), e)
+            })
+        } else {
+            let mut lib_path = self.stdlib_path.clone();
+            for segment in &path.segments {
+                lib_path = lib_path.join(segment);
+            }
+            lib_path.set_extension("oxi");
+
+            lib_path.canonicalize().map_err(|e| {
+                format!("stdlib module not found: {} ({})", lib_path.display(), e)
+            })
+        }
+    }
+
+    fn bind_module(
+        &self,
+        module: &Rc<Object>,
+        path: &ModulePath,
+        selective: &Option<Vec<Identifier>>,
+        env: Rc<RefCell<Environment>>,
+    ) -> Rc<Object> {
+        match selective {
+            None => {
+                let name = path
+                    .segments
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+                env.borrow_mut().set(name, Rc::clone(module));
+                Rc::new(Object::None)
+            }
+            Some(names) => {
+                if let Object::Module {
+                    env: module_env, ..
+                } = module.as_ref()
+                {
+                    for ident in names {
+                        let val = module_env.borrow().get(&ident.value);
+                        match val {
+                            Some(v) => {
+                                env.borrow_mut().set(ident.value.clone(), v);
+                            }
+                            None => {
+                                return Rc::new(Object::Error(format!(
+                                    "name '{}' not found in module",
+                                    ident.value
+                                )));
+                            }
+                        }
+                    }
+                    Rc::new(Object::None)
+                } else {
+                    Rc::new(Object::Error(
+                        "internal error: expected Module object".to_string(),
+                    ))
+                }
+            }
         }
     }
 
@@ -807,6 +1026,15 @@ impl Evaluator {
                         }
                         // Check methods
                         self.find_method(struct_name, &field.value, &fields)
+                    }
+                    Object::Module { env: module_env, .. } => {
+                        match module_env.borrow().get(&field.value) {
+                            Some(val) => val,
+                            None => Rc::new(Object::Error(format!(
+                                "name '{}' not found in module",
+                                field.value
+                            ))),
+                        }
                     }
                     _ => Rc::new(Object::Error(format!(
                         "cannot access field '{}' on {}",

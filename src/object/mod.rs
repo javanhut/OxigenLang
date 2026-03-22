@@ -44,6 +44,10 @@ pub enum Object {
         instance_fields: Rc<RefCell<HashMap<String, Rc<Object>>>>,
         field_names: Vec<String>,
     },
+    Module {
+        name: String,
+        env: Rc<RefCell<Environment>>,
+    },
     Builtin(BuiltinFunction),
     Return(Rc<Object>),
     Skip,
@@ -64,6 +68,7 @@ impl Object {
             Object::Array(arr) => !arr.is_empty(),
             Object::Error(_) => false,
             Object::StructInstance { .. } => true,
+            Object::Module { .. } => true,
             Object::Byte(n) => *n != 0,
             Object::Uint(n) => *n != 0,
             Object::Tuple(t) => !t.is_empty(),
@@ -94,6 +99,7 @@ impl Object {
             Object::Tuple(_) => "TUPLE",
             Object::Map(_) => "MAP",
             Object::Set(_) => "SET",
+            Object::Module { .. } => "MODULE",
             Object::Builtin(_) => "BUILTIN",
             Object::Return(_) => "RETURN",
             Object::Skip => "SKIP",
@@ -168,6 +174,7 @@ impl fmt::Display for Object {
                 let items: Vec<String> = elements.iter().map(|e| e.to_string()).collect();
                 write!(f, "set({})", items.join(", "))
             }
+            Object::Module { name, .. } => write!(f, "module <{}>", name),
             Object::Builtin(_) => write!(f, "builtin function"),
             Object::Return(val) => write!(f, "{}", val),
             Object::Skip => write!(f, "skip"),
@@ -200,6 +207,7 @@ impl fmt::Debug for Object {
             Object::Tuple(elements) => write!(f, "Tuple({:?})", elements),
             Object::Map(entries) => write!(f, "Map({:?})", entries),
             Object::Set(elements) => write!(f, "Set({:?})", elements),
+            Object::Module { name, .. } => write!(f, "Module({})", name),
             Object::Builtin(_) => write!(f, "Builtin"),
             Object::Return(val) => write!(f, "Return({:?})", val),
             Object::Skip => write!(f, "Skip"),
@@ -231,6 +239,7 @@ impl PartialEq for Object {
              Object::StructInstance { struct_name: b_name, fields: b_fields }) => {
                 a_name == b_name && *a_fields.borrow() == *b_fields.borrow()
             }
+            (Object::Module { name: a, .. }, Object::Module { name: b, .. }) => a == b,
             _ => false,
         }
     }

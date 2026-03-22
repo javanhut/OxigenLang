@@ -1,0 +1,30 @@
+introduce os
+
+// System info
+println("OS:", os.name())
+println("Arch:", os.arch())
+println("PID:", os.pid())
+println("CWD:", os.cwd())
+
+// Environment variables
+println("HOME:", os.env_get("HOME"))
+os.env_set("OXIGEN_TEST", "hello from oxigen")
+println("OXIGEN_TEST:", os.env_get("OXIGEN_TEST"))
+
+// Directory operations
+println("Is stdlib a dir?", os.is_dir("stdlib"))
+println("Is Cargo.toml a file?", os.is_file("Cargo.toml"))
+
+entries := os.list_dir("stdlib")
+println("Stdlib modules:", entries)
+
+// Execute a command
+result := os.exec("echo hello from shell")
+println("Command output:", result["stdout"])
+println("Exit code:", result["code"])
+
+// mkdir + rmdir test
+os.mkdir("/tmp/oxigen_test_dir/nested")
+println("Created dir:", os.is_dir("/tmp/oxigen_test_dir/nested"))
+os.rmdir("/tmp/oxigen_test_dir")
+println("Removed dir:", os.is_dir("/tmp/oxigen_test_dir"))

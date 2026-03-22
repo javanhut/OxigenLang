@@ -1,0 +1,10 @@
+// Test local file import with dot prefix
+introduce .mylib
+println(mylib.greet("Oxigen"))
+println(mylib.add(10, 20))
+println(mylib.PI)
+
+// Test selective local import
+introduce {greet, PI} from .mylib
+println(greet("World"))
+println(PI)
