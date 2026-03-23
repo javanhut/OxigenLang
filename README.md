@@ -113,6 +113,7 @@ For detailed information, see the [docs](docs/) directory:
 | [Data Types](docs/data_types.md) | All supported types and their operations |
 | [Operators](docs/operators.md) | Arithmetic, comparison, logical, and postfix operators |
 | [Control Flow](docs/control_flow.md) | Conditionals, loops, guards, and block styles |
+| [Angle Forms](docs/angle_forms.md) | Unified guide for type annotations, constructors, normalization, and effects |
 | [Functions](docs/functions.md) | Named/anonymous functions, closures, typed parameters |
 | [Pattern Matching](docs/pattern_matching.md) | Patterns, choose expressions, inline patterns |
 | [Structs](docs/structs.md) | Fields, methods, inheritance, hidden fields |

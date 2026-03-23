@@ -51,6 +51,11 @@ value unless condition then fallback             // unless expression with fallb
 println("hi") when condition                     // postfix when guard
 println("hi") unless condition                   // postfix unless guard
 println("hi") unless condition then println()    // postfix unless with alternative
+expr guard err -> fallback                       // recover from an error value
+expr <guard>(fallback)                           // preferred angle-effect recovery
+expr <log<Error>> err -> handler                 // handle/log matched errors explicitly
+<fail>("message")                                // preferred angle-effect failure
+fail "message"                                   // produce a runtime error
 each item in collection { body }                 // iteration
 repeat when condition { body }                   // while loop
 skip                                             // continue
@@ -101,9 +106,27 @@ struct Student(Person) { school <str> }          // inheritance
 x <int> = 10               // strict (immutable, no conversion)
 x <int> := 3.9             // walrus (mutable, converts to 3)
 x as <int>                 // as-declare (zero value)
+result <Error || Value> := <type<Error || Value>>(read_file("config"))
+err := <Error<network>>("connection lost")
+wrapped := <Value>("ok")
 type(x)                    // type introspection
 is_mut(x)                  // value mutability check
 is_type_mut(x)             // type mutability check
+```
+
+## Angle Forms — [Full Guide](angle_forms.md)
+
+```oxi
+name <str> := "Oxigen"                             // type annotation in declaration position
+count as <int>                                     // zero-init typed binding
+num <int> := "10"                                  // typed walrus conversion
+<Error>("failed to initialize")                    // construct an error value
+<Error<retry_error>>("retry failed")               // construct a tagged error value
+<Value>("ok")                                      // construct an explicit success wrapper
+<type<Error || Value>>(read_file("config"))        // normalize into expected-result space
+read_file("config") <guard>("")                    // recover from runtime error
+read_file("config") <log<Error>> err -> err.msg    // handle/log matched errors
+<fail>("missing config")                           // propagate a runtime error
 ```
 
 ## Comments

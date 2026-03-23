@@ -53,6 +53,11 @@ pub enum Object {
     Skip,
     Stop,
     None,
+    ErrorValue {
+        msg: String,
+        tag: Option<String>,
+    },
+    Value(Rc<Object>),
     Error(String),
 }
 
@@ -67,6 +72,8 @@ impl Object {
             Object::String(s) => !s.is_empty(),
             Object::Array(arr) => !arr.is_empty(),
             Object::Error(_) => false,
+            Object::ErrorValue { .. } => true,
+            Object::Value(_) => true,
             Object::StructInstance { .. } => true,
             Object::Module { .. } => true,
             Object::Byte(n) => *n != 0,
@@ -105,6 +112,8 @@ impl Object {
             Object::Skip => "SKIP",
             Object::Stop => "STOP",
             Object::None => "NONE",
+            Object::ErrorValue { .. } => "ERROR",
+            Object::Value(_) => "VALUE",
             Object::Error(_) => "ERROR",
         }
     }
@@ -119,6 +128,11 @@ impl Object {
     pub fn effective_type_name(&self) -> String {
         match self {
             Object::StructInstance { struct_name, .. } => struct_name.clone(),
+            Object::ErrorValue { tag, .. } => match tag {
+                Some(tag) => format!("ERROR<{}>", tag),
+                None => "ERROR".to_string(),
+            },
+            Object::Value(_) => "VALUE".to_string(),
             other => other.type_name().to_string(),
         }
     }
@@ -180,6 +194,11 @@ impl fmt::Display for Object {
             Object::Skip => write!(f, "skip"),
             Object::Stop => write!(f, "stop"),
             Object::None => write!(f, "None"),
+            Object::ErrorValue { msg, tag } => match tag {
+                Some(tag) => write!(f, "Error {{ tag: {}, msg: {} }}", tag, msg),
+                None => write!(f, "Error {{ msg: {} }}", msg),
+            },
+            Object::Value(val) => write!(f, "Value({})", val),
             Object::Error(msg) => write!(f, "Error: {}", msg),
         }
     }
@@ -213,6 +232,8 @@ impl fmt::Debug for Object {
             Object::Skip => write!(f, "Skip"),
             Object::Stop => write!(f, "Stop"),
             Object::None => write!(f, "None"),
+            Object::ErrorValue { msg, tag } => write!(f, "ErrorValue(tag={:?}, msg={:?})", tag, msg),
+            Object::Value(val) => write!(f, "Value({:?})", val),
             Object::Error(msg) => write!(f, "Error({:?})", msg),
         }
     }
@@ -227,6 +248,8 @@ impl PartialEq for Object {
             (Object::String(a), Object::String(b)) => a == b,
             (Object::Boolean(a), Object::Boolean(b)) => a == b,
             (Object::None, Object::None) => true,
+            (Object::ErrorValue { msg: a, tag: a_tag }, Object::ErrorValue { msg: b, tag: b_tag }) => a == b && a_tag == b_tag,
+            (Object::Value(a), Object::Value(b)) => a == b,
             (Object::Array(a), Object::Array(b)) => a == b,
             (Object::Byte(a), Object::Byte(b)) => a == b,
             (Object::Uint(a), Object::Uint(b)) => a == b,

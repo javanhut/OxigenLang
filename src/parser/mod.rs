@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 enum Precedence {
     Lowest,
     Conditional, // unless ... then ...
+    Recovery,    // guard err -> ...
     LogicalOr,   // or
     LogicalAnd,  // and
     Equals,      // == !=
@@ -26,6 +27,7 @@ fn precedence_of(tt: &TokenType) -> Precedence {
 
     match tt {
         Unless => Conditional,
+        Guard => Recovery,
         Or => LogicalOr,
         And => LogicalAnd,
         Eq | NotEq => Equals,
@@ -81,9 +83,11 @@ impl Parser {
         p.register_prefix(TokenType::False, Parser::parse_boolean);
         p.register_prefix(TokenType::None, Parser::parse_none);
         p.register_prefix(TokenType::LBracket, Parser::parse_array);
+        p.register_prefix(TokenType::Lt, Parser::parse_angle_effect_expression);
         p.register_prefix(TokenType::Minus, Parser::parse_prefix_expression);
         p.register_prefix(TokenType::Shebang, Parser::parse_prefix_expression);
         p.register_prefix(TokenType::Not, Parser::parse_prefix_expression);
+        p.register_prefix(TokenType::Fail, Parser::parse_fail_expression);
         p.register_prefix(TokenType::Function, Parser::parse_function_expression);
         p.register_prefix(TokenType::LBrace, Parser::parse_map_literal);
         p.register_prefix(TokenType::OptionKw, Parser::parse_option_expression);
@@ -99,11 +103,12 @@ impl Parser {
         p.register_infix(TokenType::And, Parser::parse_infix_expression);
         p.register_infix(TokenType::Or, Parser::parse_infix_expression);
         p.register_infix(TokenType::Unless, Parser::parse_unless_expression);
+        p.register_infix(TokenType::Guard, Parser::parse_guard_expression);
 
         // Comparison operators
         p.register_infix(TokenType::Eq, Parser::parse_infix_expression);
         p.register_infix(TokenType::NotEq, Parser::parse_infix_expression);
-        p.register_infix(TokenType::Lt, Parser::parse_infix_expression);
+        p.register_infix(TokenType::Lt, Parser::parse_lt_expression);
         p.register_infix(TokenType::Lte, Parser::parse_infix_expression);
         p.register_infix(TokenType::Gt, Parser::parse_infix_expression);
         p.register_infix(TokenType::Gte, Parser::parse_infix_expression);
@@ -151,10 +156,50 @@ impl Parser {
         matches!(tt, TokenType::Ident | TokenType::None)
     }
 
+    fn parse_type_name_from_current(&mut self) -> Option<TypeAnnotation> {
+        if self.curr_token.token_type == TokenType::Ident && self.curr_token.literal == "Error" {
+            if self.peek_token.token_type == TokenType::Lt {
+                self.next_token(); // consume inner '<'
+                if self.peek_token.token_type != TokenType::Ident {
+                    self.errors.push(format!(
+                        "expected error tag name, got {:?} (literal={:?})",
+                        self.peek_token.token_type, self.peek_token.literal
+                    ));
+                    return None;
+                }
+                self.next_token(); // move to tag
+                let tag = self.curr_token.literal.clone();
+                if self.peek_token.token_type == TokenType::RShift {
+                    self.next_token(); // consume both closing '>' tokens
+                    return Some(TypeAnnotation::ErrorType(Some(tag)));
+                }
+                self.expect_peek(TokenType::Gt)?; // close inner '>'
+                return Some(TypeAnnotation::ErrorType(Some(tag)));
+            }
+            return Some(TypeAnnotation::ErrorType(None));
+        }
+
+        if self.curr_token.token_type == TokenType::Ident && self.curr_token.literal == "Value" {
+            return Some(TypeAnnotation::ValueType);
+        }
+
+        Some(TypeAnnotation::from_str_or_struct(&self.curr_token.literal))
+    }
+
+    fn parse_type_union_member(&mut self) -> Option<TypeAnnotation> {
+        if !Self::is_type_name_token(&self.curr_token.token_type) {
+            self.errors.push(format!(
+                "expected type name, got {:?} (literal={:?})",
+                self.curr_token.token_type, self.curr_token.literal
+            ));
+            return None;
+        }
+        self.parse_type_name_from_current()
+    }
+
     /// Parses a type annotation after `<` has already been consumed.
-    /// Expects curr_token to be `<`. Consumes through closing `>` and any `|| <type>` continuations.
+    /// Supports both `<A || B>` and legacy `<A> || <B>` unions.
     fn parse_type_annotation(&mut self) -> Option<TypeAnnotation> {
-        // curr_token is '<', consume type name (Ident or None keyword)
         if !Self::is_type_name_token(&self.peek_token.token_type) {
             self.errors.push(format!(
                 "expected type name, got {:?} (literal={:?})",
@@ -163,29 +208,48 @@ impl Parser {
             return None;
         }
         self.next_token();
-        let first = TypeAnnotation::from_str_or_struct(&self.curr_token.literal);
-        self.expect_peek(TokenType::Gt)?; // '>'
+        let mut types = vec![self.parse_type_union_member()?];
 
-        // Check for || <type> continuations
-        if self.peek_token.token_type == TokenType::DoublePipe {
-            let mut types = vec![first];
-            while self.peek_token.token_type == TokenType::DoublePipe {
-                self.next_token(); // consume '||'
-                self.expect_peek(TokenType::Lt)?; // '<'
-                if !Self::is_type_name_token(&self.peek_token.token_type) {
+        loop {
+            let peek_type = self.peek_token.token_type.clone();
+            let next_type = self.peek_nth(1).token_type.clone();
+            match peek_type {
+                TokenType::Gt if next_type == TokenType::DoublePipe => {
+                    self.next_token(); // consume legacy member-closing '>'
+                }
+                TokenType::DoublePipe => {
+                    self.next_token(); // consume '||'
+                    if self.peek_token.token_type == TokenType::Lt {
+                        self.next_token(); // consume legacy '<'
+                    }
+                    if !Self::is_type_name_token(&self.peek_token.token_type) {
+                        self.errors.push(format!(
+                            "expected type name, got {:?} (literal={:?})",
+                            self.peek_token.token_type, self.peek_token.literal
+                        ));
+                        return None;
+                    }
+                    self.next_token();
+                    types.push(self.parse_type_union_member()?);
+                }
+                TokenType::Gt | TokenType::RShift => {
+                    self.next_token(); // consume closing '>' or '>>'
+                    break;
+                }
+                _ => {
                     self.errors.push(format!(
-                        "expected type name, got {:?} (literal={:?})",
+                        "expected type union separator or closing '>', got {:?} (literal={:?})",
                         self.peek_token.token_type, self.peek_token.literal
                     ));
                     return None;
                 }
-                self.next_token();
-                types.push(TypeAnnotation::from_str_or_struct(&self.curr_token.literal));
-                self.expect_peek(TokenType::Gt)?; // '>'
             }
-            Some(TypeAnnotation::Union(types))
+        }
+
+        if types.len() == 1 {
+            Some(types.remove(0))
         } else {
-            Some(first)
+            Some(TypeAnnotation::Union(types))
         }
     }
 
@@ -554,6 +618,275 @@ impl Parser {
         })
     }
 
+    fn is_angle_effect_name_token(tok: &Token) -> bool {
+        matches!(tok.token_type, TokenType::Guard | TokenType::Fail)
+            || (tok.token_type == TokenType::Ident
+                && matches!(tok.literal.as_str(), "log" | "type" | "Error" | "Value"))
+    }
+
+    fn parse_effect_header(&mut self) -> Option<(Token, String, Option<String>)> {
+        self.next_token(); // move to effect name after '<'
+        if !Self::is_angle_effect_name_token(&self.curr_token) {
+            self.errors.push(format!(
+                "expected angle effect name after '<', got {:?} (literal={:?})",
+                self.curr_token.token_type, self.curr_token.literal
+            ));
+            return None;
+        }
+
+        let effect_token = self.curr_token.clone();
+        let effect_name = self.curr_token.literal.clone();
+        let mut filter = None;
+
+        if self.peek_token.token_type == TokenType::Lt {
+            self.next_token(); // consume inner '<'
+            self.next_token(); // move to filter name
+            if self.curr_token.token_type != TokenType::Ident
+                && self.curr_token.token_type != TokenType::None
+            {
+                self.errors.push(format!(
+                    "expected effect filter name, got {:?} (literal={:?})",
+                    self.curr_token.token_type, self.curr_token.literal
+                ));
+                return None;
+            }
+            if self.curr_token.literal == "Error" && self.peek_token.token_type == TokenType::Lt {
+                self.next_token(); // consume tag '<'
+                if self.peek_token.token_type != TokenType::Ident {
+                    self.errors.push(format!(
+                        "expected error tag name, got {:?} (literal={:?})",
+                        self.peek_token.token_type, self.peek_token.literal
+                    ));
+                    return None;
+                }
+                self.next_token(); // move to tag
+                let tag = self.curr_token.literal.clone();
+                filter = Some(tag);
+                if self.peek_token.token_type == TokenType::RShift {
+                    self.next_token(); // consume inner+outer closers
+                    if self.peek_token.token_type == TokenType::Gt {
+                        self.next_token(); // consume trailing outer '>' in nested forms like <log<Error<tag>>>
+                    }
+                    return Some((effect_token, effect_name, filter));
+                }
+                self.expect_peek(TokenType::Gt)?; // close Error<tag>
+            } else {
+                if self.curr_token.literal != "Error" {
+                    self.errors.push(format!(
+                        "unsupported effect filter '{}', expected Error",
+                        self.curr_token.literal
+                    ));
+                    return None;
+                }
+                filter = None;
+            }
+            if self.peek_token.token_type == TokenType::RShift {
+                self.next_token(); // consume both inner and outer closers as '>>'
+                return Some((effect_token, effect_name, filter));
+            }
+            self.expect_peek(TokenType::Gt)?; // close inner '>'
+        }
+
+        self.expect_peek(TokenType::Gt)?; // close outer '>'
+        Some((effect_token, effect_name, filter))
+    }
+
+    fn parse_single_parenthesized_expression(&mut self) -> Option<Expression> {
+        self.expect_peek(TokenType::LParen)?;
+        self.next_token(); // move to inner expression
+        let expr = self.parse_expression(Precedence::Lowest)?;
+        self.expect_peek(TokenType::RParen)?;
+        Some(expr)
+    }
+
+    fn synthetic_error_binding() -> Identifier {
+        Identifier {
+            token: Token {
+                token_type: TokenType::Ident,
+                literal: "_err".to_string(),
+            },
+            value: "_err".to_string(),
+        }
+    }
+
+    fn parse_angle_effect_with_target(
+        &mut self,
+        value: Option<Expression>,
+    ) -> Option<Expression> {
+        let (token, effect_name, filter) = self.parse_effect_header()?;
+
+        match effect_name.as_str() {
+            "guard" => {
+                if self.peek_token.token_type == TokenType::LParen {
+                    let fallback = self.parse_single_parenthesized_expression()?;
+                    let Some(value) = value else {
+                        self.errors.push("<guard>(...) requires a target expression".to_string());
+                        return None;
+                    };
+                    Some(Expression::Guard {
+                        token,
+                        value: Box::new(value),
+                        binding: Self::synthetic_error_binding(),
+                        error_tag: filter,
+                        fallback: Box::new(fallback),
+                    })
+                } else {
+                    self.next_token(); // move to binding identifier
+                    if self.curr_token.token_type != TokenType::Ident {
+                        self.errors.push(format!(
+                            "expected identifier after <guard>, got {:?} (literal={:?})",
+                            self.curr_token.token_type, self.curr_token.literal
+                        ));
+                        return None;
+                    }
+                    let binding = Identifier {
+                        token: self.curr_token.clone(),
+                        value: self.curr_token.literal.clone(),
+                    };
+                    self.expect_peek(TokenType::Arrow)?;
+                    self.next_token(); // move to fallback
+                    let fallback = self.parse_expression(Precedence::Lowest)?;
+                    let Some(value) = value else {
+                        self.errors.push("<guard> err -> ... requires a target expression".to_string());
+                        return None;
+                    };
+                    Some(Expression::Guard {
+                        token,
+                        value: Box::new(value),
+                        binding,
+                        error_tag: filter,
+                        fallback: Box::new(fallback),
+                    })
+                }
+            }
+            "fail" => {
+                let fail_arg = self.parse_single_parenthesized_expression()?;
+                match value {
+                    Some(value) => Some(Expression::Guard {
+                        token: token.clone(),
+                        value: Box::new(value),
+                        binding: Self::synthetic_error_binding(),
+                        error_tag: filter,
+                        fallback: Box::new(Expression::Fail {
+                            token,
+                            value: Box::new(fail_arg),
+                        }),
+                    }),
+                    None => Some(Expression::Fail {
+                        token,
+                        value: Box::new(fail_arg),
+                    }),
+                }
+            }
+            "log" => {
+                let Some(value) = value else {
+                    self.errors.push("<log<Error>> ... requires a target expression".to_string());
+                    return None;
+                };
+                self.next_token(); // move to binding identifier
+                if self.curr_token.token_type != TokenType::Ident {
+                    self.errors.push(format!(
+                        "expected identifier after <log<Error>>, got {:?} (literal={:?})",
+                        self.curr_token.token_type, self.curr_token.literal
+                    ));
+                    return None;
+                }
+                let binding = Identifier {
+                    token: self.curr_token.clone(),
+                    value: self.curr_token.literal.clone(),
+                };
+                self.expect_peek(TokenType::Arrow)?;
+                self.next_token(); // move to handler
+                let handler = self.parse_expression(Precedence::Lowest)?;
+                Some(Expression::Log {
+                    token,
+                    value: Box::new(value),
+                    binding,
+                    error_tag: filter,
+                    handler: Box::new(handler),
+                })
+            }
+            _ => {
+                self.errors.push(format!("unknown angle effect '{}'", effect_name));
+                None
+            }
+        }
+    }
+
+    fn parse_angle_effect_expression(&mut self) -> Option<Expression> {
+        if self.peek_token.token_type == TokenType::Ident && self.peek_token.literal == "type" {
+            self.next_token(); // move to 'type'
+            let token = self.curr_token.clone();
+            self.expect_peek(TokenType::Lt)?;
+            let target = self.parse_type_annotation()?;
+            self.expect_peek(TokenType::LParen)?;
+            self.next_token(); // move to wrapped expression
+            let value = self.parse_expression(Precedence::Lowest)?;
+            self.expect_peek(TokenType::RParen)?;
+            return Some(Expression::TypeWrap {
+                token,
+                target,
+                value: Box::new(value),
+            });
+        }
+
+        if self.peek_token.token_type == TokenType::Ident
+            && (self.peek_token.literal == "Error" || self.peek_token.literal == "Value")
+        {
+            self.next_token(); // move to constructor name
+            let token = self.curr_token.clone();
+            if self.curr_token.literal == "Error" {
+                let tag = if self.peek_token.token_type == TokenType::Lt {
+                    self.next_token(); // consume inner '<'
+                    if self.peek_token.token_type != TokenType::Ident {
+                        self.errors.push(format!(
+                            "expected error tag name, got {:?} (literal={:?})",
+                            self.peek_token.token_type, self.peek_token.literal
+                        ));
+                        return None;
+                    }
+                    self.next_token(); // move to tag
+                    let tag = self.curr_token.literal.clone();
+                    if self.peek_token.token_type == TokenType::RShift {
+                        self.next_token(); // consume both closing '>' tokens
+                    } else {
+                        self.expect_peek(TokenType::Gt)?; // close inner '>'
+                        self.expect_peek(TokenType::Gt)?; // close outer '>'
+                    }
+                    Some(tag)
+                } else {
+                    self.expect_peek(TokenType::Gt)?;
+                    None
+                };
+                let value = self.parse_single_parenthesized_expression()?;
+                return Some(Expression::ErrorConstruct {
+                    token,
+                    tag,
+                    value: Box::new(value),
+                });
+            }
+
+            self.expect_peek(TokenType::Gt)?;
+            let value = self.parse_single_parenthesized_expression()?;
+            return Some(Expression::ValueConstruct {
+                token,
+                value: Box::new(value),
+            });
+        }
+
+        self.parse_angle_effect_with_target(None)
+    }
+
+    fn parse_fail_expression(&mut self) -> Option<Expression> {
+        let token = self.curr_token.clone(); // 'fail'
+        self.next_token(); // move to failure payload expression
+        let value = self.parse_expression(Precedence::Prefix)?;
+        Some(Expression::Fail {
+            token,
+            value: Box::new(value),
+        })
+    }
+
     fn parse_prefix_expression(&mut self) -> Option<Expression> {
         let tok = self.curr_token.clone();
         let operator = tok.literal.clone();
@@ -851,6 +1184,42 @@ impl Parser {
     }
 
     // ---------------- Infix parsers ----------------
+
+    fn parse_guard_expression(&mut self, value: Expression) -> Option<Expression> {
+        let token = self.curr_token.clone(); // 'guard'
+
+        self.next_token(); // move to binding identifier
+        if self.curr_token.token_type != TokenType::Ident {
+            self.errors.push(format!(
+                "expected identifier after guard, got {:?} (literal={:?})",
+                self.curr_token.token_type, self.curr_token.literal
+            ));
+            return None;
+        }
+        let binding = Identifier {
+            token: self.curr_token.clone(),
+            value: self.curr_token.literal.clone(),
+        };
+
+        self.expect_peek(TokenType::Arrow)?;
+        self.next_token(); // move to fallback expression
+        let fallback = self.parse_expression(Precedence::Lowest)?;
+
+        Some(Expression::Guard {
+            token,
+            value: Box::new(value),
+            binding,
+            error_tag: None,
+            fallback: Box::new(fallback),
+        })
+    }
+
+    fn parse_lt_expression(&mut self, left: Expression) -> Option<Expression> {
+        if Self::is_angle_effect_name_token(&self.peek_token) {
+            return self.parse_angle_effect_with_target(Some(left));
+        }
+        self.parse_infix_expression(left)
+    }
 
     fn parse_unless_expression(&mut self, consequence: Expression) -> Option<Expression> {
         let token = self.curr_token.clone(); // 'unless'
@@ -1290,6 +1659,7 @@ impl Parser {
 
         let mut arms = Vec::new();
         let mut default: Option<Vec<Statement>> = None;
+        let mut error_default: Option<Vec<Statement>> = None;
 
         // Skip newlines after '{'
         while self.peek_token.token_type == TokenType::Newline {
@@ -1308,6 +1678,35 @@ impl Parser {
 
             if self.curr_token.token_type == TokenType::RBrace {
                 break;
+            }
+
+            if self.curr_token.token_type == TokenType::Lt
+                && self.peek_token.token_type == TokenType::Ident
+                && self.peek_token.literal == "Error"
+                && self.peek_nth(1).token_type == TokenType::Gt
+                && self.peek_nth(2).token_type == TokenType::Arrow
+            {
+                self.next_token(); // move to Error
+                self.expect_peek(TokenType::Gt)?; // close '>'
+                self.expect_peek(TokenType::Arrow)?; // '->'
+                self.next_token(); // move to body
+
+                let body = if self.curr_token.token_type == TokenType::LBrace {
+                    self.parse_block()?
+                } else {
+                    let stmt = self.parse_statement()?;
+                    vec![stmt]
+                };
+
+                error_default = Some(body);
+
+                if self.peek_token.token_type == TokenType::Comma {
+                    self.next_token();
+                }
+                while self.peek_token.token_type == TokenType::Newline {
+                    self.next_token();
+                }
+                continue;
             }
 
             // If current token is '{', treat as a block default arm
@@ -1390,6 +1789,7 @@ impl Parser {
             token,
             arms,
             default,
+            error_default,
         })
     }
 
@@ -1707,30 +2107,57 @@ impl Parser {
         }
     }
 
+    fn skip_type_member_at(&mut self, mut pos: usize) -> Option<usize> {
+        let token_type = self.peek_nth(pos).token_type.clone();
+        let token_literal = self.peek_nth(pos).literal.clone();
+        if !Self::is_type_name_token(&token_type) {
+            return None;
+        }
+        let next_type = self.peek_nth(pos + 1).token_type.clone();
+        let next_next_type = self.peek_nth(pos + 2).token_type.clone();
+        if token_type == TokenType::Ident
+            && token_literal == "Error"
+            && next_type == TokenType::Lt
+            && next_next_type == TokenType::Ident
+        {
+            let closing_type = self.peek_nth(pos + 3).token_type.clone();
+            if matches!(closing_type, TokenType::Gt | TokenType::RShift) {
+                return Some(pos + 4);
+            }
+            return None;
+        }
+        pos += 1;
+        Some(pos)
+    }
+
     /// Scans past a type annotation starting at peek_nth(offset).
-    /// Expects: Lt Ident Gt [|| Lt Ident Gt]*
+    /// Supports both `<A || B>` and legacy `<A> || <B>` unions.
     /// Returns the offset of the token AFTER the full type annotation.
     fn skip_type_annotation(&mut self, start: usize) -> Option<usize> {
         if self.peek_nth(start).token_type != TokenType::Lt {
             return None;
         }
-        if !Self::is_type_name_token(&self.peek_nth(start + 1).token_type) {
-            return None;
-        }
-        if self.peek_nth(start + 2).token_type != TokenType::Gt {
-            return None;
-        }
-        let mut pos = start + 3;
-        while self.peek_nth(pos).token_type == TokenType::DoublePipe {
-            if self.peek_nth(pos + 1).token_type != TokenType::Lt
-                || !Self::is_type_name_token(&self.peek_nth(pos + 2).token_type)
-                || self.peek_nth(pos + 3).token_type != TokenType::Gt
-            {
-                break;
+        let mut pos = start + 1;
+        pos = self.skip_type_member_at(pos)?;
+
+        loop {
+            let current_type = self.peek_nth(pos).token_type.clone();
+            let next_type = self.peek_nth(pos + 1).token_type.clone();
+            match current_type {
+                TokenType::Gt if next_type == TokenType::DoublePipe => {
+                    pos += 1;
+                }
+                TokenType::Gt | TokenType::RShift => return Some(pos + 1),
+                TokenType::DoublePipe => {
+                    pos += 1;
+                    if self.peek_nth(pos).token_type == TokenType::Lt {
+                        pos += 1;
+                    }
+                    pos = self.skip_type_member_at(pos)?;
+                }
+                _ => return None,
             }
-            pos += 4;
         }
-        Some(pos)
     }
 
     fn is_typed_declaration(&mut self) -> bool {
@@ -1922,6 +2349,71 @@ mod tests {
                 }
                 _ => panic!("Expected prefix expression for '{}'", input),
             }
+        }
+    }
+
+    #[test]
+    fn test_parse_fail_expression() {
+        let program = parse_ok("fail \"bad input\"");
+        match &program.statements[0] {
+            Statement::Expr(Expression::Fail { value, .. }) => match value.as_ref() {
+                Expression::Str { value, .. } => assert_eq!(value, "bad input"),
+                _ => panic!("Expected string payload"),
+            },
+            other => panic!("Expected fail expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_angle_fail_expression() {
+        let program = parse_ok("<fail>(\"bad input\")");
+        match &program.statements[0] {
+            Statement::Expr(Expression::Fail { value, .. }) => match value.as_ref() {
+                Expression::Str { value, .. } => assert_eq!(value, "bad input"),
+                _ => panic!("Expected string payload"),
+            },
+            other => panic!("Expected angle fail expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_error_constructor_expression() {
+        let program = parse_ok("<Error>(\"bad input\")");
+        match &program.statements[0] {
+            Statement::Expr(Expression::ErrorConstruct { tag, value, .. }) => {
+                assert!(tag.is_none());
+                match value.as_ref() {
+                    Expression::Str { value, .. } => assert_eq!(value, "bad input"),
+                    _ => panic!("Expected string payload"),
+                }
+            }
+            other => panic!("Expected error constructor, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_tagged_error_constructor_expression() {
+        let program = parse_ok("<Error<retry_error>>(\"bad input\")");
+        match &program.statements[0] {
+            Statement::Expr(Expression::ErrorConstruct { tag, .. }) => {
+                assert_eq!(tag.as_deref(), Some("retry_error"));
+            }
+            other => panic!("Expected tagged error constructor, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_wrap_expression() {
+        let program = parse_ok("result := <type<Error || Value>>(read(path))");
+        match &program.statements[0] {
+            Statement::Let {
+                value: Expression::TypeWrap { target, .. },
+                ..
+            } => match target {
+                TypeAnnotation::Union(types) => assert_eq!(types.len(), 2),
+                _ => panic!("Expected union target"),
+            },
+            other => panic!("Expected let with type wrap, got {:?}", other),
         }
     }
 
@@ -2242,6 +2734,91 @@ mod tests {
                 }
             }
             other => panic!("Expected let with unless expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_guard_expression() {
+        let program = parse_ok("value := read(path) guard err -> \"Guest\"");
+        match &program.statements[0] {
+            Statement::Let {
+                value: Expression::Guard {
+                    value,
+                    binding,
+                    fallback,
+                    ..
+                },
+                ..
+            } => {
+                assert_eq!(binding.value, "err");
+                assert!(matches!(value.as_ref(), Expression::Call { .. }));
+                match fallback.as_ref() {
+                    Expression::Str { value, .. } => assert_eq!(value, "Guest"),
+                    _ => panic!("Expected string fallback"),
+                }
+            }
+            other => panic!("Expected let with guard expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_angle_guard_expression() {
+        let program = parse_ok("value := read(path) <guard>(\"Guest\")");
+        match &program.statements[0] {
+            Statement::Let {
+                value: Expression::Guard { fallback, .. },
+                ..
+            } => match fallback.as_ref() {
+                Expression::Str { value, .. } => assert_eq!(value, "Guest"),
+                _ => panic!("Expected string fallback"),
+            },
+            other => panic!("Expected let with angle guard expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_angle_log_expression() {
+        let program = parse_ok("value := read(path) <log<Error>> err -> err.msg");
+        match &program.statements[0] {
+            Statement::Let {
+                value: Expression::Log { binding, .. },
+                ..
+            } => assert_eq!(binding.value, "err"),
+            other => panic!("Expected let with angle log expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_tagged_angle_log_expression() {
+        let program = parse_ok("value := read(path) <log<Error<retry_error>>> err -> err.msg");
+        match &program.statements[0] {
+            Statement::Let {
+                value: Expression::Log { error_tag, .. },
+                ..
+            } => assert_eq!(error_tag.as_deref(), Some("retry_error")),
+            other => panic!("Expected let with tagged angle log expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_option_error_arm() {
+        let program = parse_ok("option { True -> 1, <Error> -> 0 }");
+        match &program.statements[0] {
+            Statement::Expr(Expression::Option { error_default, .. }) => {
+                assert!(error_default.is_some());
+            }
+            other => panic!("Expected option expression with error arm, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_guard_expression_statement() {
+        let program = parse_ok("println(load()) guard err -> err.msg");
+        match &program.statements[0] {
+            Statement::Expr(Expression::Guard { binding, .. }) => {
+                assert_eq!(binding.value, "err");
+            }
+            other => panic!("Expected guard expression statement, got {:?}", other),
         }
     }
 

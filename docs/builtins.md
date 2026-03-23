@@ -25,6 +25,32 @@ println("Name:", name, "Age:", age)
 
 Both `print` and `println` return `None`.
 
+### `error(value)`
+
+Creates a runtime error using the string form of `value`.
+
+```oxi
+error("missing file")
+error(404)
+```
+
+This is primarily useful for compatibility.
+
+Preferred modern forms:
+
+```oxi
+<Error>("missing file")               // construct an error value
+<Error<network>>("connection lost")   // construct a tagged error value
+<fail>("missing file")                // propagate a runtime error
+<fail>(<Error<network>>("timeout"))   // propagate a tagged error
+```
+
+Use:
+
+- `error(...)` for compatibility with older Oxigen code
+- `<Error>(...)` when you want an explicit error value
+- `<fail>(...)` when you want that error to propagate immediately
+
 ## Collection Operations
 
 ### `len(collection)`

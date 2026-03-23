@@ -168,6 +168,213 @@ Postfix guards do **not** work on:
 - Loops (`each`, `repeat`)
 - Blocks (`option`, `unless`, `choose`)
 
+## Angle Forms and Error Flow
+
+Oxigen uses angle forms for three related jobs:
+
+- type annotations and zero-initialization in declaration position
+- value constructors in expression position
+- effect handlers and transformations in expression position
+
+The same bracket family is used consistently, but meaning comes from position.
+
+For the full model, including declaration-time types, constructors, normalization, and postfix effects in one place, see [Angle Forms](angle_forms.md).
+
+### Declaration Position
+
+After a binding name, `<...>` is a type annotation:
+
+```oxi
+name <str> := "Oxigen"
+count as <int>
+result <Error || Value> := <type<Error || Value>>(read_file("config"))
+```
+
+This is where zero-initialization and typed walrus conversion live.
+
+### Expression Position
+
+At the start of an expression, `<...>` is a constructor or angle operator:
+
+```oxi
+<Error>("failed to initialize")
+<Error<retry_error>>("retry failed")
+<Value>("ok")
+<type<Error || Value>>(read_file("config"))
+<fail>("missing config")
+```
+
+After an already-completed expression, `<...>` is a postfix effect:
+
+```oxi
+read_file("config") <guard>("")
+parse(text) <log<Error>> err -> println(err.msg)
+```
+
+## Error Values
+
+`<Error>(...)` constructs an error value. It does not automatically stop evaluation.
+
+```oxi
+err := <Error>("missing file")
+tagged := <Error<network>>("connection lost")
+```
+
+Current public fields:
+
+```oxi
+err.msg
+err.tag
+```
+
+Tagged errors give you lightweight error categories without declaring a custom error type:
+
+```oxi
+<Error<retry_error>>("retry failed")
+<Error<parse>>("invalid header")
+```
+
+## Success Values
+
+`<Value>(...)` constructs an explicit success wrapper.
+
+```oxi
+wrapped := <Value>("ok")
+println(wrapped.value)
+```
+
+This is mainly useful together with `<type<Error || Value>>`.
+
+## Expected-Result Normalization
+
+Use `<type<Error || Value>>(expr)` when a call is expected to either succeed or fail and you want that to stay explicit instead of propagating immediately.
+
+```oxi
+file_result := <type<Error || Value>>(read_file("config"))
+```
+
+Behavior:
+
+- if `expr` succeeds, the result becomes `Value(...)`
+- if `expr` fails, the result becomes `Error(...)`
+- the failure is normalized into a value instead of escaping immediately
+
+Examples:
+
+```oxi
+ok := <type<Error || Value>>("config loaded")
+println(ok.value)
+
+failed := <type<Error || Value>>(<fail>("missing config"))
+println(failed.msg)
+```
+
+This also works in typed declarations:
+
+```oxi
+result <Error || Value> := <type<Error || Value>>(read_file("config"))
+```
+
+## Error Recovery with `guard`
+
+Use `guard` when you want a runtime error to recover into a fallback expression.
+
+Preferred angle form:
+
+```oxi
+name := read_name() <guard>("Guest")
+```
+
+Tagged filtering is also supported:
+
+```oxi
+name := load_profile() <guard<Error<retry_error>>>("Guest")
+```
+
+Compatibility keyword form:
+
+```oxi
+name := read_name() guard err -> "Guest"
+message := fail "missing config" guard err -> err.msg
+println(load()) guard err -> err.msg
+```
+
+Rules:
+
+- `guard` catches real runtime errors only
+- `guard` does not catch `None`
+- if a tag filter is present, only matching tagged errors are handled
+- unmatched errors continue propagating
+
+When the keyword form binds an identifier, the bound error is only visible inside the fallback:
+
+```oxi
+result := fail "boom" guard err -> err.msg
+```
+
+## Logging and Handling with `log`
+
+Use `<log<Error>>` to intercept matched errors and run a handler expression.
+
+```oxi
+parsed := parse(text) <log<Error>> err -> println("parse failed: {err.msg}")
+```
+
+Tagged filtering works the same way:
+
+```oxi
+result := request()
+    <log<Error<network>>> err -> println("network issue: {err.msg}")
+```
+
+Behavior:
+
+- if the left expression succeeds, its value passes through unchanged
+- if it fails with a matching error, the handler runs and its result becomes the expression result
+- if the tag does not match, the original error keeps propagating
+
+## Producing Failures with `fail`
+
+Use `<fail>(...)` to propagate a runtime error.
+
+```oxi
+<fail>("bad input")
+<fail>(<Error<retry_error>>("retry failed"))
+```
+
+`<fail>` accepts either:
+
+- a plain value, which is converted to an error message
+- an existing `Error` value, including tagged errors
+
+The keyword form remains supported:
+
+```oxi
+fail "bad input"
+```
+
+## Error Arms in `option`
+
+`option` can include an explicit error fallback arm:
+
+```oxi
+result := option {
+    risky_call() -> {},
+    <Error> -> "fallback"
+}
+```
+
+This arm runs when evaluating a condition, selected body, or default arm produces a runtime error.
+
+It works well with tagged errors and explicit failure:
+
+```oxi
+result := option {
+    connected -> fetch_data(),
+    <Error> -> <fail>("request failed")
+}
+```
+
 ## Loops
 
 ### `each` — Iteration Loop
