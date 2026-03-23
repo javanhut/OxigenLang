@@ -1,17 +1,19 @@
 # OxigenLang
 
-OxigenLang is a modern, lightweight, interpreted programming language implemented in Rust. It features a unique blend of C-like and Python-like syntax, support for pattern matching, and an optional indentation-based block syntax.
+OxigenLang is a modern, lightweight, interpreted programming language implemented in Rust. It features a unique blend of C-like and Python-like syntax, support for pattern matching, a module system with a standard library, and an optional indentation-based block syntax.
 
 ## Features
 
+- **Module System**: Import standard library modules or local files with `introduce`/`intro`. Namespace imports, selective imports, and module caching.
+- **Standard Library**: 10 built-in modules — math, strings, array, io, os, time, random, path, json, and net (HTTP client with HTTPS support).
 - **Flexible Block Styles**: Choose between traditional brace-based blocks or Python-style indentation blocks with the `#[indent]` directive.
 - **Conditional Expressions**: Multi-arm `option` blocks, ternary shorthand, `unless` inverse conditionals, `when`/`unless` postfix guards, and short-circuit `and`/`or` logical operators.
-- **Pattern Matching**: Define reusable patterns with the `pattern` keyword and match against them with `choose`. Supports both top-level and inline pattern definitions.
+- **Pattern Matching**: Define reusable patterns with the `pattern` keyword and match against them with `choose`.
 - **Rich Type System**: Dynamic typing by default with optional type annotations for locking types and controlling mutability. Four declaration forms give precise control over value and type mutability.
 - **Data Types**: Integers, Floats, Strings, Characters, Booleans, Arrays, Bytes, Uints, Tuples, Maps, Sets, and `None`.
-- **Structs**: Composite data types with typed fields, single-inheritance, methods via `contains` blocks, implicit self, hidden fields, and dot-chaining.
+- **Structs**: Composite data types with typed fields, single-inheritance, methods via `contains` blocks, `self` access, hidden fields, and dot-chaining.
 - **First-Class Functions**: Named and anonymous functions, closures, typed parameters, and implicit/explicit returns.
-- **Built-in Functions**: 22 built-in functions for I/O, collection manipulation, type conversion, and introspection.
+- **Built-in Functions**: Built-in functions for I/O, collection manipulation, type conversion, and introspection.
 - **REPL**: Interactive shell for quick experimentation with persistent state across lines.
 
 ## Getting Started
@@ -43,17 +45,20 @@ cargo run
 ## Quick Example
 
 ```oxi
+introduce math
+introduce strings
+
 struct Person {
     name <str>
     age <int>
 }
 
 Person contains {
-    fun greet() { "Hello, " + name }
-    fun is_adult() { age >= 18 }
+    fun greet() { "Hello, {self.name}" }
+    fun is_adult() { self.age >= 18 }
 }
 
-p := Person("Alice", 30)
+p <Person> := Person("Alice", 30)
 println(p.greet())
 println(p.is_adult())
 
@@ -61,16 +66,20 @@ pattern is_even(n) when n % 2 == 0
 
 each i in range(6) {
     choose i {
-        is_even -> println(i, "is even"),
-        else -> println(i, "is odd")
+        is_even -> println("{i} is even"),
+        else -> println("{i} is odd")
     }
 }
 
-status := option {
+status <str> := option {
     p.is_adult() -> "adult",
     "minor"
 }
-println(p.name, "is an", status)
+println("{p.name} is an {status}")
+
+// Standard library
+println(math.sqrt(16))
+println(strings.upper("hello oxigen"))
 ```
 
 ## Documentation
@@ -80,6 +89,7 @@ For detailed information, see the [docs](docs/) directory:
 | Guide | Description |
 |-------|-------------|
 | [Getting Started](docs/getting_started.md) | Installation, first program, REPL usage |
+| [Conventions](docs/conventions.md) | Idiomatic OxigenLang style and best practices |
 | [Syntax Quick Reference](docs/syntax.md) | Concise syntax overview with links |
 | [Variables and Assignments](docs/variables.md) | Declaration forms, mutability, reassignment |
 | [Data Types](docs/data_types.md) | All supported types and their operations |
@@ -89,7 +99,9 @@ For detailed information, see the [docs](docs/) directory:
 | [Pattern Matching](docs/pattern_matching.md) | Patterns, choose expressions, inline patterns |
 | [Structs](docs/structs.md) | Fields, methods, inheritance, hidden fields |
 | [Type System](docs/type_system.md) | Type annotations, conversions, mutability control |
-| [Built-in Functions](docs/builtins.md) | Complete reference for all 22 built-ins |
+| [Imports and Modules](docs/imports.md) | The `introduce` keyword and module system |
+| [Built-in Functions](docs/builtins.md) | Complete reference for all built-ins |
+| [Standard Library](docs/stdlib.md) | Full reference for all 10 stdlib modules |
 
 ## License
 

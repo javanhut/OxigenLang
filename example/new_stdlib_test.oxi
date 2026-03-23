@@ -12,9 +12,9 @@ introduce time
 println("Unix timestamp:", time.now())
 println("Unix ms:", time.now_ms())
 
-start := time.monotonic()
+start <int> := time.monotonic()
 time.sleep(50)
-end := time.monotonic()
+end <int> := time.monotonic()
 println("Slept ~50ms, elapsed:", time.elapsed_ms(start, end), "ms")
 
 // ── Random ──
@@ -41,30 +41,26 @@ println("Is absolute relative:", path.is_absolute("relative/path"))
 // ── JSON ──
 println("=== JSON ===")
 introduce json
-introduce {read_file} from io
+introduce io
 
-// Write a temp JSON file, read it, parse it
-io_test_json := '[1, 2, 3, "hello", true, null]'
-// Test stringify with Oxigen data
-arr := [1, 2, 3, "hello", True, None]
+arr <array> := [1, 2, 3, "hello", True, None]
 println("Array JSON:", json.stringify(arr))
 
-// Test parse with a simple array (no braces)
-data := json.parse("[10, 20, 30]")
+data <array> := json.parse("[10, 20, 30]")
 println("Parsed array:", data)
 
-// Parse from a file to test objects
-__write_file("/tmp/oxigen_test.json", json.stringify(arr))
-read_back := json.parse(read_file("/tmp/oxigen_test.json"))
+io.write_file("/tmp/oxigen_test.json", json.stringify(arr))
+read_back <array> := json.parse(io.read_file("/tmp/oxigen_test.json"))
 println("Roundtrip:", read_back)
-__remove("/tmp/oxigen_test.json")
 
-// Test map stringify
-m := {"name": "Oxigen", "version": 1}
+introduce os
+os.remove_file("/tmp/oxigen_test.json")
+
+m <map> := {"name": "Oxigen", "version": 1}
 println("Map JSON:", json.stringify(m))
 
 // ── Net/HTTP ──
 println("=== HTTP ===")
 introduce net
-resp := net.get("http://httpbin.org/get")
+resp <map> := net.get("http://httpbin.org/get")
 println("Status:", resp["status"])

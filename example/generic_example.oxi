@@ -4,16 +4,16 @@ struct Container {
 }
 
 Container contains {
-    fun show() { println(label + ":", self.data) }
+    fun show() { println("{self.label}: {self.data}") }
 }
 
-c1 := Container(42, "number")
+c1 <Container> := Container(42, "number")
 c1.show()
 
-c2 := Container("hello world", "text")
+c2 <Container> := Container("hello world", "text")
 c2.show()
 
-c3 := Container([1, 2, 3], "list")
+c3 <Container> := Container([1, 2, 3], "list")
 c3.show()
 
 c1.data = "now a string"

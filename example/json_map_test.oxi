@@ -1,0 +1,26 @@
+introduce json
+introduce io
+introduce os
+
+// Write a JSON object to a file (avoids brace interpolation issue in strings)
+io.write_file("/tmp/oxi_test.json", json.stringify({"name": "Oxigen", "version": 1, "active": True}))
+
+// Read it back and parse
+data <map> := json.parse(io.read_file("/tmp/oxi_test.json"))
+println("Type:", type(data))
+println("Data:", data)
+println("Name:", data["name"])
+println("Version:", data["version"])
+println("Active:", data["active"])
+
+// Nested objects
+nested_json <str> := json.stringify({"user": {"name": "Javan", "age": 25}, "scores": [90, 85, 100]})
+io.write_file("/tmp/oxi_test2.json", nested_json)
+nested <map> := json.parse(io.read_file("/tmp/oxi_test2.json"))
+println("Nested:", nested)
+println("User:", nested["user"])
+println("User name:", nested["user"]["name"])
+println("Scores:", nested["scores"])
+
+os.remove_file("/tmp/oxi_test.json")
+os.remove_file("/tmp/oxi_test2.json")

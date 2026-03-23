@@ -1,31 +1,26 @@
 struct Math {
-  num_one <int>
-  num_two <int>
+    num_one <int>
+    num_two <int>
 }
-
 
 Math contains {
-  fun add() { num_one + num_two}
-  fun subtract() { num_one - num_two}
-  fun multiply() { num_one * num_two}
-  fun divide() {num_one / num_two}
+    fun add() { self.num_one + self.num_two }
+    fun subtract() { self.num_one - self.num_two }
+    fun multiply() { self.num_one * self.num_two }
+    fun divide() { self.num_one / self.num_two }
 }
 
-
 m <Math> = Math {num_one: 10, num_two: 20}
-mat := Math(30,40)
+mat <Math> := Math(30, 40)
 
-println("Num One is mutable: ", is_mut(m.num_one))
-println("Num One is type mutable: ", is_type_mut(m.num_one))
-println("Num Two is mutable: ", is_mut(m.num_two))
-println("Num Two is type mutable: ", is_type_mut(m.num_two))
+println("Num One is mutable:", is_mut(m.num_one))
+println("Num One is type mutable:", is_type_mut(m.num_one))
+println("Num Two is mutable:", is_mut(m.num_two))
+println("Num Two is type mutable:", is_type_mut(m.num_two))
 println(m.add())
 
-
-println("Num One is mutable: ", is_mut(mat.num_one))
-println("Num One is type mutable: ", is_type_mut(mat.num_one))
-println("Num Two is mutable: ", is_mut(mat.num_two))
-println("Num Two is type mutable: ", is_type_mut(mat.num_two))
+println("Num One is mutable:", is_mut(mat.num_one))
+println("Num One is type mutable:", is_type_mut(mat.num_one))
+println("Num Two is mutable:", is_mut(mat.num_two))
+println("Num Two is type mutable:", is_type_mut(mat.num_two))
 println(mat.add())
-
-

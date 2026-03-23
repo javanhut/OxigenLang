@@ -1,28 +1,25 @@
 struct Array {
-  data <array>
+    data <array>
 }
 
-
 Array contains {
-  fun append(value) {
-    data := push(data, value)
-  }
-  fun pop() {
-    temp <array>
-    pos <int>
-    repeat when pos < len(data) - 1 {
-        temp := push(temp, data[pos])
-        pos++
+    fun append(value <generic>) {
+        self.data = push(self.data, value)
     }
-    popped_val := last(data)
-    data := temp
-    popped_val
-  }
-
-  fun print() {
-    println(data)
-  }
-
+    fun pop() {
+        temp <array>
+        pos <int>
+        repeat unless pos >= len(self.data) - 1 {
+            temp = push(temp, self.data[pos])
+            pos++
+        }
+        popped_val <generic> := last(self.data)
+        self.data = temp
+        popped_val
+    }
+    fun print() {
+        println(self.data)
+    }
 }
 
 arr <Array>
@@ -30,6 +27,6 @@ arr.append(10)
 arr.append(20)
 arr.append(30)
 arr.print()
-x := arr.pop()
-println("Popped: ",x)
+popped <generic> := arr.pop()
+println("Popped:", popped)
 arr.print()

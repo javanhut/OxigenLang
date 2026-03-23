@@ -1,27 +1,27 @@
-x := 90
-y := 20
+x <int> := 90
+y <int> := 20
 
 // Normal truthy or: x is 90 (truthy), short-circuits to True
 option { x or y == 10 -> println("truthy: True"), println("truthy: False") }
 
 // Distributed comparison: does x or y equal 10?
-// (x or y) == 10  →  x == 10 or y == 10  →  False
+// (x or y) == 10  ->  x == 10 or y == 10  ->  False
 option { (x or y) == 10 -> println("distributed: True"), println("distributed: False") }
 
-// With y = 10: (x or y) == 10  →  x == 10 or y == 10  →  True
+// With y = 10: (x or y) == 10  ->  x == 10 or y == 10  ->  True
 y := 10
 option { (x or y) == 10 -> println("y is 10: True"), println("y is 10: False") }
 
 // Distributed and: both must satisfy the comparison
-a := 5
-b := 5
+a <int> := 5
+b <int> := 5
 option { (a and b) == 5 -> println("both 5: True"), println("both 5: False") }
 
 b := 3
 option { (a and b) == 5 -> println("both 5 after: True"), println("both 5 after: False") }
 
 // Chaining: (x or y or z) == val
-z := 42
+z <int> := 42
 option { (x or y or z) == 42 -> println("one is 42: True"), println("one is 42: False") }
 
 // Works with all comparison operators

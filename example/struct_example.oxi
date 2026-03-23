@@ -1,50 +1,48 @@
 struct Person {
-  hide fname <str>
-  hide lname <str>
-  hide age <int>
+    hide fname <str>
+    hide lname <str>
+    hide age <int>
 }
 
 Person contains {
-  fun set_name(fn <str>, ln <str>) { 
-    self.fname = fn
-    self.lname = ln
+    fun set_name(fname <str>, lname <str>) {
+        self.fname = fname
+        self.lname = lname
     }
-  fun set_age(age <int>) {
-    self.age = age
-  }
-
+    fun set_age(age <int>) {
+        self.age = age
+    }
 }
 
 struct Nationality(Person) {
-  hide country <str>
-  hide title <str>
+    hide country <str>
+    hide title <str>
 }
 
 Nationality contains {
-  fun set_country(country <str>) {
-    self.country = country
-  }
-  fun set_title(title <str>) {
-    self.title = title
-  }
+    fun set_country(country <str>) {
+        self.country = country
+    }
+    fun set_title(title <str>) {
+        self.title = title
+    }
 }
 
-
 struct American(Nationality) {
-  state <str>
+    state <str>
 }
 
 American contains {
-  fun print_info() {
-    println("Name: ", self.fname, self.lname)
-    println("Age: ", self.age)
-    println("Country: ", self.country)
-    println("Title: ", self.title)
-  }
+    fun print_info() {
+        println("Name:", self.fname, self.lname)
+        println("Age:", self.age)
+        println("Country:", self.country)
+        println("Title:", self.title)
+    }
 }
 
 a <American>
-a.set_name("John","Hancock")
+a.set_name("John", "Hancock")
 a.set_age(29)
 a.set_country("USA")
 a.set_title("American")

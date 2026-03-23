@@ -15,11 +15,11 @@ println("OXIGEN_TEST:", os.env_get("OXIGEN_TEST"))
 println("Is stdlib a dir?", os.is_dir("stdlib"))
 println("Is Cargo.toml a file?", os.is_file("Cargo.toml"))
 
-entries := os.list_dir("stdlib")
+entries <array> := os.list_dir("stdlib")
 println("Stdlib modules:", entries)
 
 // Execute a command
-result := os.exec("echo hello from shell")
+result <map> := os.exec("echo hello from shell")
 println("Command output:", result["stdout"])
 println("Exit code:", result["code"])
 
