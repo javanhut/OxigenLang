@@ -73,6 +73,36 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
     builtins.insert("__exit".to_string(), Rc::new(Object::Builtin(builtin__exit)));
     builtins.insert("__pid".to_string(), Rc::new(Object::Builtin(builtin__pid)));
 
+    // Type conversion builtins
+    builtins.insert("int".to_string(), Rc::new(Object::Builtin(builtin_int)));
+    builtins.insert("float".to_string(), Rc::new(Object::Builtin(builtin_float)));
+
+    // Time builtins
+    builtins.insert("__time_now".to_string(), Rc::new(Object::Builtin(builtin__time_now)));
+    builtins.insert("__time_now_ms".to_string(), Rc::new(Object::Builtin(builtin__time_now_ms)));
+    builtins.insert("__time_sleep".to_string(), Rc::new(Object::Builtin(builtin__time_sleep)));
+    builtins.insert("__time_monotonic".to_string(), Rc::new(Object::Builtin(builtin__time_monotonic)));
+
+    // Random builtins
+    builtins.insert("__rand_int".to_string(), Rc::new(Object::Builtin(builtin__rand_int)));
+    builtins.insert("__rand_float".to_string(), Rc::new(Object::Builtin(builtin__rand_float)));
+    builtins.insert("__rand_seed".to_string(), Rc::new(Object::Builtin(builtin__rand_seed)));
+
+    // Path builtins
+    builtins.insert("__path_join".to_string(), Rc::new(Object::Builtin(builtin__path_join)));
+    builtins.insert("__path_ext".to_string(), Rc::new(Object::Builtin(builtin__path_ext)));
+    builtins.insert("__path_filename".to_string(), Rc::new(Object::Builtin(builtin__path_filename)));
+    builtins.insert("__path_parent".to_string(), Rc::new(Object::Builtin(builtin__path_parent)));
+    builtins.insert("__path_stem".to_string(), Rc::new(Object::Builtin(builtin__path_stem)));
+    builtins.insert("__path_is_absolute".to_string(), Rc::new(Object::Builtin(builtin__path_is_absolute)));
+
+    // JSON builtins
+    builtins.insert("__json_parse".to_string(), Rc::new(Object::Builtin(builtin__json_parse)));
+    builtins.insert("__json_stringify".to_string(), Rc::new(Object::Builtin(builtin__json_stringify)));
+
+    // HTTP builtins
+    builtins.insert("__http_request".to_string(), Rc::new(Object::Builtin(builtin__http_request)));
+
     builtins
 }
 
@@ -987,4 +1017,629 @@ fn builtin__exit(args: Vec<Rc<Object>>) -> Rc<Object> {
 
 fn builtin__pid(_args: Vec<Rc<Object>>) -> Rc<Object> {
     Rc::new(Object::Integer(std::process::id() as i64))
+}
+
+// ── Type conversion builtins ──
+
+fn builtin_int(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!("int: expected 1 argument, got {}", args.len())));
+    }
+    match args[0].as_ref() {
+        Object::Integer(_) => Rc::clone(&args[0]),
+        Object::Float(f) => Rc::new(Object::Integer(*f as i64)),
+        Object::String(s) => match s.trim().parse::<i64>() {
+            Ok(n) => Rc::new(Object::Integer(n)),
+            Err(_) => match s.trim().parse::<f64>() {
+                Ok(f) => Rc::new(Object::Integer(f as i64)),
+                Err(_) => Rc::new(Object::Error(format!("int: cannot parse '{}'", s))),
+            },
+        },
+        Object::Boolean(b) => Rc::new(Object::Integer(if *b { 1 } else { 0 })),
+        Object::Char(c) => Rc::new(Object::Integer(*c as i64)),
+        Object::Byte(b) => Rc::new(Object::Integer(*b as i64)),
+        Object::Uint(n) => Rc::new(Object::Integer(*n as i64)),
+        _ => Rc::new(Object::Error(format!("int: cannot convert {} to INTEGER", args[0].type_name()))),
+    }
+}
+
+fn builtin_float(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!("float: expected 1 argument, got {}", args.len())));
+    }
+    match args[0].as_ref() {
+        Object::Float(_) => Rc::clone(&args[0]),
+        Object::Integer(n) => Rc::new(Object::Float(*n as f64)),
+        Object::String(s) => match s.trim().parse::<f64>() {
+            Ok(f) => Rc::new(Object::Float(f)),
+            Err(_) => Rc::new(Object::Error(format!("float: cannot parse '{}'", s))),
+        },
+        Object::Boolean(b) => Rc::new(Object::Float(if *b { 1.0 } else { 0.0 })),
+        Object::Byte(b) => Rc::new(Object::Float(*b as f64)),
+        Object::Uint(n) => Rc::new(Object::Float(*n as f64)),
+        _ => Rc::new(Object::Error(format!("float: cannot convert {} to FLOAT", args[0].type_name()))),
+    }
+}
+
+// ── Time builtins ──
+
+fn builtin__time_now(_args: Vec<Rc<Object>>) -> Rc<Object> {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => Rc::new(Object::Float(d.as_secs_f64())),
+        Err(e) => Rc::new(Object::Error(format!("__time_now: {}", e))),
+    }
+}
+
+fn builtin__time_now_ms(_args: Vec<Rc<Object>>) -> Rc<Object> {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => Rc::new(Object::Integer(d.as_millis() as i64)),
+        Err(e) => Rc::new(Object::Error(format!("__time_now_ms: {}", e))),
+    }
+}
+
+fn builtin__time_sleep(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!("__time_sleep: expected 1 argument, got {}", args.len())));
+    }
+    let ms = match args[0].as_ref() {
+        Object::Integer(n) => *n as u64,
+        Object::Float(f) => *f as u64,
+        _ => return Rc::new(Object::Error(format!("__time_sleep: expected number, got {}", args[0].type_name()))),
+    };
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+    Rc::new(Object::None)
+}
+
+fn builtin__time_monotonic(_args: Vec<Rc<Object>>) -> Rc<Object> {
+    use std::time::Instant;
+    thread_local! {
+        static EPOCH: Instant = Instant::now();
+    }
+    EPOCH.with(|epoch| {
+        let elapsed = epoch.elapsed();
+        Rc::new(Object::Integer(elapsed.as_nanos() as i64))
+    })
+}
+
+// ── Random builtins (xorshift64*) ──
+
+use std::cell::Cell;
+
+thread_local! {
+    static RNG_STATE: Cell<u64> = {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        Cell::new(if seed == 0 { 1 } else { seed })
+    };
+}
+
+fn xorshift64star() -> u64 {
+    RNG_STATE.with(|state| {
+        let mut x = state.get();
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        state.set(x);
+        x.wrapping_mul(0x2545F4914F6CDD1D)
+    })
+}
+
+fn builtin__rand_int(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 2 {
+        return Rc::new(Object::Error(format!("__rand_int: expected 2 arguments (min, max), got {}", args.len())));
+    }
+    let min = match args[0].as_ref() {
+        Object::Integer(n) => *n,
+        _ => return Rc::new(Object::Error(format!("__rand_int: expected INTEGER, got {}", args[0].type_name()))),
+    };
+    let max = match args[1].as_ref() {
+        Object::Integer(n) => *n,
+        _ => return Rc::new(Object::Error(format!("__rand_int: expected INTEGER, got {}", args[1].type_name()))),
+    };
+    if min > max {
+        return Rc::new(Object::Error(format!("__rand_int: min ({}) > max ({})", min, max)));
+    }
+    let range = (max - min + 1) as u64;
+    let val = min + (xorshift64star() % range) as i64;
+    Rc::new(Object::Integer(val))
+}
+
+fn builtin__rand_float(_args: Vec<Rc<Object>>) -> Rc<Object> {
+    let val = (xorshift64star() as f64) / (u64::MAX as f64);
+    Rc::new(Object::Float(val))
+}
+
+fn builtin__rand_seed(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!("__rand_seed: expected 1 argument, got {}", args.len())));
+    }
+    let seed = match args[0].as_ref() {
+        Object::Integer(n) => *n as u64,
+        _ => return Rc::new(Object::Error(format!("__rand_seed: expected INTEGER, got {}", args[0].type_name()))),
+    };
+    RNG_STATE.with(|state| state.set(if seed == 0 { 1 } else { seed }));
+    Rc::new(Object::None)
+}
+
+// ── Path builtins ──
+
+fn builtin__path_join(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!("__path_join: expected 1 argument (array), got {}", args.len())));
+    }
+    match args[0].as_ref() {
+        Object::Array(parts) => {
+            let mut path = std::path::PathBuf::new();
+            for part in parts {
+                match part.as_ref() {
+                    Object::String(s) => path.push(s),
+                    _ => return Rc::new(Object::Error("__path_join: array elements must be strings".to_string())),
+                }
+            }
+            Rc::new(Object::String(path.to_string_lossy().to_string()))
+        }
+        _ => Rc::new(Object::Error(format!("__path_join: expected ARRAY, got {}", args[0].type_name()))),
+    }
+}
+
+fn builtin__path_ext(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!("__path_ext: expected 1 argument, got {}", args.len())));
+    }
+    match args[0].as_ref() {
+        Object::String(s) => {
+            let p = std::path::Path::new(s);
+            match p.extension() {
+                Some(ext) => Rc::new(Object::String(ext.to_string_lossy().to_string())),
+                None => Rc::new(Object::None),
+            }
+        }
+        _ => Rc::new(Object::Error(format!("__path_ext: expected STRING, got {}", args[0].type_name()))),
+    }
+}
+
+fn builtin__path_filename(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!("__path_filename: expected 1 argument, got {}", args.len())));
+    }
+    match args[0].as_ref() {
+        Object::String(s) => {
+            let p = std::path::Path::new(s);
+            match p.file_name() {
+                Some(name) => Rc::new(Object::String(name.to_string_lossy().to_string())),
+                None => Rc::new(Object::None),
+            }
+        }
+        _ => Rc::new(Object::Error(format!("__path_filename: expected STRING, got {}", args[0].type_name()))),
+    }
+}
+
+fn builtin__path_parent(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!("__path_parent: expected 1 argument, got {}", args.len())));
+    }
+    match args[0].as_ref() {
+        Object::String(s) => {
+            let p = std::path::Path::new(s);
+            match p.parent() {
+                Some(parent) => Rc::new(Object::String(parent.to_string_lossy().to_string())),
+                None => Rc::new(Object::None),
+            }
+        }
+        _ => Rc::new(Object::Error(format!("__path_parent: expected STRING, got {}", args[0].type_name()))),
+    }
+}
+
+fn builtin__path_stem(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!("__path_stem: expected 1 argument, got {}", args.len())));
+    }
+    match args[0].as_ref() {
+        Object::String(s) => {
+            let p = std::path::Path::new(s);
+            match p.file_stem() {
+                Some(stem) => Rc::new(Object::String(stem.to_string_lossy().to_string())),
+                None => Rc::new(Object::None),
+            }
+        }
+        _ => Rc::new(Object::Error(format!("__path_stem: expected STRING, got {}", args[0].type_name()))),
+    }
+}
+
+fn builtin__path_is_absolute(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!("__path_is_absolute: expected 1 argument, got {}", args.len())));
+    }
+    match args[0].as_ref() {
+        Object::String(s) => Rc::new(Object::Boolean(std::path::Path::new(s.as_str()).is_absolute())),
+        _ => Rc::new(Object::Error(format!("__path_is_absolute: expected STRING, got {}", args[0].type_name()))),
+    }
+}
+
+// ── JSON builtins ──
+
+fn json_parse_value(chars: &[char], pos: &mut usize) -> Result<Rc<Object>, String> {
+    json_skip_ws(chars, pos);
+    if *pos >= chars.len() {
+        return Err("unexpected end of JSON".to_string());
+    }
+    match chars[*pos] {
+        '"' => json_parse_string(chars, pos),
+        't' | 'f' => json_parse_bool(chars, pos),
+        'n' => json_parse_null(chars, pos),
+        '[' => json_parse_array(chars, pos),
+        '{' => json_parse_object(chars, pos),
+        c if c == '-' || c.is_ascii_digit() => json_parse_number(chars, pos),
+        c => Err(format!("unexpected character '{}' at position {}", c, pos)),
+    }
+}
+
+fn json_skip_ws(chars: &[char], pos: &mut usize) {
+    while *pos < chars.len() && chars[*pos].is_ascii_whitespace() {
+        *pos += 1;
+    }
+}
+
+fn json_parse_string(chars: &[char], pos: &mut usize) -> Result<Rc<Object>, String> {
+    *pos += 1; // skip opening "
+    let mut s = String::new();
+    while *pos < chars.len() && chars[*pos] != '"' {
+        if chars[*pos] == '\\' {
+            *pos += 1;
+            if *pos >= chars.len() {
+                return Err("unterminated string escape".to_string());
+            }
+            match chars[*pos] {
+                '"' => s.push('"'),
+                '\\' => s.push('\\'),
+                '/' => s.push('/'),
+                'b' => s.push('\u{0008}'),
+                'f' => s.push('\u{000C}'),
+                'n' => s.push('\n'),
+                'r' => s.push('\r'),
+                't' => s.push('\t'),
+                'u' => {
+                    *pos += 1;
+                    if *pos + 4 > chars.len() {
+                        return Err("incomplete unicode escape".to_string());
+                    }
+                    let hex: String = chars[*pos..*pos + 4].iter().collect();
+                    *pos += 3; // will be incremented below
+                    let cp = u32::from_str_radix(&hex, 16)
+                        .map_err(|_| format!("invalid unicode escape: \\u{}", hex))?;
+                    s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                }
+                c => s.push(c),
+            }
+        } else {
+            s.push(chars[*pos]);
+        }
+        *pos += 1;
+    }
+    if *pos >= chars.len() {
+        return Err("unterminated string".to_string());
+    }
+    *pos += 1; // skip closing "
+    Ok(Rc::new(Object::String(s)))
+}
+
+fn json_parse_number(chars: &[char], pos: &mut usize) -> Result<Rc<Object>, String> {
+    let start = *pos;
+    if chars[*pos] == '-' {
+        *pos += 1;
+    }
+    while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+        *pos += 1;
+    }
+    let mut is_float = false;
+    if *pos < chars.len() && chars[*pos] == '.' {
+        is_float = true;
+        *pos += 1;
+        while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+            *pos += 1;
+        }
+    }
+    if *pos < chars.len() && (chars[*pos] == 'e' || chars[*pos] == 'E') {
+        is_float = true;
+        *pos += 1;
+        if *pos < chars.len() && (chars[*pos] == '+' || chars[*pos] == '-') {
+            *pos += 1;
+        }
+        while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+            *pos += 1;
+        }
+    }
+    let num_str: String = chars[start..*pos].iter().collect();
+    if is_float {
+        num_str
+            .parse::<f64>()
+            .map(|f| Rc::new(Object::Float(f)))
+            .map_err(|_| format!("invalid number: {}", num_str))
+    } else {
+        num_str
+            .parse::<i64>()
+            .map(|n| Rc::new(Object::Integer(n)))
+            .map_err(|_| format!("invalid number: {}", num_str))
+    }
+}
+
+fn json_parse_bool(chars: &[char], pos: &mut usize) -> Result<Rc<Object>, String> {
+    if chars[*pos..].starts_with(&['t', 'r', 'u', 'e']) {
+        *pos += 4;
+        Ok(Rc::new(Object::Boolean(true)))
+    } else if chars[*pos..].starts_with(&['f', 'a', 'l', 's', 'e']) {
+        *pos += 5;
+        Ok(Rc::new(Object::Boolean(false)))
+    } else {
+        Err(format!("unexpected token at position {}", pos))
+    }
+}
+
+fn json_parse_null(chars: &[char], pos: &mut usize) -> Result<Rc<Object>, String> {
+    if chars[*pos..].starts_with(&['n', 'u', 'l', 'l']) {
+        *pos += 4;
+        Ok(Rc::new(Object::None))
+    } else {
+        Err(format!("unexpected token at position {}", pos))
+    }
+}
+
+fn json_parse_array(chars: &[char], pos: &mut usize) -> Result<Rc<Object>, String> {
+    *pos += 1; // skip [
+    json_skip_ws(chars, pos);
+    let mut elements = Vec::new();
+    if *pos < chars.len() && chars[*pos] == ']' {
+        *pos += 1;
+        return Ok(Rc::new(Object::Array(elements)));
+    }
+    loop {
+        let val = json_parse_value(chars, pos)?;
+        elements.push(val);
+        json_skip_ws(chars, pos);
+        if *pos >= chars.len() {
+            return Err("unterminated array".to_string());
+        }
+        if chars[*pos] == ']' {
+            *pos += 1;
+            break;
+        }
+        if chars[*pos] != ',' {
+            return Err(format!("expected ',' or ']' in array, got '{}'", chars[*pos]));
+        }
+        *pos += 1;
+    }
+    Ok(Rc::new(Object::Array(elements)))
+}
+
+fn json_parse_object(chars: &[char], pos: &mut usize) -> Result<Rc<Object>, String> {
+    *pos += 1; // skip {
+    json_skip_ws(chars, pos);
+    let mut entries: Vec<(Rc<Object>, Rc<Object>)> = Vec::new();
+    if *pos < chars.len() && chars[*pos] == '}' {
+        *pos += 1;
+        return Ok(Rc::new(Object::Map(entries)));
+    }
+    loop {
+        json_skip_ws(chars, pos);
+        if *pos >= chars.len() || chars[*pos] != '"' {
+            return Err("expected string key in object".to_string());
+        }
+        let key = json_parse_string(chars, pos)?;
+        json_skip_ws(chars, pos);
+        if *pos >= chars.len() || chars[*pos] != ':' {
+            return Err("expected ':' in object".to_string());
+        }
+        *pos += 1;
+        let val = json_parse_value(chars, pos)?;
+        entries.push((key, val));
+        json_skip_ws(chars, pos);
+        if *pos >= chars.len() {
+            return Err("unterminated object".to_string());
+        }
+        if chars[*pos] == '}' {
+            *pos += 1;
+            break;
+        }
+        if chars[*pos] != ',' {
+            return Err(format!("expected ',' or '}}' in object, got '{}'", chars[*pos]));
+        }
+        *pos += 1;
+    }
+    Ok(Rc::new(Object::Map(entries)))
+}
+
+fn object_to_json(obj: &Object) -> Result<String, String> {
+    match obj {
+        Object::None => Ok("null".to_string()),
+        Object::Boolean(b) => Ok(if *b { "true" } else { "false" }.to_string()),
+        Object::Integer(n) => Ok(n.to_string()),
+        Object::Float(f) => {
+            if f.is_nan() || f.is_infinite() {
+                Ok("null".to_string())
+            } else {
+                Ok(f.to_string())
+            }
+        }
+        Object::String(s) => {
+            let mut out = String::from('"');
+            for c in s.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    c if c < '\x20' => out.push_str(&format!("\\u{:04x}", c as u32)),
+                    c => out.push(c),
+                }
+            }
+            out.push('"');
+            Ok(out)
+        }
+        Object::Array(arr) => {
+            let items: Result<Vec<String>, String> =
+                arr.iter().map(|e| object_to_json(e)).collect();
+            Ok(format!("[{}]", items?.join(",")))
+        }
+        Object::Map(entries) => {
+            let items: Result<Vec<String>, String> = entries
+                .iter()
+                .map(|(k, v)| {
+                    let key_json = object_to_json(k)?;
+                    let val_json = object_to_json(v)?;
+                    Ok(format!("{}:{}", key_json, val_json))
+                })
+                .collect();
+            Ok(format!("{{{}}}", items?.join(",")))
+        }
+        Object::Tuple(elements) => {
+            let items: Result<Vec<String>, String> =
+                elements.iter().map(|e| object_to_json(e)).collect();
+            Ok(format!("[{}]", items?.join(",")))
+        }
+        Object::Byte(n) => Ok(n.to_string()),
+        Object::Uint(n) => Ok(n.to_string()),
+        Object::Char(c) => Ok(format!("\"{}\"", c)),
+        _ => Err(format!("cannot serialize {} to JSON", obj.type_name())),
+    }
+}
+
+fn builtin__json_parse(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!("__json_parse: expected 1 argument, got {}", args.len())));
+    }
+    match args[0].as_ref() {
+        Object::String(s) => {
+            let chars: Vec<char> = s.chars().collect();
+            let mut pos = 0;
+            match json_parse_value(&chars, &mut pos) {
+                Ok(val) => val,
+                Err(e) => Rc::new(Object::Error(format!("json parse error: {}", e))),
+            }
+        }
+        _ => Rc::new(Object::Error(format!("__json_parse: expected STRING, got {}", args[0].type_name()))),
+    }
+}
+
+fn builtin__json_stringify(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!("__json_stringify: expected 1 argument, got {}", args.len())));
+    }
+    match object_to_json(&args[0]) {
+        Ok(s) => Rc::new(Object::String(s)),
+        Err(e) => Rc::new(Object::Error(format!("json stringify error: {}", e))),
+    }
+}
+
+// ── HTTP builtins ──
+
+fn http_headers_from_args(args: &[Rc<Object>]) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    if args.len() >= 3 {
+        if let Object::Map(entries) = args[2].as_ref() {
+            for (k, v) in entries {
+                if let (Object::String(key), Object::String(val)) = (k.as_ref(), v.as_ref()) {
+                    headers.push((key.clone(), val.clone()));
+                }
+            }
+        }
+    }
+    headers
+}
+
+fn http_body_from_args(args: &[Rc<Object>]) -> Result<Option<String>, String> {
+    if args.len() >= 4 {
+        match args[3].as_ref() {
+            Object::String(s) => Ok(Some(s.clone())),
+            Object::None => Ok(None),
+            _ => Err(format!("__http_request: body must be STRING, got {}", args[3].type_name())),
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+fn http_response_to_object(body: &mut ureq::Body) -> Rc<Object> {
+    match body.read_to_string() {
+        Ok(s) => Rc::new(Object::String(s)),
+        Err(_) => Rc::new(Object::String(String::new())),
+    }
+}
+
+fn builtin__http_request(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() < 2 || args.len() > 4 {
+        return Rc::new(Object::Error("__http_request: expected 2-4 arguments (method, url, headers?, body?)".to_string()));
+    }
+    let method = match args[0].as_ref() {
+        Object::String(s) => s.to_uppercase(),
+        _ => return Rc::new(Object::Error(format!("__http_request: method must be STRING, got {}", args[0].type_name()))),
+    };
+    let url = match args[1].as_ref() {
+        Object::String(s) => s.clone(),
+        _ => return Rc::new(Object::Error(format!("__http_request: url must be STRING, got {}", args[1].type_name()))),
+    };
+
+    let headers = http_headers_from_args(&args);
+    let body = match http_body_from_args(&args) {
+        Ok(b) => b,
+        Err(e) => return Rc::new(Object::Error(e)),
+    };
+
+    macro_rules! apply_headers {
+        ($req:expr, $headers:expr) => {{
+            let mut r = $req;
+            for (k, v) in $headers {
+                r = r.header(k.as_str(), v.as_str());
+            }
+            r
+        }};
+    }
+
+    macro_rules! handle_response {
+        ($result:expr) => {
+            match $result {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let (_, mut body) = resp.into_parts();
+                    let body_obj = http_response_to_object(&mut body);
+                    let entries: Vec<(Rc<Object>, Rc<Object>)> = vec![
+                        (Rc::new(Object::String("status".to_string())), Rc::new(Object::Integer(status as i64))),
+                        (Rc::new(Object::String("body".to_string())), body_obj),
+                    ];
+                    Rc::new(Object::Map(entries))
+                }
+                Err(e) => Rc::new(Object::Error(format!("http error: {}", e))),
+            }
+        };
+    }
+
+    match method.as_str() {
+        "GET" => handle_response!(apply_headers!(ureq::get(&url), &headers).call()),
+        "HEAD" => handle_response!(apply_headers!(ureq::head(&url), &headers).call()),
+        "DELETE" => handle_response!(apply_headers!(ureq::delete(&url), &headers).call()),
+        "POST" => {
+            let req = apply_headers!(ureq::post(&url), &headers);
+            handle_response!(match &body {
+                Some(b) => req.send(b.as_bytes()),
+                None => req.send_empty(),
+            })
+        }
+        "PUT" => {
+            let req = apply_headers!(ureq::put(&url), &headers);
+            handle_response!(match &body {
+                Some(b) => req.send(b.as_bytes()),
+                None => req.send_empty(),
+            })
+        }
+        "PATCH" => {
+            let req = apply_headers!(ureq::patch(&url), &headers);
+            handle_response!(match &body {
+                Some(b) => req.send(b.as_bytes()),
+                None => req.send_empty(),
+            })
+        }
+        _ => Rc::new(Object::Error(format!("__http_request: unsupported method '{}'", method))),
+    }
 }

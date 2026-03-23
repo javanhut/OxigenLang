@@ -194,3 +194,5 @@ See the full [Control Flow](control_flow.md) guide for details.
 - [Structs](structs.md) — composite types, methods, and inheritance
 - [Type System](type_system.md) — optional type annotations and mutability control
 - [Built-in Functions](builtins.md) — the standard library of built-in functions
+- [Imports and Modules](imports.md) — the `introduce` keyword and module system
+- [Standard Library](stdlib.md) — math, strings, array, io, os, time, random, path, json, net

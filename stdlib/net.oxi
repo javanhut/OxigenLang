@@ -1,0 +1,32 @@
+// HTTP GET request. Returns map with "status" and "body".
+fun get(url) { __http_request("GET", url) }
+
+// HTTP POST request with body. Returns map with "status" and "body".
+fun post(url, body) {
+    __http_request("POST", url, {"Content-Type": "application/json"}, body)
+}
+
+// HTTP PUT request with body. Returns map with "status" and "body".
+fun put(url, body) {
+    __http_request("PUT", url, {"Content-Type": "application/json"}, body)
+}
+
+// HTTP PATCH request with body. Returns map with "status" and "body".
+fun patch(url, body) {
+    __http_request("PATCH", url, {"Content-Type": "application/json"}, body)
+}
+
+// HTTP DELETE request. Returns map with "status" and "body".
+fun delete(url) { __http_request("DELETE", url) }
+
+// HTTP HEAD request. Returns map with "status" and "body".
+fun head(url) { __http_request("HEAD", url) }
+
+// Generic HTTP request with full control.
+// method: "GET", "POST", etc.
+// url: the URL string
+// headers: map of header name -> value (or None)
+// body: request body string (or None)
+fun request(method, url, headers, body) {
+    __http_request(method, url, headers, body)
+}

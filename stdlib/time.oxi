@@ -1,0 +1,21 @@
+// Current unix timestamp in seconds (float)
+fun now() { __time_now() }
+
+// Current unix timestamp in milliseconds (integer)
+fun now_ms() { __time_now_ms() }
+
+// Sleep for the given number of milliseconds
+fun sleep(ms) { __time_sleep(ms) }
+
+// Monotonic clock in nanoseconds (for measuring elapsed time)
+fun monotonic() { __time_monotonic() }
+
+// Measure elapsed time in milliseconds between two monotonic values
+fun elapsed_ms(start, end) {
+    (end - start) / 1000000
+}
+
+// Measure elapsed time in seconds between two monotonic values
+fun elapsed_s(start, end) {
+    float((end - start)) / 1000000000.0
+}

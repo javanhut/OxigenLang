@@ -127,6 +127,37 @@ each i in range(10) {
 
 ## Type Conversion
 
+### `int(value)`
+
+Converts a value to an integer. Parses strings, truncates floats, converts booleans to 0/1, and converts chars to their Unicode codepoint.
+
+```oxi
+int("42")       // 42
+int("3.14")     // 3
+int(3.99)       // 3
+int(True)       // 1
+int(False)      // 0
+int(`A`)        // 65
+int(byte(200))  // 200
+int(uint(100))  // 100
+```
+
+**Supported types:** String, Float, Boolean, Char, Byte, Uint, Integer (identity).
+
+### `float(value)`
+
+Converts a value to a float. Parses strings, converts integers, and converts booleans to 0.0/1.0.
+
+```oxi
+float("3.14")   // 3.14
+float(42)       // 42.0
+float(True)     // 1.0
+float(byte(200))// 200.0
+float(uint(100))// 100.0
+```
+
+**Supported types:** String, Integer, Boolean, Byte, Uint, Float (identity).
+
 ### `str(value)`
 
 Converts a value to its string representation. Works on integers, floats, characters, booleans, strings, bytes, and unsigned integers.
@@ -404,6 +435,8 @@ is_type_mut(m.num_one)
 | `rest`      | `(array)`              | `Array`/`None`| All elements except first            |
 | `has`       | `(collection, value)`  | `Boolean`    | Membership test                       |
 | `range`     | `(n)`                  | `Array`      | `[0, 1, ..., n-1]`                   |
+| `int`       | `(value)`              | `Integer`    | Parse/convert to integer              |
+| `float`     | `(value)`              | `Float`      | Parse/convert to float                |
 | `str`       | `(value)`              | `String`     | String representation                 |
 | `ord`       | `(char)`               | `Integer`    | Unicode codepoint                     |
 | `chr`       | `(integer)`            | `Char`       | Character from codepoint              |
@@ -425,3 +458,5 @@ See also:
 - [Data Types](data_types.md) — types accepted by each built-in
 - [Type System](type_system.md) — type conversion and introspection details
 - [Variables and Assignments](variables.md) — mutability model used by `is_mut` and `is_type_mut`
+- [Imports and Modules](imports.md) — the `introduce` keyword and module system
+- [Standard Library](stdlib.md) — full reference for all stdlib modules (math, strings, array, io, os, time, random, path, json, net)

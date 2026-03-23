@@ -1,16 +1,16 @@
-abs := fun(x) {
+fun abs(x) {
     option { x >= 0 -> x, -x }
 }
 
-min := fun(a, b) {
+fun min(a, b) {
     option { a <= b -> a, b }
 }
 
-max := fun(a, b) {
+fun max(a, b) {
     option { a >= b -> a, b }
 }
 
-pow := fun(base, exp) {
+fun pow(base, exp) {
     result := 1
     i := 0
     repeat when i < exp {
@@ -20,7 +20,7 @@ pow := fun(base, exp) {
     result
 }
 
-clamp := fun(x, lo, hi) {
+fun clamp(x, lo, hi) {
     option {
         x < lo -> lo
         x > hi -> hi
@@ -28,7 +28,7 @@ clamp := fun(x, lo, hi) {
     }
 }
 
-sign := fun(x) {
+fun sign(x) {
     option {
         x > 0 -> 1
         x < 0 -> -1
@@ -36,7 +36,7 @@ sign := fun(x) {
     }
 }
 
-sqrt := fun(x) { __sqrt(x) }
-floor := fun(x) { __floor(x) }
-ceil := fun(x) { __ceil(x) }
-round := fun(x) { __round(x) }
+fun sqrt(x) { __sqrt(x) }
+fun floor(x) { __floor(x) }
+fun ceil(x) { __ceil(x) }
+fun round(x) { __round(x) }

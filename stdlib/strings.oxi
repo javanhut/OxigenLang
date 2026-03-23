@@ -1,9 +1,9 @@
-split := fun(s, delim) { __split(s, delim) }
-join := fun(arr, delim) { __join(arr, delim) }
-trim := fun(s) { __trim(s) }
-upper := fun(s) { __upper(s) }
-lower := fun(s) { __lower(s) }
-replace := fun(s, old, new_str) { __replace(s, old, new_str) }
-starts_with := fun(s, prefix) { __starts_with(s, prefix) }
-ends_with := fun(s, suffix) { __ends_with(s, suffix) }
-contains_str := fun(s, sub) { __contains_str(s, sub) }
+fun split(s, delim) { __split(s, delim) }
+fun join(arr, delim) { __join(arr, delim) }
+fun trim(s) { __trim(s) }
+fun upper(s) { __upper(s) }
+fun lower(s) { __lower(s) }
+fun replace(s, old, new_str) { __replace(s, old, new_str) }
+fun starts_with(s, prefix) { __starts_with(s, prefix) }
+fun ends_with(s, suffix) { __ends_with(s, suffix) }
+fun contains_str(s, sub) { __contains_str(s, sub) }

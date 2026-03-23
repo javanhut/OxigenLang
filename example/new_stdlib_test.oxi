@@ -1,0 +1,70 @@
+// ── Type conversion ──
+println("=== Type Conversion ===")
+println(int("42"))
+println(int("3.14"))
+println(int(True))
+println(float("3.14"))
+println(float(42))
+
+// ── Time ──
+println("=== Time ===")
+introduce time
+println("Unix timestamp:", time.now())
+println("Unix ms:", time.now_ms())
+
+start := time.monotonic()
+time.sleep(50)
+end := time.monotonic()
+println("Slept ~50ms, elapsed:", time.elapsed_ms(start, end), "ms")
+
+// ── Random ──
+println("=== Random ===")
+introduce random
+random.seed(42)
+println("Random int [1,10]:", random.rand_int(1, 10))
+println("Random int [1,10]:", random.rand_int(1, 10))
+println("Random float:", random.rand_float())
+println("Random bool:", random.rand_bool())
+println("Choice from [a,b,c]:", random.choice(["a", "b", "c"]))
+
+// ── Path ──
+println("=== Path ===")
+introduce path
+println("Join:", path.join(["/home", "user", "file.txt"]))
+println("Ext:", path.ext("document.pdf"))
+println("Filename:", path.filename("/home/user/document.pdf"))
+println("Parent:", path.parent("/home/user/document.pdf"))
+println("Stem:", path.stem("document.pdf"))
+println("Is absolute /home:", path.is_absolute("/home"))
+println("Is absolute relative:", path.is_absolute("relative/path"))
+
+// ── JSON ──
+println("=== JSON ===")
+introduce json
+introduce {read_file} from io
+
+// Write a temp JSON file, read it, parse it
+io_test_json := '[1, 2, 3, "hello", true, null]'
+// Test stringify with Oxigen data
+arr := [1, 2, 3, "hello", True, None]
+println("Array JSON:", json.stringify(arr))
+
+// Test parse with a simple array (no braces)
+data := json.parse("[10, 20, 30]")
+println("Parsed array:", data)
+
+// Parse from a file to test objects
+__write_file("/tmp/oxigen_test.json", json.stringify(arr))
+read_back := json.parse(read_file("/tmp/oxigen_test.json"))
+println("Roundtrip:", read_back)
+__remove("/tmp/oxigen_test.json")
+
+// Test map stringify
+m := {"name": "Oxigen", "version": 1}
+println("Map JSON:", json.stringify(m))
+
+// ── Net/HTTP ──
+println("=== HTTP ===")
+introduce net
+resp := net.get("http://httpbin.org/get")
+println("Status:", resp["status"])

@@ -1,0 +1,17 @@
+// Random integer in range [min, max] (inclusive)
+fun rand_int(min, max) { __rand_int(min, max) }
+
+// Random float in [0.0, 1.0)
+fun rand_float() { __rand_float() }
+
+// Seed the random number generator
+fun seed(n) { __rand_seed(n) }
+
+// Random boolean
+fun rand_bool() { __rand_int(0, 1) == 1 }
+
+// Pick a random element from an array
+fun choice(arr) {
+    i := __rand_int(0, len(arr) - 1)
+    arr[i]
+}
