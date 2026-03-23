@@ -74,16 +74,30 @@ impl Evaluator {
     }
 
     fn find_stdlib_path() -> PathBuf {
-        // Check relative to executable
+        // 1. Relative to executable (dev: target/debug/oxigen + stdlib/)
         if let Ok(exe) = std::env::current_exe() {
             if let Some(exe_dir) = exe.parent() {
                 let candidate = exe_dir.join("stdlib");
                 if candidate.is_dir() {
                     return candidate;
                 }
+                // 2. System install: <prefix>/bin/../lib/oxigen/stdlib
+                if let Some(prefix) = exe_dir.parent() {
+                    let candidate = prefix.join("lib").join("oxigen").join("stdlib");
+                    if candidate.is_dir() {
+                        return candidate;
+                    }
+                }
             }
         }
-        // Check current working directory
+        // 3. User install: ~/.oxigen/lib/stdlib
+        if let Ok(home) = std::env::var("HOME") {
+            let candidate = PathBuf::from(home).join(".oxigen").join("lib").join("stdlib");
+            if candidate.is_dir() {
+                return candidate;
+            }
+        }
+        // 4. Current working directory
         let candidate = PathBuf::from("stdlib");
         if candidate.is_dir() {
             return candidate;

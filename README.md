@@ -16,30 +16,48 @@ OxigenLang is a modern, lightweight, interpreted programming language implemente
 - **Built-in Functions**: Built-in functions for I/O, collection manipulation, type conversion, and introspection.
 - **REPL**: Interactive shell for quick experimentation with persistent state across lines.
 
-## Getting Started
+## Installation
 
-### Installation
+Requires [Rust](https://www.rust-lang.org/).
 
-Ensure you have [Rust](https://www.rust-lang.org/) installed. Clone the repository and build the project:
+### Quick Install (Linux / macOS)
+
+```bash
+git clone https://github.com/your-username/OxigenLang.git
+cd OxigenLang
+./install.sh
+```
+
+This builds oxigen, installs it to `~/.oxigen/`, and adds it to your PATH. Restart your shell or run:
+
+```bash
+export PATH="$HOME/.oxigen/bin:$PATH"
+```
+
+### Uninstall
+
+```bash
+./uninstall.sh
+```
+
+Removes the `~/.oxigen/` directory and cleans the PATH entry from your shell config.
+
+### System-Wide Install
+
+```bash
+sudo make install                # installs to /usr/local/
+sudo make install PREFIX=/opt    # custom prefix
+sudo make uninstall              # removes it
+```
+
+### Development
+
+Run directly from the source tree without installing:
 
 ```bash
 cargo build --release
-```
-
-### Running Scripts
-
-Run OxigenLang scripts (`.oxi`) using the interpreter:
-
-```bash
 cargo run -- path/to/script.oxi
-```
-
-### REPL
-
-Start the interactive REPL:
-
-```bash
-cargo run
+cargo run                        # starts the REPL
 ```
 
 ## Quick Example
