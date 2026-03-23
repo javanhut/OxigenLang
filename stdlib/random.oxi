@@ -12,6 +12,6 @@ fun rand_bool() { __rand_int(0, 1) == 1 }
 
 // Pick a random element from an array
 fun choice(arr <array>) {
-    i := __rand_int(0, len(arr) - 1)
+    i <int> := __rand_int(0, len(arr) - 1)
     arr[i]
 }

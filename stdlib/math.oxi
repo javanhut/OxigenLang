@@ -11,10 +11,10 @@ fun max(a <int> || <float>, b <int> || <float>) {
 }
 
 fun pow(base <int>, exp <int>) {
-    result := 1
-    i := 0
-    repeat when i < exp {
-        result := result * base
+    result <int> := 1
+    i <int>
+    repeat unless i >= exp {
+        result = result * base
         i++
     }
     result

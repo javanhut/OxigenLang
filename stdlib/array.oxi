@@ -1,15 +1,15 @@
 fun map(arr <array>, f <generic>) {
-    result := []
+    result <array>
     each item in arr {
-        result := push(result, f(item))
+        result = push(result, f(item))
     }
     result
 }
 
 fun filter(arr <array>, f <generic>) {
-    result := []
+    result <array>
     each item in arr {
-        option { f(item) -> result := push(result, item) }
+        option { f(item) -> result = push(result, item) }
     }
     result
 }
@@ -23,36 +23,36 @@ fun reduce(arr <array>, initial <generic>, f <generic>) {
 }
 
 fun reverse(arr <array>) {
-    result := []
-    i := len(arr) - 1
-    repeat when i >= 0 {
-        result := push(result, arr[i])
+    result <array>
+    i <int> := len(arr) - 1
+    repeat unless i < 0 {
+        result = push(result, arr[i])
         i--
     }
     result
 }
 
 fun zip(a <array>, b <array>) {
-    result := []
-    i := 0
-    size := option { len(a) <= len(b) -> len(a), len(b) }
-    repeat when i < size {
-        result := push(result, tuple(a[i], b[i]))
+    result <array>
+    i <int>
+    size <int> := option { len(a) <= len(b) -> len(a), len(b) }
+    repeat unless i >= size {
+        result = push(result, tuple(a[i], b[i]))
         i++
     }
     result
 }
 
 fun flatten(arr <array>) {
-    result := []
+    result <array>
     each item in arr {
         option {
             type(item) == "ARRAY" -> {
                 each sub in item {
-                    result := push(result, sub)
+                    result = push(result, sub)
                 }
             }
-            { result := push(result, item) }
+            { result = push(result, item) }
         }
     }
     result
