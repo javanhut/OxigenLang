@@ -1154,6 +1154,23 @@ impl Evaluator {
                     None => Rc::new(Object::None),
                 }
             }
+            Expression::Unless {
+                consequence,
+                condition,
+                alternative,
+                ..
+            } => {
+                let cond = self.eval_expression(condition, Rc::clone(&env));
+                if cond.is_error() {
+                    return cond;
+                }
+
+                if !cond.is_truthy() {
+                    self.eval_expression(consequence, env)
+                } else {
+                    self.eval_expression(alternative, env)
+                }
+            }
         }
     }
 
@@ -2461,6 +2478,26 @@ mod tests {
         test_none(&result);
     }
 
+    #[test]
+    fn test_unless_expression_then() {
+        let result = test_eval(r#""admin" unless False then "guest""#);
+        test_string(&result, "admin");
+
+        let result = test_eval(r#""admin" unless True then "guest""#);
+        test_string(&result, "guest");
+    }
+
+    #[test]
+    fn test_unless_expression_then_with_assignment() {
+        let input = r#"
+            name := None
+            result := "Guest" unless name != None then "Member"
+            result
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "Guest");
+    }
+
     // ==================== POSTFIX GUARD TESTS ====================
 
     #[test]
@@ -2494,6 +2531,17 @@ mod tests {
         "#;
         let result = test_eval(input);
         test_integer(&result, 5);
+    }
+
+    #[test]
+    fn test_postfix_unless_guard_true() {
+        let input = r#"
+            x <int> := 0
+            x = 5 unless True
+            x
+        "#;
+        let result = test_eval(input);
+        test_integer(&result, 0);
     }
 
     // ==================== EACH LOOP TESTS ====================

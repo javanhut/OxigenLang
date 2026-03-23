@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Precedence {
     Lowest,
+    Conditional, // unless ... then ...
     LogicalOr,   // or
     LogicalAnd,  // and
     Equals,      // == !=
@@ -24,6 +25,7 @@ fn precedence_of(tt: &TokenType) -> Precedence {
     use TokenType::*;
 
     match tt {
+        Unless => Conditional,
         Or => LogicalOr,
         And => LogicalAnd,
         Eq | NotEq => Equals,
@@ -96,6 +98,7 @@ impl Parser {
         // Logical operators
         p.register_infix(TokenType::And, Parser::parse_infix_expression);
         p.register_infix(TokenType::Or, Parser::parse_infix_expression);
+        p.register_infix(TokenType::Unless, Parser::parse_unless_expression);
 
         // Comparison operators
         p.register_infix(TokenType::Eq, Parser::parse_infix_expression);
@@ -131,6 +134,17 @@ impl Parser {
 
     pub fn error(&self) -> &[String] {
         &self.errors
+    }
+
+    fn negate_expression(expr: Expression) -> Expression {
+        Expression::Prefix {
+            token: Token {
+                token_type: TokenType::Not,
+                literal: "not".to_string(),
+            },
+            operator: "not".to_string(),
+            right: Box::new(expr),
+        }
     }
 
     fn is_type_name_token(tt: &TokenType) -> bool {
@@ -341,7 +355,7 @@ impl Parser {
     }
 
     fn parse_expression_statement(&mut self) -> Option<Statement> {
-        let expr = self.parse_expression(Precedence::Lowest)?;
+        let expr = self.parse_expression(Precedence::Conditional)?;
 
         // Check for dot-assign: expr.field = value
         if let Expression::DotAccess { token, left, field } = &expr {
@@ -381,8 +395,13 @@ impl Parser {
         // Pratt loop: while next operator binds tighter, consume it
         while self.peek_token.token_type != TokenType::Eof
             && self.peek_token.token_type != TokenType::Newline
-            && precedence < self.peek_precedence()
         {
+            if self.peek_token.token_type == TokenType::Unless && !self.peek_unless_has_then() {
+                break;
+            }
+            if precedence >= self.peek_precedence() {
+                break;
+            }
             let infix = self.infix_fns.get(&self.peek_token.token_type).copied();
             let Some(infix_fn) = infix else { break };
 
@@ -833,6 +852,24 @@ impl Parser {
 
     // ---------------- Infix parsers ----------------
 
+    fn parse_unless_expression(&mut self, consequence: Expression) -> Option<Expression> {
+        let token = self.curr_token.clone(); // 'unless'
+
+        self.next_token(); // move to condition
+        let condition = self.parse_expression(Precedence::Lowest)?;
+
+        self.expect_peek(TokenType::Then)?;
+        self.next_token(); // move to fallback expression
+        let alternative = self.parse_expression(Precedence::Lowest)?;
+
+        Some(Expression::Unless {
+            token,
+            consequence: Box::new(consequence),
+            condition: Box::new(condition),
+            alternative: Box::new(alternative),
+        })
+    }
+
     fn parse_infix_expression(&mut self, left: Expression) -> Option<Expression> {
         let tok = self.curr_token.clone(); // operator
         let operator = tok.literal.clone();
@@ -1078,11 +1115,7 @@ impl Parser {
         let raw_condition = self.parse_expression(Precedence::Lowest)?;
 
         let condition = if negate {
-            Expression::Prefix {
-                token: Token { token_type: TokenType::Not, literal: "not".into() },
-                operator: "not".to_string(),
-                right: Box::new(raw_condition),
-            }
+            Self::negate_expression(raw_condition)
         } else {
             raw_condition
         };
@@ -1366,15 +1399,7 @@ impl Parser {
         self.next_token(); // move to condition
         let condition = self.parse_expression(Precedence::Lowest)?;
 
-        // Negate the condition
-        let negated = Expression::Prefix {
-            token: Token {
-                token_type: TokenType::Shebang,
-                literal: "!".to_string(),
-            },
-            operator: "!".to_string(),
-            right: Box::new(condition),
-        };
+        let negated = Self::negate_expression(condition);
 
         self.expect_peek(TokenType::LBrace)?; // '{'
         let consequence = self.parse_block()?;
@@ -1422,14 +1447,15 @@ impl Parser {
             self.next_token(); // consume 'unless'
             self.next_token(); // move to condition
             let condition = self.parse_expression(Precedence::Lowest)?;
-            let negated = Expression::Prefix {
-                token: Token {
-                    token_type: TokenType::Shebang,
-                    literal: "!".to_string(),
-                },
-                operator: "!".to_string(),
-                right: Box::new(condition),
+            let alternative = if self.peek_token.token_type == TokenType::Then {
+                self.next_token(); // consume 'then'
+                self.next_token(); // move to alternative statement
+                let stmt = self.parse_statement_inner()?;
+                Some(vec![self.try_postfix_guard(stmt)?])
+            } else {
+                None
             };
+            let negated = Self::negate_expression(condition);
             return Some(Statement::If {
                 token: Token {
                     token_type: TokenType::If,
@@ -1437,7 +1463,7 @@ impl Parser {
                 },
                 condition: negated,
                 consequence: vec![stmt],
-                alternative: None,
+                alternative,
             });
         }
 
@@ -1662,6 +1688,23 @@ impl Parser {
             self.lookahead_buffer.push_back(tok);
         }
         &self.lookahead_buffer[needed - 1]
+    }
+
+    fn peek_unless_has_then(&mut self) -> bool {
+        if self.peek_token.token_type != TokenType::Unless {
+            return false;
+        }
+
+        let mut idx = 1;
+        loop {
+            match self.peek_nth(idx).token_type {
+                TokenType::Then => return true,
+                TokenType::Newline | TokenType::Eof | TokenType::Comma | TokenType::RBrace => {
+                    return false;
+                }
+                _ => idx += 1,
+            }
+        }
     }
 
     /// Scans past a type annotation starting at peek_nth(offset).
@@ -2027,6 +2070,31 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_repeat_unless_statement() {
+        let program = parse_ok("repeat unless x > 0 { x-- }");
+        match &program.statements[0] {
+            Statement::Repeat {
+                condition, body, ..
+            } => {
+                match condition {
+                    Expression::Prefix { token, operator, right } => {
+                        assert_eq!(token.token_type, TokenType::Not);
+                        assert_eq!(token.literal, "not");
+                        assert_eq!(operator, "not");
+                        match right.as_ref() {
+                            Expression::Infix { operator, .. } => assert_eq!(operator, ">"),
+                            _ => panic!("Expected infix condition inside negation"),
+                        }
+                    }
+                    _ => panic!("Expected negated repeat condition"),
+                }
+                assert_eq!(body.len(), 1);
+            }
+            _ => panic!("Expected repeat statement"),
+        }
+    }
+
+    #[test]
     fn test_parse_pattern_statement() {
         let program = parse_ok("pattern is_ten(x) when x == 10");
         match &program.statements[0] {
@@ -2092,9 +2160,12 @@ mod tests {
                 alternative,
                 ..
             } => {
-                // condition should be negated (prefix !)
                 match condition {
-                    Expression::Prefix { operator, .. } => assert_eq!(operator, "!"),
+                    Expression::Prefix { token, operator, .. } => {
+                        assert_eq!(token.token_type, TokenType::Not);
+                        assert_eq!(token.literal, "not");
+                        assert_eq!(operator, "not");
+                    }
                     _ => panic!("Expected negated condition"),
                 }
                 assert_eq!(consequence.len(), 1);
@@ -2118,6 +2189,88 @@ mod tests {
                 assert!(alternative.is_none());
             }
             other => panic!("Expected if statement (desugared when guard), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_postfix_unless_guard() {
+        let program = parse_ok("x = 5 unless True");
+        match &program.statements[0] {
+            Statement::If {
+                condition,
+                consequence,
+                alternative,
+                ..
+            } => {
+                match condition {
+                    Expression::Prefix { token, operator, .. } => {
+                        assert_eq!(token.token_type, TokenType::Not);
+                        assert_eq!(token.literal, "not");
+                        assert_eq!(operator, "not");
+                    }
+                    _ => panic!("Expected negated condition"),
+                }
+                assert_eq!(consequence.len(), 1);
+                assert!(matches!(&consequence[0], Statement::Assign { .. }));
+                assert!(alternative.is_none());
+            }
+            other => panic!("Expected if statement (desugared postfix unless), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_expression_unless_then() {
+        let program = parse_ok("result := name.upper() unless name == None then \"Guest\"");
+        match &program.statements[0] {
+            Statement::Let {
+                value: Expression::Unless {
+                    consequence,
+                    condition,
+                    alternative,
+                    ..
+                },
+                ..
+            } => {
+                assert!(matches!(consequence.as_ref(), Expression::Call { .. }));
+                match condition.as_ref() {
+                    Expression::Infix { operator, .. } => assert_eq!(operator, "=="),
+                    _ => panic!("Expected infix condition"),
+                }
+                match alternative.as_ref() {
+                    Expression::Str { value, .. } => assert_eq!(value, "Guest"),
+                    _ => panic!("Expected string alternative"),
+                }
+            }
+            other => panic!("Expected let with unless expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_postfix_unless_then_guard() {
+        let program = parse_ok("println(\"ok\") unless x == False then println(\"fallback\")");
+        match &program.statements[0] {
+            Statement::If {
+                condition,
+                consequence,
+                alternative,
+                ..
+            } => {
+                match condition {
+                    Expression::Prefix { token, operator, right } => {
+                        assert_eq!(token.token_type, TokenType::Not);
+                        assert_eq!(operator, "not");
+                        match right.as_ref() {
+                            Expression::Infix { operator, .. } => assert_eq!(operator, "=="),
+                            _ => panic!("Expected infix condition inside negation"),
+                        }
+                    }
+                    _ => panic!("Expected negated condition"),
+                }
+                assert_eq!(consequence.len(), 1);
+                let alternative = alternative.as_ref().expect("Expected alternative branch");
+                assert_eq!(alternative.len(), 1);
+            }
+            other => panic!("Expected if statement with alternative, got {:?}", other),
         }
     }
 

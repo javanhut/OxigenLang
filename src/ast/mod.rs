@@ -289,6 +289,12 @@ pub enum Expression {
         arms: Vec<OptionArm>,
         default: Option<Vec<Statement>>,
     },
+    Unless {
+        token: Token,
+        consequence: Box<Expression>,
+        condition: Box<Expression>,
+        alternative: Box<Expression>,
+    },
     StringInterp {
         token: Token,
         parts: Vec<StringInterpPart>,

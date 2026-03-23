@@ -47,8 +47,10 @@ arr[0]   arr[1:3]   obj.field                    // access
 option { cond -> value, default }                // conditional expression
 option { cond, true_val, false_val }             // ternary shorthand
 unless condition { body }                        // inverse conditional
+value unless condition then fallback             // unless expression with fallback
 println("hi") when condition                     // postfix when guard
 println("hi") unless condition                   // postfix unless guard
+println("hi") unless condition then println()    // postfix unless with alternative
 each item in collection { body }                 // iteration
 repeat when condition { body }                   // while loop
 skip                                             // continue

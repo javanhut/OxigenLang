@@ -86,7 +86,7 @@ option {
 
 ## Inverse Conditional with `unless`
 
-`unless` runs a block only when the condition is **false**. It does not support an `else` branch:
+`unless` runs a block only when the condition is **false**:
 
 ```oxi
 unless logged_in {
@@ -99,6 +99,35 @@ unless valid {
 ```
 
 `unless condition { ... }` is equivalent to `if !(condition) { ... }`. Use `unless` when the "negative" case is the primary concern — it reads more naturally than negating a condition.
+
+### `unless ... then ...` Expression Form
+
+Use `unless ... then ...` as an expression when you want a fallback value only when the condition is true:
+
+```oxi
+name := name.upper() unless name == None then "Guest"
+result := "ok" unless status.code != 200 then "error: {status.code}"
+```
+
+This reads as "use the left expression unless the condition is true, then use the fallback instead."
+
+### `unless ... then ...` Statement Form
+
+Postfix `unless` can also take a `then` branch for a simple alternative statement:
+
+```oxi
+println("welcome") unless logged_in then println("Please log in")
+```
+
+This is the compact form of:
+
+```oxi
+if logged_in {
+    println("Please log in")
+} else {
+    println("welcome")
+}
+```
 
 ## Postfix Guards
 
@@ -121,6 +150,7 @@ Executes the statement only if the condition is false:
 
 ```oxi
 println("error") unless valid
+println("welcome") unless logged_in then println("Please log in")
 ```
 
 ### Supported Statement Types
