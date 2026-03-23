@@ -1,16 +1,16 @@
-fun abs(x) {
+fun abs(x <int> || <float>) {
     option { x >= 0 -> x, -x }
 }
 
-fun min(a, b) {
+fun min(a <int> || <float>, b <int> || <float>) {
     option { a <= b -> a, b }
 }
 
-fun max(a, b) {
+fun max(a <int> || <float>, b <int> || <float>) {
     option { a >= b -> a, b }
 }
 
-fun pow(base, exp) {
+fun pow(base <int>, exp <int>) {
     result := 1
     i := 0
     repeat when i < exp {
@@ -20,7 +20,7 @@ fun pow(base, exp) {
     result
 }
 
-fun clamp(x, lo, hi) {
+fun clamp(x <int> || <float>, lo <int> || <float>, hi <int> || <float>) {
     option {
         x < lo -> lo
         x > hi -> hi
@@ -28,7 +28,7 @@ fun clamp(x, lo, hi) {
     }
 }
 
-fun sign(x) {
+fun sign(x <int> || <float>) {
     option {
         x > 0 -> 1
         x < 0 -> -1
@@ -36,7 +36,7 @@ fun sign(x) {
     }
 }
 
-fun sqrt(x) { __sqrt(x) }
-fun floor(x) { __floor(x) }
-fun ceil(x) { __ceil(x) }
-fun round(x) { __round(x) }
+fun sqrt(x <int> || <float>) { __sqrt(x) }
+fun floor(x <int> || <float>) { __floor(x) }
+fun ceil(x <int> || <float>) { __ceil(x) }
+fun round(x <int> || <float>) { __round(x) }

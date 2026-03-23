@@ -1,4 +1,4 @@
-fun map(arr, f) {
+fun map(arr <array>, f <generic>) {
     result := []
     each item in arr {
         result := push(result, f(item))
@@ -6,7 +6,7 @@ fun map(arr, f) {
     result
 }
 
-fun filter(arr, f) {
+fun filter(arr <array>, f <generic>) {
     result := []
     each item in arr {
         option { f(item) -> result := push(result, item) }
@@ -14,7 +14,7 @@ fun filter(arr, f) {
     result
 }
 
-fun reduce(arr, initial, f) {
+fun reduce(arr <array>, initial <generic>, f <generic>) {
     acc := initial
     each item in arr {
         acc := f(acc, item)
@@ -22,7 +22,7 @@ fun reduce(arr, initial, f) {
     acc
 }
 
-fun reverse(arr) {
+fun reverse(arr <array>) {
     result := []
     i := len(arr) - 1
     repeat when i >= 0 {
@@ -32,7 +32,7 @@ fun reverse(arr) {
     result
 }
 
-fun zip(a, b) {
+fun zip(a <array>, b <array>) {
     result := []
     i := 0
     size := option { len(a) <= len(b) -> len(a), len(b) }
@@ -43,7 +43,7 @@ fun zip(a, b) {
     result
 }
 
-fun flatten(arr) {
+fun flatten(arr <array>) {
     result := []
     each item in arr {
         option {
@@ -58,11 +58,11 @@ fun flatten(arr) {
     result
 }
 
-fun includes(arr, val) {
+fun includes(arr <array>, val <generic>) {
     each item in arr {
         option { item == val -> give True }
     }
     False
 }
 
-fun sort(arr) { __sort(arr) }
+fun sort(arr <array>) { __sort(arr) }
