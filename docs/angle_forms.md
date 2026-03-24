@@ -500,7 +500,7 @@ Use `<type<Error<tag> || Value>>` when you want **every error from an expression
 fun convert_to_int(value <generic>) {
     converted <Error || Value> := <type<Error<non_integer> || Value>>(int(value))
     option {
-        type(converted) == "VALUE" -> converted.value,
+        is_value(converted) -> converted.value,
         converted
     }
 }
@@ -514,13 +514,13 @@ Without the tag, `result.tag` would be `None` because `int()` does not tag its e
 
 ### Checking Which Outcome You Got
 
-After normalization, you have a value that is either a `Value` or an `ErrorValue`. Use `type()` to check:
+After normalization, you have a value that is either a `Value` or an `ErrorValue`. Use the `is_value()` and `is_error()` builtins to check:
 
 ```oxi
 result := <type<Error || Value>>(read_file("settings.oxi"))
 
 option {
-    type(result) == "VALUE" -> {
+    is_value(result) -> {
         // Success path — use result.value
         println("File contents: {result.value}")
     },
@@ -531,12 +531,14 @@ option {
 }
 ```
 
-### Why `type()` Works for This
+You can also check from the error side:
 
-- `type(result)` returns `"VALUE"` if the call succeeded
-- `type(result)` returns `"ERROR_VALUE"` if the call failed
-
-These are the type names of the `Value` and `ErrorValue` objects.
+```oxi
+option {
+    is_error(result) -> println("Failed: {result.msg}"),
+    println("Success: {result.value}")
+}
+```
 
 ### With Typed Declarations
 
@@ -997,13 +999,13 @@ fun load_config() {
     file_result <Error || Value> := <type<Error || Value>>(read_file("config.oxi"))
 
     config := option {
-        type(file_result) == "VALUE" -> file_result.value,
+        is_value(file_result) -> file_result.value,
         {
             // File read failed — try environment variable
             env_result <Error || Value> := <type<Error || Value>>(get_env("APP_CONFIG"))
 
             option {
-                type(env_result) == "VALUE" -> env_result.value,
+                is_value(env_result) -> env_result.value,
                 <fail>(<Error<config>>("no config source available"))
             }
         }
@@ -1141,17 +1143,29 @@ This works because:
 
 ### Combining `choose` with Expected Results
 
-A practical pattern — classify the outcome of a fallible operation:
+A practical pattern — classify the outcome of a fallible operation using `is_value()` and `is_error()` inside `option`:
 
 ```oxi
-pattern is_success(r) when type(r) == "VALUE"
-pattern is_error(r) when type(r) == "ERROR_VALUE"
+result <Error || Value> := <type<Error || Value>>(fetch_user(user_id))
+
+option {
+    is_value(result) -> println("Got user: {result.value}"),
+    is_error(result) -> println("Failed: {result.msg}"),
+    println("unexpected result type")
+}
+```
+
+Or use patterns with `choose` for more complex routing:
+
+```oxi
+pattern is_success(r) when is_value(r)
+pattern is_failure(r) when is_error(r)
 
 result <Error || Value> := <type<Error || Value>>(fetch_user(user_id))
 
 choose result {
     is_success -> println("Got user: {result.value}"),
-    is_error -> println("Failed: {result.msg}"),
+    is_failure -> println("Failed: {result.msg}"),
     else -> println("unexpected result type")
 }
 ```
@@ -1208,7 +1222,7 @@ Wrap a fallible call into an expected-result, then branch on success or failure:
 outcome <Error || Value> := <type<Error || Value>>(connect_to_database())
 
 option {
-    type(outcome) == "VALUE" -> {
+    is_value(outcome) -> {
         db := outcome.value
         println("Connected to database")
     },
@@ -1230,8 +1244,8 @@ config <Error || Value> := <type<Error || Value>>(read_file("config.oxi"))
 db <Error || Value> := <type<Error || Value>>(connect_db())
 
 option {
-    type(config) != "VALUE" -> <fail>(<Error<startup>>("config: {config.msg}")),
-    type(db) != "VALUE" -> <fail>(<Error<startup>>("database: {db.msg}"))
+    is_error(config) -> <fail>(<Error<startup>>("config: {config.msg}")),
+    is_error(db) -> <fail>(<Error<startup>>("database: {db.msg}"))
 }
 
 // If we reach here, both succeeded

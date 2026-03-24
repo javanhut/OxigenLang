@@ -2906,6 +2906,29 @@ mod tests {
     }
 
     #[test]
+    fn test_is_value_builtin() {
+        test_boolean(&test_eval(r#"is_value(<Value>("ok"))"#), true);
+        test_boolean(&test_eval(r#"is_value(<Error>("bad"))"#), false);
+        test_boolean(&test_eval(r#"is_value("hello")"#), false);
+        test_boolean(
+            &test_eval(r#"is_value(<type<Error || Value>>("ok"))"#),
+            true,
+        );
+    }
+
+    #[test]
+    fn test_is_error_builtin() {
+        test_boolean(&test_eval(r#"is_error(<Error>("bad"))"#), true);
+        test_boolean(&test_eval(r#"is_error(<Error<net>>("fail"))"#), true);
+        test_boolean(&test_eval(r#"is_error(<Value>("ok"))"#), false);
+        test_boolean(&test_eval(r#"is_error("hello")"#), false);
+        test_boolean(
+            &test_eval(r#"is_error(<type<Error || Value>>(<fail>("boom")))"#),
+            true,
+        );
+    }
+
+    #[test]
     fn test_type_wrap_tagged_error_union_applies_tag() {
         let result = test_eval(r#"<type<Error<custom> || Value>>(<fail>("boom")).tag"#);
         test_string(&result, "custom");
