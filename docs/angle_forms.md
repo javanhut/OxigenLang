@@ -448,6 +448,70 @@ Here is what happens:
 3. **If the call fails** (produces a propagating error): The error is **caught** and converted to an `ErrorValue`. The propagation stops. You can access it with `result.msg` and `result.tag`.
 4. **Either way, your program continues.** The error is now a value, not a propagation.
 
+### Tagged Variant: `<type<Error<tag> || Value>>`
+
+You can include a tag in the `Error` part of the union type. This tag acts as a **default** — it is applied to any error that does not already have its own tag.
+
+```oxi
+<type<Error<non_integer> || Value>>(int(value))
+```
+
+Breaking this down:
+
+1. `<type` — starts a type-conversion angle form
+2. `<Error<non_integer>` — the error side of the union, with a default tag of `non_integer`
+3. `|| Value>` — the success side
+4. `(int(value))` — the expression to evaluate
+
+**What happens step by step:**
+
+1. `int(value)` is evaluated.
+2. **If it succeeds:** The result is wrapped as `Value(...)`, same as the untagged form. The tag is ignored.
+3. **If it fails with an untagged error:** The error is caught and the tag `non_integer` is applied. The result is an `ErrorValue` with `.tag == "non_integer"` and `.msg` set to the error message.
+4. **If it fails with an already-tagged error:** The existing tag is **preserved**. The default tag from the union type is not used. This means tagged errors from deeper in the call stack keep their identity.
+
+**Example — default tag applied to untagged error:**
+
+```oxi
+result := <type<Error<non_integer> || Value>>(int("hello"))
+println(result.tag)    // "non_integer" — applied because int() errors are untagged
+println(result.msg)    // "int: cannot parse 'hello'"
+```
+
+**Example — existing tag preserved:**
+
+```oxi
+result := <type<Error<fallback> || Value>>(<fail>(<Error<original>>("boom")))
+println(result.tag)    // "original" — the existing tag wins over "fallback"
+println(result.msg)    // "boom"
+```
+
+**Either order works** — `Value || Error<tag>` is the same as `Error<tag> || Value`:
+
+```oxi
+result := <type<Value || Error<parse>>>(parse_json(input))
+```
+
+### When to Use the Tagged Variant
+
+Use `<type<Error<tag> || Value>>` when you want **every error from an expression** to carry a category tag, even if the underlying function does not tag its errors:
+
+```oxi
+fun convert_to_int(value <generic>) {
+    converted <Error || Value> := <type<Error<non_integer> || Value>>(int(value))
+    option {
+        type(converted) == "VALUE" -> converted.value,
+        converted
+    }
+}
+
+result := convert_to_int("hello")
+println(result.tag)    // "non_integer"
+println(result.msg)    // "int: cannot parse 'hello'"
+```
+
+Without the tag, `result.tag` would be `None` because `int()` does not tag its errors. The tagged union form adds the category for you.
+
 ### Checking Which Outcome You Got
 
 After normalization, you have a value that is either a `Value` or an `ErrorValue`. Use `type()` to check:
@@ -1267,6 +1331,7 @@ Used at the start of an expression to construct or transform:
 <Error<tag>>("message")             // create tagged error value (does NOT halt)
 <Value>(expr)                       // wrap value as explicit success
 <type<Error || Value>>(expr)        // normalize expression to expected-result
+<type<Error<tag> || Value>>(expr)   // normalize with default tag on errors
 <fail>("message")                   // propagate as runtime error (HALTS)
 <fail>(<Error<tag>>("message"))     // propagate tagged error (HALTS)
 ```

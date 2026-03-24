@@ -150,6 +150,24 @@ impl Evaluator {
         }
     }
 
+    fn error_or_value_union(target: &TypeAnnotation) -> Option<Option<String>> {
+        if let TypeAnnotation::Union(types) = target {
+            let mut has_value = false;
+            let mut error_tag: Option<Option<String>> = None;
+            for t in types {
+                match t {
+                    TypeAnnotation::ValueType => has_value = true,
+                    TypeAnnotation::ErrorType(tag) => error_tag = Some(tag.clone()),
+                    _ => return None,
+                }
+            }
+            if has_value && error_tag.is_some() {
+                return error_tag;
+            }
+        }
+        None
+    }
+
     fn convert_to_type(obj: &Rc<Object>, target: &str) -> Result<Rc<Object>, String> {
         match target {
             "GENERIC" => Ok(Rc::clone(obj)),
@@ -1093,15 +1111,18 @@ impl Evaluator {
 
             Expression::TypeWrap { target, value, .. } => {
                 let evaluated = self.eval_expression(value, Rc::clone(&env));
-                let target_name = target.type_name();
 
-                if target_name == "ERROR || VALUE" || target_name == "VALUE || ERROR" {
+                if let Some(default_tag) = Self::error_or_value_union(target) {
                     return match Self::error_info_from(&evaluated) {
-                        Some((tag, msg)) => Self::tagged_error_value(msg, tag),
+                        Some((existing_tag, msg)) => {
+                            let tag = existing_tag.or(default_tag);
+                            Self::tagged_error_value(msg, tag)
+                        }
                         None => Rc::new(Object::Value(evaluated)),
                     };
                 }
 
+                let target_name = target.type_name();
                 if evaluated.is_error() {
                     return evaluated;
                 }
@@ -2882,6 +2903,26 @@ mod tests {
         "#;
         let result = test_eval(input);
         test_string(&result, "boom");
+    }
+
+    #[test]
+    fn test_type_wrap_tagged_error_union_applies_tag() {
+        let result = test_eval(r#"<type<Error<custom> || Value>>(<fail>("boom")).tag"#);
+        test_string(&result, "custom");
+    }
+
+    #[test]
+    fn test_type_wrap_tagged_error_union_success_path() {
+        let result = test_eval(r#"<type<Value || Error<custom>>>("ok").value"#);
+        test_string(&result, "ok");
+    }
+
+    #[test]
+    fn test_type_wrap_tagged_error_preserves_existing_tag() {
+        let result = test_eval(
+            r#"<type<Error<override> || Value>>(<fail>(<Error<original>>("boom"))).tag"#,
+        );
+        test_string(&result, "original");
     }
 
     #[test]

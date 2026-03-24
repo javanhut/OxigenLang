@@ -259,6 +259,14 @@ Behavior:
 - if `expr` fails, the result becomes `Error(...)`
 - the failure is normalized into a value instead of escaping immediately
 
+You can include a tag in the `Error` side of the union. The tag acts as a default — it is applied to errors that do not already have their own tag:
+
+```oxi
+result := <type<Error<parse> || Value>>(parse_json(input))
+// if parse_json fails with an untagged error, result.tag is "parse"
+// if parse_json fails with its own tagged error, that tag is preserved
+```
+
 Examples:
 
 ```oxi
