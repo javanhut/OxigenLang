@@ -52,6 +52,7 @@ fn main() {
                 eprintln!("Error: {}", msg);
                 std::process::exit(1);
             }
+            object::Object::ErrorValue { .. } => println!("{}", result),
             _ => println!("{}", result),
         }
     } else {

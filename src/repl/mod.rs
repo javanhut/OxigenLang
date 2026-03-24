@@ -59,6 +59,7 @@ pub fn run_repl() {
                 match result.as_ref() {
                     Object::None => {}
                     Object::Error(msg) => println!("Error: {}", msg),
+                    Object::ErrorValue { .. } => println!("{}", result),
                     _ => println!("{}", result),
                 }
             }

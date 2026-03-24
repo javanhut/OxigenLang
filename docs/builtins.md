@@ -25,6 +25,32 @@ println("Name:", name, "Age:", age)
 
 Both `print` and `println` return `None`.
 
+### `error(value)`
+
+Creates a runtime error using the string form of `value`.
+
+```oxi
+error("missing file")
+error(404)
+```
+
+This is primarily useful for compatibility.
+
+Preferred modern forms:
+
+```oxi
+<Error>("missing file")               // construct an error value
+<Error<network>>("connection lost")   // construct a tagged error value
+<fail>("missing file")                // propagate a runtime error
+<fail>(<Error<network>>("timeout"))   // propagate a tagged error
+```
+
+Use:
+
+- `error(...)` for compatibility with older Oxigen code
+- `<Error>(...)` when you want an explicit error value
+- `<fail>(...)` when you want that error to propagate immediately
+
 ## Collection Operations
 
 ### `len(collection)`
@@ -422,6 +448,53 @@ Also works on struct fields:
 is_type_mut(m.num_one)
 ```
 
+### `is_value(value)`
+
+Returns `True` if the value is a `Value` wrapper (produced by `<Value>(...)` or the success path of `<type<Error || Value>>`), `False` otherwise.
+
+```oxi
+is_value(<Value>("ok"))                              // True
+is_value(<type<Error || Value>>("loaded"))            // True
+is_value(<Error>("bad")    )                          // False
+is_value("hello")                                     // False
+is_value(42)                                          // False
+```
+
+Use this to check the success path of an expected-result normalization:
+
+```oxi
+result <Error || Value> := <type<Error || Value>>(read_file("config"))
+option {
+    is_value(result) -> println("Got: {result.value}"),
+    println("Failed: {result.msg}")
+}
+```
+
+### `is_error(value)`
+
+Returns `True` if the value is an `ErrorValue` (produced by `<Error>(...)` or the failure path of `<type<Error || Value>>`), `False` otherwise.
+
+```oxi
+is_error(<Error>("bad"))                              // True
+is_error(<Error<network>>("offline"))                 // True
+is_error(<type<Error || Value>>(<fail>("boom")))      // True
+is_error(<Value>("ok"))                               // False
+is_error("hello")                                     // False
+is_error(42)                                          // False
+```
+
+Use this to check the failure path of an expected-result normalization:
+
+```oxi
+result <Error || Value> := <type<Error || Value>>(connect_db())
+option {
+    is_error(result) -> println("Error: {result.tag} - {result.msg}"),
+    println("Connected: {result.value}")
+}
+```
+
+**Note:** `is_error` checks for error **values** (tier 2). Propagating errors (tier 1) halt the program before they can reach the function call, so they will never be seen by `is_error`.
+
 ## Complete Built-in Reference
 
 | Function    | Arguments              | Returns      | Description                           |
@@ -453,6 +526,8 @@ is_type_mut(m.num_one)
 | `is_type`   | `(value, type_name)`   | `Boolean`    | Runtime type check                    |
 | `is_mut`    | `(variable)`           | `Boolean`    | Value mutability check                |
 | `is_type_mut`| `(variable)`          | `Boolean`    | Type mutability check                 |
+| `is_value`  | `(value)`              | `Boolean`    | True if value is a Value wrapper      |
+| `is_error`  | `(value)`              | `Boolean`    | True if value is an ErrorValue        |
 
 See also:
 - [Data Types](data_types.md) — types accepted by each built-in

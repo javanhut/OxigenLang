@@ -35,6 +35,9 @@ fn type_matches(expected: &str, actual: &str) -> bool {
     if expected == "GENERIC" {
         return true;
     }
+    if expected == "ERROR" && actual.starts_with("ERROR") {
+        return true;
+    }
     if expected.contains(" || ") {
         expected.split(" || ").any(|t| t == "GENERIC" || t == actual)
     } else {
@@ -106,6 +109,65 @@ impl Evaluator {
         PathBuf::from("stdlib")
     }
 
+    fn encode_error_message(msg: &str, tag: Option<&str>) -> String {
+        match tag {
+            Some(tag) => format!("[{}] {}", tag, msg),
+            None => msg.to_string(),
+        }
+    }
+
+    fn decode_error_message(msg: &str) -> (Option<String>, String) {
+        if let Some(rest) = msg.strip_prefix('[') {
+            if let Some((tag, tail)) = rest.split_once("] ") {
+                return (Some(tag.to_string()), tail.to_string());
+            }
+        }
+        (None, msg.to_string())
+    }
+
+    fn error_object(msg: impl Into<String>) -> Rc<Object> {
+        let msg = msg.into();
+        Rc::new(Object::Error(msg))
+    }
+
+    fn error_object_with_tag(msg: impl Into<String>, tag: Option<String>) -> Rc<Object> {
+        let msg = msg.into();
+        Rc::new(Object::Error(Self::encode_error_message(&msg, tag.as_deref())))
+    }
+
+    fn tagged_error_value(msg: impl Into<String>, tag: Option<String>) -> Rc<Object> {
+        Rc::new(Object::ErrorValue {
+            msg: msg.into(),
+            tag,
+        })
+    }
+
+    fn error_info_from(obj: &Rc<Object>) -> Option<(Option<String>, String)> {
+        match obj.as_ref() {
+            Object::Error(msg) => Some(Self::decode_error_message(msg)),
+            Object::ErrorValue { msg, tag } => Some((tag.clone(), msg.clone())),
+            _ => None,
+        }
+    }
+
+    fn error_or_value_union(target: &TypeAnnotation) -> Option<Option<String>> {
+        if let TypeAnnotation::Union(types) = target {
+            let mut has_value = false;
+            let mut error_tag: Option<Option<String>> = None;
+            for t in types {
+                match t {
+                    TypeAnnotation::ValueType => has_value = true,
+                    TypeAnnotation::ErrorType(tag) => error_tag = Some(tag.clone()),
+                    _ => return None,
+                }
+            }
+            if has_value && error_tag.is_some() {
+                return error_tag;
+            }
+        }
+        None
+    }
+
     fn convert_to_type(obj: &Rc<Object>, target: &str) -> Result<Rc<Object>, String> {
         match target {
             "GENERIC" => Ok(Rc::clone(obj)),
@@ -113,6 +175,24 @@ impl Evaluator {
                 Object::None => Ok(Rc::clone(obj)),
                 _ => Err(format!("cannot convert {} to NONE", obj.type_name())),
             },
+            "VALUE" => Ok(Rc::new(Object::Value(Rc::clone(obj)))),
+            "ERROR" => match Self::error_info_from(obj) {
+                Some((tag, msg)) => Ok(Self::tagged_error_value(msg, tag)),
+                None => Err(format!("cannot convert {} to ERROR", obj.type_name())),
+            },
+            t if t.starts_with("ERROR<") && t.ends_with('>') => {
+                let wanted_tag = &t[6..t.len() - 1];
+                match Self::error_info_from(obj) {
+                    Some((Some(tag), msg)) if tag == wanted_tag => {
+                        Ok(Self::tagged_error_value(msg, Some(tag)))
+                    }
+                    Some((None, _)) => Err(format!("cannot convert untagged ERROR to {}", t)),
+                    Some((Some(actual), _)) => {
+                        Err(format!("cannot convert ERROR<{}> to {}", actual, t))
+                    }
+                    None => Err(format!("cannot convert {} to {}", obj.type_name(), t)),
+                }
+            }
             t if t.contains(" || ") => {
                 // Union type: accept value if it already matches any member type
                 let actual = obj.effective_type_name();
@@ -1013,6 +1093,58 @@ impl Evaluator {
                 env: Rc::clone(&env),
             }),
 
+            Expression::ErrorConstruct { tag, value, .. } => {
+                let payload = self.eval_expression(value, env);
+                if payload.is_error() {
+                    return payload;
+                }
+                Self::tagged_error_value(payload.to_string(), tag.clone())
+            }
+
+            Expression::ValueConstruct { value, .. } => {
+                let payload = self.eval_expression(value, env);
+                if payload.is_error() {
+                    return payload;
+                }
+                Rc::new(Object::Value(payload))
+            }
+
+            Expression::TypeWrap { target, value, .. } => {
+                let evaluated = self.eval_expression(value, Rc::clone(&env));
+
+                if let Some(default_tag) = Self::error_or_value_union(target) {
+                    return match Self::error_info_from(&evaluated) {
+                        Some((existing_tag, msg)) => {
+                            let tag = existing_tag.or(default_tag);
+                            Self::tagged_error_value(msg, tag)
+                        }
+                        None => Rc::new(Object::Value(evaluated)),
+                    };
+                }
+
+                let target_name = target.type_name();
+                if evaluated.is_error() {
+                    return evaluated;
+                }
+                match Self::convert_to_type(&evaluated, &target_name) {
+                    Ok(converted) => converted,
+                    Err(msg) => Self::error_object(msg),
+                }
+            }
+
+            Expression::Fail { value, .. } => {
+                let payload = self.eval_expression(value, env);
+                if payload.is_error() {
+                    return payload;
+                }
+                match payload.as_ref() {
+                    Object::ErrorValue { msg, tag } => {
+                        Self::error_object_with_tag(msg.clone(), tag.clone())
+                    }
+                    _ => Self::error_object(payload.to_string()),
+                }
+            }
+
             Expression::DotAccess { left, field, .. } => {
                 let is_self_access = matches!(left.as_ref(), Expression::Ident(id) if id.value == "self");
                 let obj = self.eval_expression(left, Rc::clone(&env));
@@ -1050,6 +1182,24 @@ impl Evaluator {
                             ))),
                         }
                     }
+                    Object::ErrorValue { msg, tag } => match field.value.as_str() {
+                        "msg" => Rc::new(Object::String(msg.clone())),
+                        "tag" => match tag {
+                            Some(tag) => Rc::new(Object::String(tag.clone())),
+                            None => Rc::new(Object::None),
+                        },
+                        _ => Self::error_object(format!(
+                            "error has no field '{}'",
+                            field.value
+                        )),
+                    },
+                    Object::Value(val) => match field.value.as_str() {
+                        "value" => Rc::clone(val),
+                        _ => Self::error_object(format!(
+                            "value has no field '{}'",
+                            field.value
+                        )),
+                    },
                     _ => Rc::new(Object::Error(format!(
                         "cannot access field '{}' on {}",
                         field.value,
@@ -1139,19 +1289,104 @@ impl Evaluator {
                 Rc::new(Object::Map(map_entries))
             }
 
-            Expression::Option { arms, default, .. } => {
+            Expression::Option {
+                arms,
+                default,
+                error_default,
+                ..
+            } => {
                 for arm in arms {
                     let cond = self.eval_expression(&arm.condition, Rc::clone(&env));
                     if cond.is_error() {
-                        return cond;
+                        return match error_default {
+                            Some(stmts) => self.eval_block(stmts, Rc::clone(&env)),
+                            None => cond,
+                        };
                     }
                     if cond.is_truthy() {
-                        return self.eval_block(&arm.body, Rc::clone(&env));
+                        let body_result = self.eval_block(&arm.body, Rc::clone(&env));
+                        if body_result.is_error() {
+                            return match error_default {
+                                Some(stmts) => self.eval_block(stmts, Rc::clone(&env)),
+                                None => body_result,
+                            };
+                        }
+                        return body_result;
                     }
                 }
                 match default {
-                    Some(stmts) => self.eval_block(stmts, Rc::clone(&env)),
+                    Some(stmts) => {
+                        let result = self.eval_block(stmts, Rc::clone(&env));
+                        if result.is_error() {
+                            match error_default {
+                                Some(error_stmts) => self.eval_block(error_stmts, Rc::clone(&env)),
+                                None => result,
+                            }
+                        } else {
+                            result
+                        }
+                    }
                     None => Rc::new(Object::None),
+                }
+            }
+            Expression::Guard {
+                value,
+                binding,
+                error_tag,
+                fallback,
+                ..
+            } => {
+                let evaluated = self.eval_expression(value, Rc::clone(&env));
+                let Some((tag, msg)) = Self::error_info_from(&evaluated) else {
+                    return evaluated;
+                };
+                if error_tag.as_ref().is_some_and(|wanted| tag.as_ref() != Some(wanted)) {
+                    return evaluated;
+                }
+
+                let guard_env = Rc::new(RefCell::new(Environment::new_enclosed(Rc::clone(&env))));
+                guard_env
+                    .borrow_mut()
+                    .set(binding.value.clone(), Self::tagged_error_value(msg, tag));
+                self.eval_expression(fallback, guard_env)
+            }
+            Expression::Log {
+                value,
+                binding,
+                error_tag,
+                handler,
+                ..
+            } => {
+                let evaluated = self.eval_expression(value, Rc::clone(&env));
+                let Some((tag, msg)) = Self::error_info_from(&evaluated) else {
+                    return evaluated;
+                };
+                if error_tag.as_ref().is_some_and(|wanted| tag.as_ref() != Some(wanted)) {
+                    return evaluated;
+                }
+
+                let log_env = Rc::new(RefCell::new(Environment::new_enclosed(Rc::clone(&env))));
+                log_env
+                    .borrow_mut()
+                    .set(binding.value.clone(), Self::tagged_error_value(msg, tag));
+                let _side_effect = self.eval_expression(handler, log_env);
+                evaluated
+            }
+            Expression::Unless {
+                consequence,
+                condition,
+                alternative,
+                ..
+            } => {
+                let cond = self.eval_expression(condition, Rc::clone(&env));
+                if cond.is_error() {
+                    return cond;
+                }
+
+                if !cond.is_truthy() {
+                    self.eval_expression(consequence, env)
+                } else {
+                    self.eval_expression(alternative, env)
                 }
             }
         }
@@ -2461,6 +2696,276 @@ mod tests {
         test_none(&result);
     }
 
+    #[test]
+    fn test_unless_expression_then() {
+        let result = test_eval(r#""admin" unless False then "guest""#);
+        test_string(&result, "admin");
+
+        let result = test_eval(r#""admin" unless True then "guest""#);
+        test_string(&result, "guest");
+    }
+
+    #[test]
+    fn test_unless_expression_then_with_assignment() {
+        let input = r#"
+            name := None
+            result := "Guest" unless name != None then "Member"
+            result
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "Guest");
+    }
+
+    #[test]
+    fn test_fail_expression() {
+        let result = test_eval(r#"fail "bad input""#);
+        match result.as_ref() {
+            Object::Error(msg) => assert_eq!(msg, "bad input"),
+            other => panic!("Expected error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_angle_fail_expression() {
+        let result = test_eval(r#"<fail>("bad input")"#);
+        match result.as_ref() {
+            Object::Error(msg) => assert_eq!(msg, "bad input"),
+            other => panic!("Expected error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_error_builtin() {
+        let result = test_eval(r#"error("bad input")"#);
+        match result.as_ref() {
+            Object::Error(msg) => assert_eq!(msg, "bad input"),
+            other => panic!("Expected error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_guard_expression_recovers_with_bound_error() {
+        let input = r#"
+            result := fail "boom" guard err -> err.msg
+            result
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "boom");
+    }
+
+    #[test]
+    fn test_angle_guard_expression() {
+        let input = r#"
+            result := <fail>("boom") <guard>("fallback")
+            result
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "fallback");
+    }
+
+    #[test]
+    fn test_guard_expression_keeps_success_value() {
+        let input = r#"
+            result := "ok" guard err -> err.msg
+            result
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "ok");
+    }
+
+    #[test]
+    fn test_angle_log_expression_success_returns_original() {
+        let input = r#"
+            result := "ok" <log<Error>> err -> err.msg
+            result
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "ok");
+    }
+
+    #[test]
+    fn test_angle_log_expression_error_propagates_original() {
+        let input = r#"
+            <fail>("boom") <log<Error>> err -> err.msg
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert_eq!(msg, "boom"),
+            other => panic!("Expected error to propagate through log, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_angle_log_handler_error_discarded() {
+        let input = r#"
+            <fail>("original") <log<Error>> err -> <fail>("handler error")
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert_eq!(msg, "original"),
+            other => panic!("Expected original error to propagate, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_guard_expression_does_not_catch_none() {
+        let input = r#"
+            result := None guard err -> "fallback"
+            result
+        "#;
+        let result = test_eval(input);
+        test_none(&result);
+    }
+
+    #[test]
+    fn test_guard_expression_statement() {
+        let input = r#"
+            println(fail "boom") guard err -> err.msg
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "boom");
+    }
+
+    #[test]
+    fn test_option_error_arm_handles_condition_error() {
+        let input = r#"
+            option { missing == 1 -> 10, <Error> -> 0 }
+        "#;
+        let result = test_eval(input);
+        test_integer(&result, 0);
+    }
+
+    #[test]
+    fn test_option_error_arm_handles_body_error() {
+        let input = r#"
+            option { True -> missing, <Error> -> 0 }
+        "#;
+        let result = test_eval(input);
+        test_integer(&result, 0);
+    }
+
+    #[test]
+    fn test_error_constructor_expression_runtime() {
+        let result = test_eval(r#"<Error>("bad input")"#);
+        match result.as_ref() {
+            Object::ErrorValue { msg, tag } => {
+                assert_eq!(msg, "bad input");
+                assert_eq!(tag, &None);
+            }
+            other => panic!("Expected ErrorValue, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_tagged_error_constructor_expression_runtime() {
+        let result = test_eval(r#"<Error<retry_error>>("bad input")"#);
+        match result.as_ref() {
+            Object::ErrorValue { msg, tag } => {
+                assert_eq!(msg, "bad input");
+                assert_eq!(tag.as_deref(), Some("retry_error"));
+            }
+            other => panic!("Expected tagged ErrorValue, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_value_constructor_expression_runtime() {
+        let result = test_eval(r#"<Value>("ok").value"#);
+        test_string(&result, "ok");
+    }
+
+    #[test]
+    fn test_error_constructor_field_access() {
+        let result = test_eval(r#"<Error<retry_error>>("bad input").tag"#);
+        test_string(&result, "retry_error");
+
+        let result = test_eval(r#"<Error>("bad input").msg"#);
+        test_string(&result, "bad input");
+    }
+
+    #[test]
+    fn test_type_wrap_error_or_value_success() {
+        let result = test_eval(r#"<type<Error || Value>>("ok").value"#);
+        test_string(&result, "ok");
+    }
+
+    #[test]
+    fn test_type_wrap_error_or_value_error() {
+        let result = test_eval(r#"<type<Error || Value>>(<fail>("boom")).msg"#);
+        test_string(&result, "boom");
+    }
+
+    #[test]
+    fn test_typed_declaration_with_error_or_value() {
+        let input = r#"
+            result <Error || Value> := <type<Error || Value>>(<fail>("boom"))
+            result.msg
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "boom");
+    }
+
+    #[test]
+    fn test_is_value_builtin() {
+        test_boolean(&test_eval(r#"is_value(<Value>("ok"))"#), true);
+        test_boolean(&test_eval(r#"is_value(<Error>("bad"))"#), false);
+        test_boolean(&test_eval(r#"is_value("hello")"#), false);
+        test_boolean(
+            &test_eval(r#"is_value(<type<Error || Value>>("ok"))"#),
+            true,
+        );
+    }
+
+    #[test]
+    fn test_is_error_builtin() {
+        test_boolean(&test_eval(r#"is_error(<Error>("bad"))"#), true);
+        test_boolean(&test_eval(r#"is_error(<Error<net>>("fail"))"#), true);
+        test_boolean(&test_eval(r#"is_error(<Value>("ok"))"#), false);
+        test_boolean(&test_eval(r#"is_error("hello")"#), false);
+        test_boolean(
+            &test_eval(r#"is_error(<type<Error || Value>>(<fail>("boom")))"#),
+            true,
+        );
+    }
+
+    #[test]
+    fn test_type_wrap_tagged_error_union_applies_tag() {
+        let result = test_eval(r#"<type<Error<custom> || Value>>(<fail>("boom")).tag"#);
+        test_string(&result, "custom");
+    }
+
+    #[test]
+    fn test_type_wrap_tagged_error_union_success_path() {
+        let result = test_eval(r#"<type<Value || Error<custom>>>("ok").value"#);
+        test_string(&result, "ok");
+    }
+
+    #[test]
+    fn test_type_wrap_tagged_error_preserves_existing_tag() {
+        let result = test_eval(
+            r#"<type<Error<override> || Value>>(<fail>(<Error<original>>("boom"))).tag"#,
+        );
+        test_string(&result, "original");
+    }
+
+    #[test]
+    fn test_tagged_log_filter_matches_only_selected_error_tag() {
+        let result = test_eval(
+            r#"<fail>(<Error<retry_error>>("boom")) <log<Error<retry_error>>> err -> err.tag"#,
+        );
+        match result.as_ref() {
+            Object::Error(msg) => assert_eq!(msg, "[retry_error] boom"),
+            other => panic!("Expected tagged error to propagate through log, got {:?}", other),
+        }
+
+        let result =
+            test_eval(r#"<fail>(<Error<network>>("offline")) <guard<Error<retry_error>>>("missed")"#);
+        match result.as_ref() {
+            Object::Error(msg) => assert_eq!(msg, "[network] offline"),
+            other => panic!("Expected propagated tagged error, got {:?}", other),
+        }
+    }
+
     // ==================== POSTFIX GUARD TESTS ====================
 
     #[test]
@@ -2494,6 +2999,17 @@ mod tests {
         "#;
         let result = test_eval(input);
         test_integer(&result, 5);
+    }
+
+    #[test]
+    fn test_postfix_unless_guard_true() {
+        let input = r#"
+            x <int> := 0
+            x = 5 unless True
+            x
+        "#;
+        let result = test_eval(input);
+        test_integer(&result, 0);
     }
 
     // ==================== EACH LOOP TESTS ====================

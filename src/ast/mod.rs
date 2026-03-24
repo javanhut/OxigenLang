@@ -15,6 +15,8 @@ pub enum TypeAnnotation {
     Set,
     Generic,
     NoneType,
+    ErrorType(Option<String>),
+    ValueType,
     Union(Vec<TypeAnnotation>),
     Struct(String),
 }
@@ -35,6 +37,8 @@ impl TypeAnnotation {
             "set" => Some(TypeAnnotation::Set),
             "generic" => Some(TypeAnnotation::Generic),
             "None" => Some(TypeAnnotation::NoneType),
+            "Error" => Some(TypeAnnotation::ErrorType(None)),
+            "Value" => Some(TypeAnnotation::ValueType),
             _ => None,
         }
     }
@@ -61,6 +65,11 @@ impl TypeAnnotation {
             TypeAnnotation::Set => "SET".to_string(),
             TypeAnnotation::Generic => "GENERIC".to_string(),
             TypeAnnotation::NoneType => "NONE".to_string(),
+            TypeAnnotation::ErrorType(tag) => match tag {
+                Some(tag) => format!("ERROR<{}>", tag),
+                None => "ERROR".to_string(),
+            },
+            TypeAnnotation::ValueType => "VALUE".to_string(),
             TypeAnnotation::Union(types) => {
                 types.iter().map(|t| t.type_name()).collect::<Vec<_>>().join(" || ")
             }
@@ -288,6 +297,45 @@ pub enum Expression {
         token: Token,
         arms: Vec<OptionArm>,
         default: Option<Vec<Statement>>,
+        error_default: Option<Vec<Statement>>,
+    },
+    Guard {
+        token: Token,
+        value: Box<Expression>,
+        binding: Identifier,
+        error_tag: Option<String>,
+        fallback: Box<Expression>,
+    },
+    Log {
+        token: Token,
+        value: Box<Expression>,
+        binding: Identifier,
+        error_tag: Option<String>,
+        handler: Box<Expression>,
+    },
+    ErrorConstruct {
+        token: Token,
+        tag: Option<String>,
+        value: Box<Expression>,
+    },
+    ValueConstruct {
+        token: Token,
+        value: Box<Expression>,
+    },
+    TypeWrap {
+        token: Token,
+        target: TypeAnnotation,
+        value: Box<Expression>,
+    },
+    Fail {
+        token: Token,
+        value: Box<Expression>,
+    },
+    Unless {
+        token: Token,
+        consequence: Box<Expression>,
+        condition: Box<Expression>,
+        alternative: Box<Expression>,
     },
     StringInterp {
         token: Token,

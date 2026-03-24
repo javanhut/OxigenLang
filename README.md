@@ -7,7 +7,7 @@ OxigenLang is a modern, lightweight, interpreted programming language implemente
 - **Module System**: Import standard library modules or local files with `introduce`/`intro`. Namespace imports, selective imports, and module caching.
 - **Standard Library**: 10 built-in modules — math, strings, array, io, os, time, random, path, json, and net (HTTP client with HTTPS support).
 - **Flexible Block Styles**: Choose between traditional brace-based blocks or Python-style indentation blocks with the `#[indent]` directive.
-- **Conditional Expressions**: Multi-arm `option` blocks, ternary shorthand, `unless` inverse conditionals, `when`/`unless` postfix guards, and short-circuit `and`/`or` logical operators.
+- **Conditional Expressions**: Multi-arm `option` blocks, ternary shorthand, `unless` inverse conditionals, `unless ... then ...` fallback expressions, `when`/`unless` postfix guards, and short-circuit `and`/`or` logical operators.
 - **Pattern Matching**: Define reusable patterns with the `pattern` keyword and match against them with `choose`.
 - **Rich Type System**: Dynamic typing by default with optional type annotations for locking types and controlling mutability. Four declaration forms give precise control over value and type mutability.
 - **Data Types**: Integers, Floats, Strings, Characters, Booleans, Arrays, Bytes, Uints, Tuples, Maps, Sets, and `None`.
@@ -113,6 +113,7 @@ For detailed information, see the [docs](docs/) directory:
 | [Data Types](docs/data_types.md) | All supported types and their operations |
 | [Operators](docs/operators.md) | Arithmetic, comparison, logical, and postfix operators |
 | [Control Flow](docs/control_flow.md) | Conditionals, loops, guards, and block styles |
+| [Angle Forms](docs/angle_forms.md) | Unified guide for type annotations, constructors, normalization, and effects |
 | [Functions](docs/functions.md) | Named/anonymous functions, closures, typed parameters |
 | [Pattern Matching](docs/pattern_matching.md) | Patterns, choose expressions, inline patterns |
 | [Structs](docs/structs.md) | Fields, methods, inheritance, hidden fields |

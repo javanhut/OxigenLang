@@ -33,6 +33,9 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
     builtins.insert("remove".to_string(), Rc::new(Object::Builtin(builtin_remove)));
     builtins.insert("has".to_string(), Rc::new(Object::Builtin(builtin_has)));
     builtins.insert("tuple".to_string(), Rc::new(Object::Builtin(builtin_tuple)));
+    builtins.insert("error".to_string(), Rc::new(Object::Builtin(builtin_error)));
+    builtins.insert("is_value".to_string(), Rc::new(Object::Builtin(builtin_is_value)));
+    builtins.insert("is_error".to_string(), Rc::new(Object::Builtin(builtin_is_error)));
 
     // Internal builtins for stdlib
     builtins.insert("__sqrt".to_string(), Rc::new(Object::Builtin(builtin__sqrt)));
@@ -116,6 +119,16 @@ fn builtin_println(args: Vec<Rc<Object>>) -> Rc<Object> {
     let output: Vec<String> = args.iter().map(|a| a.to_string()).collect();
     println!("{}", output.join(" "));
     Rc::new(Object::None)
+}
+
+fn builtin_error(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!(
+            "error: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+    Rc::new(Object::Error(args[0].to_string()))
 }
 
 fn builtin_len(args: Vec<Rc<Object>>) -> Rc<Object> {
@@ -241,6 +254,29 @@ fn builtin_type(args: Vec<Rc<Object>>) -> Rc<Object> {
         return Rc::new(Object::String(name.to_string()));
     }
     Rc::new(Object::String(args[0].type_name().to_string()))
+}
+
+fn builtin_is_value(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!(
+            "wrong number of arguments. got={}, want=1",
+            args.len()
+        )));
+    }
+    Rc::new(Object::Boolean(matches!(args[0].as_ref(), Object::Value(_))))
+}
+
+fn builtin_is_error(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!(
+            "wrong number of arguments. got={}, want=1",
+            args.len()
+        )));
+    }
+    Rc::new(Object::Boolean(matches!(
+        args[0].as_ref(),
+        Object::ErrorValue { .. }
+    )))
 }
 
 // ord(`a`) -> 97 (char to integer)
