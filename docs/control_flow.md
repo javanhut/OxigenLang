@@ -186,7 +186,7 @@ After a binding name, `<...>` is a type annotation:
 
 ```oxi
 name <str> := "Oxigen"
-count as <int>
+count <int>
 result <Error || Value> := <type<Error || Value>>(read_file("config"))
 ```
 

@@ -70,14 +70,14 @@ x <bool> := 0
 - Type is locked — reassignments must match the type.
 - Value is mutable — `=`, `++`/`--`, and `:=` work (with type checking).
 
-### As-Declare: `x as <type>` or `x <type>`
+### Zero-Init: `x <type>` or `x as <type>`
 
-Declares a typed variable initialized to its zero value. The value is mutable. The shorthand form `x <type>` (without `=` or `:=`) is equivalent to `x as <type>`.
+Declares a typed variable initialized to its zero value. The value is mutable. The `as` keyword is optional — `x <type>` is the preferred convention.
 
 ```oxi
-x as <int>
-x <str>
-x as <array>
+x <int>
+y <str>
+z <array>
 p <Person>
 ```
 
@@ -223,7 +223,7 @@ is_mut(b)
 c <int> = 10
 is_mut(c)
 
-d as <int>
+d <int>
 is_mut(d)
 ```
 
@@ -241,7 +241,7 @@ is_type_mut(b)
 c <int> = 10
 is_type_mut(c)
 
-d as <int>
+d <int>
 is_type_mut(d)
 ```
 
@@ -252,8 +252,8 @@ is_type_mut(d)
 | `x := 10`       | yes           | no          | no          | yes                |
 | `x <int> = 10`  | no            | yes         | no          | no                 |
 | `x <int> := 10` | yes           | yes         | yes         | yes                |
-| `x as <int>`    | yes           | yes         | yes         | yes                |
 | `x <int>`       | yes           | yes         | yes         | yes                |
+| `x as <int>`    | yes           | yes         | yes         | yes                |
 
 See also:
 - [Variables and Assignments](variables.md) — practical guide to declaring and using variables

@@ -8,8 +8,8 @@ This is a concise reference for OxigenLang syntax. For detailed explanations, fo
 x := 10                    // untyped, mutable
 x <int> = 10               // typed, immutable value
 x <int> := 10              // typed, mutable value
-x as <int>                 // typed, zero-value init
-x <int>                    // shorthand for above
+x <int>                    // typed, zero-value init
+x as <int>                 // alternative form (optional `as`)
 ```
 
 ## Data Types — [Full Guide](data_types.md)
@@ -105,7 +105,7 @@ struct Student(Person) { school <str> }          // inheritance
 ```oxi
 x <int> = 10               // strict (immutable, no conversion)
 x <int> := 3.9             // walrus (mutable, converts to 3)
-x as <int>                 // as-declare (zero value)
+x <int>                    // zero-value init
 result <Error || Value> := <type<Error || Value>>(read_file("config"))
 err := <Error<network>>("connection lost")
 wrapped := <Value>("ok")
@@ -118,7 +118,7 @@ is_type_mut(x)             // type mutability check
 
 ```oxi
 name <str> := "Oxigen"                             // type annotation in declaration position
-count as <int>                                     // zero-init typed binding
+count <int>                                        // zero-init typed binding
 num <int> := "10"                                  // typed walrus conversion
 <Error>("failed to initialize")                    // construct an error value
 <Error<retry_error>>("retry failed")               // construct a tagged error value

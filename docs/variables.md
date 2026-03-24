@@ -60,14 +60,14 @@ z <bool> := 0
 
 The type is locked — subsequent reassignments must match the type. The value is mutable — `=`, `:=`, `++`/`--` all work (with type checking).
 
-### As-Declare: `x as <type>` or `x <type>`
+### Zero-Init: `x <type>` or `x as <type>`
 
-Declares a typed variable initialized to its **zero value**. The value is mutable. The shorthand form `x <type>` (without `=` or `:=`) is equivalent to `x as <type>`:
+Declares a typed variable initialized to its **zero value**. The value is mutable. The `as` keyword is optional — `x <type>` is the preferred convention:
 
 ```oxi
-x as <int>
+x <int>
 y <str>
-z as <array>
+z <array>
 p <Person>
 ```
 
@@ -177,8 +177,8 @@ user_input := "hello"
 | `x := 10`       | yes           | no          | no          | yes                |
 | `x <int> = 10`  | no            | yes         | no          | no                 |
 | `x <int> := 10` | yes           | yes         | yes         | yes                |
-| `x as <int>`    | yes           | yes         | yes         | yes                |
 | `x <int>`       | yes           | yes         | yes         | yes                |
+| `x as <int>`    | yes           | yes         | yes         | yes                |
 
 ## Introspection
 

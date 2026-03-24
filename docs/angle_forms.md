@@ -22,7 +22,7 @@ Whenever you see `<...>` in Oxigen, look at what comes **before** the opening `<
 | What comes before `<` | What `<...>` means | Example |
 |---|---|---|
 | A variable name | Type annotation — declares what type this variable holds | `name <str> = "hello"` |
-| The keyword `as` | Zero-initialize — create an empty value of this type | `count as <int>` |
+| The keyword `as` or just `<type>` after a name | Zero-initialize — create an empty value of this type | `count <int>` |
 | Nothing (start of expression) | Constructor — build a value like an error or success wrapper | `<Error>("failed")` |
 | A completed expression | Effect — do something with the result of that expression | `expr <guard>("fallback")` |
 
@@ -142,21 +142,30 @@ This is the same type system used across variables, struct fields, and function 
 
 ## 2. Zero Initialization
 
-With the `as` keyword, angle forms create an **empty value** of the specified type.
+Angle forms create an **empty value** of the specified type when used with just a variable name and no assignment operator.
 
 ### What the Syntax Means
 
 ```oxi
-count as <int>
+count <int>
 ```
 
 Reading this left to right:
 
 1. `count` — the variable name
-2. `as` — the keyword that says "initialize this to the default"
-3. `<int>` — the type to create a zero value for
+2. `<int>` — the type to create a zero value for
 
-After this line, `count` exists and holds `0` (the zero value for integers).
+After this line, `count` exists and holds `0` (the zero value for integers). No `=` or `:=` is needed — the type alone is enough.
+
+### The `as` Form
+
+The `as` keyword is an optional alternative that does the same thing:
+
+```oxi
+count as <int>
+```
+
+Both `count <int>` and `count as <int>` produce identical results. The convention in Oxigen is to use `count <int>` (without `as`) because it is shorter and consistent with how types appear everywhere else in the language.
 
 ### All Zero Values
 
@@ -174,10 +183,10 @@ Each type has a specific zero value:
 
 ### When to Use Zero Initialization
 
-Use `as` when you need a typed variable **before** you have a value for it. This is common when the value will be set inside a conditional or loop:
+Use zero initialization when you need a typed variable **before** you have a value for it. This is common when the value will be set inside a conditional or loop:
 
 ```oxi
-result as <str>
+result <str>
 
 option {
     ready -> result = fetch_data(),
@@ -187,11 +196,11 @@ option {
 println(result)
 ```
 
-Without `as <str>`, the variable `result` would not exist before the `option` block, and the assignments inside would fail.
+Without `result <str>`, the variable `result` would not exist before the `option` block, and the assignments inside would fail.
 
 ### Why Not Just Write `result <str> := ""`?
 
-You can. `as <str>` is a shorthand that means the same thing as `:= ""` for strings, `:= 0` for ints, etc. Use whichever reads more clearly. `as` is especially useful when you do not have a meaningful initial value.
+You can. `result <str>` (zero initialization) is a shorthand that means the same thing as `result <str> := ""` for strings, `result <int> := 0` for ints, etc. Use whichever reads more clearly. Zero initialization is especially useful when you do not have a meaningful initial value.
 
 ---
 

@@ -352,7 +352,7 @@ Declare a typed variable with all fields set to their zero values. Both forms ar
 
 ```oxi
 p <Person>
-p as <Person>
+// or equivalently: p as <Person>
 
 println(p.name)
 println(p.age)
