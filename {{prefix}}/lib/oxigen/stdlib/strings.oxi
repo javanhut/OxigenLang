@@ -1,9 +1,0 @@
-fun split(s <str>, delim <str>) { __split(s, delim) }
-fun join(arr <array>, delim <str>) { __join(arr, delim) }
-fun trim(s <str>) { __trim(s) }
-fun upper(s <str>) { __upper(s) }
-fun lower(s <str>) { __lower(s) }
-fun replace(s <str>, old <str>, new_str <str>) { __replace(s, old, new_str) }
-fun starts_with(s <str>, prefix <str>) { __starts_with(s, prefix) }
-fun ends_with(s <str>, suffix <str>) { __ends_with(s, suffix) }
-fun contains_str(s <str>, sub <str>) { __contains_str(s, sub) }
