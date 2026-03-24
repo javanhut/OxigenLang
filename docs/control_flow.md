@@ -330,7 +330,7 @@ result := request()
 Behavior:
 
 - if the left expression succeeds, its value passes through unchanged
-- if it fails with a matching error, the handler runs and its result becomes the expression result
+- if it fails with a matching error, the handler runs for its side effects and the original error continues propagating
 - if the tag does not match, the original error keeps propagating
 
 ## Producing Failures with `fail`

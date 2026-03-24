@@ -1,0 +1,50 @@
+// Execute a shell command. Returns a map with "stdout", "stderr", and "code".
+fun exec(cmd <str>) { __exec(cmd) }
+
+// Get the operating system name (e.g. "linux", "macos", "windows")
+fun name() { __os_name() }
+
+// Get the CPU architecture (e.g. "x86_64", "aarch64")
+fun arch() { __os_arch() }
+
+// Get an environment variable. Returns None if not set.
+fun env_get(key <str>) { __env_get(key) }
+
+// Set an environment variable.
+fun env_set(key <str>, val <str>) { __env_set(key, val) }
+
+// Get all environment variables as a map.
+fun env_vars() { __env_vars() }
+
+// Get the current working directory.
+fun cwd() { __cwd() }
+
+// Change the current working directory.
+fun chdir(path <str>) { __chdir(path) }
+
+// List entries in a directory (non-recursive). Returns array of paths.
+fun list_dir(path <str>) { __list_dir(path) }
+
+// Recursively walk a directory tree. Returns array of all paths.
+fun walk_dir(path <str>) { __walk_dir(path) }
+
+// Create a directory (and parents if needed).
+fun mkdir(path <str>) { __mkdir(path) }
+
+// Remove a directory and all its contents.
+fun rmdir(path <str>) { __rmdir(path) }
+
+// Remove a file.
+fun remove_file(path <str>) { __remove(path) }
+
+// Check if a path is a directory.
+fun is_dir(path <str>) { __is_dir(path) }
+
+// Check if a path is a file.
+fun is_file(path <str>) { __is_file(path) }
+
+// Exit the process with an optional exit code (default 0).
+fun exit(code <int>) { __exit(code) }
+
+// Get the current process ID.
+fun pid() { __pid() }

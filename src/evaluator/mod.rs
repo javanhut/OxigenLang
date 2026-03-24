@@ -1348,7 +1348,8 @@ impl Evaluator {
                 log_env
                     .borrow_mut()
                     .set(binding.value.clone(), Self::tagged_error_value(msg, tag));
-                self.eval_expression(handler, log_env)
+                let _side_effect = self.eval_expression(handler, log_env);
+                evaluated
             }
             Expression::Unless {
                 consequence,
@@ -2762,13 +2763,27 @@ mod tests {
     }
 
     #[test]
-    fn test_angle_log_expression_error_runs_handler() {
+    fn test_angle_log_expression_error_propagates_original() {
         let input = r#"
-            result := <fail>("boom") <log<Error>> err -> err.msg
-            result
+            <fail>("boom") <log<Error>> err -> err.msg
         "#;
         let result = test_eval(input);
-        test_string(&result, "boom");
+        match result.as_ref() {
+            Object::Error(msg) => assert_eq!(msg, "boom"),
+            other => panic!("Expected error to propagate through log, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_angle_log_handler_error_discarded() {
+        let input = r#"
+            <fail>("original") <log<Error>> err -> <fail>("handler error")
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert_eq!(msg, "original"),
+            other => panic!("Expected original error to propagate, got {:?}", other),
+        }
     }
 
     #[test]
@@ -2874,7 +2889,10 @@ mod tests {
         let result = test_eval(
             r#"<fail>(<Error<retry_error>>("boom")) <log<Error<retry_error>>> err -> err.tag"#,
         );
-        test_string(&result, "retry_error");
+        match result.as_ref() {
+            Object::Error(msg) => assert_eq!(msg, "[retry_error] boom"),
+            other => panic!("Expected tagged error to propagate through log, got {:?}", other),
+        }
 
         let result =
             test_eval(r#"<fail>(<Error<network>>("offline")) <guard<Error<retry_error>>>("missed")"#);

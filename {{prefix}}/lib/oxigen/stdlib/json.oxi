@@ -1,0 +1,6 @@
+// Parse a JSON string into Oxigen values
+// Objects become maps, arrays stay arrays, null becomes None
+fun parse(s <str>) { __json_parse(s) }
+
+// Serialize an Oxigen value to a JSON string
+fun stringify(val <generic>) { __json_stringify(val) }
