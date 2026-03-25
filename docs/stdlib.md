@@ -92,12 +92,22 @@ introduce io
 | `write_file` | `write_file(path, content)` | Write string to file |
 | `append_file` | `append_file(path, content)` | Append string to file |
 | `file_exists` | `file_exists(path)` | Check if file exists |
+| `input` | `input(prompt)` | Print prompt and read a line from stdin |
+| `read_line` | `read_line()` | Read a line from stdin (no prompt) |
 
 ```oxi
 introduce io
+
+// File operations
 io.write_file("test.txt", "Hello!")
 println(io.read_file("test.txt"))   // Hello!
 println(io.file_exists("test.txt")) // True
+
+// Console input
+name := io.input("What is your name? ")
+println("Hello, {name}!")
+
+line := io.read_line()
 ```
 
 ## os

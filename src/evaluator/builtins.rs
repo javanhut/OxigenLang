@@ -56,6 +56,8 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
     builtins.insert("__write_file".to_string(), Rc::new(Object::Builtin(builtin__write_file)));
     builtins.insert("__append_file".to_string(), Rc::new(Object::Builtin(builtin__append_file)));
     builtins.insert("__file_exists".to_string(), Rc::new(Object::Builtin(builtin__file_exists)));
+    builtins.insert("__input".to_string(), Rc::new(Object::Builtin(builtin__input)));
+    builtins.insert("__read_line".to_string(), Rc::new(Object::Builtin(builtin__read_line)));
 
     // OS builtins
     builtins.insert("__exec".to_string(), Rc::new(Object::Builtin(builtin__exec)));
@@ -817,6 +819,71 @@ fn builtin__file_exists(args: Vec<Rc<Object>>) -> Rc<Object> {
     match args[0].as_ref() {
         Object::String(path) => Rc::new(Object::Boolean(std::path::Path::new(path).exists())),
         _ => Rc::new(Object::Error(format!("__file_exists: expected STRING, got {}", args[0].type_name()))),
+    }
+}
+
+fn builtin__input(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() > 1 {
+        return Rc::new(Object::Error(format!(
+            "__input: expected 0 or 1 arguments, got {}",
+            args.len()
+        )));
+    }
+    // Print prompt if provided (without newline)
+    if args.len() == 1 {
+        match args[0].as_ref() {
+            Object::String(prompt) => {
+                use std::io::Write;
+                print!("{}", prompt);
+                if std::io::stdout().flush().is_err() {
+                    return Rc::new(Object::Error("__input: failed to flush stdout".to_string()));
+                }
+            }
+            _ => {
+                return Rc::new(Object::Error(format!(
+                    "__input: prompt must be STRING, got {}",
+                    args[0].type_name()
+                )));
+            }
+        }
+    }
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) => Rc::new(Object::None), // EOF
+        Ok(_) => {
+            // Strip trailing newline
+            if line.ends_with('\n') {
+                line.pop();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+            }
+            Rc::new(Object::String(line))
+        }
+        Err(e) => Rc::new(Object::Error(format!("__input: {}", e))),
+    }
+}
+
+fn builtin__read_line(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if !args.is_empty() {
+        return Rc::new(Object::Error(format!(
+            "__read_line: expected 0 arguments, got {}",
+            args.len()
+        )));
+    }
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) => Rc::new(Object::None), // EOF
+        Ok(_) => {
+            if line.ends_with('\n') {
+                line.pop();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+            }
+            Rc::new(Object::String(line))
+        }
+        Err(e) => Rc::new(Object::Error(format!("__read_line: {}", e))),
     }
 }
 
