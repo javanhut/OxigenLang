@@ -1,8 +1,9 @@
 use crate::ast::{ChooseArm, Expression, Identifier, ModulePath, OptionArm, Program, Statement, StringInterpPart, TypeAnnotation, TypedParam};
 use crate::lexer::Lexer;
-use crate::token::{Token, TokenType};
+use crate::token::{Span, Token, TokenType};
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Precedence {
@@ -45,21 +46,77 @@ fn precedence_of(tt: &TokenType) -> Precedence {
 type PrefixParseFn = fn(&mut Parser) -> Option<Expression>;
 type InfixParseFn = fn(&mut Parser, Expression) -> Option<Expression>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+impl fmt::Display for Severity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Severity::Error => write!(f, "error"),
+            Severity::Warning => write!(f, "warning"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Diagnostic {
+    pub span: Span,
+    pub message: String,
+    pub suggestion: Option<String>,
+    pub severity: Severity,
+}
+
+impl fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {} [{}:{}]", self.severity, self.message, self.span.line, self.span.column)?;
+        if let Some(ref hint) = self.suggestion {
+            write!(f, "\n  hint: {}", hint)?;
+        }
+        Ok(())
+    }
+}
+
+impl Diagnostic {
+    fn error(span: Span, message: impl Into<String>) -> Self {
+        Self {
+            span,
+            message: message.into(),
+            suggestion: None,
+            severity: Severity::Error,
+        }
+    }
+
+    fn error_with_hint(span: Span, message: impl Into<String>, suggestion: impl Into<String>) -> Self {
+        Self {
+            span,
+            message: message.into(),
+            suggestion: Some(suggestion.into()),
+            severity: Severity::Error,
+        }
+    }
+}
+
 pub struct Parser {
     lexer: Lexer,
     curr_token: Token,
     peek_token: Token,
-    errors: Vec<String>,
+    errors: Vec<Diagnostic>,
+    source: String,
     prefix_fns: HashMap<TokenType, PrefixParseFn>,
     infix_fns: HashMap<TokenType, InfixParseFn>,
     lookahead_buffer: VecDeque<Token>,
 }
 
 impl Parser {
-    pub fn new(lexer: Lexer) -> Self {
+    pub fn new(lexer: Lexer, source: &str) -> Self {
         let dummy = Token {
             token_type: TokenType::Illegal,
             literal: "".into(),
+            span: Span::default(),
         };
 
         let mut p = Parser {
@@ -67,6 +124,7 @@ impl Parser {
             curr_token: dummy.clone(),
             peek_token: dummy,
             errors: Vec::new(),
+            source: source.to_string(),
             prefix_fns: HashMap::new(),
             infix_fns: HashMap::new(),
             lookahead_buffer: VecDeque::new(),
@@ -137,8 +195,56 @@ impl Parser {
         p
     }
 
-    pub fn error(&self) -> &[String] {
+    pub fn errors(&self) -> &[Diagnostic] {
         &self.errors
+    }
+
+    pub fn format_errors(&self) -> String {
+        let displayed: Vec<_> = self.errors.iter().map(|d| self.format_diagnostic(d)).collect();
+        if displayed.len() > 1 {
+            let mut out = displayed[0].clone();
+            // Show up to 3 additional errors, skip noise
+            let rest: Vec<_> = displayed[1..].iter().take(2).collect();
+            for d in rest {
+                out.push_str("\n\n");
+                out.push_str(d);
+            }
+            if displayed.len() > 3 {
+                out.push_str(&format!("\n\n... and {} more error(s)", displayed.len() - 3));
+            }
+            out
+        } else {
+            displayed.join("\n\n")
+        }
+    }
+
+    fn format_diagnostic(&self, diag: &Diagnostic) -> String {
+        let mut out = String::new();
+        let line_num = diag.span.line;
+        let col = diag.span.column;
+
+        // Header
+        out.push_str(&format!("{}: {}\n", diag.severity, diag.message));
+        out.push_str(&format!("  --> line {}:{}\n", line_num, col));
+
+        // Source context
+        if let Some(source_line) = self.source.lines().nth(line_num.saturating_sub(1)) {
+            let line_str = format!("{}", line_num);
+            let padding = " ".repeat(line_str.len());
+            out.push_str(&format!("{} |\n", padding));
+            out.push_str(&format!("{} | {}\n", line_str, source_line));
+            if col > 0 {
+                let caret_padding = " ".repeat(col.saturating_sub(1));
+                out.push_str(&format!("{} | {}^", padding, caret_padding));
+            }
+        }
+
+        // Suggestion
+        if let Some(ref hint) = diag.suggestion {
+            out.push_str(&format!("\n  = hint: {}", hint));
+        }
+
+        out
     }
 
     fn negate_expression(expr: Expression) -> Expression {
@@ -146,6 +252,7 @@ impl Parser {
             token: Token {
                 token_type: TokenType::Not,
                 literal: "not".to_string(),
+                span: Span::default(),
             },
             operator: "not".to_string(),
             right: Box::new(expr),
@@ -161,9 +268,10 @@ impl Parser {
             if self.peek_token.token_type == TokenType::Lt {
                 self.next_token(); // consume inner '<'
                 if self.peek_token.token_type != TokenType::Ident {
-                    self.errors.push(format!(
-                        "expected error tag name, got {:?} (literal={:?})",
-                        self.peek_token.token_type, self.peek_token.literal
+                    self.errors.push(Diagnostic::error_with_hint(
+                        self.peek_token.span,
+                        format!("expected error tag name, got {:?}", self.peek_token.literal),
+                        "provide a tag name like Error<MyTag>",
                     ));
                     return None;
                 }
@@ -188,9 +296,10 @@ impl Parser {
 
     fn parse_type_union_member(&mut self) -> Option<TypeAnnotation> {
         if !Self::is_type_name_token(&self.curr_token.token_type) {
-            self.errors.push(format!(
-                "expected type name, got {:?} (literal={:?})",
-                self.curr_token.token_type, self.curr_token.literal
+            self.errors.push(Diagnostic::error_with_hint(
+                self.curr_token.span,
+                format!("expected type name, got {:?}", self.curr_token.literal),
+                "valid types: int, str, float, char, bool, array, byte, uint, tuple, map, set",
             ));
             return None;
         }
@@ -201,9 +310,10 @@ impl Parser {
     /// Supports both `<A || B>` and legacy `<A> || <B>` unions.
     fn parse_type_annotation(&mut self) -> Option<TypeAnnotation> {
         if !Self::is_type_name_token(&self.peek_token.token_type) {
-            self.errors.push(format!(
-                "expected type name, got {:?} (literal={:?})",
-                self.peek_token.token_type, self.peek_token.literal
+            self.errors.push(Diagnostic::error_with_hint(
+                self.peek_token.span,
+                format!("expected type name after `<`, got {:?}", self.peek_token.literal),
+                "valid types: int, str, float, char, bool, array, byte, uint, tuple, map, set",
             ));
             return None;
         }
@@ -223,9 +333,10 @@ impl Parser {
                         self.next_token(); // consume legacy '<'
                     }
                     if !Self::is_type_name_token(&self.peek_token.token_type) {
-                        self.errors.push(format!(
-                            "expected type name, got {:?} (literal={:?})",
-                            self.peek_token.token_type, self.peek_token.literal
+                        self.errors.push(Diagnostic::error_with_hint(
+                            self.peek_token.span,
+                            format!("expected type name in union, got {:?}", self.peek_token.literal),
+                            "use `<TypeA || TypeB>` for union types",
                         ));
                         return None;
                     }
@@ -237,9 +348,10 @@ impl Parser {
                     break;
                 }
                 _ => {
-                    self.errors.push(format!(
-                        "expected type union separator or closing '>', got {:?} (literal={:?})",
-                        self.peek_token.token_type, self.peek_token.literal
+                    self.errors.push(Diagnostic::error_with_hint(
+                        self.peek_token.span,
+                        format!("expected `>` or `||` in type annotation, got {:?}", self.peek_token.literal),
+                        "close the type annotation with `>` or add `||` for a union type",
                     ));
                     return None;
                 }
@@ -263,8 +375,13 @@ impl Parser {
                 continue;
             }
 
+            let err_count = self.errors.len();
             if let Some(stmt) = self.parse_statement() {
                 program.statements.push(stmt);
+            } else if self.errors.len() > err_count {
+                // A new error was added — synchronize to recover and continue parsing
+                self.synchronize();
+                continue;
             }
             self.next_token();
         }
@@ -448,9 +565,9 @@ impl Parser {
         let mut left = match prefix {
             Some(f) => f(self)?,
             None => {
-                self.errors.push(format!(
-                    "no prefix parse fn for {:?} (literal={:?})",
-                    self.curr_token.token_type, self.curr_token.literal
+                self.errors.push(Diagnostic::error(
+                    self.curr_token.span,
+                    format!("unexpected token {:?}", self.curr_token.literal),
                 ));
                 return None;
             }
@@ -576,13 +693,17 @@ impl Parser {
                     self.next_token(); // move past InterpExprEnd
                 }
                 TokenType::Eof => {
-                    self.errors.push("unterminated string interpolation".to_string());
+                    self.errors.push(Diagnostic::error_with_hint(
+                        self.curr_token.span,
+                        "unterminated string interpolation",
+                        "make sure the string is properly closed with a matching quote",
+                    ));
                     break;
                 }
                 _ => {
-                    self.errors.push(format!(
-                        "unexpected token in string interpolation: {:?}",
-                        self.curr_token
+                    self.errors.push(Diagnostic::error(
+                        self.curr_token.span,
+                        format!("unexpected token in string interpolation: {:?}", self.curr_token.literal),
                     ));
                     self.next_token();
                 }
@@ -627,9 +748,10 @@ impl Parser {
     fn parse_effect_header(&mut self) -> Option<(Token, String, Option<String>)> {
         self.next_token(); // move to effect name after '<'
         if !Self::is_angle_effect_name_token(&self.curr_token) {
-            self.errors.push(format!(
-                "expected angle effect name after '<', got {:?} (literal={:?})",
-                self.curr_token.token_type, self.curr_token.literal
+            self.errors.push(Diagnostic::error_with_hint(
+                self.curr_token.span,
+                format!("expected effect name after `<`, got {:?}", self.curr_token.literal),
+                "valid effects: guard, fail, log, type, Error, Value",
             ));
             return None;
         }
@@ -644,18 +766,19 @@ impl Parser {
             if self.curr_token.token_type != TokenType::Ident
                 && self.curr_token.token_type != TokenType::None
             {
-                self.errors.push(format!(
-                    "expected effect filter name, got {:?} (literal={:?})",
-                    self.curr_token.token_type, self.curr_token.literal
+                self.errors.push(Diagnostic::error(
+                    self.curr_token.span,
+                    format!("expected effect filter name, got {:?}", self.curr_token.literal),
                 ));
                 return None;
             }
             if self.curr_token.literal == "Error" && self.peek_token.token_type == TokenType::Lt {
                 self.next_token(); // consume tag '<'
                 if self.peek_token.token_type != TokenType::Ident {
-                    self.errors.push(format!(
-                        "expected error tag name, got {:?} (literal={:?})",
-                        self.peek_token.token_type, self.peek_token.literal
+                    self.errors.push(Diagnostic::error_with_hint(
+                        self.peek_token.span,
+                        format!("expected error tag name, got {:?}", self.peek_token.literal),
+                        "provide a tag name like Error<MyTag>",
                     ));
                     return None;
                 }
@@ -672,9 +795,10 @@ impl Parser {
                 self.expect_peek(TokenType::Gt)?; // close Error<tag>
             } else {
                 if self.curr_token.literal != "Error" {
-                    self.errors.push(format!(
-                        "unsupported effect filter '{}', expected Error",
-                        self.curr_token.literal
+                    self.errors.push(Diagnostic::error_with_hint(
+                        self.curr_token.span,
+                        format!("unsupported effect filter '{}'", self.curr_token.literal),
+                        "only `Error` is supported as an effect filter",
                     ));
                     return None;
                 }
@@ -704,6 +828,7 @@ impl Parser {
             token: Token {
                 token_type: TokenType::Ident,
                 literal: "_err".to_string(),
+                span: Span::default(),
             },
             value: "_err".to_string(),
         }
@@ -720,7 +845,11 @@ impl Parser {
                 if self.peek_token.token_type == TokenType::LParen {
                     let fallback = self.parse_single_parenthesized_expression()?;
                     let Some(value) = value else {
-                        self.errors.push("<guard>(...) requires a target expression".to_string());
+                        self.errors.push(Diagnostic::error_with_hint(
+                            token.span,
+                            "<guard>(...) requires a target expression",
+                            "use like: value <guard>(fallback)",
+                        ));
                         return None;
                     };
                     Some(Expression::Guard {
@@ -733,9 +862,10 @@ impl Parser {
                 } else {
                     self.next_token(); // move to binding identifier
                     if self.curr_token.token_type != TokenType::Ident {
-                        self.errors.push(format!(
-                            "expected identifier after <guard>, got {:?} (literal={:?})",
-                            self.curr_token.token_type, self.curr_token.literal
+                        self.errors.push(Diagnostic::error_with_hint(
+                            self.curr_token.span,
+                            format!("expected identifier after <guard>, got {:?}", self.curr_token.literal),
+                            "use like: value <guard> err -> fallback",
                         ));
                         return None;
                     }
@@ -747,7 +877,11 @@ impl Parser {
                     self.next_token(); // move to fallback
                     let fallback = self.parse_expression(Precedence::Lowest)?;
                     let Some(value) = value else {
-                        self.errors.push("<guard> err -> ... requires a target expression".to_string());
+                        self.errors.push(Diagnostic::error_with_hint(
+                            token.span,
+                            "<guard> err -> ... requires a target expression",
+                            "use like: value <guard> err -> fallback",
+                        ));
                         return None;
                     };
                     Some(Expression::Guard {
@@ -780,14 +914,18 @@ impl Parser {
             }
             "log" => {
                 let Some(value) = value else {
-                    self.errors.push("<log<Error>> ... requires a target expression".to_string());
+                    self.errors.push(Diagnostic::error(
+                        token.span,
+                        "<log<Error>> requires a target expression",
+                    ));
                     return None;
                 };
                 self.next_token(); // move to binding identifier
                 if self.curr_token.token_type != TokenType::Ident {
-                    self.errors.push(format!(
-                        "expected identifier after <log<Error>>, got {:?} (literal={:?})",
-                        self.curr_token.token_type, self.curr_token.literal
+                    self.errors.push(Diagnostic::error_with_hint(
+                        self.curr_token.span,
+                        format!("expected identifier after <log<Error>>, got {:?}", self.curr_token.literal),
+                        "use like: value <log<Error>> err -> handler",
                     ));
                     return None;
                 }
@@ -807,7 +945,11 @@ impl Parser {
                 })
             }
             _ => {
-                self.errors.push(format!("unknown angle effect '{}'", effect_name));
+                self.errors.push(Diagnostic::error_with_hint(
+                    token.span,
+                    format!("unknown angle effect '{}'", effect_name),
+                    "valid effects: guard, fail, log, type, Error, Value",
+                ));
                 None
             }
         }
@@ -839,9 +981,10 @@ impl Parser {
                 let tag = if self.peek_token.token_type == TokenType::Lt {
                     self.next_token(); // consume inner '<'
                     if self.peek_token.token_type != TokenType::Ident {
-                        self.errors.push(format!(
-                            "expected error tag name, got {:?} (literal={:?})",
-                            self.peek_token.token_type, self.peek_token.literal
+                        self.errors.push(Diagnostic::error_with_hint(
+                            self.peek_token.span,
+                            format!("expected error tag name, got {:?}", self.peek_token.literal),
+                            "provide a tag name like Error<MyTag>",
                         ));
                         return None;
                     }
@@ -1164,14 +1307,18 @@ impl Parser {
                     self.next_token(); // consume next ident
                     segments.push(self.curr_token.literal.clone());
                 } else {
-                    self.errors.push("expected identifier after '.' in module path".to_string());
+                    self.errors.push(Diagnostic::error(
+                        self.peek_token.span,
+                        "expected identifier after `.` in module path",
+                    ));
                     return None;
                 }
             }
         } else {
-            self.errors.push(format!(
-                "expected module name, got {:?}",
-                self.peek_token.token_type
+            self.errors.push(Diagnostic::error_with_hint(
+                self.peek_token.span,
+                format!("expected module name, got {:?}", self.peek_token.literal),
+                "use like: introduce math or introduce .utils",
             ));
             return None;
         }
@@ -1190,9 +1337,10 @@ impl Parser {
 
         self.next_token(); // move to binding identifier
         if self.curr_token.token_type != TokenType::Ident {
-            self.errors.push(format!(
-                "expected identifier after guard, got {:?} (literal={:?})",
-                self.curr_token.token_type, self.curr_token.literal
+            self.errors.push(Diagnostic::error_with_hint(
+                self.curr_token.span,
+                format!("expected identifier after guard, got {:?}", self.curr_token.literal),
+                "use like: value guard err -> fallback",
             ));
             return None;
         }
@@ -1742,6 +1890,33 @@ impl Parser {
                     condition: expr,
                     body,
                 });
+            } else if self.peek_token.token_type == TokenType::LBrace {
+                // User likely forgot '->' before the block
+                self.errors.push(Diagnostic::error_with_hint(
+                    self.peek_token.span,
+                    "missing `->` before block in option arm",
+                    "add `->` between the condition and its body: condition -> { ... }",
+                ));
+                // Recovery: skip this malformed arm by jumping over the block
+                self.next_token(); // consume '{'
+                let mut depth = 1i32;
+                while depth > 0 && self.curr_token.token_type != TokenType::Eof {
+                    self.next_token();
+                    match self.curr_token.token_type {
+                        TokenType::LBrace => depth += 1,
+                        TokenType::RBrace => depth -= 1,
+                        _ => {}
+                    }
+                }
+                // Skip comma if present
+                if self.peek_token.token_type == TokenType::Comma {
+                    self.next_token();
+                }
+                // Skip newlines
+                while self.peek_token.token_type == TokenType::Newline {
+                    self.next_token();
+                }
+                continue;
             } else if arms.is_empty() && self.peek_token.token_type == TokenType::Comma {
                 // Ternary form: option { cond, true_val, false_val }
                 self.next_token(); // consume ','
@@ -1836,6 +2011,7 @@ impl Parser {
                 token: Token {
                     token_type: TokenType::If,
                     literal: "if".to_string(),
+                    span: Span::default(),
                 },
                 condition,
                 consequence: vec![stmt],
@@ -1860,6 +2036,7 @@ impl Parser {
                 token: Token {
                     token_type: TokenType::If,
                     literal: "if".to_string(),
+                    span: Span::default(),
                 },
                 condition: negated,
                 consequence: vec![stmt],
@@ -2022,9 +2199,10 @@ impl Parser {
             }
 
             if self.curr_token.token_type != TokenType::Function {
-                self.errors.push(format!(
-                    "expected 'fun' inside contains block, got {:?}",
-                    self.curr_token.token_type
+                self.errors.push(Diagnostic::error_with_hint(
+                    self.curr_token.span,
+                    format!("expected `fun` inside contains block, got {:?}", self.curr_token.literal),
+                    "contains blocks should only contain method definitions: fun name() { ... }",
                 ));
                 return None;
             }
@@ -2067,6 +2245,52 @@ impl Parser {
     }
 
     // ---------------- Helpers ----------------
+
+    /// Skip tokens until we find a likely statement boundary for error recovery.
+    /// This lets us report multiple errors instead of stopping at the first one.
+    fn synchronize(&mut self) {
+        // Track brace depth so we can skip over nested blocks
+        let mut brace_depth: i32 = 0;
+        loop {
+            match self.curr_token.token_type {
+                TokenType::Eof => break,
+                TokenType::LBrace => {
+                    brace_depth += 1;
+                    self.next_token();
+                    continue;
+                }
+                TokenType::RBrace => {
+                    if brace_depth > 0 {
+                        brace_depth -= 1;
+                        self.next_token();
+                        continue;
+                    }
+                    // At depth 0, a '}' ends the enclosing context
+                    self.next_token();
+                    break;
+                }
+                _ => {}
+            }
+            if brace_depth == 0 {
+                // Statement-starting keywords at the top level are sync points
+                match self.curr_token.token_type {
+                    TokenType::Each | TokenType::Repeat | TokenType::Pattern
+                    | TokenType::Choose | TokenType::Struct | TokenType::Function
+                    | TokenType::Give | TokenType::Introduce | TokenType::Unless
+                    | TokenType::OptionKw => break,
+                    _ => {}
+                }
+                // A newline followed by a non-trivial token at depth 0 is likely a new statement
+                if self.curr_token.token_type == TokenType::Newline
+                    && !matches!(self.peek_token.token_type, TokenType::Newline | TokenType::Eof)
+                {
+                    self.next_token();
+                    break;
+                }
+            }
+            self.next_token();
+        }
+    }
 
     fn next_token(&mut self) {
         self.curr_token = self.peek_token.clone();
@@ -2195,11 +2419,62 @@ impl Parser {
             self.next_token();
             Some(())
         } else {
-            self.errors.push(format!(
-                "expected next token {:?}, got {:?} (literal={:?})",
-                tt, self.peek_token.token_type, self.peek_token.literal
-            ));
+            let suggestion = Self::suggest_for_expected(&tt, &self.peek_token);
+            self.errors.push(Diagnostic {
+                span: self.peek_token.span,
+                message: format!(
+                    "expected {:?}, got {:?} ({:?})",
+                    tt, self.peek_token.token_type, self.peek_token.literal
+                ),
+                suggestion,
+                severity: Severity::Error,
+            });
             None
+        }
+    }
+
+    fn suggest_for_expected(expected: &TokenType, got: &Token) -> Option<String> {
+        match expected {
+            TokenType::RBrace => Some("you may be missing a closing `}`".to_string()),
+            TokenType::RParen => Some("you may be missing a closing `)`".to_string()),
+            TokenType::RBracket => Some("you may be missing a closing `]`".to_string()),
+            TokenType::LBrace => Some("expected a `{` to open a block".to_string()),
+            TokenType::LParen => Some("expected `(` for function parameters".to_string()),
+            TokenType::In => Some("did you mean `each <var> in <iterable>`?".to_string()),
+            TokenType::When => Some("did you mean `repeat when <condition>`?".to_string()),
+            TokenType::Arrow => Some("expected `->` to separate pattern from body".to_string()),
+            TokenType::Then => Some("did you mean `unless <cond> then <fallback>`?".to_string()),
+            TokenType::Lt => {
+                // Expected '<' for a type annotation but got something else
+                match got.token_type {
+                    TokenType::Contains | TokenType::Function | TokenType::Struct
+                    | TokenType::Each | TokenType::Repeat | TokenType::Introduce => {
+                        Some("you may be missing a closing `}` on a previous block".to_string())
+                    }
+                    TokenType::Assign => {
+                        Some("use `<type>` for type annotations, e.g. `name <str>`".to_string())
+                    }
+                    _ => Some("expected `<type>` annotation, e.g. `<str>`, `<int>`".to_string()),
+                }
+            }
+            TokenType::Gt => Some("you may be missing a closing `>` on a type annotation".to_string()),
+            TokenType::Colon => {
+                if got.token_type == TokenType::Assign {
+                    Some("use `:` not `=` to separate key from value".to_string())
+                } else {
+                    None
+                }
+            }
+            TokenType::Walrus | TokenType::Assign => {
+                if got.token_type == TokenType::Assign {
+                    Some("use `:=` for initial assignment or `=` for reassignment".to_string())
+                } else {
+                    None
+                }
+            }
+            TokenType::Contains => Some("did you mean `StructName contains { ... }`?".to_string()),
+            TokenType::From => Some("did you mean `introduce {name} from module`?".to_string()),
+            _ => None,
         }
     }
 
@@ -2217,11 +2492,11 @@ mod tests {
     use super::*;
     use crate::lexer::Lexer;
 
-    fn parse(input: &str) -> (Program, Vec<String>) {
+    fn parse(input: &str) -> (Program, Vec<Diagnostic>) {
         let lexer = Lexer::new(input);
-        let mut parser = Parser::new(lexer);
+        let mut parser = Parser::new(lexer, input);
         let program = parser.parse_program();
-        let errors = parser.error().to_vec();
+        let errors = parser.errors().to_vec();
         (program, errors)
     }
 
@@ -3039,8 +3314,8 @@ mod tests {
     #[test]
     fn test_parser_errors() {
         let tests = vec![
-            ("x :=", "no prefix parse fn"),          // Missing value after :=
-            ("each x in { }", "expected next token"), // {} parses as empty map, then block '{' is missing
+            ("x :=", "unexpected token"),              // Missing value after :=
+            ("each x in { }", "expected"),             // {} parses as empty map, then block '{' is missing
         ];
 
         for (input, expected_error) in tests {
@@ -3049,7 +3324,7 @@ mod tests {
             assert!(
                 errors
                     .iter()
-                    .any(|e| e.to_lowercase().contains(expected_error)),
+                    .any(|e| e.message.to_lowercase().contains(expected_error)),
                 "Expected error containing '{}' for '{}', got {:?}",
                 expected_error,
                 input,

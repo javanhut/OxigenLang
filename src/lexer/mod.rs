@@ -1,4 +1,4 @@
-use crate::token::{Token, TokenType, token_map};
+use crate::token::{Token, TokenType, Span, token_map};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
@@ -13,6 +13,9 @@ pub struct Lexer {
     indent_stack: Vec<usize>,
     pending_tokens: VecDeque<Token>,
     at_line_start: bool,
+    // Source location tracking
+    line: usize,
+    column: usize,
 }
 
 impl Lexer {
@@ -21,11 +24,13 @@ impl Lexer {
         let indent_mode = input.trim_start().starts_with(indent_directive);
 
         // If indent mode, skip past the directive
-        let effective_input = if indent_mode {
+        let (effective_input, start_line) = if indent_mode {
             let start = input.find(indent_directive).unwrap() + indent_directive.len();
-            &input[start..]
+            let skipped = &input[..start];
+            let newlines = skipped.chars().filter(|&c| c == '\n').count();
+            (&input[start..], 1 + newlines)
         } else {
-            input
+            (input, 1)
         };
 
         let mut l = Self {
@@ -38,10 +43,18 @@ impl Lexer {
             indent_stack: vec![0], // Start with base indentation level 0
             pending_tokens: VecDeque::new(),
             at_line_start: true, // We start at the beginning of input
+            line: start_line,
+            column: 0,
         };
         l.read_char();
         l
     }
+
+    /// Returns the current span (line, column) for the character being processed.
+    fn span(&self) -> Span {
+        Span::new(self.line, self.column)
+    }
+
     pub fn next_token(&mut self) -> Token {
         // Return any pending tokens first (from dedent handling)
         if let Some(tok) = self.pending_tokens.pop_front() {
@@ -63,13 +76,17 @@ impl Lexer {
         self.skip_whitespace_except_newline();
 
         if self.ch == '\n' {
+            let span = self.span();
             self.read_char();
             self.at_line_start = true;
             return Token {
                 token_type: TokenType::Newline,
                 literal: "\n".into(),
+                span,
             };
         }
+
+        let span = self.span();
 
         let tok = match self.ch {
             '\0' => {
@@ -82,21 +99,25 @@ impl Lexer {
                         self.pending_tokens.push_back(Token {
                             token_type: TokenType::RBrace,
                             literal: "}".into(),
+                            span,
                         });
                     }
                     // Queue the final EOF
                     self.pending_tokens.push_back(Token {
                         token_type: TokenType::Eof,
                         literal: "".into(),
+                        span,
                     });
                     return Token {
                         token_type: TokenType::RBrace,
                         literal: "}".into(),
+                        span,
                     };
                 }
                 Token {
                     token_type: TokenType::Eof,
                     literal: "".into(),
+                    span,
                 }
             }
             ':' if self.peek_char() == '=' => {
@@ -105,6 +126,7 @@ impl Lexer {
                 Token {
                     token_type: TokenType::Walrus,
                     literal: ":=".into(),
+                    span,
                 }
             }
             '-' if self.peek_char() == '>' => {
@@ -113,6 +135,7 @@ impl Lexer {
                 Token {
                     token_type: TokenType::Arrow,
                     literal: "->".into(),
+                    span,
                 }
             }
             '>' => match self.peek_char() {
@@ -122,6 +145,7 @@ impl Lexer {
                     Token {
                         token_type: TokenType::Gte,
                         literal: ">=".into(),
+                        span,
                     }
                 }
                 '>' => {
@@ -130,9 +154,10 @@ impl Lexer {
                     Token {
                         token_type: TokenType::RShift,
                         literal: ">>".into(),
+                        span,
                     }
                 }
-                _ => self.single(TokenType::Gt),
+                _ => self.single_with_span(TokenType::Gt, span),
             },
             '<' => match self.peek_char() {
                 '=' => {
@@ -141,6 +166,7 @@ impl Lexer {
                     Token {
                         token_type: TokenType::Lte,
                         literal: "<=".into(),
+                        span,
                     }
                 }
                 '<' => {
@@ -149,29 +175,32 @@ impl Lexer {
                     Token {
                         token_type: TokenType::LShift,
                         literal: "<<".into(),
+                        span,
                     }
                 }
-                _ => self.single(TokenType::Lt),
+                _ => self.single_with_span(TokenType::Lt, span),
             },
             '-' => match self.peek_char() {
                 '-' => {
                     self.read_char();
                     self.read_char();
                     Token {
-                        token_type: TokenType::Decrement, literal: "--".into()
+                        token_type: TokenType::Decrement, literal: "--".into(),
+                        span,
                     }
                 }
-                _ => self.single(TokenType::Minus),
+                _ => self.single_with_span(TokenType::Minus, span),
             },
             '+' => match self.peek_char() {
                 '+' => {
                     self.read_char();
                     self.read_char();
                     Token {
-                        token_type: TokenType::Increment, literal: "++".into()
+                        token_type: TokenType::Increment, literal: "++".into(),
+                        span,
                     }
                 }
-                _ => self.single(TokenType::Plus),
+                _ => self.single_with_span(TokenType::Plus, span),
             },
             ':' => {
                 // In indent mode, colon at end of line becomes LBrace
@@ -180,55 +209,57 @@ impl Lexer {
                     Token {
                         token_type: TokenType::LBrace,
                         literal: "{".into(),
+                        span,
                     }
                 } else {
-                    self.single(TokenType::Colon)
+                    self.single_with_span(TokenType::Colon, span)
                 }
             },
             '=' => match self.peek_char() {
                 '=' => {
                     self.read_char();
                     self.read_char();
-                    Token {token_type: TokenType::Eq, literal: "==".into()}
+                    Token {token_type: TokenType::Eq, literal: "==".into(), span}
                 }
-                _ => self.single(TokenType::Assign)
+                _ => self.single_with_span(TokenType::Assign, span)
             }
             '!' => match self.peek_char() {
                 '=' => {
                     self.read_char();
                     self.read_char();
-                    Token { 
+                    Token {
                         token_type: TokenType::NotEq,
-                        literal: "!=".into()
+                        literal: "!=".into(),
+                        span,
                     }
                 }
-                _ => self.single(TokenType::Shebang)
+                _ => self.single_with_span(TokenType::Shebang, span)
             },
-            ',' => self.single(TokenType::Comma),
-            '$' => self.single(TokenType::DollarSign),
-            '#' => self.single(TokenType::Hash),
-            '@' => self.single(TokenType::At),
-            '%' => self.single(TokenType::Mod),
-            '&' => self.single(TokenType::Ampersand),
-            '.' => self.single(TokenType::FullStop),
+            ',' => self.single_with_span(TokenType::Comma, span),
+            '$' => self.single_with_span(TokenType::DollarSign, span),
+            '#' => self.single_with_span(TokenType::Hash, span),
+            '@' => self.single_with_span(TokenType::At, span),
+            '%' => self.single_with_span(TokenType::Mod, span),
+            '&' => self.single_with_span(TokenType::Ampersand, span),
+            '.' => self.single_with_span(TokenType::FullStop, span),
             '|' => match self.peek_char() {
                 '|' => {
                     self.read_char();
                     self.read_char();
-                    Token { token_type: TokenType::DoublePipe, literal: "||".into() }
+                    Token { token_type: TokenType::DoublePipe, literal: "||".into(), span }
                 }
-                _ => self.single(TokenType::Pipe)
+                _ => self.single_with_span(TokenType::Pipe, span)
             },
-            '^' => self.single(TokenType::Caret),
-            '~' => self.single(TokenType::Tilde),
-            ';' => self.single(TokenType::Semicolon),
-            '[' => self.single(TokenType::LBracket),
-            ']' => self.single(TokenType::RBracket),
-            '{' => self.single(TokenType::LBrace),
-            '}' => self.single(TokenType::RBrace),
-            '(' => self.single(TokenType::LParen),
-            ')' => self.single(TokenType::RParen),
-            '*' => self.single(TokenType::Asterisk),
+            '^' => self.single_with_span(TokenType::Caret, span),
+            '~' => self.single_with_span(TokenType::Tilde, span),
+            ';' => self.single_with_span(TokenType::Semicolon, span),
+            '[' => self.single_with_span(TokenType::LBracket, span),
+            ']' => self.single_with_span(TokenType::RBracket, span),
+            '{' => self.single_with_span(TokenType::LBrace, span),
+            '}' => self.single_with_span(TokenType::RBrace, span),
+            '(' => self.single_with_span(TokenType::LParen, span),
+            ')' => self.single_with_span(TokenType::RParen, span),
+            '*' => self.single_with_span(TokenType::Asterisk, span),
             '/' => match self.peek_char() {
                 '/' => {
                     self.skip_line_comment();
@@ -238,36 +269,42 @@ impl Lexer {
                     self.skip_block_comment();
                     return self.next_token();
                 }
-                _ => self.single(TokenType::FSlash),
+                _ => self.single_with_span(TokenType::FSlash, span),
             },
-            '\\' => self.single(TokenType::BSlash),
-            '"' => self.read_string('"'),
-            '\'' => self.read_string('\''),
-            '`' => self.read_char_literal(),
-            c if c.is_ascii_digit() => return self.read_number(),
-            c if is_ident_start(c) => return self.read_ident(),
+            '\\' => self.single_with_span(TokenType::BSlash, span),
+            '"' => self.read_string('"', span),
+            '\'' => self.read_string('\'', span),
+            '`' => self.read_char_literal(span),
+            c if c.is_ascii_digit() => return self.read_number(span),
+            c if is_ident_start(c) => return self.read_ident(span),
             _ => {
                 let lit = self.ch.to_string();
                 self.read_char();
                 Token {
                     token_type: TokenType::Illegal,
                     literal: lit,
+                    span,
                 }
             }
         };
         tok
     }
 
-    fn single(&mut self, tt: TokenType) -> Token {
+    fn single_with_span(&mut self, tt: TokenType, span: Span) -> Token {
         let lit = self.ch.to_string();
         self.read_char();
         Token {
             token_type: tt,
             literal: lit,
+            span,
         }
     }
 
     fn read_char(&mut self) {
+        if self.ch == '\n' {
+            self.line += 1;
+            self.column = 0;
+        }
         self.ch = if self.read_position >= self.input.len() {
             '\0'
         } else {
@@ -275,6 +312,9 @@ impl Lexer {
         };
         self.position = self.read_position;
         self.read_position += 1;
+        if self.ch != '\0' {
+            self.column += 1;
+        }
     }
 
     fn peek_char(&self) -> char {
@@ -316,7 +356,7 @@ impl Lexer {
         }
     }
 
-    fn read_ident(&mut self) -> Token {
+    fn read_ident(&mut self, span: Span) -> Token {
         let start = self.position;
         while is_ident_continue(self.ch) {
             self.read_char();
@@ -330,10 +370,11 @@ impl Lexer {
         Token {
             token_type: tt,
             literal,
+            span,
         }
     }
 
-    fn read_number(&mut self) -> Token {
+    fn read_number(&mut self, span: Span) -> Token {
         let start = self.position;
         let mut is_float = false;
 
@@ -354,10 +395,11 @@ impl Lexer {
         Token {
             token_type: if is_float { TokenType::Float } else { TokenType::Integer },
             literal,
+            span,
         }
     }
 
-    fn read_string(&mut self, delimiter: char) -> Token {
+    fn read_string(&mut self, delimiter: char, span: Span) -> Token {
         self.read_char(); // opening quote
 
         // Check if this string contains interpolation
@@ -374,6 +416,7 @@ impl Lexer {
             return Token {
                 token_type: TokenType::String,
                 literal,
+                span,
             };
         }
 
@@ -388,14 +431,17 @@ impl Lexer {
                     self.pending_tokens.push_back(Token {
                         token_type: TokenType::String,
                         literal: literal_buf.clone(),
+                        span,
                     });
                     literal_buf.clear();
                 }
 
+                let expr_span = self.span();
                 // Emit InterpExprStart
                 self.pending_tokens.push_back(Token {
                     token_type: TokenType::InterpExprStart,
                     literal: "{".into(),
+                    span: expr_span,
                 });
 
                 self.read_char(); // skip '{'
@@ -418,38 +464,42 @@ impl Lexer {
                         continue;
                     }
 
+                    let inner_span = self.span();
                     // Lex one token from inside the interpolation
                     let inner_tok = match self.ch {
-                        c if c.is_ascii_digit() => self.read_number(),
-                        c if is_ident_start(c) => self.read_ident(),
-                        '"' => self.read_string('"'),
-                        '\'' => self.read_string('\''),
-                        '(' => self.single(TokenType::LParen),
-                        ')' => self.single(TokenType::RParen),
-                        ',' => self.single(TokenType::Comma),
-                        '+' => self.single(TokenType::Plus),
-                        '-' => self.single(TokenType::Minus),
-                        '*' => self.single(TokenType::Asterisk),
-                        '/' => self.single(TokenType::FSlash),
-                        '.' => self.single(TokenType::FullStop),
-                        '[' => self.single(TokenType::LBracket),
-                        ']' => self.single(TokenType::RBracket),
+                        c if c.is_ascii_digit() => self.read_number(inner_span),
+                        c if is_ident_start(c) => self.read_ident(inner_span),
+                        '"' => self.read_string('"', inner_span),
+                        '\'' => self.read_string('\'', inner_span),
+                        '(' => self.single_with_span(TokenType::LParen, inner_span),
+                        ')' => self.single_with_span(TokenType::RParen, inner_span),
+                        ',' => self.single_with_span(TokenType::Comma, inner_span),
+                        '+' => self.single_with_span(TokenType::Plus, inner_span),
+                        '-' => self.single_with_span(TokenType::Minus, inner_span),
+                        '*' => self.single_with_span(TokenType::Asterisk, inner_span),
+                        '/' => self.single_with_span(TokenType::FSlash, inner_span),
+                        '.' => self.single_with_span(TokenType::FullStop, inner_span),
+                        '[' => self.single_with_span(TokenType::LBracket, inner_span),
+                        ']' => self.single_with_span(TokenType::RBracket, inner_span),
                         _ => {
                             let lit = self.ch.to_string();
                             self.read_char();
                             Token {
                                 token_type: TokenType::Illegal,
                                 literal: lit,
+                                span: inner_span,
                             }
                         }
                     };
                     self.pending_tokens.push_back(inner_tok);
                 }
 
+                let end_span = self.span();
                 // Emit InterpExprEnd
                 self.pending_tokens.push_back(Token {
                     token_type: TokenType::InterpExprEnd,
                     literal: "}".into(),
+                    span: end_span,
                 });
 
                 self.read_char(); // skip closing '}'
@@ -464,6 +514,7 @@ impl Lexer {
             self.pending_tokens.push_back(Token {
                 token_type: TokenType::String,
                 literal: literal_buf,
+                span,
             });
         }
 
@@ -471,6 +522,7 @@ impl Lexer {
         self.pending_tokens.push_back(Token {
             token_type: TokenType::InterpEnd,
             literal: "".into(),
+            span: self.span(),
         });
 
         self.read_char(); // closing quote
@@ -479,6 +531,7 @@ impl Lexer {
         Token {
             token_type: TokenType::InterpStart,
             literal: "".into(),
+            span,
         }
     }
 
@@ -498,7 +551,7 @@ impl Lexer {
         false
     }
 
-    fn read_char_literal(&mut self) -> Token {
+    fn read_char_literal(&mut self, span: Span) -> Token {
         self.read_char(); // opening `
         let start = self.position;
         while self.ch != '`' && self.ch != '\0' {
@@ -512,12 +565,14 @@ impl Lexer {
             return Token {
                 token_type: TokenType::Illegal,
                 literal: format!("invalid char literal: `{}`", literal),
+                span,
             };
         }
 
         Token {
             token_type: TokenType::Char,
             literal,
+            span,
         }
     }
 
@@ -574,6 +629,7 @@ impl Lexer {
     /// Handle indentation changes - emit RBrace tokens for dedents
     fn handle_indentation(&mut self, indent_level: usize) {
         let current_indent = *self.indent_stack.last().unwrap_or(&0);
+        let span = self.span();
 
         if indent_level > current_indent {
             // Indent increased - push new level (LBrace was already emitted by colon)
@@ -588,6 +644,7 @@ impl Lexer {
                 self.pending_tokens.push_back(Token {
                     token_type: TokenType::RBrace,
                     literal: "}".into(),
+                    span,
                 });
             }
         }
@@ -701,5 +758,38 @@ mod tests {
             indent_types, brace_types,
             "Indent and brace syntax should produce same token types"
         );
+    }
+
+    #[test]
+    fn test_span_tracking() {
+        let input = "x := 5\ny := 10";
+        let tokens = collect_tokens(input);
+
+        // 'x' should be at line 1, col 1
+        assert_eq!(tokens[0].span.line, 1);
+        assert_eq!(tokens[0].span.column, 1);
+
+        // 'y' should be at line 2, col 1
+        let y_tok = tokens.iter().find(|t| t.literal == "y").unwrap();
+        assert_eq!(y_tok.span.line, 2);
+        assert_eq!(y_tok.span.column, 1);
+    }
+
+    #[test]
+    fn test_span_column_tracking() {
+        let input = "abc := 42";
+        let tokens = collect_tokens(input);
+
+        // 'abc' at col 1
+        assert_eq!(tokens[0].literal, "abc");
+        assert_eq!(tokens[0].span.column, 1);
+
+        // ':=' at col 5
+        assert_eq!(tokens[1].literal, ":=");
+        assert_eq!(tokens[1].span.column, 5);
+
+        // '42' at col 8
+        assert_eq!(tokens[2].literal, "42");
+        assert_eq!(tokens[2].span.column, 8);
     }
 }

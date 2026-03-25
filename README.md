@@ -1,6 +1,6 @@
 # OxigenLang
 
-OxigenLang is a modern, lightweight, interpreted programming language implemented in Rust. It features a unique blend of C-like and Python-like syntax, support for pattern matching, a module system with a standard library, and an optional indentation-based block syntax.
+OxigenLang is a modern, lightweight, interpreted programming language implemented in Rust. It features a clean, expressive syntax, support for pattern matching, a module system with a standard library, and an optional indentation-based block syntax.
 
 ## Features
 

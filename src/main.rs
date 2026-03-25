@@ -26,15 +26,12 @@ fn main() {
             fs::read_to_string(file_path).expect("Should have been able to read this file");
 
         let lexer = Lexer::new(&contents);
-        let mut parser = Parser::new(lexer);
+        let mut parser = Parser::new(lexer, &contents);
         let program = parser.parse_program();
 
-        let errors = parser.error();
+        let errors = parser.errors();
         if !errors.is_empty() {
-            eprintln!("Parser errors:");
-            for err in errors {
-                eprintln!("  {}", err);
-            }
+            eprintln!("{}", parser.format_errors());
             std::process::exit(1);
         }
 

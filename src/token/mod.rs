@@ -94,10 +94,29 @@ pub enum TokenType {
     InterpExprEnd,   // marks end of an interpolation expression }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Span {
+    pub line: usize,
+    pub column: usize,
+}
+
+impl Span {
+    pub fn new(line: usize, column: usize) -> Self {
+        Self { line, column }
+    }
+}
+
+impl Default for Span {
+    fn default() -> Self {
+        Self { line: 1, column: 0 }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub token_type: TokenType,
     pub literal: String,
+    pub span: Span,
 }
 
 pub fn token_map() -> HashMap<&'static str, TokenType> {

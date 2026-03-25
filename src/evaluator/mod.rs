@@ -767,15 +767,15 @@ impl Evaluator {
 
         // 5. Lex and parse
         let lexer = Lexer::new(&source);
-        let mut parser = Parser::new(lexer);
+        let mut parser = Parser::new(lexer, &source);
         let program = parser.parse_program();
 
-        let errors = parser.error();
+        let errors = parser.errors();
         if !errors.is_empty() {
             return Rc::new(Object::Error(format!(
-                "parse errors in module '{}': {}",
+                "parse errors in module '{}':\n{}",
                 resolved.display(),
-                errors.join(", ")
+                parser.format_errors()
             )));
         }
 
@@ -2315,11 +2315,11 @@ mod tests {
 
     fn test_eval(input: &str) -> Rc<Object> {
         let lexer = Lexer::new(input);
-        let mut parser = Parser::new(lexer);
+        let mut parser = Parser::new(lexer, input);
         let program = parser.parse_program();
 
-        if !parser.error().is_empty() {
-            panic!("Parser errors: {:?}", parser.error());
+        if !parser.errors().is_empty() {
+            panic!("Parser errors:\n{}", parser.format_errors());
         }
 
         let env = Rc::new(RefCell::new(Environment::new()));

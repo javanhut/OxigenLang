@@ -42,14 +42,12 @@ pub fn run_repl() {
                 }
 
                 let lexer = Lexer::new(line);
-                let mut parser = Parser::new(lexer);
+                let mut parser = Parser::new(lexer, line);
                 let program = parser.parse_program();
 
-                let errors = parser.error();
+                let errors = parser.errors();
                 if !errors.is_empty() {
-                    for err in errors {
-                        println!("Error: {}", err);
-                    }
+                    println!("{}", parser.format_errors());
                     continue;
                 }
 
