@@ -95,6 +95,17 @@ impl Environment {
     pub fn get_all(&self) -> &HashMap<String, Rc<Object>> {
         &self.store
     }
+
+    /// Collect all visible variable names from this scope and all outer scopes.
+    pub fn all_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self.store.keys().cloned().collect();
+        if let Some(outer) = &self.outer {
+            keys.extend(outer.borrow().all_keys());
+        }
+        keys.sort();
+        keys.dedup();
+        keys
+    }
 }
 
 impl Default for Environment {

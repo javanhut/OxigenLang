@@ -45,6 +45,46 @@ fn type_matches(expected: &str, actual: &str) -> bool {
     }
 }
 
+/// Compute the Levenshtein edit distance between two strings.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (m, n) = (a.len(), b.len());
+    let mut prev = (0..=n).collect::<Vec<_>>();
+    let mut curr = vec![0; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
+}
+
+/// Find the closest match to `name` from `candidates` using edit distance.
+/// Returns None if no candidate is close enough (threshold: max 2 edits, and less than half the name length).
+fn suggest_similar<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    let name_lower = name.to_lowercase();
+    let max_dist = 2.max(name.len() / 3);
+    let mut best: Option<(usize, String)> = None;
+    for candidate in candidates {
+        if candidate == name {
+            continue;
+        }
+        let dist = levenshtein(&name_lower, &candidate.to_lowercase());
+        if dist <= max_dist {
+            if best.is_none() || dist < best.as_ref().unwrap().0 {
+                best = Some((dist, candidate.to_string()));
+            }
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
 impl Default for Evaluator {
     fn default() -> Self {
         Self::new()
@@ -530,10 +570,18 @@ impl Evaluator {
             Statement::Assign { name, value } => {
                 let existing = env.borrow().get(&name.value);
                 if existing.is_none() {
-                    return Rc::new(Object::Error(format!(
-                        "identifier not found: {}. use := to declare",
-                        name.value
-                    )));
+                    let all_names = env.borrow().all_keys();
+                    let msg = match suggest_similar(&name.value, all_names.iter().map(|s| s.as_str())) {
+                        Some(suggestion) => format!(
+                            "identifier not found: {}. did you mean `{}`? (use := to declare new variables)",
+                            name.value, suggestion
+                        ),
+                        None => format!(
+                            "identifier not found: {}. use := to declare",
+                            name.value
+                        ),
+                    };
+                    return Rc::new(Object::Error(msg));
                 }
                 let tc = env.borrow().get_type_constraint(&name.value);
                 if tc.is_none() {
@@ -676,10 +724,18 @@ impl Evaluator {
                                     match field_def {
                                         Some((_, et, h)) => (et.clone(), *h),
                                         None => {
-                                            return Rc::new(Object::Error(format!(
-                                                "struct {} has no field '{}'",
-                                                struct_name, field.value
-                                            )));
+                                            let field_names: Vec<&str> = def_fields.iter().map(|(n, _, _)| n.as_str()).collect();
+                                            let msg = match suggest_similar(&field.value, field_names.into_iter()) {
+                                                Some(suggestion) => format!(
+                                                    "struct {} has no field '{}'. did you mean `{}`?",
+                                                    struct_name, field.value, suggestion
+                                                ),
+                                                None => format!(
+                                                    "struct {} has no field '{}'",
+                                                    struct_name, field.value
+                                                ),
+                                            };
+                                            return Rc::new(Object::Error(msg));
                                         }
                                     }
                                 } else {
@@ -1173,13 +1229,23 @@ impl Evaluator {
                         // Check methods
                         self.find_method(struct_name, &field.value, &fields)
                     }
-                    Object::Module { env: module_env, .. } => {
+                    Object::Module { env: module_env, name: mod_name } => {
                         match module_env.borrow().get(&field.value) {
                             Some(val) => val,
-                            None => Rc::new(Object::Error(format!(
-                                "name '{}' not found in module",
-                                field.value
-                            ))),
+                            None => {
+                                let available = module_env.borrow().all_keys();
+                                let msg = match suggest_similar(&field.value, available.iter().map(|s| s.as_str())) {
+                                    Some(suggestion) => format!(
+                                        "name '{}' not found in module {}. did you mean `{}`?",
+                                        field.value, mod_name, suggestion
+                                    ),
+                                    None => format!(
+                                        "name '{}' not found in module {}",
+                                        field.value, mod_name
+                                    ),
+                                };
+                                Rc::new(Object::Error(msg))
+                            }
                         }
                     }
                     Object::ErrorValue { msg, tag } => match field.value.as_str() {
@@ -1243,10 +1309,18 @@ impl Evaluator {
                                         instance_fields.insert(field_name.clone(), val);
                                     }
                                     None => {
-                                        return Rc::new(Object::Error(format!(
-                                            "unknown field '{}' for struct {}",
-                                            field_name, name
-                                        )));
+                                        let field_names: Vec<&str> = def_fields.iter().map(|(n, _, _)| n.as_str()).collect();
+                                        let msg = match suggest_similar(field_name, field_names.into_iter()) {
+                                            Some(suggestion) => format!(
+                                                "unknown field '{}' for struct {}. did you mean `{}`?",
+                                                field_name, name, suggestion
+                                            ),
+                                            None => format!(
+                                                "unknown field '{}' for struct {}",
+                                                field_name, name
+                                            ),
+                                        };
+                                        return Rc::new(Object::Error(msg));
                                     }
                                 }
                             }
@@ -1433,11 +1507,22 @@ impl Evaluator {
                             current_name = p.clone();
                             continue;
                         }
+                        // Method not found — collect all available names for suggestion
+                        let mut all_names: Vec<String> = methods.keys().cloned().collect();
+                        // Also add field names (user may confuse field/method)
+                        all_names.extend(instance_fields.borrow().keys().cloned());
+                        let msg = match suggest_similar(method_name, all_names.iter().map(|s: &String| s.as_str())) {
+                            Some(suggestion) => format!(
+                                "method '{}' not found on struct {}. did you mean `{}`?",
+                                method_name, struct_name, suggestion
+                            ),
+                            None => format!(
+                                "method '{}' not found on struct {}",
+                                method_name, struct_name
+                            ),
+                        };
+                        return Rc::new(Object::Error(msg));
                     }
-                    return Rc::new(Object::Error(format!(
-                        "method '{}' not found on struct {}",
-                        method_name, struct_name
-                    )));
                 }
                 None => {
                     return Rc::new(Object::Error(format!(
@@ -1460,10 +1545,19 @@ impl Evaluator {
             return Rc::clone(builtin);
         }
 
-        Rc::new(Object::Error(format!(
-            "identifier not found: {}",
-            ident.value
-        )))
+        // Collect all known names for "did you mean?" suggestions
+        let mut all_names = env.borrow().all_keys();
+        all_names.extend(self.builtins.keys().cloned());
+        all_names.extend(self.struct_defs.keys().cloned());
+
+        let msg = match suggest_similar(&ident.value, all_names.iter().map(|s| s.as_str())) {
+            Some(suggestion) => format!(
+                "identifier not found: {}. did you mean `{}`?",
+                ident.value, suggestion
+            ),
+            None => format!("identifier not found: {}", ident.value),
+        };
+        Rc::new(Object::Error(msg))
     }
 
     fn eval_prefix_expression(&self, operator: &str, right: Rc<Object>) -> Rc<Object> {
