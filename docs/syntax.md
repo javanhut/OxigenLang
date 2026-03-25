@@ -10,6 +10,7 @@ x <int> = 10               // typed, immutable value
 x <int> := 10              // typed, mutable value
 x <int>                    // typed, zero-value init
 x as <int>                 // alternative form (optional `as`)
+a, b := [1, 2]             // array/tuple unpacking
 ```
 
 ## Data Types — [Full Guide](data_types.md)
@@ -18,7 +19,7 @@ x as <int>                 // alternative form (optional `as`)
 |---------|----------------------------|--------------|
 | Integer | `42`, `-7`                 | `int`        |
 | Float   | `3.14`, `-0.5`             | `float`      |
-| String  | `"hello"`, `'world'`       | `str`        |
+| String  | `"hello"`, `'world'`, `"line\n"` | `str`  |
 | Char    | `` `a` ``, `` `Z` ``      | `char`       |
 | Boolean | `True`, `False`            | `bool`       |
 | Array   | `[1, 2, 3]`               | `array`      |
@@ -39,6 +40,7 @@ x and y  x or y                                  // logical
 !x       not x    -x                             // prefix
 x++      x--                                     // postfix
 arr[0]   arr[1:3]   obj.field                    // access
+m[key] = val   arr[0] = val                      // index assignment
 ```
 
 ## Control Flow — [Full Guide](control_flow.md)
@@ -127,6 +129,12 @@ num <int> := "10"                                  // typed walrus conversion
 read_file("config") <guard>("")                    // recover from runtime error
 read_file("config") <log<Error>> err -> err.msg    // handle/log matched errors
 <fail>("missing config")                           // propagate a runtime error
+```
+
+## Escape Sequences
+
+```oxi
+"\n"   "\t"   "\r"   "\\"   "\""   "\'"   "\0"
 ```
 
 ## Comments

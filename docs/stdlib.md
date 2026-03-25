@@ -40,6 +40,9 @@ introduce strings
 | `split` | `split(s, delim)` | Split string into array |
 | `join` | `join(arr, delim)` | Join array into string |
 | `trim` | `trim(s)` | Remove leading/trailing whitespace |
+| `strip` | `strip(s, chars)` | Remove specific characters from both ends |
+| `strip_left` | `strip_left(s, chars)` | Remove specific characters from the left |
+| `strip_right` | `strip_right(s, chars)` | Remove specific characters from the right |
 | `upper` | `upper(s)` | Convert to uppercase |
 | `lower` | `lower(s)` | Convert to lowercase |
 | `replace` | `replace(s, old, new)` | Replace all occurrences |
@@ -53,6 +56,12 @@ println(strings.upper("hello"))          // HELLO
 println(strings.split("a,b,c", ","))     // [a, b, c]
 println(strings.join(["x", "y"], "-"))   // x-y
 println(strings.replace("foo bar", "bar", "baz")) // foo baz
+
+// Strip specific characters
+println(strings.strip("##heading##", "#"))       // heading
+println(strings.strip_left("--value", "-"))      // value
+println(strings.strip_right("value--", "-"))     // value
+println(strings.strip("  --test--  ", " -"))     // test
 ```
 
 ## array

@@ -45,6 +45,9 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
     builtins.insert("__split".to_string(), Rc::new(Object::Builtin(builtin__split)));
     builtins.insert("__join".to_string(), Rc::new(Object::Builtin(builtin__join)));
     builtins.insert("__trim".to_string(), Rc::new(Object::Builtin(builtin__trim)));
+    builtins.insert("__strip".to_string(), Rc::new(Object::Builtin(builtin__strip)));
+    builtins.insert("__strip_left".to_string(), Rc::new(Object::Builtin(builtin__strip_left)));
+    builtins.insert("__strip_right".to_string(), Rc::new(Object::Builtin(builtin__strip_right)));
     builtins.insert("__upper".to_string(), Rc::new(Object::Builtin(builtin__upper)));
     builtins.insert("__lower".to_string(), Rc::new(Object::Builtin(builtin__lower)));
     builtins.insert("__replace".to_string(), Rc::new(Object::Builtin(builtin__replace)));
@@ -669,6 +672,57 @@ fn builtin__trim(args: Vec<Rc<Object>>) -> Rc<Object> {
     match args[0].as_ref() {
         Object::String(s) => Rc::new(Object::String(s.trim().to_string())),
         _ => Rc::new(Object::Error(format!("__trim: expected STRING, got {}", args[0].type_name()))),
+    }
+}
+
+fn builtin__strip(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 2 {
+        return Rc::new(Object::Error(format!("__strip: expected 2 arguments, got {}", args.len())));
+    }
+    match (args[0].as_ref(), args[1].as_ref()) {
+        (Object::String(s), Object::String(chars)) => {
+            let char_set: Vec<char> = chars.chars().collect();
+            let result = s.trim_matches(|c| char_set.contains(&c)).to_string();
+            Rc::new(Object::String(result))
+        }
+        _ => Rc::new(Object::Error(format!(
+            "__strip: expected (STRING, STRING), got ({}, {})",
+            args[0].type_name(), args[1].type_name()
+        ))),
+    }
+}
+
+fn builtin__strip_left(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 2 {
+        return Rc::new(Object::Error(format!("__strip_left: expected 2 arguments, got {}", args.len())));
+    }
+    match (args[0].as_ref(), args[1].as_ref()) {
+        (Object::String(s), Object::String(chars)) => {
+            let char_set: Vec<char> = chars.chars().collect();
+            let result = s.trim_start_matches(|c| char_set.contains(&c)).to_string();
+            Rc::new(Object::String(result))
+        }
+        _ => Rc::new(Object::Error(format!(
+            "__strip_left: expected (STRING, STRING), got ({}, {})",
+            args[0].type_name(), args[1].type_name()
+        ))),
+    }
+}
+
+fn builtin__strip_right(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 2 {
+        return Rc::new(Object::Error(format!("__strip_right: expected 2 arguments, got {}", args.len())));
+    }
+    match (args[0].as_ref(), args[1].as_ref()) {
+        (Object::String(s), Object::String(chars)) => {
+            let char_set: Vec<char> = chars.chars().collect();
+            let result = s.trim_end_matches(|c| char_set.contains(&c)).to_string();
+            Rc::new(Object::String(result))
+        }
+        _ => Rc::new(Object::Error(format!(
+            "__strip_right: expected (STRING, STRING), got ({}, {})",
+            args[0].type_name(), args[1].type_name()
+        ))),
     }
 }
 

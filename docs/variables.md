@@ -140,6 +140,32 @@ y <int> = 5
 y++
 ```
 
+## Unpacking
+
+Arrays and tuples can be unpacked into multiple variables in a single `:=` declaration:
+
+```oxi
+x, y := [1, 2]
+a, b, c := [10, 20, 30]
+first, second := (100, 200)
+```
+
+This works with any expression that produces an array or tuple:
+
+```oxi
+introduce strings
+key, val := strings.split("name=Alice", "=")
+
+fun get_pair() { [42, "hello"] }
+num, msg := get_pair()
+```
+
+The number of names on the left must match the number of elements on the right — a mismatch produces an error:
+
+```oxi
+x, y := [1, 2, 3]   // error: expected 2 values, got 3
+```
+
 ## Shadowing
 
 Typed variables can be shadowed in inner scopes. The outer binding is unaffected:

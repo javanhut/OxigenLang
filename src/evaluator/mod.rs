@@ -819,8 +819,128 @@ impl Evaluator {
                 }
             }
 
+            Statement::IndexAssign {
+                token, object, index, value,
+            } => {
+                let idx = self.eval_expression(index, Rc::clone(&env));
+                if idx.is_error() {
+                    return idx;
+                }
+                let val = self.eval_expression(value, Rc::clone(&env));
+                if val.is_error() {
+                    return val;
+                }
+                let obj = self.eval_expression(object, Rc::clone(&env));
+                if obj.is_error() {
+                    return obj;
+                }
+
+                // Determine the variable name so we can update it in the env
+                let var_name = match object {
+                    Expression::Ident(ident) => ident.value.clone(),
+                    _ => {
+                        return self.runtime_error(
+                            token.span,
+                            "index assignment requires a variable on the left side",
+                            Some("use like: m[key] = value"),
+                        );
+                    }
+                };
+
+                let new_obj = match obj.as_ref() {
+                    Object::Map(entries) => {
+                        let mut new_entries = entries.clone();
+                        if let Some(entry) = new_entries.iter_mut().find(|(k, _)| *k == idx) {
+                            entry.1 = val.clone();
+                        } else {
+                            new_entries.push((idx, val.clone()));
+                        }
+                        Rc::new(Object::Map(new_entries))
+                    }
+                    Object::Array(elements) => {
+                        match idx.as_ref() {
+                            Object::Integer(i) => {
+                                let index = if *i < 0 {
+                                    (elements.len() as i64 + *i) as usize
+                                } else {
+                                    *i as usize
+                                };
+                                if index >= elements.len() {
+                                    return self.runtime_error(
+                                        token.span,
+                                        &format!("index out of bounds: {} (length {})", i, elements.len()),
+                                        None,
+                                    );
+                                }
+                                let mut new_elements = elements.clone();
+                                new_elements[index] = val.clone();
+                                Rc::new(Object::Array(new_elements))
+                            }
+                            _ => {
+                                return self.runtime_error(
+                                    token.span,
+                                    &format!("array index must be INTEGER, got {}", idx.type_name()),
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        return self.runtime_error(
+                            token.span,
+                            &format!("cannot index-assign on {}", obj.type_name()),
+                            Some("index assignment works on maps and arrays"),
+                        );
+                    }
+                };
+
+                // Update the variable in the environment
+                if env.borrow_mut().update(&var_name, new_obj).is_none() {
+                    env.borrow_mut().set(var_name, Rc::new(Object::None));
+                }
+                val
+            }
+
             Statement::Introduce { path, selective, .. } => {
                 self.eval_introduce(path, selective, Rc::clone(&env))
+            }
+            Statement::Unpack { names, value } => {
+                let val = self.eval_expression(value, Rc::clone(&env));
+                if val.is_error() {
+                    return val;
+                }
+                let elements = match val.as_ref() {
+                    Object::Array(arr) => arr.clone(),
+                    Object::Tuple(t) => t.clone(),
+                    _ => {
+                        let span = names.first().map(|n| n.token.span).unwrap_or_default();
+                        return self.runtime_error(
+                            span,
+                            &format!("cannot unpack {}, expected array or tuple", val.type_name()),
+                            None,
+                        );
+                    }
+                };
+                if elements.len() != names.len() {
+                    let span = names.first().map(|n| n.token.span).unwrap_or_default();
+                    return self.runtime_error(
+                        span,
+                        &format!(
+                            "unpack length mismatch: expected {} values, got {}",
+                            names.len(),
+                            elements.len()
+                        ),
+                        Some(&format!(
+                            "the right side has {} elements but the left side has {} names",
+                            elements.len(),
+                            names.len()
+                        )),
+                    );
+                }
+                for (name, element) in names.iter().zip(elements.iter()) {
+                    env.borrow_mut().set(name.value.clone(), Rc::clone(element));
+                }
+                Rc::new(Object::None)
             }
         }
     }

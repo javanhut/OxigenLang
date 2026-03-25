@@ -395,6 +395,10 @@ impl Parser {
 
     fn parse_statement_inner(&mut self) -> Option<Statement> {
         if self.curr_token.token_type == TokenType::Ident {
+            // Check for unpacking: x, y := expr
+            if self.peek_token.token_type == TokenType::Comma && self.is_unpack_statement() {
+                return self.parse_unpack_statement();
+            }
             if self.peek_token.token_type == TokenType::Walrus {
                 return self.parse_let_statement();
             }
@@ -453,6 +457,63 @@ impl Parser {
         let value = self.parse_expression(Precedence::Lowest)?;
 
         Some(Statement::Let { name, value })
+    }
+
+    /// Lookahead to check if this is an unpack: ident, ident, ... :=
+    fn is_unpack_statement(&mut self) -> bool {
+        let mut idx = 0; // peek_nth(0) is peek_token
+        loop {
+            let tt = self.peek_nth(idx).token_type.clone();
+            match tt {
+                TokenType::Comma => {
+                    // Next should be an ident
+                    let next = self.peek_nth(idx + 1).token_type.clone();
+                    if next != TokenType::Ident {
+                        return false;
+                    }
+                    idx += 2; // skip comma + ident
+                }
+                TokenType::Walrus => return true,
+                _ => return false,
+            }
+        }
+    }
+
+    fn parse_unpack_statement(&mut self) -> Option<Statement> {
+        let mut names = Vec::new();
+
+        // First identifier (curr_token)
+        names.push(Identifier {
+            token: self.curr_token.clone(),
+            value: self.curr_token.literal.clone(),
+        });
+
+        // Parse remaining: , ident, ident, ...
+        while self.peek_token.token_type == TokenType::Comma {
+            self.next_token(); // consume ','
+            self.next_token(); // move to next ident
+            if self.curr_token.token_type != TokenType::Ident {
+                self.errors.push(Diagnostic::error_with_hint(
+                    self.curr_token.span,
+                    format!("expected identifier in unpack, got {:?}", self.curr_token.literal),
+                    "unpack syntax: x, y := [1, 2]",
+                ));
+                return None;
+            }
+            names.push(Identifier {
+                token: self.curr_token.clone(),
+                value: self.curr_token.literal.clone(),
+            });
+        }
+
+        // consume ':='
+        self.expect_peek(TokenType::Walrus)?;
+
+        // move to expression
+        self.next_token();
+        let value = self.parse_expression(Precedence::Lowest)?;
+
+        Some(Statement::Unpack { names, value })
     }
 
     fn parse_typed_let_statement(&mut self) -> Option<Statement> {
@@ -551,6 +612,26 @@ impl Parser {
                     token: tok,
                     object: obj,
                     field: fld,
+                    value,
+                });
+            }
+        }
+
+        // Check for index-assign: expr[key] = value  or  expr[key] := value
+        if let Expression::Index { token, left, index } = &expr {
+            if self.peek_token.token_type == TokenType::Assign
+                || self.peek_token.token_type == TokenType::Walrus
+            {
+                let tok = token.clone();
+                let obj = *left.clone();
+                let idx = *index.clone();
+                self.next_token(); // consume '=' or ':='
+                self.next_token(); // move to value expression
+                let value = self.parse_expression(Precedence::Lowest)?;
+                return Some(Statement::IndexAssign {
+                    token: tok,
+                    object: obj,
+                    index: idx,
                     value,
                 });
             }
@@ -1997,6 +2078,7 @@ impl Parser {
                 | Statement::Stop
                 | Statement::Assign { .. }
                 | Statement::DotAssign { .. }
+                | Statement::IndexAssign { .. }
         );
 
         if !eligible {

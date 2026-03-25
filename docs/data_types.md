@@ -73,6 +73,27 @@ Type keyword: `str`. Zero value: `""` (empty string).
 
   Strings without `{}` remain plain strings — no special syntax is needed to opt out. Both double-quoted and single-quoted strings support interpolation.
 
+- **Escape Sequences**: Strings support the following escape sequences:
+
+  | Escape | Character |
+  |--------|-----------|
+  | `\n` | Newline |
+  | `\t` | Tab |
+  | `\r` | Carriage return |
+  | `\\` | Backslash |
+  | `\"` | Double quote (inside `"..."`) |
+  | `\'` | Single quote (inside `'...'`) |
+  | `\0` | Null character |
+
+  ```oxi
+  println("line one\nline two")
+  println("col1\tcol2")
+  println("she said \"hello\"")
+  println('it\'s fine')
+  ```
+
+  Escape sequences work in both plain strings and interpolated strings.
+
 - **Indexing**: Access individual characters by position (returns a string):
 
   ```oxi
@@ -188,6 +209,15 @@ Type keyword: `array`. Zero value: `[]`.
   arr[2]
   ```
 
+- **Index Assignment**: Update an element at a specific position:
+
+  ```oxi
+  arr := [10, 20, 30]
+  arr[0] = 99
+  arr[-1] = 77       // negative index counts from the end
+  println(arr)        // [99, 20, 77]
+  ```
+
 - **Slicing**: Extract a sub-array with `[start:end]`:
 
   ```oxi
@@ -264,6 +294,17 @@ Note: An empty map `{}` and an empty block `{}` use the same syntax. The parser 
   m := {"a": 1, "b": 2}
   m["a"]
   ```
+
+- **Index Assignment**: Set or update a key directly using bracket syntax:
+
+  ```oxi
+  m <map>
+  m["name"] = "Oxigen"
+  m["version"] = "0.1.0"
+  m["version"] = "0.2.0"    // updates existing key
+  ```
+
+  Both `=` and `:=` work for index assignment.
 
 - **Insert**: Returns a new map with the key-value pair added or updated:
 

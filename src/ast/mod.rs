@@ -158,6 +158,16 @@ pub enum Statement {
         path: ModulePath,
         selective: Option<Vec<Identifier>>,
     },
+    Unpack {
+        names: Vec<Identifier>,
+        value: Expression,
+    },
+    IndexAssign {
+        token: Token,
+        object: Expression,
+        index: Expression,
+        value: Expression,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

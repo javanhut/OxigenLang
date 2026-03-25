@@ -1,6 +1,9 @@
 fun split(s <str>, delim <str>) { __split(s, delim) }
 fun join(arr <array>, delim <str>) { __join(arr, delim) }
 fun trim(s <str>) { __trim(s) }
+fun strip(s <str>, chars <str>) { __strip(s, chars) }
+fun strip_left(s <str>, chars <str>) { __strip_left(s, chars) }
+fun strip_right(s <str>, chars <str>) { __strip_right(s, chars) }
 fun upper(s <str>) { __upper(s) }
 fun lower(s <str>) { __lower(s) }
 fun replace(s <str>, old <str>, new_str <str>) { __replace(s, old, new_str) }

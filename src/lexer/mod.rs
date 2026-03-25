@@ -406,12 +406,28 @@ impl Lexer {
         let has_interp = self.string_has_interpolation(delimiter);
 
         if !has_interp {
-            // Simple string, no interpolation
-            let start = self.position;
+            // Simple string, no interpolation — process escape sequences
+            let mut literal = std::string::String::new();
             while self.ch != delimiter && self.ch != '\0' {
+                if self.ch == '\\' {
+                    self.read_char(); // consume '\'
+                    match self.ch {
+                        'n' => literal.push('\n'),
+                        't' => literal.push('\t'),
+                        'r' => literal.push('\r'),
+                        '\\' => literal.push('\\'),
+                        '0' => literal.push('\0'),
+                        c if c == delimiter => literal.push(c),
+                        other => {
+                            literal.push('\\');
+                            literal.push(other);
+                        }
+                    }
+                } else {
+                    literal.push(self.ch);
+                }
                 self.read_char();
             }
-            let literal: String = self.input[start..self.position].iter().collect();
             self.read_char(); // closing quote
             return Token {
                 token_type: TokenType::String,
@@ -503,6 +519,21 @@ impl Lexer {
                 });
 
                 self.read_char(); // skip closing '}'
+            } else if self.ch == '\\' {
+                self.read_char(); // consume '\'
+                match self.ch {
+                    'n' => literal_buf.push('\n'),
+                    't' => literal_buf.push('\t'),
+                    'r' => literal_buf.push('\r'),
+                    '\\' => literal_buf.push('\\'),
+                    '0' => literal_buf.push('\0'),
+                    c if c == delimiter => literal_buf.push(c),
+                    other => {
+                        literal_buf.push('\\');
+                        literal_buf.push(other);
+                    }
+                }
+                self.read_char();
             } else {
                 literal_buf.push(self.ch);
                 self.read_char();
@@ -542,6 +573,10 @@ impl Lexer {
             let c = self.input[pos];
             if c == delimiter || c == '\0' {
                 return false;
+            }
+            if c == '\\' {
+                pos += 2; // skip escaped character
+                continue;
             }
             if c == '{' {
                 return true;
