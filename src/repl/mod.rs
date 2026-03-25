@@ -51,12 +51,13 @@ pub fn run_repl() {
                     continue;
                 }
 
+                evaluator.set_source(line);
                 let result = evaluator.eval_program(&program, Rc::clone(&env));
 
                 // Print result unless it's None
                 match result.as_ref() {
                     Object::None => {}
-                    Object::Error(msg) => println!("Error: {}", msg),
+                    Object::Error(msg) => println!("{}", msg),
                     Object::ErrorValue { .. } => println!("{}", result),
                     _ => println!("{}", result),
                 }

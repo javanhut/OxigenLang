@@ -5,6 +5,7 @@ use crate::lexer::Lexer;
 use crate::object::environment::{Environment, PatternRegistry};
 use crate::object::Object;
 use crate::parser::Parser;
+use crate::token::Span;
 use builtins::get_builtins;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -19,6 +20,7 @@ pub struct Evaluator {
     stdlib_path: PathBuf,
     module_cache: HashMap<PathBuf, Rc<Object>>,
     import_stack: Vec<PathBuf>,
+    source: String,
 }
 
 /// Unwraps nested `Grouped(...)` wrappers to get the inner expression.
@@ -101,6 +103,7 @@ impl Evaluator {
             stdlib_path: Self::find_stdlib_path(),
             module_cache: HashMap::new(),
             import_stack: Vec::new(),
+            source: String::new(),
         }
     }
 
@@ -113,7 +116,52 @@ impl Evaluator {
             stdlib_path: Self::find_stdlib_path(),
             module_cache: HashMap::new(),
             import_stack: Vec::new(),
+            source: String::new(),
         }
+    }
+
+    pub fn set_source(&mut self, source: &str) {
+        self.source = source.to_string();
+    }
+
+    /// Format a runtime error with source context, matching the parser error style.
+    fn format_error(&self, span: Span, message: &str, hint: Option<&str>) -> String {
+        let mut out = String::new();
+        let line_num = span.line;
+        let col = span.column;
+
+        out.push_str(&format!("error: {}\n", message));
+        out.push_str(&format!("  --> line {}:{}\n", line_num, col));
+
+        if let Some(source_line) = self.source.lines().nth(line_num.saturating_sub(1)) {
+            let line_str = format!("{}", line_num);
+            let padding = " ".repeat(line_str.len());
+            out.push_str(&format!("{} |\n", padding));
+            out.push_str(&format!("{} | {}\n", line_str, source_line));
+            if col > 0 {
+                let caret_padding = " ".repeat(col.saturating_sub(1));
+                out.push_str(&format!("{} | {}^", padding, caret_padding));
+            }
+        }
+
+        if let Some(hint) = hint {
+            out.push_str(&format!("\n  = hint: {}", hint));
+        }
+
+        out
+    }
+
+    /// Create an error object with source context embedded in the message.
+    fn runtime_error(&self, span: Span, message: &str, hint: Option<&str>) -> Rc<Object> {
+        if self.source.is_empty() || span.line == 0 {
+            // No source available — fall back to plain error
+            let msg = match hint {
+                Some(h) => format!("{}\n  = hint: {}", message, h),
+                None => message.to_string(),
+            };
+            return Rc::new(Object::Error(msg));
+        }
+        Rc::new(Object::Error(self.format_error(span, message, hint)))
     }
 
     fn find_stdlib_path() -> PathBuf {
@@ -571,17 +619,16 @@ impl Evaluator {
                 let existing = env.borrow().get(&name.value);
                 if existing.is_none() {
                     let all_names = env.borrow().all_keys();
-                    let msg = match suggest_similar(&name.value, all_names.iter().map(|s| s.as_str())) {
-                        Some(suggestion) => format!(
-                            "identifier not found: {}. did you mean `{}`? (use := to declare new variables)",
-                            name.value, suggestion
-                        ),
-                        None => format!(
-                            "identifier not found: {}. use := to declare",
-                            name.value
-                        ),
-                    };
-                    return Rc::new(Object::Error(msg));
+                    let mut hint_parts = Vec::new();
+                    if let Some(suggestion) = suggest_similar(&name.value, all_names.iter().map(|s| s.as_str())) {
+                        hint_parts.push(format!("did you mean `{}`?", suggestion));
+                    }
+                    hint_parts.push("use `:=` to declare new variables".to_string());
+                    return self.runtime_error(
+                        name.token.span,
+                        &format!("identifier not found: {}", name.value),
+                        Some(&hint_parts.join(". ")),
+                    );
                 }
                 let tc = env.borrow().get_type_constraint(&name.value);
                 if tc.is_none() {
@@ -725,17 +772,13 @@ impl Evaluator {
                                         Some((_, et, h)) => (et.clone(), *h),
                                         None => {
                                             let field_names: Vec<&str> = def_fields.iter().map(|(n, _, _)| n.as_str()).collect();
-                                            let msg = match suggest_similar(&field.value, field_names.into_iter()) {
-                                                Some(suggestion) => format!(
-                                                    "struct {} has no field '{}'. did you mean `{}`?",
-                                                    struct_name, field.value, suggestion
-                                                ),
-                                                None => format!(
-                                                    "struct {} has no field '{}'",
-                                                    struct_name, field.value
-                                                ),
-                                            };
-                                            return Rc::new(Object::Error(msg));
+                                            let hint = suggest_similar(&field.value, field_names.into_iter())
+                                                .map(|s| format!("did you mean `{}`?", s));
+                                            return self.runtime_error(
+                                                field.token.span,
+                                                &format!("struct {} has no field '{}'", struct_name, field.value),
+                                                hint.as_deref(),
+                                            );
                                         }
                                     }
                                 } else {
@@ -746,10 +789,11 @@ impl Evaluator {
                             }
                         };
                         if hidden && !is_self_access {
-                            return Rc::new(Object::Error(format!(
-                                "field '{}' is hidden on struct {}",
-                                field.value, struct_name
-                            )));
+                            return self.runtime_error(
+                                field.token.span,
+                                &format!("field '{}' is hidden on struct {}", field.value, struct_name),
+                                Some("hidden fields can only be accessed via `self` inside a method"),
+                            );
                         }
                         let val = self.eval_expression(value, Rc::clone(&env));
                         if val.is_error() {
@@ -1000,6 +1044,7 @@ impl Evaluator {
             }
 
             Expression::Infix {
+                token: infix_token,
                 operator,
                 left,
                 right,
@@ -1065,7 +1110,7 @@ impl Evaluator {
                 if right_val.is_error() {
                     return right_val;
                 }
-                self.eval_infix_expression(operator, left_val, right_val)
+                self.eval_infix_expression(operator, left_val, right_val, infix_token.span)
             }
 
             Expression::Postfix {
@@ -1216,10 +1261,11 @@ impl Evaluator {
                                 if let Some(def) = self.struct_defs.get(struct_name) {
                                     if let Object::StructDef { fields: def_fields, .. } = def.as_ref() {
                                         if let Some((_, _, true)) = def_fields.iter().find(|(n, _, _)| n == &field.value) {
-                                            return Rc::new(Object::Error(format!(
-                                                "field '{}' is hidden on struct {}",
-                                                field.value, struct_name
-                                            )));
+                                            return self.runtime_error(
+                                                field.token.span,
+                                                &format!("field '{}' is hidden on struct {}", field.value, struct_name),
+                                                Some("hidden fields can only be accessed via `self` inside a method"),
+                                            );
                                         }
                                     }
                                 }
@@ -1227,24 +1273,20 @@ impl Evaluator {
                             return Rc::clone(val);
                         }
                         // Check methods
-                        self.find_method(struct_name, &field.value, &fields)
+                        self.find_method(struct_name, &field.value, &fields, field.token.span)
                     }
                     Object::Module { env: module_env, name: mod_name } => {
                         match module_env.borrow().get(&field.value) {
                             Some(val) => val,
                             None => {
                                 let available = module_env.borrow().all_keys();
-                                let msg = match suggest_similar(&field.value, available.iter().map(|s| s.as_str())) {
-                                    Some(suggestion) => format!(
-                                        "name '{}' not found in module {}. did you mean `{}`?",
-                                        field.value, mod_name, suggestion
-                                    ),
-                                    None => format!(
-                                        "name '{}' not found in module {}",
-                                        field.value, mod_name
-                                    ),
-                                };
-                                Rc::new(Object::Error(msg))
+                                let hint = suggest_similar(&field.value, available.iter().map(|s| s.as_str()))
+                                    .map(|s| format!("did you mean `{}`?", s));
+                                self.runtime_error(
+                                    field.token.span,
+                                    &format!("name '{}' not found in module {}", field.value, mod_name),
+                                    hint.as_deref(),
+                                )
                             }
                         }
                     }
@@ -1275,7 +1317,7 @@ impl Evaluator {
             }
 
             Expression::StructLiteral {
-                struct_name, field_values, ..
+                token: struct_token, struct_name, field_values, ..
             } => {
                 let def = self.struct_defs.get(struct_name);
                 match def {
@@ -1310,17 +1352,13 @@ impl Evaluator {
                                     }
                                     None => {
                                         let field_names: Vec<&str> = def_fields.iter().map(|(n, _, _)| n.as_str()).collect();
-                                        let msg = match suggest_similar(field_name, field_names.into_iter()) {
-                                            Some(suggestion) => format!(
-                                                "unknown field '{}' for struct {}. did you mean `{}`?",
-                                                field_name, name, suggestion
-                                            ),
-                                            None => format!(
-                                                "unknown field '{}' for struct {}",
-                                                field_name, name
-                                            ),
-                                        };
-                                        return Rc::new(Object::Error(msg));
+                                        let hint = suggest_similar(field_name, field_names.into_iter())
+                                            .map(|s| format!("did you mean `{}`?", s));
+                                        return self.runtime_error(
+                                            struct_token.span,
+                                            &format!("unknown field '{}' for struct {}", field_name, name),
+                                            hint.as_deref(),
+                                        );
                                     }
                                 }
                             }
@@ -1471,6 +1509,7 @@ impl Evaluator {
         struct_name: &str,
         method_name: &str,
         instance_fields: &Rc<RefCell<HashMap<String, Rc<Object>>>>,
+        span: Span,
     ) -> Rc<Object> {
         let mut current_name = struct_name.to_string();
         loop {
@@ -1511,17 +1550,13 @@ impl Evaluator {
                         let mut all_names: Vec<String> = methods.keys().cloned().collect();
                         // Also add field names (user may confuse field/method)
                         all_names.extend(instance_fields.borrow().keys().cloned());
-                        let msg = match suggest_similar(method_name, all_names.iter().map(|s: &String| s.as_str())) {
-                            Some(suggestion) => format!(
-                                "method '{}' not found on struct {}. did you mean `{}`?",
-                                method_name, struct_name, suggestion
-                            ),
-                            None => format!(
-                                "method '{}' not found on struct {}",
-                                method_name, struct_name
-                            ),
-                        };
-                        return Rc::new(Object::Error(msg));
+                        let hint = suggest_similar(method_name, all_names.iter().map(|s: &String| s.as_str()))
+                            .map(|s| format!("did you mean `{}`?", s));
+                        return self.runtime_error(
+                            span,
+                            &format!("method '{}' not found on struct {}", method_name, struct_name),
+                            hint.as_deref(),
+                        );
                     }
                 }
                 None => {
@@ -1550,14 +1585,13 @@ impl Evaluator {
         all_names.extend(self.builtins.keys().cloned());
         all_names.extend(self.struct_defs.keys().cloned());
 
-        let msg = match suggest_similar(&ident.value, all_names.iter().map(|s| s.as_str())) {
-            Some(suggestion) => format!(
-                "identifier not found: {}. did you mean `{}`?",
-                ident.value, suggestion
-            ),
-            None => format!("identifier not found: {}", ident.value),
-        };
-        Rc::new(Object::Error(msg))
+        let hint = suggest_similar(&ident.value, all_names.iter().map(|s| s.as_str()))
+            .map(|s| format!("did you mean `{}`?", s));
+        self.runtime_error(
+            ident.token.span,
+            &format!("identifier not found: {}", ident.value),
+            hint.as_deref(),
+        )
     }
 
     fn eval_prefix_expression(&self, operator: &str, right: Rc<Object>) -> Rc<Object> {
@@ -1624,9 +1658,9 @@ impl Evaluator {
         let val = self.eval_expression(expr, Rc::clone(env));
         if val.is_error() { return val; }
         if value_on_right {
-            self.eval_infix_expression(cmp_op, val, Rc::clone(cmp_value))
+            self.eval_infix_expression(cmp_op, val, Rc::clone(cmp_value), Span::default())
         } else {
-            self.eval_infix_expression(cmp_op, Rc::clone(cmp_value), val)
+            self.eval_infix_expression(cmp_op, Rc::clone(cmp_value), val, Span::default())
         }
     }
 
@@ -1635,6 +1669,7 @@ impl Evaluator {
         operator: &str,
         left: Rc<Object>,
         right: Rc<Object>,
+        span: Span,
     ) -> Rc<Object> {
         match (left.as_ref(), right.as_ref()) {
             (Object::Integer(l), Object::Integer(r)) => {
@@ -1724,12 +1759,11 @@ impl Evaluator {
                 } else if operator == "!=" {
                     Rc::new(Object::Boolean(left != right))
                 } else {
-                    Rc::new(Object::Error(format!(
-                        "type mismatch: {} {} {}",
-                        left.type_name(),
-                        operator,
-                        right.type_name()
-                    )))
+                    self.runtime_error(
+                        span,
+                        &format!("type mismatch: {} {} {}", left.type_name(), operator, right.type_name()),
+                        None,
+                    )
                 }
             }
         }

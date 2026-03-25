@@ -40,13 +40,14 @@ fn main() {
             .expect("Could not resolve file path");
         let env = Rc::new(RefCell::new(Environment::new()));
         let mut evaluator = Evaluator::new_with_path(file_path_buf);
+        evaluator.set_source(&contents);
         let result = evaluator.eval_program(&program, env);
 
         // Print result if it's not None and not an error
         match result.as_ref() {
             object::Object::None => {}
             object::Object::Error(msg) => {
-                eprintln!("Error: {}", msg);
+                eprintln!("{}", msg);
                 std::process::exit(1);
             }
             object::Object::ErrorValue { .. } => println!("{}", result),
