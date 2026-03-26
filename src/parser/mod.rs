@@ -1238,6 +1238,7 @@ impl Parser {
 
     fn parse_function_parameters(&mut self) -> Option<Vec<TypedParam>> {
         let mut params = Vec::new();
+        let mut seen_optional = false;
 
         if self.peek_token.token_type == TokenType::RParen {
             self.next_token();
@@ -1245,36 +1246,68 @@ impl Parser {
         }
 
         self.next_token();
+        let param = self.parse_single_param(&mut seen_optional)?;
+        params.push(param);
+
+        while self.peek_token.token_type == TokenType::Comma {
+            self.next_token(); // ','
+            self.next_token(); // next param
+            let param = self.parse_single_param(&mut seen_optional)?;
+            params.push(param);
+        }
+
+        self.expect_peek(TokenType::RParen)?;
+        Some(params)
+    }
+
+    /// Parse a single function parameter: name, name? <type>, name <type> = default
+    fn parse_single_param(&mut self, seen_optional: &mut bool) -> Option<TypedParam> {
         let ident = Identifier {
             token: self.curr_token.clone(),
             value: self.curr_token.literal.clone(),
         };
+
+        // Check for '?' (optional marker) — '?' is lexed as Illegal
+        let optional = if self.peek_token.token_type == TokenType::Illegal
+            && self.peek_token.literal == "?"
+        {
+            self.next_token(); // consume '?'
+            true
+        } else {
+            false
+        };
+
         let type_ann = if self.peek_token.token_type == TokenType::Lt {
             self.next_token(); // move to '<'
             Some(self.parse_type_annotation()?)
         } else {
             None
         };
-        params.push(TypedParam { ident, type_ann });
 
-        while self.peek_token.token_type == TokenType::Comma {
-            self.next_token(); // ','
-            self.next_token(); // next param
-            let ident = Identifier {
-                token: self.curr_token.clone(),
-                value: self.curr_token.literal.clone(),
-            };
-            let type_ann = if self.peek_token.token_type == TokenType::Lt {
-                self.next_token(); // move to '<'
-                Some(self.parse_type_annotation()?)
-            } else {
-                None
-            };
-            params.push(TypedParam { ident, type_ann });
+        // Check for default value: = expr
+        let default = if self.peek_token.token_type == TokenType::Assign {
+            self.next_token(); // consume '='
+            self.next_token(); // move to default expression
+            Some(self.parse_expression(Precedence::Lowest)?)
+        } else {
+            None
+        };
+
+        // Validate ordering: once we see an optional/default param, all following must be too
+        let has_default = optional || default.is_some();
+        if *seen_optional && !has_default {
+            self.errors.push(Diagnostic::error_with_hint(
+                ident.token.span,
+                format!("required parameter '{}' cannot follow optional/default parameters", ident.value),
+                "move required parameters before optional ones",
+            ));
+            return None;
+        }
+        if has_default {
+            *seen_optional = true;
         }
 
-        self.expect_peek(TokenType::RParen)?;
-        Some(params)
+        Some(TypedParam { ident, type_ann, default, optional })
     }
 
     fn parse_named_function_statement(&mut self) -> Option<Statement> {
@@ -1497,17 +1530,66 @@ impl Parser {
         })
     }
 
-    // Call: f(arg1, arg2, ...)
+    // Call: f(arg1, arg2, ...) or f(name=val, ...)
     // Trigger token is '(' *after* the function expression.
     fn parse_call_expression(&mut self, function: Expression) -> Option<Expression> {
         let tok = self.curr_token.clone(); // '('
-        let args = self.parse_expression_list(TokenType::RParen)?;
+        let (args, named_args) = self.parse_call_args()?;
 
         Some(Expression::Call {
             token: tok,
             function: Box::new(function),
             args,
+            named_args,
         })
+    }
+
+    /// Parse call arguments, handling both positional and named: f(a, b, name=val)
+    fn parse_call_args(&mut self) -> Option<(Vec<Expression>, Vec<(String, Expression)>)> {
+        let mut args = Vec::new();
+        let mut named_args: Vec<(String, Expression)> = Vec::new();
+        let mut in_named = false;
+
+        // Handle empty args: f()
+        if self.peek_token.token_type == TokenType::RParen {
+            self.next_token();
+            return Some((args, named_args));
+        }
+
+        loop {
+            self.next_token(); // move to arg
+
+            // Check if this is a named arg: ident = expr
+            if self.curr_token.token_type == TokenType::Ident
+                && self.peek_token.token_type == TokenType::Assign
+            {
+                let name = self.curr_token.literal.clone();
+                self.next_token(); // consume '='
+                self.next_token(); // move to value
+                let value = self.parse_expression(Precedence::Lowest)?;
+                named_args.push((name, value));
+                in_named = true;
+            } else {
+                if in_named {
+                    self.errors.push(Diagnostic::error_with_hint(
+                        self.curr_token.span,
+                        "positional argument cannot follow named arguments",
+                        "put all positional arguments before named ones",
+                    ));
+                    return None;
+                }
+                let expr = self.parse_expression(Precedence::Lowest)?;
+                args.push(expr);
+            }
+
+            if self.peek_token.token_type != TokenType::Comma {
+                break;
+            }
+            self.next_token(); // consume comma
+        }
+
+        self.expect_peek(TokenType::RParen)?;
+        Some((args, named_args))
     }
 
     // Index: arr[index]

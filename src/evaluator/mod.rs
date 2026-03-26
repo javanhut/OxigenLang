@@ -1,6 +1,6 @@
 pub mod builtins;
 
-use crate::ast::{Expression, Identifier, ModulePath, Program, Statement, StringInterpPart, TypeAnnotation};
+use crate::ast::{Expression, Identifier, ModulePath, Program, Statement, StringInterpPart, TypeAnnotation, TypedParam};
 use crate::lexer::Lexer;
 use crate::object::environment::{Environment, PatternRegistry};
 use crate::object::Object;
@@ -506,12 +506,14 @@ impl Evaluator {
                         // Type is immutable — no implicit conversion. Use explicit
                         // typed re-declaration (x <type> := val) to change the type.
                         if !type_matches(&target_type, &val.effective_type_name()) {
-                            return Rc::new(Object::Error(format!(
-                                "type mismatch: '{}' is locked to {}, got {}. use explicit type declaration to change type",
-                                name.value,
-                                target_type,
-                                val.effective_type_name()
-                            )));
+                            return self.runtime_error(
+                                name.token.span,
+                                &format!(
+                                    "type mismatch: '{}' is locked to {}, got {}",
+                                    name.value, target_type, val.effective_type_name()
+                                ),
+                                Some("use explicit type declaration to change type"),
+                            );
                         }
                         env.borrow_mut().update(&name.value, val.clone());
                         return val;
@@ -570,11 +572,11 @@ impl Evaluator {
                     }
                 } else {
                     if !type_matches(&target, &val.effective_type_name()) {
-                        return Rc::new(Object::Error(format!(
-                            "type mismatch: expected {}, got {}",
-                            target,
-                            val.effective_type_name()
-                        )));
+                        return self.runtime_error(
+                            name.token.span,
+                            &format!("type mismatch: expected {}, got {}", target, val.effective_type_name()),
+                            Some(&format!("'{}' is declared as <{}>", name.value, target.to_lowercase())),
+                        );
                     }
                     val
                 };
@@ -632,17 +634,19 @@ impl Evaluator {
                 }
                 let tc = env.borrow().get_type_constraint(&name.value);
                 if tc.is_none() {
-                    return Rc::new(Object::Error(format!(
-                        "= requires typed variable, use := for '{}'",
-                        name.value
-                    )));
+                    return self.runtime_error(
+                        name.token.span,
+                        &format!("`=` requires typed variable, use `:=` for '{}'", name.value),
+                        Some("declare with a type first: x <type> := value"),
+                    );
                 }
                 // Immutable check: = cannot reassign an immutable binding
                 if env.borrow().is_immutable(&name.value) {
-                    return Rc::new(Object::Error(format!(
-                        "cannot reassign immutable variable '{}'. use := to override",
-                        name.value
-                    )));
+                    return self.runtime_error(
+                        name.token.span,
+                        &format!("cannot reassign immutable variable '{}'", name.value),
+                        Some("use `:=` to override an immutable binding"),
+                    );
                 }
                 let target_type = tc.unwrap();
                 let val = self.eval_expression(value, Rc::clone(&env));
@@ -650,11 +654,11 @@ impl Evaluator {
                     return val;
                 }
                 if !type_matches(&target_type, &val.effective_type_name()) {
-                    return Rc::new(Object::Error(format!(
-                        "type mismatch: expected {}, got {}",
-                        target_type,
-                        val.effective_type_name()
-                    )));
+                    return self.runtime_error(
+                        name.token.span,
+                        &format!("type mismatch: expected {}, got {}", target_type, val.effective_type_name()),
+                        Some(&format!("'{}' is locked to type {}", name.value, target_type)),
+                    );
                 }
                 env.borrow_mut().update(&name.value, val.clone());
                 val
@@ -1237,7 +1241,7 @@ impl Evaluator {
                 operator, left, ..
             } => self.eval_postfix_expression(operator, left, env),
 
-            Expression::Call { function, args, .. } => {
+            Expression::Call { token: call_token, function, args, named_args, .. } => {
                 // is_mut() needs the variable name, not its value
                 if let Expression::Ident(ident) = function.as_ref() {
                     if ident.value == "is_mut" {
@@ -1259,7 +1263,16 @@ impl Evaluator {
                 if arguments.len() == 1 && arguments[0].is_error() {
                     return Rc::clone(&arguments[0]);
                 }
-                self.apply_function(func, arguments, env)
+                // Evaluate named arguments
+                let mut eval_named: Vec<(String, Rc<Object>)> = Vec::new();
+                for (name, expr) in named_args {
+                    let val = self.eval_expression(expr, Rc::clone(&env));
+                    if val.is_error() {
+                        return val;
+                    }
+                    eval_named.push((name.clone(), val));
+                }
+                self.apply_function(func, arguments, eval_named, env, call_token.span)
             }
 
             Expression::Index { left, index, .. } => {
@@ -2160,40 +2173,138 @@ impl Evaluator {
         results
     }
 
+    /// Bind function arguments to parameters, handling positional args, named args,
+    /// defaults, and optional params. Returns Some(error) on failure, None on success.
+    fn bind_params(
+        &mut self,
+        parameters: &[TypedParam],
+        args: &[Rc<Object>],
+        named_args: &[(String, Rc<Object>)],
+        env: &Rc<RefCell<Environment>>,
+        call_span: Span,
+    ) -> Option<Rc<Object>> {
+        // Count required params (no default, not optional)
+        let required = parameters.iter().filter(|p| p.default.is_none() && !p.optional).count();
+        let total_provided = args.len() + named_args.len();
+
+        if total_provided < required {
+            return Some(self.runtime_error(
+                call_span,
+                &format!(
+                    "wrong number of arguments: expected at least {}, got {}",
+                    required, total_provided
+                ),
+                None,
+            ));
+        }
+        if total_provided > parameters.len() {
+            return Some(self.runtime_error(
+                call_span,
+                &format!(
+                    "wrong number of arguments: expected at most {}, got {}",
+                    parameters.len(), total_provided
+                ),
+                None,
+            ));
+        }
+
+        // Check for duplicate named args or named args that conflict with positional
+        for (name, _) in named_args {
+            // Check if this name matches a param that was already filled positionally
+            if let Some(pos) = parameters.iter().position(|p| p.ident.value == *name) {
+                if pos < args.len() {
+                    return Some(self.runtime_error(
+                        call_span,
+                        &format!("parameter '{}' was given both positionally and by name", name),
+                        None,
+                    ));
+                }
+            } else {
+                return Some(self.runtime_error(
+                    call_span,
+                    &format!("unknown parameter name: '{}'", name),
+                    None,
+                ));
+            }
+        }
+
+        for (i, param) in parameters.iter().enumerate() {
+            let val = if i < args.len() {
+                // Filled by positional arg
+                Rc::clone(&args[i])
+            } else if let Some((_, v)) = named_args.iter().find(|(n, _)| *n == param.ident.value) {
+                // Filled by named arg
+                Rc::clone(v)
+            } else if let Some(ref default_expr) = param.default {
+                // Use default value
+                let v = self.eval_expression(default_expr, Rc::clone(env));
+                if v.is_error() {
+                    return Some(v);
+                }
+                v
+            } else if param.optional {
+                // Optional param with no default — use None
+                Rc::new(Object::None)
+            } else {
+                return Some(self.runtime_error(
+                    call_span,
+                    &format!("missing required argument: '{}'", param.ident.value),
+                    None,
+                ));
+            };
+
+            // Type check
+            if let Some(ref expected_ta) = param.type_ann {
+                // Skip type check for None on optional params
+                if !(param.optional && matches!(val.as_ref(), Object::None)) {
+                    let expected = expected_ta.type_name();
+                    let actual = val.effective_type_name();
+                    if !type_matches(&expected, &actual) {
+                        return Some(self.runtime_error(
+                            call_span,
+                            &format!(
+                                "type mismatch for parameter '{}': expected {}, got {}",
+                                param.ident.value, expected, actual
+                            ),
+                            Some(&format!("parameter '{}' requires type {}", param.ident.value, expected)),
+                        ));
+                    }
+                }
+            }
+
+            env.borrow_mut().set(param.ident.value.clone(), val);
+        }
+
+        None
+    }
+
     fn apply_function(
         &mut self,
         func: Rc<Object>,
         args: Vec<Rc<Object>>,
+        named_args: Vec<(String, Rc<Object>)>,
         _env: Rc<RefCell<Environment>>,
+        call_span: Span,
     ) -> Rc<Object> {
         match func.as_ref() {
-            Object::Builtin(f) => f(args),
+            Object::Builtin(f) => {
+                if !named_args.is_empty() {
+                    return self.runtime_error(
+                        call_span,
+                        "named arguments are not supported for built-in functions",
+                        None,
+                    );
+                }
+                f(args)
+            }
             Object::Function {
                 parameters,
                 body,
                 env,
             } => {
-                if parameters.len() != args.len() {
-                    return Rc::new(Object::Error(format!(
-                        "wrong number of arguments: expected {}, got {}",
-                        parameters.len(),
-                        args.len()
-                    )));
-                }
-
                 let extended_env = Rc::new(RefCell::new(Environment::new_enclosed(Rc::clone(env))));
-                for (param, arg) in parameters.iter().zip(args.iter()) {
-                    if let Some(ref expected_ta) = param.type_ann {
-                        let expected = expected_ta.type_name();
-                        let actual = arg.effective_type_name();
-                        if !type_matches(&expected, &actual) {
-                            return Rc::new(Object::Error(format!(
-                                "type mismatch for parameter '{}': expected {}, got {}",
-                                param.ident.value, expected, actual
-                            )));
-                        }
-                    }
-                    extended_env.borrow_mut().set(param.ident.value.clone(), Rc::clone(arg));
+                if let Some(err) = self.bind_params(parameters, &args, &named_args, &extended_env, call_span) {
+                    return err;
                 }
 
                 let result = self.eval_block(body, extended_env);
@@ -2209,27 +2320,9 @@ impl Evaluator {
                 instance_fields,
                 field_names,
             } => {
-                if parameters.len() != args.len() {
-                    return Rc::new(Object::Error(format!(
-                        "wrong number of arguments: expected {}, got {}",
-                        parameters.len(),
-                        args.len()
-                    )));
-                }
-
                 let extended_env = Rc::new(RefCell::new(Environment::new_enclosed(Rc::clone(env))));
-                for (param, arg) in parameters.iter().zip(args.iter()) {
-                    if let Some(ref expected_ta) = param.type_ann {
-                        let expected = expected_ta.type_name();
-                        let actual = arg.effective_type_name();
-                        if !type_matches(&expected, &actual) {
-                            return Rc::new(Object::Error(format!(
-                                "type mismatch for parameter '{}': expected {}, got {}",
-                                param.ident.value, expected, actual
-                            )));
-                        }
-                    }
-                    extended_env.borrow_mut().set(param.ident.value.clone(), Rc::clone(arg));
+                if let Some(err) = self.bind_params(parameters, &args, &named_args, &extended_env, call_span) {
+                    return err;
                 }
 
                 let result = self.eval_block(body, Rc::clone(&extended_env));
@@ -2249,22 +2342,22 @@ impl Evaluator {
             Object::StructDef { name, fields, .. } => {
                 // Positional instantiation: Person("Alice", 30)
                 if args.len() != fields.len() {
-                    return Rc::new(Object::Error(format!(
-                        "struct {} has {} fields, got {} arguments",
-                        name,
-                        fields.len(),
-                        args.len()
-                    )));
+                    return self.runtime_error(
+                        call_span,
+                        &format!("struct {} has {} fields, got {} arguments", name, fields.len(), args.len()),
+                        None,
+                    );
                 }
 
                 let mut instance_fields = HashMap::new();
                 for ((field_name, expected_type, _), arg) in fields.iter().zip(args.iter()) {
                     let actual_type = arg.effective_type_name();
                     if !type_matches(expected_type, &actual_type) {
-                        return Rc::new(Object::Error(format!(
-                            "type mismatch for field '{}': expected {}, got {}",
-                            field_name, expected_type, actual_type
-                        )));
+                        return self.runtime_error(
+                            call_span,
+                            &format!("type mismatch for field '{}': expected {}, got {}", field_name, expected_type, actual_type),
+                            Some(&format!("field '{}' requires type {}", field_name, expected_type)),
+                        );
                     }
                     instance_fields.insert(field_name.clone(), Rc::clone(arg));
                 }
@@ -2274,10 +2367,7 @@ impl Evaluator {
                     fields: Rc::new(RefCell::new(instance_fields)),
                 })
             }
-            _ => Rc::new(Object::Error(format!(
-                "not a function: {}",
-                func.type_name()
-            ))),
+            _ => self.runtime_error(call_span, &format!("not a function: {}", func.type_name()), None),
         }
     }
 
@@ -3887,7 +3977,7 @@ mod tests {
     fn test_assign_untyped_variable_errors() {
         let result = test_eval("x := 10\nx = 20");
         match result.as_ref() {
-            Object::Error(msg) => assert!(msg.contains("= requires typed variable"), "got: {}", msg),
+            Object::Error(msg) => assert!(msg.contains("requires typed variable"), "got: {}", msg),
             _ => panic!("Expected error, got {:?}", result),
         }
     }

@@ -12,7 +12,7 @@ OxigenLang is a modern, lightweight, interpreted programming language implemente
 - **Rich Type System**: Dynamic typing by default with optional type annotations for locking types and controlling mutability. Four declaration forms give precise control over value and type mutability.
 - **Data Types**: Integers, Floats, Strings (with escape sequences and interpolation), Characters, Booleans, Arrays, Bytes, Uints, Tuples, Maps, Sets, and `None`.
 - **Structs**: Composite data types with typed fields, single-inheritance, methods via `contains` blocks, `self` access, hidden fields, and dot-chaining.
-- **First-Class Functions**: Named and anonymous functions, closures, typed parameters, and implicit/explicit returns.
+- **First-Class Functions**: Named and anonymous functions, closures, typed parameters, default values, optional parameters, and implicit/explicit returns.
 - **Unpacking**: Destructure arrays and tuples into multiple variables with `a, b := [1, 2]`.
 - **Index Assignment**: Set map keys and array elements directly with `m[key] = value` and `arr[i] = value`.
 - **Built-in Functions**: Built-in functions for I/O, collection manipulation, type conversion, and introspection.
@@ -96,6 +96,12 @@ status <str> := option {
     "minor"
 }
 println("{p.name} is an {status}")
+
+// Default and named arguments
+fun connect(host <str>, port <int> = 8080, tls? <bool>) {
+    println("host={host} port={port} tls={tls}")
+}
+connect("example.com", tls=True)
 
 // Unpacking
 x, y := [10, 20]

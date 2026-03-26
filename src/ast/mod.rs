@@ -202,6 +202,8 @@ pub struct StructField {
 pub struct TypedParam {
     pub ident: Identifier,
     pub type_ann: Option<TypeAnnotation>,
+    pub default: Option<Expression>,
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -264,6 +266,7 @@ pub enum Expression {
         token: Token,
         function: Box<Expression>,
         args: Vec<Expression>,
+        named_args: Vec<(String, Expression)>,
     },
 
     Index {

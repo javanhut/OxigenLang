@@ -68,6 +68,115 @@ fun format(label, value <int>) {
 }
 ```
 
+### Default Values
+
+Parameters can have default values using `= value` after the type annotation. If the caller omits the argument, the default is used:
+
+```oxi
+fun greet(name <str>, greeting <str> = "Hello") {
+    println("{greeting}, {name}!")
+}
+
+greet("Alice")           // Hello, Alice!
+greet("Bob", "Hey")      // Hey, Bob!
+```
+
+Default values work with untyped parameters too:
+
+```oxi
+fun add(a, b = 0) { a + b }
+println(add(5))      // 5
+println(add(5, 3))   // 8
+```
+
+### Optional Parameters
+
+Mark a parameter as optional with `?` after the name. Optional parameters default to `None` when omitted and skip type checking for `None`:
+
+```oxi
+fun connect(host <str>, port? <int>) {
+    option {
+        port == None -> println("Connecting to {host} on default port"),
+        println("Connecting to {host}:{port}")
+    }
+}
+
+connect("localhost")         // port is None
+connect("localhost", 8080)   // port is 8080
+```
+
+### Mixing Required, Default, and Optional
+
+All three forms can be combined. Required parameters must come first — the parser enforces this:
+
+```oxi
+fun log(msg <str>, level <str> = "INFO", tag? <str>) {
+    option {
+        tag == None -> println("[{level}] {msg}"),
+        println("[{level}] [{tag}] {msg}")
+    }
+}
+
+log("server started")                       // [INFO] server started
+log("request received", "DEBUG")            // [DEBUG] request received
+log("auth failed", "ERROR", "security")     // [ERROR] [security] auth failed
+```
+
+Placing a required parameter after an optional or default parameter is an error:
+
+```oxi
+fun bad(x <str> = "hi", y <int>) { ... }
+// error: required parameter 'y' cannot follow optional/default parameters
+```
+
+### Named Arguments
+
+When calling a function, arguments can be passed by name using `name=value` syntax. This is especially useful with default and optional parameters, since it lets you skip parameters you don't need:
+
+```oxi
+fun connect(host <str>, port <int> = 8080, tls? <bool>) {
+    println("host={host} port={port} tls={tls}")
+}
+
+connect("example.com")                          // positional only
+connect("example.com", tls=True)                // skip port, set tls
+connect("example.com", port=443, tls=True)      // named for both
+```
+
+Named arguments can be in any order:
+
+```oxi
+fun point(x <int>, y <int>) {
+    println("({x}, {y})")
+}
+
+point(y=20, x=10)    // (10, 20)
+```
+
+You can mix positional and named arguments — positional arguments must come first:
+
+```oxi
+fun greet(name <str>, greeting <str> = "Hello") {
+    println("{greeting}, {name}!")
+}
+
+greet("Alice", greeting="Hey")   // Hey, Alice!
+```
+
+A positional argument after a named argument is an error:
+
+```oxi
+greet(name="Alice", "Hey")
+// error: positional argument cannot follow named arguments
+```
+
+Named arguments are validated against the function's parameter names:
+
+```oxi
+greet(unknown="Bob")
+// error: unknown parameter name: 'unknown'
+```
+
 ## Return Values
 
 ### Implicit Return
@@ -229,15 +338,18 @@ println(factorial(5))
 
 ## Summary
 
-| Feature          | Syntax                               |
-|------------------|--------------------------------------|
-| Named function   | `fun name(params) { body }`         |
-| Anonymous function | `fun(params) { body }`             |
-| Typed parameter  | `fun f(x <int>) { ... }`           |
-| Implicit return  | Last expression in body              |
-| Explicit return  | `give value`                         |
-| Early return     | `give value when condition`          |
-| Closure          | Functions capture enclosing variables |
+| Feature            | Syntax                               |
+|--------------------|--------------------------------------|
+| Named function     | `fun name(params) { body }`         |
+| Anonymous function | `fun(params) { body }`              |
+| Typed parameter    | `fun f(x <int>) { ... }`           |
+| Default value      | `fun f(x <int> = 10) { ... }`      |
+| Optional parameter | `fun f(x? <int>) { ... }`          |
+| Named argument     | `f(name="Alice", age=30)`           |
+| Implicit return    | Last expression in body              |
+| Explicit return    | `give value`                         |
+| Early return       | `give value when condition`          |
+| Closure            | Functions capture enclosing variables |
 
 See also:
 - [Variables and Assignments](variables.md) — how function variables work

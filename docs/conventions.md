@@ -125,6 +125,56 @@ fun greet(name) {
 }
 ```
 
+### Use Default Values Over `None` Checks
+
+When a parameter has a natural default, declare it in the signature rather than checking for `None` inside the body.
+
+```oxi
+// Good — default value in signature
+fun connect(host <str>, port <int> = 8080) {
+    println("Connecting to {host}:{port}")
+}
+
+// Avoid — checking None manually
+fun connect(host <str>, port? <int>) {
+    actual_port := option { port == None -> 8080, port }
+    println("Connecting to {host}:{actual_port}")
+}
+```
+
+Use `?` (optional parameters) when there is genuinely no sensible default and the caller may or may not provide a value:
+
+```oxi
+// Good — tag is truly optional, no sensible default
+fun log(msg <str>, level <str> = "INFO", tag? <str>) {
+    option {
+        tag == None -> println("[{level}] {msg}"),
+        println("[{level}] [{tag}] {msg}")
+    }
+}
+```
+
+### Use Named Arguments for Clarity at Call Sites
+
+When a function has multiple parameters of the same type or boolean flags, use named arguments to make the call self-documenting:
+
+```oxi
+// Good — named arguments make intent clear
+fun create_user(name <str>, email <str>, admin <bool> = False) { ... }
+create_user("Alice", email="alice@example.com", admin=True)
+
+// Avoid — positional args are ambiguous
+create_user("Alice", "alice@example.com", True)
+```
+
+Named arguments are especially useful for skipping default parameters:
+
+```oxi
+// Good — skip port, only set tls
+fun connect(host <str>, port <int> = 8080, tls? <bool>) { ... }
+connect("example.com", tls=True)
+```
+
 ## Conditionals and Pattern Matching
 
 ### Use `option` for Conditional Logic
