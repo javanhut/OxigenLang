@@ -534,4 +534,4 @@ See also:
 - [Type System](type_system.md) — type conversion and introspection details
 - [Variables and Assignments](variables.md) — mutability model used by `is_mut` and `is_type_mut`
 - [Imports and Modules](imports.md) — the `introduce` keyword and module system
-- [Standard Library](stdlib.md) — full reference for all stdlib modules (math, strings, array, io, os, time, random, path, json, net)
+- [Standard Library](stdlib.md) — full reference for all stdlib modules (math, strings, array, io, os, time, random, path, json, toml, net)

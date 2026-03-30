@@ -1,4 +1,4 @@
-use crate::token::{Token, TokenType, Span, token_map};
+use crate::token::{Span, Token, TokenType, token_map};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
@@ -185,7 +185,8 @@ impl Lexer {
                     self.read_char();
                     self.read_char();
                     Token {
-                        token_type: TokenType::Decrement, literal: "--".into(),
+                        token_type: TokenType::Decrement,
+                        literal: "--".into(),
                         span,
                     }
                 }
@@ -196,7 +197,8 @@ impl Lexer {
                     self.read_char();
                     self.read_char();
                     Token {
-                        token_type: TokenType::Increment, literal: "++".into(),
+                        token_type: TokenType::Increment,
+                        literal: "++".into(),
                         span,
                     }
                 }
@@ -214,15 +216,19 @@ impl Lexer {
                 } else {
                     self.single_with_span(TokenType::Colon, span)
                 }
-            },
+            }
             '=' => match self.peek_char() {
                 '=' => {
                     self.read_char();
                     self.read_char();
-                    Token {token_type: TokenType::Eq, literal: "==".into(), span}
+                    Token {
+                        token_type: TokenType::Eq,
+                        literal: "==".into(),
+                        span,
+                    }
                 }
-                _ => self.single_with_span(TokenType::Assign, span)
-            }
+                _ => self.single_with_span(TokenType::Assign, span),
+            },
             '!' => match self.peek_char() {
                 '=' => {
                     self.read_char();
@@ -233,7 +239,7 @@ impl Lexer {
                         span,
                     }
                 }
-                _ => self.single_with_span(TokenType::Shebang, span)
+                _ => self.single_with_span(TokenType::Shebang, span),
             },
             ',' => self.single_with_span(TokenType::Comma, span),
             '$' => self.single_with_span(TokenType::DollarSign, span),
@@ -246,9 +252,13 @@ impl Lexer {
                 '|' => {
                     self.read_char();
                     self.read_char();
-                    Token { token_type: TokenType::DoublePipe, literal: "||".into(), span }
+                    Token {
+                        token_type: TokenType::DoublePipe,
+                        literal: "||".into(),
+                        span,
+                    }
                 }
-                _ => self.single_with_span(TokenType::Pipe, span)
+                _ => self.single_with_span(TokenType::Pipe, span),
             },
             '^' => self.single_with_span(TokenType::Caret, span),
             '~' => self.single_with_span(TokenType::Tilde, span),
@@ -393,7 +403,11 @@ impl Lexer {
 
         let literal: String = self.input[start..self.position].iter().collect();
         Token {
-            token_type: if is_float { TokenType::Float } else { TokenType::Integer },
+            token_type: if is_float {
+                TokenType::Float
+            } else {
+                TokenType::Integer
+            },
             literal,
             span,
         }
@@ -719,8 +733,12 @@ mod tests {
         let tokens = collect_tokens(input);
 
         // Should have LBrace and RBrace as literals
-        let has_lbrace = tokens.iter().any(|t| t.token_type == TokenType::LBrace && t.literal == "{");
-        let has_rbrace = tokens.iter().any(|t| t.token_type == TokenType::RBrace && t.literal == "}");
+        let has_lbrace = tokens
+            .iter()
+            .any(|t| t.token_type == TokenType::LBrace && t.literal == "{");
+        let has_rbrace = tokens
+            .iter()
+            .any(|t| t.token_type == TokenType::RBrace && t.literal == "}");
         assert!(has_lbrace, "Should have literal LBrace");
         assert!(has_rbrace, "Should have literal RBrace");
     }
@@ -732,7 +750,10 @@ mod tests {
 
         // Colon at EOL should become LBrace
         let has_lbrace = tokens.iter().any(|t| t.token_type == TokenType::LBrace);
-        assert!(has_lbrace, "Colon at EOL should become LBrace in indent mode");
+        assert!(
+            has_lbrace,
+            "Colon at EOL should become LBrace in indent mode"
+        );
     }
 
     #[test]
@@ -750,11 +771,23 @@ mod tests {
         let input = "#[indent]\nouter:\n  inner:\n    x\n";
         let tokens = collect_tokens(input);
 
-        let lbrace_count = tokens.iter().filter(|t| t.token_type == TokenType::LBrace).count();
-        let rbrace_count = tokens.iter().filter(|t| t.token_type == TokenType::RBrace).count();
+        let lbrace_count = tokens
+            .iter()
+            .filter(|t| t.token_type == TokenType::LBrace)
+            .count();
+        let rbrace_count = tokens
+            .iter()
+            .filter(|t| t.token_type == TokenType::RBrace)
+            .count();
 
-        assert_eq!(lbrace_count, 2, "Should have 2 LBrace tokens for nested blocks");
-        assert_eq!(rbrace_count, 2, "Should have 2 RBrace tokens for nested blocks");
+        assert_eq!(
+            lbrace_count, 2,
+            "Should have 2 LBrace tokens for nested blocks"
+        );
+        assert_eq!(
+            rbrace_count, 2,
+            "Should have 2 RBrace tokens for nested blocks"
+        );
     }
 
     #[test]
@@ -763,7 +796,9 @@ mod tests {
         let tokens = collect_tokens(input);
 
         // Should not have Hash or the indent directive tokens
-        let has_hash_indent = tokens.iter().any(|t| t.literal == "#" || t.literal == "indent");
+        let has_hash_indent = tokens
+            .iter()
+            .any(|t| t.literal == "#" || t.literal == "indent");
         assert!(!has_hash_indent, "#[indent] directive should be stripped");
     }
 

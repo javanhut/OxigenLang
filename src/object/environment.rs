@@ -46,7 +46,13 @@ impl Environment {
         val
     }
 
-    pub fn set_typed(&mut self, name: String, val: Rc<Object>, type_name: String, immutable: bool) -> Rc<Object> {
+    pub fn set_typed(
+        &mut self,
+        name: String,
+        val: Rc<Object>,
+        type_name: String,
+        immutable: bool,
+    ) -> Rc<Object> {
         self.store.insert(name.clone(), Rc::clone(&val));
         self.type_constraints.insert(name.clone(), type_name);
         if immutable {
@@ -133,11 +139,19 @@ impl PatternRegistry {
         }
     }
 
-    pub fn register(&mut self, name: String, parameters: Vec<String>, condition: crate::ast::Expression) {
-        self.patterns.insert(name, PatternDef {
-            parameters,
-            condition,
-        });
+    pub fn register(
+        &mut self,
+        name: String,
+        parameters: Vec<String>,
+        condition: crate::ast::Expression,
+    ) {
+        self.patterns.insert(
+            name,
+            PatternDef {
+                parameters,
+                condition,
+            },
+        );
     }
 
     pub fn get(&self, name: &str) -> Option<&PatternDef> {

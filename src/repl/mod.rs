@@ -1,10 +1,10 @@
 use crate::evaluator::Evaluator;
 use crate::lexer::Lexer;
-use crate::object::environment::Environment;
 use crate::object::Object;
+use crate::object::environment::Environment;
 use crate::parser::Parser;
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 use std::cell::RefCell;
 use std::rc::Rc;
 

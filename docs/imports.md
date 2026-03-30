@@ -118,6 +118,7 @@ OxigenLang ships with the following standard library modules:
 | `random`   | Random number generation                             |
 | `path`     | File path manipulation                               |
 | `json`     | JSON parsing and serialization                       |
+| `toml`     | TOML parsing and file loading                        |
 | `net`      | HTTP client (GET, POST, PUT, DELETE, etc.)           |
 
 See the [Standard Library Reference](stdlib.md) for full details on each module.

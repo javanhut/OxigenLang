@@ -1,4 +1,7 @@
-use crate::ast::{ChooseArm, Expression, Identifier, ModulePath, OptionArm, Program, Statement, StringInterpPart, TypeAnnotation, TypedParam};
+use crate::ast::{
+    ChooseArm, Expression, Identifier, ModulePath, OptionArm, Program, Statement, StringInterpPart,
+    TypeAnnotation, TypedParam,
+};
 use crate::lexer::Lexer;
 use crate::token::{Span, Token, TokenType};
 use std::collections::HashMap;
@@ -72,7 +75,11 @@ pub struct Diagnostic {
 
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {} [{}:{}]", self.severity, self.message, self.span.line, self.span.column)?;
+        write!(
+            f,
+            "{}: {} [{}:{}]",
+            self.severity, self.message, self.span.line, self.span.column
+        )?;
         if let Some(ref hint) = self.suggestion {
             write!(f, "\n  hint: {}", hint)?;
         }
@@ -90,7 +97,11 @@ impl Diagnostic {
         }
     }
 
-    fn error_with_hint(span: Span, message: impl Into<String>, suggestion: impl Into<String>) -> Self {
+    fn error_with_hint(
+        span: Span,
+        message: impl Into<String>,
+        suggestion: impl Into<String>,
+    ) -> Self {
         Self {
             span,
             message: message.into(),
@@ -189,7 +200,6 @@ impl Parser {
         // Dot access
         p.register_infix(TokenType::FullStop, Parser::parse_dot_expression);
 
-
         p.next_token();
         p.next_token();
         p
@@ -200,7 +210,11 @@ impl Parser {
     }
 
     pub fn format_errors(&self) -> String {
-        let displayed: Vec<_> = self.errors.iter().map(|d| self.format_diagnostic(d)).collect();
+        let displayed: Vec<_> = self
+            .errors
+            .iter()
+            .map(|d| self.format_diagnostic(d))
+            .collect();
         if displayed.len() > 1 {
             let mut out = displayed[0].clone();
             // Show up to 3 additional errors, skip noise
@@ -210,7 +224,10 @@ impl Parser {
                 out.push_str(d);
             }
             if displayed.len() > 3 {
-                out.push_str(&format!("\n\n... and {} more error(s)", displayed.len() - 3));
+                out.push_str(&format!(
+                    "\n\n... and {} more error(s)",
+                    displayed.len() - 3
+                ));
             }
             out
         } else {
@@ -312,7 +329,10 @@ impl Parser {
         if !Self::is_type_name_token(&self.peek_token.token_type) {
             self.errors.push(Diagnostic::error_with_hint(
                 self.peek_token.span,
-                format!("expected type name after `<`, got {:?}", self.peek_token.literal),
+                format!(
+                    "expected type name after `<`, got {:?}",
+                    self.peek_token.literal
+                ),
                 "valid types: int, str, float, char, bool, array, byte, uint, tuple, map, set",
             ));
             return None;
@@ -335,7 +355,10 @@ impl Parser {
                     if !Self::is_type_name_token(&self.peek_token.token_type) {
                         self.errors.push(Diagnostic::error_with_hint(
                             self.peek_token.span,
-                            format!("expected type name in union, got {:?}", self.peek_token.literal),
+                            format!(
+                                "expected type name in union, got {:?}",
+                                self.peek_token.literal
+                            ),
                             "use `<TypeA || TypeB>` for union types",
                         ));
                         return None;
@@ -350,7 +373,10 @@ impl Parser {
                 _ => {
                     self.errors.push(Diagnostic::error_with_hint(
                         self.peek_token.span,
-                        format!("expected `>` or `||` in type annotation, got {:?}", self.peek_token.literal),
+                        format!(
+                            "expected `>` or `||` in type annotation, got {:?}",
+                            self.peek_token.literal
+                        ),
                         "close the type annotation with `>` or add `||` for a union type",
                     ));
                     return None;
@@ -502,7 +528,10 @@ impl Parser {
             if self.curr_token.token_type != TokenType::Ident {
                 self.errors.push(Diagnostic::error_with_hint(
                     self.curr_token.span,
-                    format!("expected identifier in unpack, got {:?}", self.curr_token.literal),
+                    format!(
+                        "expected identifier in unpack, got {:?}",
+                        self.curr_token.literal
+                    ),
                     "unpack syntax: x, y := [1, 2]",
                 ));
                 return None;
@@ -791,7 +820,10 @@ impl Parser {
                 _ => {
                     self.errors.push(Diagnostic::error(
                         self.curr_token.span,
-                        format!("unexpected token in string interpolation: {:?}", self.curr_token.literal),
+                        format!(
+                            "unexpected token in string interpolation: {:?}",
+                            self.curr_token.literal
+                        ),
                     ));
                     self.next_token();
                 }
@@ -838,7 +870,10 @@ impl Parser {
         if !Self::is_angle_effect_name_token(&self.curr_token) {
             self.errors.push(Diagnostic::error_with_hint(
                 self.curr_token.span,
-                format!("expected effect name after `<`, got {:?}", self.curr_token.literal),
+                format!(
+                    "expected effect name after `<`, got {:?}",
+                    self.curr_token.literal
+                ),
                 "valid effects: guard, fail, log, type, Error, Value",
             ));
             return None;
@@ -856,7 +891,10 @@ impl Parser {
             {
                 self.errors.push(Diagnostic::error(
                     self.curr_token.span,
-                    format!("expected effect filter name, got {:?}", self.curr_token.literal),
+                    format!(
+                        "expected effect filter name, got {:?}",
+                        self.curr_token.literal
+                    ),
                 ));
                 return None;
             }
@@ -939,7 +977,10 @@ impl Parser {
             if self.curr_token.token_type != TokenType::Ident {
                 self.errors.push(Diagnostic::error_with_hint(
                     self.curr_token.span,
-                    format!("expected tag name after <log<, got {:?}", self.curr_token.literal),
+                    format!(
+                        "expected tag name after <log<, got {:?}",
+                        self.curr_token.literal
+                    ),
                     "use like: <log<debug>>(\"message\")",
                 ));
                 return None;
@@ -1012,10 +1053,7 @@ impl Parser {
         })
     }
 
-    fn parse_angle_effect_with_target(
-        &mut self,
-        value: Option<Expression>,
-    ) -> Option<Expression> {
+    fn parse_angle_effect_with_target(&mut self, value: Option<Expression>) -> Option<Expression> {
         let (token, effect_name, filter) = self.parse_effect_header()?;
 
         match effect_name.as_str() {
@@ -1042,7 +1080,10 @@ impl Parser {
                     if self.curr_token.token_type != TokenType::Ident {
                         self.errors.push(Diagnostic::error_with_hint(
                             self.curr_token.span,
-                            format!("expected identifier after <guard>, got {:?}", self.curr_token.literal),
+                            format!(
+                                "expected identifier after <guard>, got {:?}",
+                                self.curr_token.literal
+                            ),
                             "use like: value <guard> err -> fallback",
                         ));
                         return None;
@@ -1345,14 +1386,13 @@ impl Parser {
         };
 
         // Check for '?' (optional marker) — '?' is lexed as Illegal
-        let optional = if self.peek_token.token_type == TokenType::Illegal
-            && self.peek_token.literal == "?"
-        {
-            self.next_token(); // consume '?'
-            true
-        } else {
-            false
-        };
+        let optional =
+            if self.peek_token.token_type == TokenType::Illegal && self.peek_token.literal == "?" {
+                self.next_token(); // consume '?'
+                true
+            } else {
+                false
+            };
 
         let type_ann = if self.peek_token.token_type == TokenType::Lt {
             self.next_token(); // move to '<'
@@ -1375,7 +1415,10 @@ impl Parser {
         if *seen_optional && !has_default {
             self.errors.push(Diagnostic::error_with_hint(
                 ident.token.span,
-                format!("required parameter '{}' cannot follow optional/default parameters", ident.value),
+                format!(
+                    "required parameter '{}' cannot follow optional/default parameters",
+                    ident.value
+                ),
                 "move required parameters before optional ones",
             ));
             return None;
@@ -1384,7 +1427,12 @@ impl Parser {
             *seen_optional = true;
         }
 
-        Some(TypedParam { ident, type_ann, default, optional })
+        Some(TypedParam {
+            ident,
+            type_ann,
+            default,
+            optional,
+        })
     }
 
     fn parse_named_function_statement(&mut self) -> Option<Statement> {
@@ -1530,7 +1578,10 @@ impl Parser {
         if self.curr_token.token_type != TokenType::Ident {
             self.errors.push(Diagnostic::error_with_hint(
                 self.curr_token.span,
-                format!("expected identifier after guard, got {:?}", self.curr_token.literal),
+                format!(
+                    "expected identifier after guard, got {:?}",
+                    self.curr_token.literal
+                ),
                 "use like: value guard err -> fallback",
             ));
             return None;
@@ -2449,7 +2500,10 @@ impl Parser {
             if self.curr_token.token_type != TokenType::Function {
                 self.errors.push(Diagnostic::error_with_hint(
                     self.curr_token.span,
-                    format!("expected `fun` inside contains block, got {:?}", self.curr_token.literal),
+                    format!(
+                        "expected `fun` inside contains block, got {:?}",
+                        self.curr_token.literal
+                    ),
                     "contains blocks should only contain method definitions: fun name() { ... }",
                 ));
                 return None;
@@ -2522,15 +2576,24 @@ impl Parser {
             if brace_depth == 0 {
                 // Statement-starting keywords at the top level are sync points
                 match self.curr_token.token_type {
-                    TokenType::Each | TokenType::Repeat | TokenType::Pattern
-                    | TokenType::Choose | TokenType::Struct | TokenType::Function
-                    | TokenType::Give | TokenType::Introduce | TokenType::Unless
+                    TokenType::Each
+                    | TokenType::Repeat
+                    | TokenType::Pattern
+                    | TokenType::Choose
+                    | TokenType::Struct
+                    | TokenType::Function
+                    | TokenType::Give
+                    | TokenType::Introduce
+                    | TokenType::Unless
                     | TokenType::OptionKw => break,
                     _ => {}
                 }
                 // A newline followed by a non-trivial token at depth 0 is likely a new statement
                 if self.curr_token.token_type == TokenType::Newline
-                    && !matches!(self.peek_token.token_type, TokenType::Newline | TokenType::Eof)
+                    && !matches!(
+                        self.peek_token.token_type,
+                        TokenType::Newline | TokenType::Eof
+                    )
                 {
                     self.next_token();
                     break;
@@ -2695,8 +2758,12 @@ impl Parser {
             TokenType::Lt => {
                 // Expected '<' for a type annotation but got something else
                 match got.token_type {
-                    TokenType::Contains | TokenType::Function | TokenType::Struct
-                    | TokenType::Each | TokenType::Repeat | TokenType::Introduce => {
+                    TokenType::Contains
+                    | TokenType::Function
+                    | TokenType::Struct
+                    | TokenType::Each
+                    | TokenType::Repeat
+                    | TokenType::Introduce => {
                         Some("you may be missing a closing `}` on a previous block".to_string())
                     }
                     TokenType::Assign => {
@@ -2705,7 +2772,9 @@ impl Parser {
                     _ => Some("expected `<type>` annotation, e.g. `<str>`, `<int>`".to_string()),
                 }
             }
-            TokenType::Gt => Some("you may be missing a closing `>` on a type annotation".to_string()),
+            TokenType::Gt => {
+                Some("you may be missing a closing `>` on a type annotation".to_string())
+            }
             TokenType::Colon => {
                 if got.token_type == TokenType::Assign {
                     Some("use `:` not `=` to separate key from value".to_string())
@@ -3092,7 +3161,11 @@ mod tests {
                 condition, body, ..
             } => {
                 match condition {
-                    Expression::Prefix { token, operator, right } => {
+                    Expression::Prefix {
+                        token,
+                        operator,
+                        right,
+                    } => {
                         assert_eq!(token.token_type, TokenType::Not);
                         assert_eq!(token.literal, "not");
                         assert_eq!(operator, "not");
@@ -3176,7 +3249,9 @@ mod tests {
                 ..
             } => {
                 match condition {
-                    Expression::Prefix { token, operator, .. } => {
+                    Expression::Prefix {
+                        token, operator, ..
+                    } => {
                         assert_eq!(token.token_type, TokenType::Not);
                         assert_eq!(token.literal, "not");
                         assert_eq!(operator, "not");
@@ -3203,7 +3278,10 @@ mod tests {
                 assert!(matches!(&consequence[0], Statement::Assign { .. }));
                 assert!(alternative.is_none());
             }
-            other => panic!("Expected if statement (desugared when guard), got {:?}", other),
+            other => panic!(
+                "Expected if statement (desugared when guard), got {:?}",
+                other
+            ),
         }
     }
 
@@ -3218,7 +3296,9 @@ mod tests {
                 ..
             } => {
                 match condition {
-                    Expression::Prefix { token, operator, .. } => {
+                    Expression::Prefix {
+                        token, operator, ..
+                    } => {
                         assert_eq!(token.token_type, TokenType::Not);
                         assert_eq!(token.literal, "not");
                         assert_eq!(operator, "not");
@@ -3229,7 +3309,10 @@ mod tests {
                 assert!(matches!(&consequence[0], Statement::Assign { .. }));
                 assert!(alternative.is_none());
             }
-            other => panic!("Expected if statement (desugared postfix unless), got {:?}", other),
+            other => panic!(
+                "Expected if statement (desugared postfix unless), got {:?}",
+                other
+            ),
         }
     }
 
@@ -3238,12 +3321,13 @@ mod tests {
         let program = parse_ok("result := name.upper() unless name == None then \"Guest\"");
         match &program.statements[0] {
             Statement::Let {
-                value: Expression::Unless {
-                    consequence,
-                    condition,
-                    alternative,
-                    ..
-                },
+                value:
+                    Expression::Unless {
+                        consequence,
+                        condition,
+                        alternative,
+                        ..
+                    },
                 ..
             } => {
                 assert!(matches!(consequence.as_ref(), Expression::Call { .. }));
@@ -3265,12 +3349,13 @@ mod tests {
         let program = parse_ok("value := read(path) guard err -> \"Guest\"");
         match &program.statements[0] {
             Statement::Let {
-                value: Expression::Guard {
-                    value,
-                    binding,
-                    fallback,
-                    ..
-                },
+                value:
+                    Expression::Guard {
+                        value,
+                        binding,
+                        fallback,
+                        ..
+                    },
                 ..
             } => {
                 assert_eq!(binding.value, "err");
@@ -3303,7 +3388,12 @@ mod tests {
     fn test_parse_log_with_message() {
         let program = parse_ok("<log>(\"hello world\")");
         match &program.statements[0] {
-            Statement::Expr(Expression::Log { tag, sub_tag, message, .. }) => {
+            Statement::Expr(Expression::Log {
+                tag,
+                sub_tag,
+                message,
+                ..
+            }) => {
                 assert_eq!(*tag, None);
                 assert_eq!(*sub_tag, None);
                 assert!(message.is_some());
@@ -3316,7 +3406,12 @@ mod tests {
     fn test_parse_log_with_tag() {
         let program = parse_ok("<log<debug>>(\"info\")");
         match &program.statements[0] {
-            Statement::Expr(Expression::Log { tag, sub_tag, message, .. }) => {
+            Statement::Expr(Expression::Log {
+                tag,
+                sub_tag,
+                message,
+                ..
+            }) => {
                 assert_eq!(tag.as_deref(), Some("debug"));
                 assert_eq!(*sub_tag, None);
                 assert!(message.is_some());
@@ -3329,7 +3424,12 @@ mod tests {
     fn test_parse_log_with_error_tag() {
         let program = parse_ok("<log<Error>>(\"failure\")");
         match &program.statements[0] {
-            Statement::Expr(Expression::Log { tag, sub_tag, message, .. }) => {
+            Statement::Expr(Expression::Log {
+                tag,
+                sub_tag,
+                message,
+                ..
+            }) => {
                 assert_eq!(tag.as_deref(), Some("Error"));
                 assert_eq!(*sub_tag, None);
                 assert!(message.is_some());
@@ -3342,7 +3442,12 @@ mod tests {
     fn test_parse_log_with_nested_tags() {
         let program = parse_ok("<log<Error<network>>>(\"connection lost\")");
         match &program.statements[0] {
-            Statement::Expr(Expression::Log { tag, sub_tag, message, .. }) => {
+            Statement::Expr(Expression::Log {
+                tag,
+                sub_tag,
+                message,
+                ..
+            }) => {
                 assert_eq!(tag.as_deref(), Some("Error"));
                 assert_eq!(sub_tag.as_deref(), Some("network"));
                 assert!(message.is_some());
@@ -3355,7 +3460,12 @@ mod tests {
     fn test_parse_log_no_parens() {
         let program = parse_ok("<log<Error>>");
         match &program.statements[0] {
-            Statement::Expr(Expression::Log { tag, sub_tag, message, .. }) => {
+            Statement::Expr(Expression::Log {
+                tag,
+                sub_tag,
+                message,
+                ..
+            }) => {
                 assert_eq!(tag.as_deref(), Some("Error"));
                 assert_eq!(*sub_tag, None);
                 assert!(message.is_none());
@@ -3368,7 +3478,12 @@ mod tests {
     fn test_parse_log_empty_parens() {
         let program = parse_ok("<log<custom_tag>>()");
         match &program.statements[0] {
-            Statement::Expr(Expression::Log { tag, sub_tag, message, .. }) => {
+            Statement::Expr(Expression::Log {
+                tag,
+                sub_tag,
+                message,
+                ..
+            }) => {
                 assert_eq!(tag.as_deref(), Some("custom_tag"));
                 assert_eq!(*sub_tag, None);
                 assert!(message.is_none());
@@ -3381,12 +3496,20 @@ mod tests {
     fn test_parse_log_nested_no_parens() {
         let program = parse_ok("<log<Error<custom_error>>>");
         match &program.statements[0] {
-            Statement::Expr(Expression::Log { tag, sub_tag, message, .. }) => {
+            Statement::Expr(Expression::Log {
+                tag,
+                sub_tag,
+                message,
+                ..
+            }) => {
                 assert_eq!(tag.as_deref(), Some("Error"));
                 assert_eq!(sub_tag.as_deref(), Some("custom_error"));
                 assert!(message.is_none());
             }
-            other => panic!("Expected log expression with nested tags no parens, got {:?}", other),
+            other => panic!(
+                "Expected log expression with nested tags no parens, got {:?}",
+                other
+            ),
         }
     }
 
@@ -3443,7 +3566,11 @@ mod tests {
                 ..
             } => {
                 match condition {
-                    Expression::Prefix { token, operator, right } => {
+                    Expression::Prefix {
+                        token,
+                        operator,
+                        right,
+                    } => {
                         assert_eq!(token.token_type, TokenType::Not);
                         assert_eq!(operator, "not");
                         match right.as_ref() {
@@ -3493,7 +3620,12 @@ mod tests {
     fn test_parse_typed_let_strict() {
         let program = parse_ok("x <int> = 10");
         match &program.statements[0] {
-            Statement::TypedLet { name, type_ann, walrus, .. } => {
+            Statement::TypedLet {
+                name,
+                type_ann,
+                walrus,
+                ..
+            } => {
                 assert_eq!(name.value, "x");
                 assert_eq!(*type_ann, TypeAnnotation::Int);
                 assert!(!walrus);
@@ -3506,7 +3638,12 @@ mod tests {
     fn test_parse_typed_let_walrus() {
         let program = parse_ok("x <str> := \"hi\"");
         match &program.statements[0] {
-            Statement::TypedLet { name, type_ann, walrus, .. } => {
+            Statement::TypedLet {
+                name,
+                type_ann,
+                walrus,
+                ..
+            } => {
                 assert_eq!(name.value, "x");
                 assert_eq!(*type_ann, TypeAnnotation::Str);
                 assert!(walrus);
@@ -3570,7 +3707,9 @@ mod tests {
         let program = parse_ok("fun(a, b) { a + b }");
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0] {
-            Statement::Expr(Expression::FunctionLiteral { parameters, body, .. }) => {
+            Statement::Expr(Expression::FunctionLiteral {
+                parameters, body, ..
+            }) => {
                 assert_eq!(parameters.len(), 2);
                 assert_eq!(parameters[0].ident.value, "a");
                 assert_eq!(parameters[1].ident.value, "b");
@@ -3588,7 +3727,9 @@ mod tests {
             Statement::Let { name, value } => {
                 assert_eq!(name.value, "add");
                 match value {
-                    Expression::FunctionLiteral { parameters, body, .. } => {
+                    Expression::FunctionLiteral {
+                        parameters, body, ..
+                    } => {
                         assert_eq!(parameters.len(), 2);
                         assert_eq!(parameters[0].ident.value, "a");
                         assert_eq!(parameters[1].ident.value, "b");
@@ -3616,12 +3757,10 @@ mod tests {
     fn test_parse_give_statement() {
         let program = parse_ok("give 42");
         match &program.statements[0] {
-            Statement::Give { value, .. } => {
-                match value {
-                    Expression::Int { value, .. } => assert_eq!(*value, 42),
-                    other => panic!("Expected Int, got {:?}", other),
-                }
-            }
+            Statement::Give { value, .. } => match value {
+                Expression::Int { value, .. } => assert_eq!(*value, 42),
+                other => panic!("Expected Int, got {:?}", other),
+            },
             other => panic!("Expected Give statement, got {:?}", other),
         }
     }
@@ -3649,8 +3788,8 @@ mod tests {
     #[test]
     fn test_parser_errors() {
         let tests = vec![
-            ("x :=", "unexpected token"),              // Missing value after :=
-            ("each x in { }", "expected"),             // {} parses as empty map, then block '{' is missing
+            ("x :=", "unexpected token"),  // Missing value after :=
+            ("each x in { }", "expected"), // {} parses as empty map, then block '{' is missing
         ];
 
         for (input, expected_error) in tests {
@@ -3674,7 +3813,12 @@ mod tests {
     fn test_parse_struct_definition() {
         let program = parse_ok("struct Person {\n    name <str>\n    age <int>\n}");
         match &program.statements[0] {
-            Statement::StructDef { name, parent, fields, .. } => {
+            Statement::StructDef {
+                name,
+                parent,
+                fields,
+                ..
+            } => {
                 assert_eq!(name.value, "Person");
                 assert!(parent.is_none());
                 assert_eq!(fields.len(), 2);
@@ -3691,7 +3835,12 @@ mod tests {
     fn test_parse_struct_with_parent() {
         let program = parse_ok("struct American(Person) {\n    nationality <str>\n}");
         match &program.statements[0] {
-            Statement::StructDef { name, parent, fields, .. } => {
+            Statement::StructDef {
+                name,
+                parent,
+                fields,
+                ..
+            } => {
                 assert_eq!(name.value, "American");
                 assert!(parent.is_some());
                 assert_eq!(parent.as_ref().unwrap().value, "Person");
@@ -3706,7 +3855,11 @@ mod tests {
     fn test_parse_contains_def() {
         let program = parse_ok("Person contains {\n    fun greet() { 42 }\n}");
         match &program.statements[0] {
-            Statement::ContainsDef { struct_name, methods, .. } => {
+            Statement::ContainsDef {
+                struct_name,
+                methods,
+                ..
+            } => {
                 assert_eq!(struct_name.value, "Person");
                 assert_eq!(methods.len(), 1);
                 assert_eq!(methods[0].0.value, "greet");
@@ -3734,7 +3887,12 @@ mod tests {
     fn test_parse_dot_assign() {
         let program = parse_ok("p.name = \"Jane\"");
         match &program.statements[0] {
-            Statement::DotAssign { object, field, value, .. } => {
+            Statement::DotAssign {
+                object,
+                field,
+                value,
+                ..
+            } => {
                 match object {
                     Expression::Ident(ident) => assert_eq!(ident.value, "p"),
                     _ => panic!("Expected Ident as object"),
@@ -3753,7 +3911,11 @@ mod tests {
     fn test_parse_struct_literal() {
         let program = parse_ok("Person { name: \"Alice\", age: 30 }");
         match &program.statements[0] {
-            Statement::Expr(Expression::StructLiteral { struct_name, field_values, .. }) => {
+            Statement::Expr(Expression::StructLiteral {
+                struct_name,
+                field_values,
+                ..
+            }) => {
                 assert_eq!(struct_name, "Person");
                 assert_eq!(field_values.len(), 2);
                 assert_eq!(field_values[0].0, "name");
@@ -3865,18 +4027,16 @@ mod tests {
     fn test_parse_typed_function_parameters() {
         let program = parse_ok("fun f(x <int>, y) { x }");
         match &program.statements[0] {
-            Statement::Let { value, .. } => {
-                match value {
-                    Expression::FunctionLiteral { parameters, .. } => {
-                        assert_eq!(parameters.len(), 2);
-                        assert_eq!(parameters[0].ident.value, "x");
-                        assert_eq!(parameters[0].type_ann, Some(TypeAnnotation::Int));
-                        assert_eq!(parameters[1].ident.value, "y");
-                        assert_eq!(parameters[1].type_ann, None);
-                    }
-                    other => panic!("Expected FunctionLiteral, got {:?}", other),
+            Statement::Let { value, .. } => match value {
+                Expression::FunctionLiteral { parameters, .. } => {
+                    assert_eq!(parameters.len(), 2);
+                    assert_eq!(parameters[0].ident.value, "x");
+                    assert_eq!(parameters[0].type_ann, Some(TypeAnnotation::Int));
+                    assert_eq!(parameters[1].ident.value, "y");
+                    assert_eq!(parameters[1].type_ann, None);
                 }
-            }
+                other => panic!("Expected FunctionLiteral, got {:?}", other),
+            },
             other => panic!("Expected Let, got {:?}", other),
         }
     }

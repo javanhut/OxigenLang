@@ -70,13 +70,14 @@ impl TypeAnnotation {
                 None => "ERROR".to_string(),
             },
             TypeAnnotation::ValueType => "VALUE".to_string(),
-            TypeAnnotation::Union(types) => {
-                types.iter().map(|t| t.type_name()).collect::<Vec<_>>().join(" || ")
-            }
+            TypeAnnotation::Union(types) => types
+                .iter()
+                .map(|t| t.type_name())
+                .collect::<Vec<_>>()
+                .join(" || "),
             TypeAnnotation::Struct(name) => name.clone(),
         }
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -86,7 +87,10 @@ pub struct Program {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
-    Let { name: Identifier, value: Expression },
+    Let {
+        name: Identifier,
+        value: Expression,
+    },
     Expr(Expression),
     Each {
         token: Token,

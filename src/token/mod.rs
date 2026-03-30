@@ -49,12 +49,12 @@ pub enum TokenType {
     BSlash,    // \
 
     // Bitwise Operators
-    LShift, // <<
-    RShift, // >>
-    Caret,  // ^
+    LShift,     // <<
+    RShift,     // >>
+    Caret,      // ^
     Pipe,       // |
     DoublePipe, // ||
-    Tilde,  // ~
+    Tilde,      // ~
 
     // Keywords
     If,
@@ -88,8 +88,8 @@ pub enum TokenType {
     From,
 
     // String interpolation
-    InterpStart,  // marks beginning of an interpolated string
-    InterpEnd,    // marks end of an interpolated string
+    InterpStart,     // marks beginning of an interpolated string
+    InterpEnd,       // marks end of an interpolated string
     InterpExprStart, // marks start of an interpolation expression {
     InterpExprEnd,   // marks end of an interpolation expression }
 }

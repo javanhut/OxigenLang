@@ -4,6 +4,7 @@ use crate::object::Object;
 use std::collections::HashMap;
 use std::fs;
 use std::rc::Rc;
+use toml::Value as TomlValue;
 
 pub fn get_builtins() -> HashMap<String, Rc<Object>> {
     let mut builtins: HashMap<String, Rc<Object>> = HashMap::new();
@@ -28,57 +29,186 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
     builtins.insert("uint".to_string(), Rc::new(Object::Builtin(builtin_uint)));
     builtins.insert("set".to_string(), Rc::new(Object::Builtin(builtin_set)));
     builtins.insert("keys".to_string(), Rc::new(Object::Builtin(builtin_keys)));
-    builtins.insert("values".to_string(), Rc::new(Object::Builtin(builtin_values)));
-    builtins.insert("insert".to_string(), Rc::new(Object::Builtin(builtin_insert)));
-    builtins.insert("remove".to_string(), Rc::new(Object::Builtin(builtin_remove)));
+    builtins.insert(
+        "values".to_string(),
+        Rc::new(Object::Builtin(builtin_values)),
+    );
+    builtins.insert(
+        "insert".to_string(),
+        Rc::new(Object::Builtin(builtin_insert)),
+    );
+    builtins.insert(
+        "remove".to_string(),
+        Rc::new(Object::Builtin(builtin_remove)),
+    );
     builtins.insert("has".to_string(), Rc::new(Object::Builtin(builtin_has)));
     builtins.insert("tuple".to_string(), Rc::new(Object::Builtin(builtin_tuple)));
     builtins.insert("error".to_string(), Rc::new(Object::Builtin(builtin_error)));
-    builtins.insert("is_value".to_string(), Rc::new(Object::Builtin(builtin_is_value)));
-    builtins.insert("is_error".to_string(), Rc::new(Object::Builtin(builtin_is_error)));
+    builtins.insert(
+        "is_value".to_string(),
+        Rc::new(Object::Builtin(builtin_is_value)),
+    );
+    builtins.insert(
+        "is_error".to_string(),
+        Rc::new(Object::Builtin(builtin_is_error)),
+    );
 
     // Internal builtins for stdlib
-    builtins.insert("__sqrt".to_string(), Rc::new(Object::Builtin(builtin__sqrt)));
-    builtins.insert("__floor".to_string(), Rc::new(Object::Builtin(builtin__floor)));
-    builtins.insert("__ceil".to_string(), Rc::new(Object::Builtin(builtin__ceil)));
-    builtins.insert("__round".to_string(), Rc::new(Object::Builtin(builtin__round)));
-    builtins.insert("__split".to_string(), Rc::new(Object::Builtin(builtin__split)));
-    builtins.insert("__join".to_string(), Rc::new(Object::Builtin(builtin__join)));
-    builtins.insert("__trim".to_string(), Rc::new(Object::Builtin(builtin__trim)));
-    builtins.insert("__strip".to_string(), Rc::new(Object::Builtin(builtin__strip)));
-    builtins.insert("__strip_left".to_string(), Rc::new(Object::Builtin(builtin__strip_left)));
-    builtins.insert("__strip_right".to_string(), Rc::new(Object::Builtin(builtin__strip_right)));
-    builtins.insert("__upper".to_string(), Rc::new(Object::Builtin(builtin__upper)));
-    builtins.insert("__lower".to_string(), Rc::new(Object::Builtin(builtin__lower)));
-    builtins.insert("__replace".to_string(), Rc::new(Object::Builtin(builtin__replace)));
-    builtins.insert("__starts_with".to_string(), Rc::new(Object::Builtin(builtin__starts_with)));
-    builtins.insert("__ends_with".to_string(), Rc::new(Object::Builtin(builtin__ends_with)));
-    builtins.insert("__contains_str".to_string(), Rc::new(Object::Builtin(builtin__contains_str)));
-    builtins.insert("__sort".to_string(), Rc::new(Object::Builtin(builtin__sort)));
-    builtins.insert("__read_file".to_string(), Rc::new(Object::Builtin(builtin__read_file)));
-    builtins.insert("__write_file".to_string(), Rc::new(Object::Builtin(builtin__write_file)));
-    builtins.insert("__append_file".to_string(), Rc::new(Object::Builtin(builtin__append_file)));
-    builtins.insert("__file_exists".to_string(), Rc::new(Object::Builtin(builtin__file_exists)));
-    builtins.insert("__input".to_string(), Rc::new(Object::Builtin(builtin__input)));
-    builtins.insert("__read_line".to_string(), Rc::new(Object::Builtin(builtin__read_line)));
+    builtins.insert(
+        "__sqrt".to_string(),
+        Rc::new(Object::Builtin(builtin__sqrt)),
+    );
+    builtins.insert(
+        "__floor".to_string(),
+        Rc::new(Object::Builtin(builtin__floor)),
+    );
+    builtins.insert(
+        "__ceil".to_string(),
+        Rc::new(Object::Builtin(builtin__ceil)),
+    );
+    builtins.insert(
+        "__round".to_string(),
+        Rc::new(Object::Builtin(builtin__round)),
+    );
+    builtins.insert(
+        "__split".to_string(),
+        Rc::new(Object::Builtin(builtin__split)),
+    );
+    builtins.insert(
+        "__join".to_string(),
+        Rc::new(Object::Builtin(builtin__join)),
+    );
+    builtins.insert(
+        "__trim".to_string(),
+        Rc::new(Object::Builtin(builtin__trim)),
+    );
+    builtins.insert(
+        "__strip".to_string(),
+        Rc::new(Object::Builtin(builtin__strip)),
+    );
+    builtins.insert(
+        "__strip_left".to_string(),
+        Rc::new(Object::Builtin(builtin__strip_left)),
+    );
+    builtins.insert(
+        "__strip_right".to_string(),
+        Rc::new(Object::Builtin(builtin__strip_right)),
+    );
+    builtins.insert(
+        "__upper".to_string(),
+        Rc::new(Object::Builtin(builtin__upper)),
+    );
+    builtins.insert(
+        "__lower".to_string(),
+        Rc::new(Object::Builtin(builtin__lower)),
+    );
+    builtins.insert(
+        "__replace".to_string(),
+        Rc::new(Object::Builtin(builtin__replace)),
+    );
+    builtins.insert(
+        "__starts_with".to_string(),
+        Rc::new(Object::Builtin(builtin__starts_with)),
+    );
+    builtins.insert(
+        "__ends_with".to_string(),
+        Rc::new(Object::Builtin(builtin__ends_with)),
+    );
+    builtins.insert(
+        "__contains_str".to_string(),
+        Rc::new(Object::Builtin(builtin__contains_str)),
+    );
+    builtins.insert(
+        "__sort".to_string(),
+        Rc::new(Object::Builtin(builtin__sort)),
+    );
+    builtins.insert(
+        "__read_file".to_string(),
+        Rc::new(Object::Builtin(builtin__read_file)),
+    );
+    builtins.insert(
+        "__write_file".to_string(),
+        Rc::new(Object::Builtin(builtin__write_file)),
+    );
+    builtins.insert(
+        "__append_file".to_string(),
+        Rc::new(Object::Builtin(builtin__append_file)),
+    );
+    builtins.insert(
+        "__file_exists".to_string(),
+        Rc::new(Object::Builtin(builtin__file_exists)),
+    );
+    builtins.insert(
+        "__input".to_string(),
+        Rc::new(Object::Builtin(builtin__input)),
+    );
+    builtins.insert(
+        "__read_line".to_string(),
+        Rc::new(Object::Builtin(builtin__read_line)),
+    );
 
     // OS builtins
-    builtins.insert("__exec".to_string(), Rc::new(Object::Builtin(builtin__exec)));
-    builtins.insert("__os_name".to_string(), Rc::new(Object::Builtin(builtin__os_name)));
-    builtins.insert("__os_arch".to_string(), Rc::new(Object::Builtin(builtin__os_arch)));
-    builtins.insert("__env_get".to_string(), Rc::new(Object::Builtin(builtin__env_get)));
-    builtins.insert("__env_set".to_string(), Rc::new(Object::Builtin(builtin__env_set)));
-    builtins.insert("__env_vars".to_string(), Rc::new(Object::Builtin(builtin__env_vars)));
+    builtins.insert(
+        "__exec".to_string(),
+        Rc::new(Object::Builtin(builtin__exec)),
+    );
+    builtins.insert(
+        "__os_name".to_string(),
+        Rc::new(Object::Builtin(builtin__os_name)),
+    );
+    builtins.insert(
+        "__os_arch".to_string(),
+        Rc::new(Object::Builtin(builtin__os_arch)),
+    );
+    builtins.insert(
+        "__env_get".to_string(),
+        Rc::new(Object::Builtin(builtin__env_get)),
+    );
+    builtins.insert(
+        "__env_set".to_string(),
+        Rc::new(Object::Builtin(builtin__env_set)),
+    );
+    builtins.insert(
+        "__env_vars".to_string(),
+        Rc::new(Object::Builtin(builtin__env_vars)),
+    );
     builtins.insert("__cwd".to_string(), Rc::new(Object::Builtin(builtin__cwd)));
-    builtins.insert("__chdir".to_string(), Rc::new(Object::Builtin(builtin__chdir)));
-    builtins.insert("__list_dir".to_string(), Rc::new(Object::Builtin(builtin__list_dir)));
-    builtins.insert("__walk_dir".to_string(), Rc::new(Object::Builtin(builtin__walk_dir)));
-    builtins.insert("__mkdir".to_string(), Rc::new(Object::Builtin(builtin__mkdir)));
-    builtins.insert("__rmdir".to_string(), Rc::new(Object::Builtin(builtin__rmdir)));
-    builtins.insert("__remove".to_string(), Rc::new(Object::Builtin(builtin__remove_file)));
-    builtins.insert("__is_dir".to_string(), Rc::new(Object::Builtin(builtin__is_dir)));
-    builtins.insert("__is_file".to_string(), Rc::new(Object::Builtin(builtin__is_file)));
-    builtins.insert("__exit".to_string(), Rc::new(Object::Builtin(builtin__exit)));
+    builtins.insert(
+        "__chdir".to_string(),
+        Rc::new(Object::Builtin(builtin__chdir)),
+    );
+    builtins.insert(
+        "__list_dir".to_string(),
+        Rc::new(Object::Builtin(builtin__list_dir)),
+    );
+    builtins.insert(
+        "__walk_dir".to_string(),
+        Rc::new(Object::Builtin(builtin__walk_dir)),
+    );
+    builtins.insert(
+        "__mkdir".to_string(),
+        Rc::new(Object::Builtin(builtin__mkdir)),
+    );
+    builtins.insert(
+        "__rmdir".to_string(),
+        Rc::new(Object::Builtin(builtin__rmdir)),
+    );
+    builtins.insert(
+        "__remove".to_string(),
+        Rc::new(Object::Builtin(builtin__remove_file)),
+    );
+    builtins.insert(
+        "__is_dir".to_string(),
+        Rc::new(Object::Builtin(builtin__is_dir)),
+    );
+    builtins.insert(
+        "__is_file".to_string(),
+        Rc::new(Object::Builtin(builtin__is_file)),
+    );
+    builtins.insert(
+        "__exit".to_string(),
+        Rc::new(Object::Builtin(builtin__exit)),
+    );
     builtins.insert("__pid".to_string(), Rc::new(Object::Builtin(builtin__pid)));
 
     // Type conversion builtins
@@ -86,30 +216,82 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
     builtins.insert("float".to_string(), Rc::new(Object::Builtin(builtin_float)));
 
     // Time builtins
-    builtins.insert("__time_now".to_string(), Rc::new(Object::Builtin(builtin__time_now)));
-    builtins.insert("__time_now_ms".to_string(), Rc::new(Object::Builtin(builtin__time_now_ms)));
-    builtins.insert("__time_sleep".to_string(), Rc::new(Object::Builtin(builtin__time_sleep)));
-    builtins.insert("__time_monotonic".to_string(), Rc::new(Object::Builtin(builtin__time_monotonic)));
+    builtins.insert(
+        "__time_now".to_string(),
+        Rc::new(Object::Builtin(builtin__time_now)),
+    );
+    builtins.insert(
+        "__time_now_ms".to_string(),
+        Rc::new(Object::Builtin(builtin__time_now_ms)),
+    );
+    builtins.insert(
+        "__time_sleep".to_string(),
+        Rc::new(Object::Builtin(builtin__time_sleep)),
+    );
+    builtins.insert(
+        "__time_monotonic".to_string(),
+        Rc::new(Object::Builtin(builtin__time_monotonic)),
+    );
 
     // Random builtins
-    builtins.insert("__rand_int".to_string(), Rc::new(Object::Builtin(builtin__rand_int)));
-    builtins.insert("__rand_float".to_string(), Rc::new(Object::Builtin(builtin__rand_float)));
-    builtins.insert("__rand_seed".to_string(), Rc::new(Object::Builtin(builtin__rand_seed)));
+    builtins.insert(
+        "__rand_int".to_string(),
+        Rc::new(Object::Builtin(builtin__rand_int)),
+    );
+    builtins.insert(
+        "__rand_float".to_string(),
+        Rc::new(Object::Builtin(builtin__rand_float)),
+    );
+    builtins.insert(
+        "__rand_seed".to_string(),
+        Rc::new(Object::Builtin(builtin__rand_seed)),
+    );
 
     // Path builtins
-    builtins.insert("__path_join".to_string(), Rc::new(Object::Builtin(builtin__path_join)));
-    builtins.insert("__path_ext".to_string(), Rc::new(Object::Builtin(builtin__path_ext)));
-    builtins.insert("__path_filename".to_string(), Rc::new(Object::Builtin(builtin__path_filename)));
-    builtins.insert("__path_parent".to_string(), Rc::new(Object::Builtin(builtin__path_parent)));
-    builtins.insert("__path_stem".to_string(), Rc::new(Object::Builtin(builtin__path_stem)));
-    builtins.insert("__path_is_absolute".to_string(), Rc::new(Object::Builtin(builtin__path_is_absolute)));
+    builtins.insert(
+        "__path_join".to_string(),
+        Rc::new(Object::Builtin(builtin__path_join)),
+    );
+    builtins.insert(
+        "__path_ext".to_string(),
+        Rc::new(Object::Builtin(builtin__path_ext)),
+    );
+    builtins.insert(
+        "__path_filename".to_string(),
+        Rc::new(Object::Builtin(builtin__path_filename)),
+    );
+    builtins.insert(
+        "__path_parent".to_string(),
+        Rc::new(Object::Builtin(builtin__path_parent)),
+    );
+    builtins.insert(
+        "__path_stem".to_string(),
+        Rc::new(Object::Builtin(builtin__path_stem)),
+    );
+    builtins.insert(
+        "__path_is_absolute".to_string(),
+        Rc::new(Object::Builtin(builtin__path_is_absolute)),
+    );
 
     // JSON builtins
-    builtins.insert("__json_parse".to_string(), Rc::new(Object::Builtin(builtin__json_parse)));
-    builtins.insert("__json_stringify".to_string(), Rc::new(Object::Builtin(builtin__json_stringify)));
+    builtins.insert(
+        "__json_parse".to_string(),
+        Rc::new(Object::Builtin(builtin__json_parse)),
+    );
+    builtins.insert(
+        "__json_stringify".to_string(),
+        Rc::new(Object::Builtin(builtin__json_stringify)),
+    );
+    builtins.insert(
+        "__toml_parse".to_string(),
+        Rc::new(Object::Builtin(builtin__toml_parse)),
+    );
 
     // HTTP builtins
-    builtins.insert("__http_request".to_string(), Rc::new(Object::Builtin(builtin__http_request)));
+    builtins.insert(
+        "__http_request".to_string(),
+        Rc::new(Object::Builtin(builtin__http_request)),
+    );
 
     builtins
 }
@@ -268,7 +450,10 @@ fn builtin_is_value(args: Vec<Rc<Object>>) -> Rc<Object> {
             args.len()
         )));
     }
-    Rc::new(Object::Boolean(matches!(args[0].as_ref(), Object::Value(_))))
+    Rc::new(Object::Boolean(matches!(
+        args[0].as_ref(),
+        Object::Value(_)
+    )))
 }
 
 fn builtin_is_error(args: Vec<Rc<Object>>) -> Rc<Object> {
@@ -409,21 +594,28 @@ fn builtin_byte(args: Vec<Rc<Object>>) -> Rc<Object> {
         Object::Byte(_) => Rc::clone(&args[0]),
         Object::Integer(n) => {
             if *n < 0 || *n > 255 {
-                Rc::new(Object::Error(format!("byte() argument out of range (0-255): {}", n)))
+                Rc::new(Object::Error(format!(
+                    "byte() argument out of range (0-255): {}",
+                    n
+                )))
             } else {
                 Rc::new(Object::Byte(*n as u8))
             }
         }
         Object::Uint(n) => {
             if *n > 255 {
-                Rc::new(Object::Error(format!("byte() argument out of range (0-255): {}", n)))
+                Rc::new(Object::Error(format!(
+                    "byte() argument out of range (0-255): {}",
+                    n
+                )))
             } else {
                 Rc::new(Object::Byte(*n as u8))
             }
         }
         Object::Char(c) => Rc::new(Object::Byte(*c as u8)),
         obj => Rc::new(Object::Error(format!(
-            "cannot convert {} to BYTE", obj.type_name()
+            "cannot convert {} to BYTE",
+            obj.type_name()
         ))),
     }
 }
@@ -439,7 +631,10 @@ fn builtin_uint(args: Vec<Rc<Object>>) -> Rc<Object> {
         Object::Uint(_) => Rc::clone(&args[0]),
         Object::Integer(n) => {
             if *n < 0 {
-                Rc::new(Object::Error(format!("uint() cannot convert negative: {}", n)))
+                Rc::new(Object::Error(format!(
+                    "uint() cannot convert negative: {}",
+                    n
+                )))
             } else {
                 Rc::new(Object::Uint(*n as u64))
             }
@@ -447,7 +642,10 @@ fn builtin_uint(args: Vec<Rc<Object>>) -> Rc<Object> {
         Object::Byte(n) => Rc::new(Object::Uint(*n as u64)),
         Object::Float(f) => {
             if *f < 0.0 {
-                Rc::new(Object::Error(format!("uint() cannot convert negative: {}", f)))
+                Rc::new(Object::Error(format!(
+                    "uint() cannot convert negative: {}",
+                    f
+                )))
             } else {
                 Rc::new(Object::Uint(*f as u64))
             }
@@ -457,7 +655,8 @@ fn builtin_uint(args: Vec<Rc<Object>>) -> Rc<Object> {
             Err(_) => Rc::new(Object::Error(format!("cannot convert \"{}\" to UINT", s))),
         },
         obj => Rc::new(Object::Error(format!(
-            "cannot convert {} to UINT", obj.type_name()
+            "cannot convert {} to UINT",
+            obj.type_name()
         ))),
     }
 }
@@ -489,7 +688,8 @@ fn builtin_keys(args: Vec<Rc<Object>>) -> Rc<Object> {
             Rc::new(Object::Array(keys))
         }
         obj => Rc::new(Object::Error(format!(
-            "argument to `keys` must be MAP, got {}", obj.type_name()
+            "argument to `keys` must be MAP, got {}",
+            obj.type_name()
         ))),
     }
 }
@@ -507,7 +707,8 @@ fn builtin_values(args: Vec<Rc<Object>>) -> Rc<Object> {
             Rc::new(Object::Array(vals))
         }
         obj => Rc::new(Object::Error(format!(
-            "argument to `values` must be MAP, got {}", obj.type_name()
+            "argument to `values` must be MAP, got {}",
+            obj.type_name()
         ))),
     }
 }
@@ -533,7 +734,8 @@ fn builtin_insert(args: Vec<Rc<Object>>) -> Rc<Object> {
             Rc::new(Object::Map(new_entries))
         }
         obj => Rc::new(Object::Error(format!(
-            "argument to `insert` must be MAP, got {}", obj.type_name()
+            "argument to `insert` must be MAP, got {}",
+            obj.type_name()
         ))),
     }
 }
@@ -548,22 +750,17 @@ fn builtin_remove(args: Vec<Rc<Object>>) -> Rc<Object> {
     match args[0].as_ref() {
         Object::Map(entries) => {
             let key = &args[1];
-            let new_entries: Vec<_> = entries.iter()
-                .filter(|(k, _)| k != key)
-                .cloned()
-                .collect();
+            let new_entries: Vec<_> = entries.iter().filter(|(k, _)| k != key).cloned().collect();
             Rc::new(Object::Map(new_entries))
         }
         Object::Set(elements) => {
             let val = &args[1];
-            let new_elements: Vec<_> = elements.iter()
-                .filter(|e| e != &val)
-                .cloned()
-                .collect();
+            let new_elements: Vec<_> = elements.iter().filter(|e| e != &val).cloned().collect();
             Rc::new(Object::Set(new_elements))
         }
         obj => Rc::new(Object::Error(format!(
-            "argument to `remove` must be MAP or SET, got {}", obj.type_name()
+            "argument to `remove` must be MAP or SET, got {}",
+            obj.type_name()
         ))),
     }
 }
@@ -582,7 +779,8 @@ fn builtin_has(args: Vec<Rc<Object>>) -> Rc<Object> {
         Object::Map(entries) => Rc::new(Object::Boolean(entries.iter().any(|(k, _)| k == val))),
         Object::Tuple(elements) => Rc::new(Object::Boolean(elements.iter().any(|e| e == val))),
         obj => Rc::new(Object::Error(format!(
-            "argument to `has` must be a collection, got {}", obj.type_name()
+            "argument to `has` must be a collection, got {}",
+            obj.type_name()
         ))),
     }
 }
@@ -599,85 +797,129 @@ fn to_f64(obj: &Object) -> Option<f64> {
 
 fn builtin__sqrt(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__sqrt: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__sqrt: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match to_f64(&args[0]) {
         Some(n) => Rc::new(Object::Float(n.sqrt())),
-        None => Rc::new(Object::Error(format!("__sqrt: expected number, got {}", args[0].type_name()))),
+        None => Rc::new(Object::Error(format!(
+            "__sqrt: expected number, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__floor(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__floor: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__floor: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match to_f64(&args[0]) {
         Some(n) => Rc::new(Object::Integer(n.floor() as i64)),
-        None => Rc::new(Object::Error(format!("__floor: expected number, got {}", args[0].type_name()))),
+        None => Rc::new(Object::Error(format!(
+            "__floor: expected number, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__ceil(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__ceil: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__ceil: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match to_f64(&args[0]) {
         Some(n) => Rc::new(Object::Integer(n.ceil() as i64)),
-        None => Rc::new(Object::Error(format!("__ceil: expected number, got {}", args[0].type_name()))),
+        None => Rc::new(Object::Error(format!(
+            "__ceil: expected number, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__round(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__round: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__round: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match to_f64(&args[0]) {
         Some(n) => Rc::new(Object::Integer(n.round() as i64)),
-        None => Rc::new(Object::Error(format!("__round: expected number, got {}", args[0].type_name()))),
+        None => Rc::new(Object::Error(format!(
+            "__round: expected number, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__split(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 2 {
-        return Rc::new(Object::Error(format!("__split: expected 2 arguments, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__split: expected 2 arguments, got {}",
+            args.len()
+        )));
     }
     match (args[0].as_ref(), args[1].as_ref()) {
         (Object::String(s), Object::String(delim)) => {
-            let parts: Vec<Rc<Object>> = s.split(delim.as_str())
+            let parts: Vec<Rc<Object>> = s
+                .split(delim.as_str())
                 .map(|p| Rc::new(Object::String(p.to_string())) as Rc<Object>)
                 .collect();
             Rc::new(Object::Array(parts))
         }
-        _ => Rc::new(Object::Error("__split: expected (STRING, STRING)".to_string())),
+        _ => Rc::new(Object::Error(
+            "__split: expected (STRING, STRING)".to_string(),
+        )),
     }
 }
 
 fn builtin__join(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 2 {
-        return Rc::new(Object::Error(format!("__join: expected 2 arguments, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__join: expected 2 arguments, got {}",
+            args.len()
+        )));
     }
     match (args[0].as_ref(), args[1].as_ref()) {
         (Object::Array(arr), Object::String(delim)) => {
             let parts: Vec<String> = arr.iter().map(|e| e.to_string()).collect();
             Rc::new(Object::String(parts.join(delim)))
         }
-        _ => Rc::new(Object::Error("__join: expected (ARRAY, STRING)".to_string())),
+        _ => Rc::new(Object::Error(
+            "__join: expected (ARRAY, STRING)".to_string(),
+        )),
     }
 }
 
 fn builtin__trim(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__trim: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__trim: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::String(s) => Rc::new(Object::String(s.trim().to_string())),
-        _ => Rc::new(Object::Error(format!("__trim: expected STRING, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__trim: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__strip(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 2 {
-        return Rc::new(Object::Error(format!("__strip: expected 2 arguments, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__strip: expected 2 arguments, got {}",
+            args.len()
+        )));
     }
     match (args[0].as_ref(), args[1].as_ref()) {
         (Object::String(s), Object::String(chars)) => {
@@ -687,14 +929,18 @@ fn builtin__strip(args: Vec<Rc<Object>>) -> Rc<Object> {
         }
         _ => Rc::new(Object::Error(format!(
             "__strip: expected (STRING, STRING), got ({}, {})",
-            args[0].type_name(), args[1].type_name()
+            args[0].type_name(),
+            args[1].type_name()
         ))),
     }
 }
 
 fn builtin__strip_left(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 2 {
-        return Rc::new(Object::Error(format!("__strip_left: expected 2 arguments, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__strip_left: expected 2 arguments, got {}",
+            args.len()
+        )));
     }
     match (args[0].as_ref(), args[1].as_ref()) {
         (Object::String(s), Object::String(chars)) => {
@@ -704,14 +950,18 @@ fn builtin__strip_left(args: Vec<Rc<Object>>) -> Rc<Object> {
         }
         _ => Rc::new(Object::Error(format!(
             "__strip_left: expected (STRING, STRING), got ({}, {})",
-            args[0].type_name(), args[1].type_name()
+            args[0].type_name(),
+            args[1].type_name()
         ))),
     }
 }
 
 fn builtin__strip_right(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 2 {
-        return Rc::new(Object::Error(format!("__strip_right: expected 2 arguments, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__strip_right: expected 2 arguments, got {}",
+            args.len()
+        )));
     }
     match (args[0].as_ref(), args[1].as_ref()) {
         (Object::String(s), Object::String(chars)) => {
@@ -721,158 +971,213 @@ fn builtin__strip_right(args: Vec<Rc<Object>>) -> Rc<Object> {
         }
         _ => Rc::new(Object::Error(format!(
             "__strip_right: expected (STRING, STRING), got ({}, {})",
-            args[0].type_name(), args[1].type_name()
+            args[0].type_name(),
+            args[1].type_name()
         ))),
     }
 }
 
 fn builtin__upper(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__upper: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__upper: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::String(s) => Rc::new(Object::String(s.to_uppercase())),
-        _ => Rc::new(Object::Error(format!("__upper: expected STRING, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__upper: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__lower(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__lower: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__lower: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::String(s) => Rc::new(Object::String(s.to_lowercase())),
-        _ => Rc::new(Object::Error(format!("__lower: expected STRING, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__lower: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__replace(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 3 {
-        return Rc::new(Object::Error(format!("__replace: expected 3 arguments, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__replace: expected 3 arguments, got {}",
+            args.len()
+        )));
     }
     match (args[0].as_ref(), args[1].as_ref(), args[2].as_ref()) {
         (Object::String(s), Object::String(old), Object::String(new_s)) => {
             Rc::new(Object::String(s.replace(old.as_str(), new_s.as_str())))
         }
-        _ => Rc::new(Object::Error("__replace: expected (STRING, STRING, STRING)".to_string())),
+        _ => Rc::new(Object::Error(
+            "__replace: expected (STRING, STRING, STRING)".to_string(),
+        )),
     }
 }
 
 fn builtin__starts_with(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 2 {
-        return Rc::new(Object::Error(format!("__starts_with: expected 2 arguments, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__starts_with: expected 2 arguments, got {}",
+            args.len()
+        )));
     }
     match (args[0].as_ref(), args[1].as_ref()) {
         (Object::String(s), Object::String(prefix)) => {
             Rc::new(Object::Boolean(s.starts_with(prefix.as_str())))
         }
-        _ => Rc::new(Object::Error("__starts_with: expected (STRING, STRING)".to_string())),
+        _ => Rc::new(Object::Error(
+            "__starts_with: expected (STRING, STRING)".to_string(),
+        )),
     }
 }
 
 fn builtin__ends_with(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 2 {
-        return Rc::new(Object::Error(format!("__ends_with: expected 2 arguments, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__ends_with: expected 2 arguments, got {}",
+            args.len()
+        )));
     }
     match (args[0].as_ref(), args[1].as_ref()) {
         (Object::String(s), Object::String(suffix)) => {
             Rc::new(Object::Boolean(s.ends_with(suffix.as_str())))
         }
-        _ => Rc::new(Object::Error("__ends_with: expected (STRING, STRING)".to_string())),
+        _ => Rc::new(Object::Error(
+            "__ends_with: expected (STRING, STRING)".to_string(),
+        )),
     }
 }
 
 fn builtin__contains_str(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 2 {
-        return Rc::new(Object::Error(format!("__contains_str: expected 2 arguments, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__contains_str: expected 2 arguments, got {}",
+            args.len()
+        )));
     }
     match (args[0].as_ref(), args[1].as_ref()) {
         (Object::String(s), Object::String(sub)) => {
             Rc::new(Object::Boolean(s.contains(sub.as_str())))
         }
-        _ => Rc::new(Object::Error("__contains_str: expected (STRING, STRING)".to_string())),
+        _ => Rc::new(Object::Error(
+            "__contains_str: expected (STRING, STRING)".to_string(),
+        )),
     }
 }
 
 fn builtin__sort(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__sort: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__sort: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::Array(arr) => {
             let mut sorted = arr.clone();
-            sorted.sort_by(|a, b| {
-                match (a.as_ref(), b.as_ref()) {
-                    (Object::Integer(x), Object::Integer(y)) => x.cmp(y),
-                    (Object::Float(x), Object::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-                    (Object::String(x), Object::String(y)) => x.cmp(y),
-                    _ => std::cmp::Ordering::Equal,
+            sorted.sort_by(|a, b| match (a.as_ref(), b.as_ref()) {
+                (Object::Integer(x), Object::Integer(y)) => x.cmp(y),
+                (Object::Float(x), Object::Float(y)) => {
+                    x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
                 }
+                (Object::String(x), Object::String(y)) => x.cmp(y),
+                _ => std::cmp::Ordering::Equal,
             });
             Rc::new(Object::Array(sorted))
         }
-        _ => Rc::new(Object::Error(format!("__sort: expected ARRAY, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__sort: expected ARRAY, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__read_file(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__read_file: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__read_file: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
-        Object::String(path) => {
-            match fs::read_to_string(path) {
-                Ok(contents) => Rc::new(Object::String(contents)),
-                Err(e) => Rc::new(Object::Error(format!("__read_file: {}", e))),
-            }
-        }
-        _ => Rc::new(Object::Error(format!("__read_file: expected STRING, got {}", args[0].type_name()))),
+        Object::String(path) => match fs::read_to_string(path) {
+            Ok(contents) => Rc::new(Object::String(contents)),
+            Err(e) => Rc::new(Object::Error(format!("__read_file: {}", e))),
+        },
+        _ => Rc::new(Object::Error(format!(
+            "__read_file: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__write_file(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 2 {
-        return Rc::new(Object::Error(format!("__write_file: expected 2 arguments, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__write_file: expected 2 arguments, got {}",
+            args.len()
+        )));
     }
     match (args[0].as_ref(), args[1].as_ref()) {
-        (Object::String(path), Object::String(content)) => {
-            match fs::write(path, content) {
-                Ok(_) => Rc::new(Object::None),
-                Err(e) => Rc::new(Object::Error(format!("__write_file: {}", e))),
-            }
-        }
-        _ => Rc::new(Object::Error("__write_file: expected (STRING, STRING)".to_string())),
+        (Object::String(path), Object::String(content)) => match fs::write(path, content) {
+            Ok(_) => Rc::new(Object::None),
+            Err(e) => Rc::new(Object::Error(format!("__write_file: {}", e))),
+        },
+        _ => Rc::new(Object::Error(
+            "__write_file: expected (STRING, STRING)".to_string(),
+        )),
     }
 }
 
 fn builtin__append_file(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 2 {
-        return Rc::new(Object::Error(format!("__append_file: expected 2 arguments, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__append_file: expected 2 arguments, got {}",
+            args.len()
+        )));
     }
     match (args[0].as_ref(), args[1].as_ref()) {
         (Object::String(path), Object::String(content)) => {
             use std::io::Write;
             match fs::OpenOptions::new().append(true).create(true).open(path) {
-                Ok(mut file) => {
-                    match file.write_all(content.as_bytes()) {
-                        Ok(_) => Rc::new(Object::None),
-                        Err(e) => Rc::new(Object::Error(format!("__append_file: {}", e))),
-                    }
-                }
+                Ok(mut file) => match file.write_all(content.as_bytes()) {
+                    Ok(_) => Rc::new(Object::None),
+                    Err(e) => Rc::new(Object::Error(format!("__append_file: {}", e))),
+                },
                 Err(e) => Rc::new(Object::Error(format!("__append_file: {}", e))),
             }
         }
-        _ => Rc::new(Object::Error("__append_file: expected (STRING, STRING)".to_string())),
+        _ => Rc::new(Object::Error(
+            "__append_file: expected (STRING, STRING)".to_string(),
+        )),
     }
 }
 
 fn builtin__file_exists(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__file_exists: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__file_exists: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::String(path) => Rc::new(Object::Boolean(std::path::Path::new(path).exists())),
-        _ => Rc::new(Object::Error(format!("__file_exists: expected STRING, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__file_exists: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
@@ -945,19 +1250,31 @@ fn builtin__read_line(args: Vec<Rc<Object>>) -> Rc<Object> {
 
 fn builtin__exec(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.is_empty() {
-        return Rc::new(Object::Error("__exec: expected at least 1 argument".to_string()));
+        return Rc::new(Object::Error(
+            "__exec: expected at least 1 argument".to_string(),
+        ));
     }
     let cmd = match args[0].as_ref() {
         Object::String(s) => s.clone(),
-        _ => return Rc::new(Object::Error(format!("__exec: expected STRING command, got {}", args[0].type_name()))),
+        _ => {
+            return Rc::new(Object::Error(format!(
+                "__exec: expected STRING command, got {}",
+                args[0].type_name()
+            )));
+        }
     };
-    let extra_args: Vec<String> = args[1..]
-        .iter()
-        .map(|a| a.to_string())
-        .collect();
+    let extra_args: Vec<String> = args[1..].iter().map(|a| a.to_string()).collect();
 
-    let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
-    let flag = if cfg!(target_os = "windows") { "/C" } else { "-c" };
+    let shell = if cfg!(target_os = "windows") {
+        "cmd"
+    } else {
+        "sh"
+    };
+    let flag = if cfg!(target_os = "windows") {
+        "/C"
+    } else {
+        "-c"
+    };
 
     let full_cmd = if extra_args.is_empty() {
         cmd
@@ -976,9 +1293,18 @@ fn builtin__exec(args: Vec<Rc<Object>>) -> Rc<Object> {
             let code = output.status.code().unwrap_or(-1);
             // Return a map with stdout, stderr, and exit code
             let entries: Vec<(Rc<Object>, Rc<Object>)> = vec![
-                (Rc::new(Object::String("stdout".to_string())), Rc::new(Object::String(stdout))),
-                (Rc::new(Object::String("stderr".to_string())), Rc::new(Object::String(stderr))),
-                (Rc::new(Object::String("code".to_string())), Rc::new(Object::Integer(code as i64))),
+                (
+                    Rc::new(Object::String("stdout".to_string())),
+                    Rc::new(Object::String(stdout)),
+                ),
+                (
+                    Rc::new(Object::String("stderr".to_string())),
+                    Rc::new(Object::String(stderr)),
+                ),
+                (
+                    Rc::new(Object::String("code".to_string())),
+                    Rc::new(Object::Integer(code as i64)),
+                ),
             ];
             Rc::new(Object::Map(entries))
         }
@@ -996,28 +1322,41 @@ fn builtin__os_arch(_args: Vec<Rc<Object>>) -> Rc<Object> {
 
 fn builtin__env_get(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__env_get: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__env_get: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::String(key) => match std::env::var(key) {
             Ok(val) => Rc::new(Object::String(val)),
             Err(_) => Rc::new(Object::None),
         },
-        _ => Rc::new(Object::Error(format!("__env_get: expected STRING, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__env_get: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__env_set(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 2 {
-        return Rc::new(Object::Error(format!("__env_set: expected 2 arguments, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__env_set: expected 2 arguments, got {}",
+            args.len()
+        )));
     }
     match (args[0].as_ref(), args[1].as_ref()) {
         (Object::String(key), Object::String(val)) => {
             // SAFETY: This is called from single-threaded Oxigen interpreter
-            unsafe { std::env::set_var(key, val); }
+            unsafe {
+                std::env::set_var(key, val);
+            }
             Rc::new(Object::None)
         }
-        _ => Rc::new(Object::Error("__env_set: expected (STRING, STRING)".to_string())),
+        _ => Rc::new(Object::Error(
+            "__env_set: expected (STRING, STRING)".to_string(),
+        )),
     }
 }
 
@@ -1042,33 +1381,48 @@ fn builtin__cwd(_args: Vec<Rc<Object>>) -> Rc<Object> {
 
 fn builtin__chdir(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__chdir: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__chdir: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::String(path) => match std::env::set_current_dir(path) {
             Ok(_) => Rc::new(Object::None),
             Err(e) => Rc::new(Object::Error(format!("__chdir: {}", e))),
         },
-        _ => Rc::new(Object::Error(format!("__chdir: expected STRING, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__chdir: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__list_dir(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__list_dir: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__list_dir: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::String(path) => match fs::read_dir(path) {
             Ok(entries) => {
                 let items: Vec<Rc<Object>> = entries
                     .filter_map(|e| e.ok())
-                    .map(|e| Rc::new(Object::String(e.path().to_string_lossy().to_string())) as Rc<Object>)
+                    .map(|e| {
+                        Rc::new(Object::String(e.path().to_string_lossy().to_string()))
+                            as Rc<Object>
+                    })
                     .collect();
                 Rc::new(Object::Array(items))
             }
             Err(e) => Rc::new(Object::Error(format!("__list_dir: {}", e))),
         },
-        _ => Rc::new(Object::Error(format!("__list_dir: expected STRING, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__list_dir: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
@@ -1087,7 +1441,10 @@ fn walk_dir_recursive(dir: &std::path::Path, results: &mut Vec<Rc<Object>>) -> R
 
 fn builtin__walk_dir(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__walk_dir: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__walk_dir: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::String(path) => {
@@ -1097,66 +1454,103 @@ fn builtin__walk_dir(args: Vec<Rc<Object>>) -> Rc<Object> {
                 Err(e) => Rc::new(Object::Error(e)),
             }
         }
-        _ => Rc::new(Object::Error(format!("__walk_dir: expected STRING, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__walk_dir: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__mkdir(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__mkdir: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__mkdir: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::String(path) => match fs::create_dir_all(path) {
             Ok(_) => Rc::new(Object::None),
             Err(e) => Rc::new(Object::Error(format!("__mkdir: {}", e))),
         },
-        _ => Rc::new(Object::Error(format!("__mkdir: expected STRING, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__mkdir: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__rmdir(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__rmdir: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__rmdir: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::String(path) => match fs::remove_dir_all(path) {
             Ok(_) => Rc::new(Object::None),
             Err(e) => Rc::new(Object::Error(format!("__rmdir: {}", e))),
         },
-        _ => Rc::new(Object::Error(format!("__rmdir: expected STRING, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__rmdir: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__remove_file(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__remove: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__remove: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::String(path) => match fs::remove_file(path) {
             Ok(_) => Rc::new(Object::None),
             Err(e) => Rc::new(Object::Error(format!("__remove: {}", e))),
         },
-        _ => Rc::new(Object::Error(format!("__remove: expected STRING, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__remove: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__is_dir(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__is_dir: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__is_dir: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
-        Object::String(path) => Rc::new(Object::Boolean(std::path::Path::new(path.as_str()).is_dir())),
-        _ => Rc::new(Object::Error(format!("__is_dir: expected STRING, got {}", args[0].type_name()))),
+        Object::String(path) => Rc::new(Object::Boolean(
+            std::path::Path::new(path.as_str()).is_dir(),
+        )),
+        _ => Rc::new(Object::Error(format!(
+            "__is_dir: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__is_file(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__is_file: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__is_file: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
-        Object::String(path) => Rc::new(Object::Boolean(std::path::Path::new(path.as_str()).is_file())),
-        _ => Rc::new(Object::Error(format!("__is_file: expected STRING, got {}", args[0].type_name()))),
+        Object::String(path) => Rc::new(Object::Boolean(
+            std::path::Path::new(path.as_str()).is_file(),
+        )),
+        _ => Rc::new(Object::Error(format!(
+            "__is_file: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
@@ -1180,7 +1574,10 @@ fn builtin__pid(_args: Vec<Rc<Object>>) -> Rc<Object> {
 
 fn builtin_int(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("int: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "int: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::Integer(_) => Rc::clone(&args[0]),
@@ -1196,13 +1593,19 @@ fn builtin_int(args: Vec<Rc<Object>>) -> Rc<Object> {
         Object::Char(c) => Rc::new(Object::Integer(*c as i64)),
         Object::Byte(b) => Rc::new(Object::Integer(*b as i64)),
         Object::Uint(n) => Rc::new(Object::Integer(*n as i64)),
-        _ => Rc::new(Object::Error(format!("int: cannot convert {} to INTEGER", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "int: cannot convert {} to INTEGER",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin_float(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("float: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "float: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::Float(_) => Rc::clone(&args[0]),
@@ -1214,7 +1617,10 @@ fn builtin_float(args: Vec<Rc<Object>>) -> Rc<Object> {
         Object::Boolean(b) => Rc::new(Object::Float(if *b { 1.0 } else { 0.0 })),
         Object::Byte(b) => Rc::new(Object::Float(*b as f64)),
         Object::Uint(n) => Rc::new(Object::Float(*n as f64)),
-        _ => Rc::new(Object::Error(format!("float: cannot convert {} to FLOAT", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "float: cannot convert {} to FLOAT",
+            args[0].type_name()
+        ))),
     }
 }
 
@@ -1236,12 +1642,20 @@ fn builtin__time_now_ms(_args: Vec<Rc<Object>>) -> Rc<Object> {
 
 fn builtin__time_sleep(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__time_sleep: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__time_sleep: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     let ms = match args[0].as_ref() {
         Object::Integer(n) => *n as u64,
         Object::Float(f) => *f as u64,
-        _ => return Rc::new(Object::Error(format!("__time_sleep: expected number, got {}", args[0].type_name()))),
+        _ => {
+            return Rc::new(Object::Error(format!(
+                "__time_sleep: expected number, got {}",
+                args[0].type_name()
+            )));
+        }
     };
     std::thread::sleep(std::time::Duration::from_millis(ms));
     Rc::new(Object::None)
@@ -1285,18 +1699,34 @@ fn xorshift64star() -> u64 {
 
 fn builtin__rand_int(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 2 {
-        return Rc::new(Object::Error(format!("__rand_int: expected 2 arguments (min, max), got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__rand_int: expected 2 arguments (min, max), got {}",
+            args.len()
+        )));
     }
     let min = match args[0].as_ref() {
         Object::Integer(n) => *n,
-        _ => return Rc::new(Object::Error(format!("__rand_int: expected INTEGER, got {}", args[0].type_name()))),
+        _ => {
+            return Rc::new(Object::Error(format!(
+                "__rand_int: expected INTEGER, got {}",
+                args[0].type_name()
+            )));
+        }
     };
     let max = match args[1].as_ref() {
         Object::Integer(n) => *n,
-        _ => return Rc::new(Object::Error(format!("__rand_int: expected INTEGER, got {}", args[1].type_name()))),
+        _ => {
+            return Rc::new(Object::Error(format!(
+                "__rand_int: expected INTEGER, got {}",
+                args[1].type_name()
+            )));
+        }
     };
     if min > max {
-        return Rc::new(Object::Error(format!("__rand_int: min ({}) > max ({})", min, max)));
+        return Rc::new(Object::Error(format!(
+            "__rand_int: min ({}) > max ({})",
+            min, max
+        )));
     }
     let range = (max - min + 1) as u64;
     let val = min + (xorshift64star() % range) as i64;
@@ -1310,11 +1740,19 @@ fn builtin__rand_float(_args: Vec<Rc<Object>>) -> Rc<Object> {
 
 fn builtin__rand_seed(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__rand_seed: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__rand_seed: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     let seed = match args[0].as_ref() {
         Object::Integer(n) => *n as u64,
-        _ => return Rc::new(Object::Error(format!("__rand_seed: expected INTEGER, got {}", args[0].type_name()))),
+        _ => {
+            return Rc::new(Object::Error(format!(
+                "__rand_seed: expected INTEGER, got {}",
+                args[0].type_name()
+            )));
+        }
     };
     RNG_STATE.with(|state| state.set(if seed == 0 { 1 } else { seed }));
     Rc::new(Object::None)
@@ -1324,7 +1762,10 @@ fn builtin__rand_seed(args: Vec<Rc<Object>>) -> Rc<Object> {
 
 fn builtin__path_join(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__path_join: expected 1 argument (array), got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__path_join: expected 1 argument (array), got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::Array(parts) => {
@@ -1332,18 +1773,28 @@ fn builtin__path_join(args: Vec<Rc<Object>>) -> Rc<Object> {
             for part in parts {
                 match part.as_ref() {
                     Object::String(s) => path.push(s),
-                    _ => return Rc::new(Object::Error("__path_join: array elements must be strings".to_string())),
+                    _ => {
+                        return Rc::new(Object::Error(
+                            "__path_join: array elements must be strings".to_string(),
+                        ));
+                    }
                 }
             }
             Rc::new(Object::String(path.to_string_lossy().to_string()))
         }
-        _ => Rc::new(Object::Error(format!("__path_join: expected ARRAY, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__path_join: expected ARRAY, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__path_ext(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__path_ext: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__path_ext: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::String(s) => {
@@ -1353,13 +1804,19 @@ fn builtin__path_ext(args: Vec<Rc<Object>>) -> Rc<Object> {
                 None => Rc::new(Object::None),
             }
         }
-        _ => Rc::new(Object::Error(format!("__path_ext: expected STRING, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__path_ext: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__path_filename(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__path_filename: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__path_filename: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::String(s) => {
@@ -1369,13 +1826,19 @@ fn builtin__path_filename(args: Vec<Rc<Object>>) -> Rc<Object> {
                 None => Rc::new(Object::None),
             }
         }
-        _ => Rc::new(Object::Error(format!("__path_filename: expected STRING, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__path_filename: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__path_parent(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__path_parent: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__path_parent: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::String(s) => {
@@ -1385,13 +1848,19 @@ fn builtin__path_parent(args: Vec<Rc<Object>>) -> Rc<Object> {
                 None => Rc::new(Object::None),
             }
         }
-        _ => Rc::new(Object::Error(format!("__path_parent: expected STRING, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__path_parent: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__path_stem(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__path_stem: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__path_stem: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::String(s) => {
@@ -1401,17 +1870,28 @@ fn builtin__path_stem(args: Vec<Rc<Object>>) -> Rc<Object> {
                 None => Rc::new(Object::None),
             }
         }
-        _ => Rc::new(Object::Error(format!("__path_stem: expected STRING, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__path_stem: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__path_is_absolute(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__path_is_absolute: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__path_is_absolute: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
-        Object::String(s) => Rc::new(Object::Boolean(std::path::Path::new(s.as_str()).is_absolute())),
-        _ => Rc::new(Object::Error(format!("__path_is_absolute: expected STRING, got {}", args[0].type_name()))),
+        Object::String(s) => Rc::new(Object::Boolean(
+            std::path::Path::new(s.as_str()).is_absolute(),
+        )),
+        _ => Rc::new(Object::Error(format!(
+            "__path_is_absolute: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
@@ -1563,7 +2043,10 @@ fn json_parse_array(chars: &[char], pos: &mut usize) -> Result<Rc<Object>, Strin
             break;
         }
         if chars[*pos] != ',' {
-            return Err(format!("expected ',' or ']' in array, got '{}'", chars[*pos]));
+            return Err(format!(
+                "expected ',' or ']' in array, got '{}'",
+                chars[*pos]
+            ));
         }
         *pos += 1;
     }
@@ -1600,7 +2083,10 @@ fn json_parse_object(chars: &[char], pos: &mut usize) -> Result<Rc<Object>, Stri
             break;
         }
         if chars[*pos] != ',' {
-            return Err(format!("expected ',' or '}}' in object, got '{}'", chars[*pos]));
+            return Err(format!(
+                "expected ',' or '}}' in object, got '{}'",
+                chars[*pos]
+            ));
         }
         *pos += 1;
     }
@@ -1665,7 +2151,10 @@ fn object_to_json(obj: &Object) -> Result<String, String> {
 
 fn builtin__json_parse(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__json_parse: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__json_parse: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match args[0].as_ref() {
         Object::String(s) => {
@@ -1676,17 +2165,61 @@ fn builtin__json_parse(args: Vec<Rc<Object>>) -> Rc<Object> {
                 Err(e) => Rc::new(Object::Error(format!("json parse error: {}", e))),
             }
         }
-        _ => Rc::new(Object::Error(format!("__json_parse: expected STRING, got {}", args[0].type_name()))),
+        _ => Rc::new(Object::Error(format!(
+            "__json_parse: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
 fn builtin__json_stringify(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 1 {
-        return Rc::new(Object::Error(format!("__json_stringify: expected 1 argument, got {}", args.len())));
+        return Rc::new(Object::Error(format!(
+            "__json_stringify: expected 1 argument, got {}",
+            args.len()
+        )));
     }
     match object_to_json(&args[0]) {
         Ok(s) => Rc::new(Object::String(s)),
         Err(e) => Rc::new(Object::Error(format!("json stringify error: {}", e))),
+    }
+}
+
+fn toml_value_to_object(value: TomlValue) -> Rc<Object> {
+    match value {
+        TomlValue::String(s) => Rc::new(Object::String(s)),
+        TomlValue::Integer(i) => Rc::new(Object::Integer(i)),
+        TomlValue::Float(f) => Rc::new(Object::Float(f)),
+        TomlValue::Boolean(b) => Rc::new(Object::Boolean(b)),
+        TomlValue::Datetime(dt) => Rc::new(Object::String(dt.to_string())),
+        TomlValue::Array(values) => Rc::new(Object::Array(
+            values.into_iter().map(toml_value_to_object).collect(),
+        )),
+        TomlValue::Table(entries) => Rc::new(Object::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| (Rc::new(Object::String(key)), toml_value_to_object(value)))
+                .collect(),
+        )),
+    }
+}
+
+fn builtin__toml_parse(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!(
+            "__toml_parse: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+    match args[0].as_ref() {
+        Object::String(s) => match s.parse::<TomlValue>() {
+            Ok(value) => toml_value_to_object(value),
+            Err(e) => Rc::new(Object::Error(format!("toml parse error: {}", e))),
+        },
+        _ => Rc::new(Object::Error(format!(
+            "__toml_parse: expected STRING, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
@@ -1711,7 +2244,10 @@ fn http_body_from_args(args: &[Rc<Object>]) -> Result<Option<String>, String> {
         match args[3].as_ref() {
             Object::String(s) => Ok(Some(s.clone())),
             Object::None => Ok(None),
-            _ => Err(format!("__http_request: body must be STRING, got {}", args[3].type_name())),
+            _ => Err(format!(
+                "__http_request: body must be STRING, got {}",
+                args[3].type_name()
+            )),
         }
     } else {
         Ok(None)
@@ -1727,15 +2263,27 @@ fn http_response_to_object(body: &mut ureq::Body) -> Rc<Object> {
 
 fn builtin__http_request(args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() < 2 || args.len() > 4 {
-        return Rc::new(Object::Error("__http_request: expected 2-4 arguments (method, url, headers?, body?)".to_string()));
+        return Rc::new(Object::Error(
+            "__http_request: expected 2-4 arguments (method, url, headers?, body?)".to_string(),
+        ));
     }
     let method = match args[0].as_ref() {
         Object::String(s) => s.to_uppercase(),
-        _ => return Rc::new(Object::Error(format!("__http_request: method must be STRING, got {}", args[0].type_name()))),
+        _ => {
+            return Rc::new(Object::Error(format!(
+                "__http_request: method must be STRING, got {}",
+                args[0].type_name()
+            )));
+        }
     };
     let url = match args[1].as_ref() {
         Object::String(s) => s.clone(),
-        _ => return Rc::new(Object::Error(format!("__http_request: url must be STRING, got {}", args[1].type_name()))),
+        _ => {
+            return Rc::new(Object::Error(format!(
+                "__http_request: url must be STRING, got {}",
+                args[1].type_name()
+            )));
+        }
     };
 
     let headers = http_headers_from_args(&args);
@@ -1762,7 +2310,10 @@ fn builtin__http_request(args: Vec<Rc<Object>>) -> Rc<Object> {
                     let (_, mut body) = resp.into_parts();
                     let body_obj = http_response_to_object(&mut body);
                     let entries: Vec<(Rc<Object>, Rc<Object>)> = vec![
-                        (Rc::new(Object::String("status".to_string())), Rc::new(Object::Integer(status as i64))),
+                        (
+                            Rc::new(Object::String("status".to_string())),
+                            Rc::new(Object::Integer(status as i64)),
+                        ),
                         (Rc::new(Object::String("body".to_string())), body_obj),
                     ];
                     Rc::new(Object::Map(entries))
@@ -1797,6 +2348,9 @@ fn builtin__http_request(args: Vec<Rc<Object>>) -> Rc<Object> {
                 None => req.send_empty(),
             })
         }
-        _ => Rc::new(Object::Error(format!("__http_request: unsupported method '{}'", method))),
+        _ => Rc::new(Object::Error(format!(
+            "__http_request: unsupported method '{}'",
+            method
+        ))),
     }
 }

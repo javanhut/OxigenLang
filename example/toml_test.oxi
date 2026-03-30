@@ -1,0 +1,7 @@
+introduce toml
+
+config := toml.parse("title = \"Oxigen\"\nports = [8000, 8001]\n[owner]\nname = \"Javan\"")
+
+println("Title:", config["title"])
+println("First port:", config["ports"][0])
+println("Owner:", config["owner"]["name"])

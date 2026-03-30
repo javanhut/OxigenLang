@@ -1,9 +1,12 @@
 pub mod builtins;
 
-use crate::ast::{Expression, Identifier, ModulePath, Program, Statement, StringInterpPart, TypeAnnotation, TypedParam};
+use crate::ast::{
+    Expression, Identifier, ModulePath, Program, Statement, StringInterpPart, TypeAnnotation,
+    TypedParam,
+};
 use crate::lexer::Lexer;
-use crate::object::environment::{Environment, PatternRegistry};
 use crate::object::Object;
+use crate::object::environment::{Environment, PatternRegistry};
 use crate::parser::Parser;
 use crate::token::Span;
 use builtins::get_builtins;
@@ -42,7 +45,9 @@ fn type_matches(expected: &str, actual: &str) -> bool {
         return true;
     }
     if expected.contains(" || ") {
-        expected.split(" || ").any(|t| t == "GENERIC" || t == actual)
+        expected
+            .split(" || ")
+            .any(|t| t == "GENERIC" || t == actual)
     } else {
         expected == actual
     }
@@ -59,9 +64,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
         curr[0] = i;
         for j in 1..=n {
             let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -70,7 +73,10 @@ fn levenshtein(a: &str, b: &str) -> usize {
 
 /// Find the closest match to `name` from `candidates` using edit distance.
 /// Returns None if no candidate is close enough (threshold: max 2 edits, and less than half the name length).
-fn suggest_similar<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<String> {
+fn suggest_similar<'a>(
+    name: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
     let name_lower = name.to_lowercase();
     let max_dist = 2.max(name.len() / 3);
     let mut best: Option<(usize, String)> = None;
@@ -186,7 +192,10 @@ impl Evaluator {
         }
         // 3. User install: ~/.oxigen/lib/stdlib
         if let Ok(home) = std::env::var("HOME") {
-            let candidate = PathBuf::from(home).join(".oxigen").join("lib").join("stdlib");
+            let candidate = PathBuf::from(home)
+                .join(".oxigen")
+                .join("lib")
+                .join("stdlib");
             if candidate.is_dir() {
                 return candidate;
             }
@@ -223,7 +232,10 @@ impl Evaluator {
 
     fn error_object_with_tag(msg: impl Into<String>, tag: Option<String>) -> Rc<Object> {
         let msg = msg.into();
-        Rc::new(Object::Error(Self::encode_error_message(&msg, tag.as_deref())))
+        Rc::new(Object::Error(Self::encode_error_message(
+            &msg,
+            tag.as_deref(),
+        )))
     }
 
     fn tagged_error_value(msg: impl Into<String>, tag: Option<String>) -> Rc<Object> {
@@ -316,7 +328,8 @@ impl Evaluator {
             "INTEGER" => match obj.as_ref() {
                 Object::Integer(_) => Ok(Rc::clone(obj)),
                 Object::Float(f) => Ok(Rc::new(Object::Integer(*f as i64))),
-                Object::String(s) => s.parse::<i64>()
+                Object::String(s) => s
+                    .parse::<i64>()
                     .map(|n| Rc::new(Object::Integer(n)))
                     .map_err(|_| format!("cannot convert STRING \"{}\" to INTEGER", s)),
                 Object::Char(c) => Ok(Rc::new(Object::Integer(*c as i64))),
@@ -328,7 +341,8 @@ impl Evaluator {
             "FLOAT" => match obj.as_ref() {
                 Object::Float(_) => Ok(Rc::clone(obj)),
                 Object::Integer(n) => Ok(Rc::new(Object::Float(*n as f64))),
-                Object::String(s) => s.parse::<f64>()
+                Object::String(s) => s
+                    .parse::<f64>()
                     .map(|f| Rc::new(Object::Float(f)))
                     .map_err(|_| format!("cannot convert STRING \"{}\" to FLOAT", s)),
                 Object::Boolean(b) => Ok(Rc::new(Object::Float(if *b { 1.0 } else { 0.0 }))),
@@ -341,7 +355,11 @@ impl Evaluator {
                 Object::Integer(n) => Ok(Rc::new(Object::String(n.to_string()))),
                 Object::Float(f) => Ok(Rc::new(Object::String(f.to_string()))),
                 Object::Char(c) => Ok(Rc::new(Object::String(c.to_string()))),
-                Object::Boolean(b) => Ok(Rc::new(Object::String(if *b { "True".to_string() } else { "False".to_string() }))),
+                Object::Boolean(b) => Ok(Rc::new(Object::String(if *b {
+                    "True".to_string()
+                } else {
+                    "False".to_string()
+                }))),
                 _ => Err(format!("cannot convert {} to STRING", obj.type_name())),
             },
             "CHAR" => match obj.as_ref() {
@@ -420,7 +438,8 @@ impl Evaluator {
                 }
                 Object::Byte(n) => Ok(Rc::new(Object::Uint(*n as u64))),
                 Object::Boolean(b) => Ok(Rc::new(Object::Uint(if *b { 1 } else { 0 }))),
-                Object::String(s) => s.parse::<u64>()
+                Object::String(s) => s
+                    .parse::<u64>()
                     .map(|n| Rc::new(Object::Uint(n)))
                     .map_err(|_| format!("cannot convert STRING \"{}\" to UINT", s)),
                 _ => Err(format!("cannot convert {} to UINT", obj.type_name())),
@@ -444,7 +463,11 @@ impl Evaluator {
                         return Ok(Rc::clone(obj));
                     }
                 }
-                Err(format!("cannot convert {} to {}", obj.effective_type_name(), target))
+                Err(format!(
+                    "cannot convert {} to {}",
+                    obj.effective_type_name(),
+                    target
+                ))
             }
         }
     }
@@ -474,7 +497,9 @@ impl Evaluator {
     }
 
     fn zero_value_for_struct(&self, struct_name: &str) -> Result<Rc<Object>, String> {
-        let def = self.struct_defs.get(struct_name)
+        let def = self
+            .struct_defs
+            .get(struct_name)
             .ok_or_else(|| format!("struct not found: {}", struct_name))?;
         if let Object::StructDef { name, fields, .. } = def.as_ref() {
             let mut instance_fields = HashMap::new();
@@ -507,7 +532,11 @@ impl Evaluator {
         result
     }
 
-    pub fn eval_statement(&mut self, stmt: &Statement, env: Rc<RefCell<Environment>>) -> Rc<Object> {
+    pub fn eval_statement(
+        &mut self,
+        stmt: &Statement,
+        env: Rc<RefCell<Environment>>,
+    ) -> Rc<Object> {
         match stmt {
             Statement::Let { name, value } => {
                 let val = self.eval_expression(value, Rc::clone(&env));
@@ -528,7 +557,9 @@ impl Evaluator {
                                 name.token.span,
                                 &format!(
                                     "type mismatch: '{}' is locked to {}, got {}",
-                                    name.value, target_type, val.effective_type_name()
+                                    name.value,
+                                    target_type,
+                                    val.effective_type_name()
                                 ),
                                 Some("use explicit type declaration to change type"),
                             );
@@ -565,7 +596,10 @@ impl Evaluator {
                 Rc::new(Object::None)
             }
             Statement::Choose {
-                token: choose_token, subject, arms, ..
+                token: choose_token,
+                subject,
+                arms,
+                ..
             } => self.eval_choose(subject, arms, env, choose_token.span),
             Statement::If {
                 condition,
@@ -593,8 +627,16 @@ impl Evaluator {
                     if !type_matches(&target, &val.effective_type_name()) {
                         return self.runtime_error(
                             name.token.span,
-                            &format!("type mismatch: expected {}, got {}", target, val.effective_type_name()),
-                            Some(&format!("'{}' is declared as <{}>", name.value, target.to_lowercase())),
+                            &format!(
+                                "type mismatch: expected {}, got {}",
+                                target,
+                                val.effective_type_name()
+                            ),
+                            Some(&format!(
+                                "'{}' is declared as <{}>",
+                                name.value,
+                                target.to_lowercase()
+                            )),
                         );
                     }
                     val
@@ -616,12 +658,10 @@ impl Evaluator {
             Statement::TypedDeclare { name, type_ann } => {
                 let target = type_ann.type_name();
                 let val = match type_ann {
-                    TypeAnnotation::Struct(sname) => {
-                        match self.zero_value_for_struct(sname) {
-                            Ok(v) => v,
-                            Err(msg) => return Rc::new(Object::Error(msg)),
-                        }
-                    }
+                    TypeAnnotation::Struct(sname) => match self.zero_value_for_struct(sname) {
+                        Ok(v) => v,
+                        Err(msg) => return Rc::new(Object::Error(msg)),
+                    },
                     _ => Self::zero_value_for_type(&target),
                 };
                 if *type_ann == TypeAnnotation::NoneType {
@@ -641,7 +681,9 @@ impl Evaluator {
                 if existing.is_none() {
                     let all_names = env.borrow().all_keys();
                     let mut hint_parts = Vec::new();
-                    if let Some(suggestion) = suggest_similar(&name.value, all_names.iter().map(|s| s.as_str())) {
+                    if let Some(suggestion) =
+                        suggest_similar(&name.value, all_names.iter().map(|s| s.as_str()))
+                    {
                         hint_parts.push(format!("did you mean `{}`?", suggestion));
                     }
                     hint_parts.push("use `:=` to declare new variables".to_string());
@@ -675,8 +717,15 @@ impl Evaluator {
                 if !type_matches(&target_type, &val.effective_type_name()) {
                     return self.runtime_error(
                         name.token.span,
-                        &format!("type mismatch: expected {}, got {}", target_type, val.effective_type_name()),
-                        Some(&format!("'{}' is locked to type {}", name.value, target_type)),
+                        &format!(
+                            "type mismatch: expected {}, got {}",
+                            target_type,
+                            val.effective_type_name()
+                        ),
+                        Some(&format!(
+                            "'{}' is locked to type {}",
+                            name.value, target_type
+                        )),
                     );
                 }
                 env.borrow_mut().update(&name.value, val.clone());
@@ -692,7 +741,10 @@ impl Evaluator {
                 Rc::new(Object::Return(val))
             }
             Statement::StructDef {
-                token, name, parent, fields,
+                token,
+                name,
+                parent,
+                fields,
             } => {
                 // If parent specified, get parent's fields
                 let mut all_fields: Vec<(String, String, bool)> = Vec::new();
@@ -700,7 +752,11 @@ impl Evaluator {
                     let parent_def = self.struct_defs.get(&parent_ident.value);
                     match parent_def {
                         Some(def) => {
-                            if let Object::StructDef { fields: parent_fields, .. } = def.as_ref() {
+                            if let Object::StructDef {
+                                fields: parent_fields,
+                                ..
+                            } = def.as_ref()
+                            {
                                 all_fields.extend(parent_fields.clone());
                             }
                         }
@@ -719,7 +775,11 @@ impl Evaluator {
 
                 // Add own fields
                 for field in fields {
-                    all_fields.push((field.name.value.clone(), field.type_ann.type_name(), field.hidden));
+                    all_fields.push((
+                        field.name.value.clone(),
+                        field.type_ann.type_name(),
+                        field.hidden,
+                    ));
                 }
 
                 let struct_obj = Rc::new(Object::StructDef {
@@ -729,18 +789,25 @@ impl Evaluator {
                     parent: parent_name,
                 });
 
-                self.struct_defs.insert(name.value.clone(), Rc::clone(&struct_obj));
-                env.borrow_mut().set(name.value.clone(), Rc::clone(&struct_obj));
+                self.struct_defs
+                    .insert(name.value.clone(), Rc::clone(&struct_obj));
+                env.borrow_mut()
+                    .set(name.value.clone(), Rc::clone(&struct_obj));
                 struct_obj
             }
             Statement::ContainsDef {
-                token, struct_name, methods,
+                token,
+                struct_name,
+                methods,
             } => {
                 let existing = self.struct_defs.get(&struct_name.value).cloned();
                 match existing {
                     Some(def) => {
                         if let Object::StructDef {
-                            name, fields, methods: existing_methods, parent,
+                            name,
+                            fields,
+                            methods: existing_methods,
+                            parent,
                         } = def.as_ref()
                         {
                             let mut new_methods = existing_methods.clone();
@@ -760,8 +827,10 @@ impl Evaluator {
                                 methods: new_methods,
                                 parent: sparent,
                             });
-                            self.struct_defs.insert(struct_name.value.clone(), Rc::clone(&updated));
-                            env.borrow_mut().set(struct_name.value.clone(), Rc::clone(&updated));
+                            self.struct_defs
+                                .insert(struct_name.value.clone(), Rc::clone(&updated));
+                            env.borrow_mut()
+                                .set(struct_name.value.clone(), Rc::clone(&updated));
                             updated
                         } else {
                             self.runtime_error(
@@ -779,7 +848,10 @@ impl Evaluator {
                 }
             }
             Statement::DotAssign {
-                token, object, field, value,
+                token,
+                object,
+                field,
+                value,
             } => {
                 let is_self_access = matches!(object, Expression::Ident(id) if id.value == "self");
                 let obj = self.eval_expression(object, Rc::clone(&env));
@@ -787,22 +859,38 @@ impl Evaluator {
                     return obj;
                 }
                 match obj.as_ref() {
-                    Object::StructInstance { struct_name, fields } => {
+                    Object::StructInstance {
+                        struct_name,
+                        fields,
+                    } => {
                         // Look up struct def and find the expected type for this field
                         let (expected_type, hidden) = {
                             let def = self.struct_defs.get(struct_name);
                             if let Some(def) = def {
-                                if let Object::StructDef { fields: def_fields, .. } = def.as_ref() {
-                                    let field_def = def_fields.iter().find(|(n, _, _)| n == &field.value);
+                                if let Object::StructDef {
+                                    fields: def_fields, ..
+                                } = def.as_ref()
+                                {
+                                    let field_def =
+                                        def_fields.iter().find(|(n, _, _)| n == &field.value);
                                     match field_def {
                                         Some((_, et, h)) => (et.clone(), *h),
                                         None => {
-                                            let field_names: Vec<&str> = def_fields.iter().map(|(n, _, _)| n.as_str()).collect();
-                                            let hint = suggest_similar(&field.value, field_names.into_iter())
-                                                .map(|s| format!("did you mean `{}`?", s));
+                                            let field_names: Vec<&str> = def_fields
+                                                .iter()
+                                                .map(|(n, _, _)| n.as_str())
+                                                .collect();
+                                            let hint = suggest_similar(
+                                                &field.value,
+                                                field_names.into_iter(),
+                                            )
+                                            .map(|s| format!("did you mean `{}`?", s));
                                             return self.runtime_error(
                                                 field.token.span,
-                                                &format!("struct {} has no field '{}'", struct_name, field.value),
+                                                &format!(
+                                                    "struct {} has no field '{}'",
+                                                    struct_name, field.value
+                                                ),
                                                 hint.as_deref(),
                                             );
                                         }
@@ -825,8 +913,13 @@ impl Evaluator {
                         if hidden && !is_self_access {
                             return self.runtime_error(
                                 field.token.span,
-                                &format!("field '{}' is hidden on struct {}", field.value, struct_name),
-                                Some("hidden fields can only be accessed via `self` inside a method"),
+                                &format!(
+                                    "field '{}' is hidden on struct {}",
+                                    field.value, struct_name
+                                ),
+                                Some(
+                                    "hidden fields can only be accessed via `self` inside a method",
+                                ),
                             );
                         }
                         let val = self.eval_expression(value, Rc::clone(&env));
@@ -837,7 +930,10 @@ impl Evaluator {
                         if !type_matches(&expected_type, &actual_type) {
                             return self.runtime_error(
                                 token.span,
-                                &format!("type mismatch: field '{}' expects {}, got {}", field.value, expected_type, actual_type),
+                                &format!(
+                                    "type mismatch: field '{}' expects {}, got {}",
+                                    field.value, expected_type, actual_type
+                                ),
                                 Some("ensure the assigned value matches the field's declared type"),
                             );
                         }
@@ -856,7 +952,10 @@ impl Evaluator {
             }
 
             Statement::IndexAssign {
-                token, object, index, value,
+                token,
+                object,
+                index,
+                value,
             } => {
                 let idx = self.eval_expression(index, Rc::clone(&env));
                 if idx.is_error() {
@@ -893,34 +992,36 @@ impl Evaluator {
                         }
                         Rc::new(Object::Map(new_entries))
                     }
-                    Object::Array(elements) => {
-                        match idx.as_ref() {
-                            Object::Integer(i) => {
-                                let index = if *i < 0 {
-                                    (elements.len() as i64 + *i) as usize
-                                } else {
-                                    *i as usize
-                                };
-                                if index >= elements.len() {
-                                    return self.runtime_error(
-                                        token.span,
-                                        &format!("index out of bounds: {} (length {})", i, elements.len()),
-                                        None,
-                                    );
-                                }
-                                let mut new_elements = elements.clone();
-                                new_elements[index] = val.clone();
-                                Rc::new(Object::Array(new_elements))
-                            }
-                            _ => {
+                    Object::Array(elements) => match idx.as_ref() {
+                        Object::Integer(i) => {
+                            let index = if *i < 0 {
+                                (elements.len() as i64 + *i) as usize
+                            } else {
+                                *i as usize
+                            };
+                            if index >= elements.len() {
                                 return self.runtime_error(
                                     token.span,
-                                    &format!("array index must be INTEGER, got {}", idx.type_name()),
+                                    &format!(
+                                        "index out of bounds: {} (length {})",
+                                        i,
+                                        elements.len()
+                                    ),
                                     None,
                                 );
                             }
+                            let mut new_elements = elements.clone();
+                            new_elements[index] = val.clone();
+                            Rc::new(Object::Array(new_elements))
                         }
-                    }
+                        _ => {
+                            return self.runtime_error(
+                                token.span,
+                                &format!("array index must be INTEGER, got {}", idx.type_name()),
+                                None,
+                            );
+                        }
+                    },
                     _ => {
                         return self.runtime_error(
                             token.span,
@@ -944,9 +1045,11 @@ impl Evaluator {
                     Rc::new(Object::None)
                 }
             }
-            Statement::Introduce { token, path, selective } => {
-                self.eval_introduce(token.span, path, selective, Rc::clone(&env))
-            }
+            Statement::Introduce {
+                token,
+                path,
+                selective,
+            } => self.eval_introduce(token.span, path, selective, Rc::clone(&env)),
             Statement::Unpack { names, value } => {
                 let val = self.eval_expression(value, Rc::clone(&env));
                 if val.is_error() {
@@ -1000,7 +1103,13 @@ impl Evaluator {
         // 1. Resolve module path
         let resolved = match self.resolve_module_path(path) {
             Ok(p) => p,
-            Err(msg) => return self.runtime_error(span, &msg, Some("check that the module path is correct")),
+            Err(msg) => {
+                return self.runtime_error(
+                    span,
+                    &msg,
+                    Some("check that the module path is correct"),
+                );
+            }
         };
 
         // 2. Check cache
@@ -1026,7 +1135,7 @@ impl Evaluator {
                     span,
                     &format!("could not read module '{}': {}", resolved.display(), e),
                     Some("verify the file exists and has the correct permissions"),
-                )
+                );
             }
         };
 
@@ -1039,7 +1148,11 @@ impl Evaluator {
         if !errors.is_empty() {
             return self.runtime_error(
                 span,
-                &format!("parse errors in module '{}':\n{}", resolved.display(), parser.format_errors()),
+                &format!(
+                    "parse errors in module '{}':\n{}",
+                    resolved.display(),
+                    parser.format_errors()
+                ),
                 Some("fix the syntax errors in the imported module before using it"),
             );
         }
@@ -1104,9 +1217,8 @@ impl Evaluator {
             }
             base.set_extension("oxi");
 
-            base.canonicalize().map_err(|e| {
-                format!("module not found: {} ({})", base.display(), e)
-            })
+            base.canonicalize()
+                .map_err(|e| format!("module not found: {} ({})", base.display(), e))
         } else {
             let mut lib_path = self.stdlib_path.clone();
             for segment in &path.segments {
@@ -1114,9 +1226,9 @@ impl Evaluator {
             }
             lib_path.set_extension("oxi");
 
-            lib_path.canonicalize().map_err(|e| {
-                format!("stdlib module not found: {} ({})", lib_path.display(), e)
-            })
+            lib_path
+                .canonicalize()
+                .map_err(|e| format!("stdlib module not found: {} ({})", lib_path.display(), e))
         }
     }
 
@@ -1168,7 +1280,11 @@ impl Evaluator {
         }
     }
 
-    pub fn eval_expression(&mut self, expr: &Expression, env: Rc<RefCell<Environment>>) -> Rc<Object> {
+    pub fn eval_expression(
+        &mut self,
+        expr: &Expression,
+        env: Rc<RefCell<Environment>>,
+    ) -> Rc<Object> {
         match expr {
             Expression::Int { value, .. } => Rc::new(Object::Integer(*value)),
             Expression::Float { value, .. } => Rc::new(Object::Float(*value)),
@@ -1204,7 +1320,10 @@ impl Evaluator {
             Expression::Ident(ident) => self.eval_identifier(ident, env),
 
             Expression::Prefix {
-                token: prefix_token, operator, right, ..
+                token: prefix_token,
+                operator,
+                right,
+                ..
             } => {
                 let right_val = self.eval_expression(right, env);
                 if right_val.is_error() {
@@ -1232,13 +1351,24 @@ impl Evaluator {
                     );
                     if left_is_logical && !right_is_logical {
                         let cmp_val = self.eval_expression(right, Rc::clone(&env));
-                        if cmp_val.is_error() { return cmp_val; }
-                        return self.distribute_comparison(operator, left_inner, &cmp_val, true, &env);
+                        if cmp_val.is_error() {
+                            return cmp_val;
+                        }
+                        return self
+                            .distribute_comparison(operator, left_inner, &cmp_val, true, &env);
                     }
                     if right_is_logical && !left_is_logical {
                         let cmp_val = self.eval_expression(left, Rc::clone(&env));
-                        if cmp_val.is_error() { return cmp_val; }
-                        return self.distribute_comparison(operator, right_inner, &cmp_val, false, &env);
+                        if cmp_val.is_error() {
+                            return cmp_val;
+                        }
+                        return self.distribute_comparison(
+                            operator,
+                            right_inner,
+                            &cmp_val,
+                            false,
+                            &env,
+                        );
                     }
                 }
 
@@ -1284,10 +1414,19 @@ impl Evaluator {
             }
 
             Expression::Postfix {
-                token: postfix_token, operator, left, ..
+                token: postfix_token,
+                operator,
+                left,
+                ..
             } => self.eval_postfix_expression(operator, left, env, postfix_token.span),
 
-            Expression::Call { token: call_token, function, args, named_args, .. } => {
+            Expression::Call {
+                token: call_token,
+                function,
+                args,
+                named_args,
+                ..
+            } => {
                 // is_mut() needs the variable name, not its value
                 if let Expression::Ident(ident) = function.as_ref() {
                     if ident.value == "is_mut" {
@@ -1321,7 +1460,12 @@ impl Evaluator {
                 self.apply_function(func, arguments, eval_named, env, call_token.span)
             }
 
-            Expression::Index { token: index_token, left, index, .. } => {
+            Expression::Index {
+                token: index_token,
+                left,
+                index,
+                ..
+            } => {
                 let left_val = self.eval_expression(left, Rc::clone(&env));
                 if left_val.is_error() {
                     return left_val;
@@ -1333,7 +1477,13 @@ impl Evaluator {
                 self.eval_index_expression(left_val, index_val, index_token.span)
             }
 
-            Expression::Slice { token: slice_token, left, start, end, .. } => {
+            Expression::Slice {
+                token: slice_token,
+                left,
+                start,
+                end,
+                ..
+            } => {
                 let left_val = self.eval_expression(left, Rc::clone(&env));
                 if left_val.is_error() {
                     return left_val;
@@ -1341,10 +1491,18 @@ impl Evaluator {
                 let start_val = match start {
                     Some(s) => {
                         let v = self.eval_expression(s, Rc::clone(&env));
-                        if v.is_error() { return v; }
+                        if v.is_error() {
+                            return v;
+                        }
                         match v.as_ref() {
                             Object::Integer(n) => Some(*n as usize),
-                            _ => return self.runtime_error(slice_token.span, "slice start must be an integer", Some("slice indices must be integer values")),
+                            _ => {
+                                return self.runtime_error(
+                                    slice_token.span,
+                                    "slice start must be an integer",
+                                    Some("slice indices must be integer values"),
+                                );
+                            }
                         }
                     }
                     None => None,
@@ -1352,10 +1510,18 @@ impl Evaluator {
                 let end_val = match end {
                     Some(e) => {
                         let v = self.eval_expression(e, Rc::clone(&env));
-                        if v.is_error() { return v; }
+                        if v.is_error() {
+                            return v;
+                        }
                         match v.as_ref() {
                             Object::Integer(n) => Some(*n as usize),
-                            _ => return self.runtime_error(slice_token.span, "slice end must be an integer", Some("slice indices must be integer values")),
+                            _ => {
+                                return self.runtime_error(
+                                    slice_token.span,
+                                    "slice end must be an integer",
+                                    Some("slice indices must be integer values"),
+                                );
+                            }
                         }
                     }
                     None => None,
@@ -1425,21 +1591,35 @@ impl Evaluator {
                 }
             }
 
-            Expression::DotAccess { token: dot_token, left, field, .. } => {
-                let is_self_access = matches!(left.as_ref(), Expression::Ident(id) if id.value == "self");
+            Expression::DotAccess {
+                token: dot_token,
+                left,
+                field,
+                ..
+            } => {
+                let is_self_access =
+                    matches!(left.as_ref(), Expression::Ident(id) if id.value == "self");
                 let obj = self.eval_expression(left, Rc::clone(&env));
                 if obj.is_error() {
                     return obj;
                 }
                 match obj.as_ref() {
-                    Object::StructInstance { struct_name, fields } => {
+                    Object::StructInstance {
+                        struct_name,
+                        fields,
+                    } => {
                         // Check fields first
                         if let Some(val) = fields.borrow().get(&field.value) {
                             // Enforce hide: block external access to hidden fields
                             if !is_self_access {
                                 if let Some(def) = self.struct_defs.get(struct_name) {
-                                    if let Object::StructDef { fields: def_fields, .. } = def.as_ref() {
-                                        if let Some((_, _, true)) = def_fields.iter().find(|(n, _, _)| n == &field.value) {
+                                    if let Object::StructDef {
+                                        fields: def_fields, ..
+                                    } = def.as_ref()
+                                    {
+                                        if let Some((_, _, true)) =
+                                            def_fields.iter().find(|(n, _, _)| n == &field.value)
+                                        {
                                             return self.runtime_error(
                                                 field.token.span,
                                                 &format!("field '{}' is hidden on struct {}", field.value, struct_name),
@@ -1454,60 +1634,75 @@ impl Evaluator {
                         // Check methods
                         self.find_method(struct_name, &field.value, &fields, field.token.span)
                     }
-                    Object::Module { env: module_env, name: mod_name } => {
-                        match module_env.borrow().get(&field.value) {
-                            Some(val) => val,
-                            None => {
-                                let available = module_env.borrow().all_keys();
-                                let hint = suggest_similar(&field.value, available.iter().map(|s| s.as_str()))
+                    Object::Module {
+                        env: module_env,
+                        name: mod_name,
+                    } => match module_env.borrow().get(&field.value) {
+                        Some(val) => val,
+                        None => {
+                            let available = module_env.borrow().all_keys();
+                            let hint =
+                                suggest_similar(&field.value, available.iter().map(|s| s.as_str()))
                                     .map(|s| format!("did you mean `{}`?", s));
-                                self.runtime_error(
-                                    field.token.span,
-                                    &format!("name '{}' not found in module {}", field.value, mod_name),
-                                    hint.as_deref(),
-                                )
-                            }
+                            self.runtime_error(
+                                field.token.span,
+                                &format!("name '{}' not found in module {}", field.value, mod_name),
+                                hint.as_deref(),
+                            )
                         }
-                    }
+                    },
                     Object::ErrorValue { msg, tag } => match field.value.as_str() {
                         "msg" => Rc::new(Object::String(msg.clone())),
                         "tag" => match tag {
                             Some(tag) => Rc::new(Object::String(tag.clone())),
                             None => Rc::new(Object::None),
                         },
-                        _ => Self::error_object(format!(
-                            "error has no field '{}'",
-                            field.value
-                        )),
+                        _ => Self::error_object(format!("error has no field '{}'", field.value)),
                     },
                     Object::Value(val) => match field.value.as_str() {
                         "value" => Rc::clone(val),
-                        _ => Self::error_object(format!(
-                            "value has no field '{}'",
-                            field.value
-                        )),
+                        _ => Self::error_object(format!("value has no field '{}'", field.value)),
                     },
                     _ => self.runtime_error(
                         dot_token.span,
-                        &format!("cannot access field '{}' on {}", field.value, obj.type_name()),
-                        Some("dot access is only supported on structs, modules, errors, and values"),
+                        &format!(
+                            "cannot access field '{}' on {}",
+                            field.value,
+                            obj.type_name()
+                        ),
+                        Some(
+                            "dot access is only supported on structs, modules, errors, and values",
+                        ),
                     ),
                 }
             }
 
             Expression::StructLiteral {
-                token: struct_token, struct_name, field_values, ..
+                token: struct_token,
+                struct_name,
+                field_values,
+                ..
             } => {
                 let def = self.struct_defs.get(struct_name);
                 match def {
                     Some(def) => {
                         let def = Rc::clone(def);
-                        if let Object::StructDef { fields: def_fields, name, .. } = def.as_ref() {
+                        if let Object::StructDef {
+                            fields: def_fields,
+                            name,
+                            ..
+                        } = def.as_ref()
+                        {
                             // Verify all fields provided
                             if field_values.len() != def_fields.len() {
                                 return self.runtime_error(
                                     struct_token.span,
-                                    &format!("struct {} has {} fields, got {}", name, def_fields.len(), field_values.len()),
+                                    &format!(
+                                        "struct {} has {} fields, got {}",
+                                        name,
+                                        def_fields.len(),
+                                        field_values.len()
+                                    ),
                                     Some("ensure all struct fields are provided in the literal"),
                                 );
                             }
@@ -1532,12 +1727,17 @@ impl Evaluator {
                                         instance_fields.insert(field_name.clone(), val);
                                     }
                                     None => {
-                                        let field_names: Vec<&str> = def_fields.iter().map(|(n, _, _)| n.as_str()).collect();
-                                        let hint = suggest_similar(field_name, field_names.into_iter())
-                                            .map(|s| format!("did you mean `{}`?", s));
+                                        let field_names: Vec<&str> =
+                                            def_fields.iter().map(|(n, _, _)| n.as_str()).collect();
+                                        let hint =
+                                            suggest_similar(field_name, field_names.into_iter())
+                                                .map(|s| format!("did you mean `{}`?", s));
                                         return self.runtime_error(
                                             struct_token.span,
-                                            &format!("unknown field '{}' for struct {}", field_name, name),
+                                            &format!(
+                                                "unknown field '{}' for struct {}",
+                                                field_name, name
+                                            ),
                                             hint.as_deref(),
                                         );
                                     }
@@ -1638,7 +1838,10 @@ impl Evaluator {
                 let Some((tag, msg)) = Self::error_info_from(&evaluated) else {
                     return evaluated;
                 };
-                if error_tag.as_ref().is_some_and(|wanted| tag.as_ref() != Some(wanted)) {
+                if error_tag
+                    .as_ref()
+                    .is_some_and(|wanted| tag.as_ref() != Some(wanted))
+                {
                     return evaluated;
                 }
 
@@ -1725,13 +1928,22 @@ impl Evaluator {
             let def = self.struct_defs.get(&current_name);
             match def {
                 Some(def) => {
-                    if let Object::StructDef { methods, parent, .. } = def.as_ref() {
+                    if let Object::StructDef {
+                        methods, parent, ..
+                    } = def.as_ref()
+                    {
                         if let Some(method) = methods.get(method_name) {
-                            if let Object::Function { parameters, body, env } = method.as_ref() {
-                                let bound_env = Rc::new(RefCell::new(
-                                    Environment::new_enclosed(Rc::clone(env)),
-                                ));
-                                let field_names: Vec<String> = instance_fields.borrow().keys().cloned().collect();
+                            if let Object::Function {
+                                parameters,
+                                body,
+                                env,
+                            } = method.as_ref()
+                            {
+                                let bound_env = Rc::new(RefCell::new(Environment::new_enclosed(
+                                    Rc::clone(env),
+                                )));
+                                let field_names: Vec<String> =
+                                    instance_fields.borrow().keys().cloned().collect();
                                 for (k, v) in instance_fields.borrow().iter() {
                                     bound_env.borrow_mut().set(k.clone(), Rc::clone(v));
                                 }
@@ -1759,11 +1971,17 @@ impl Evaluator {
                         let mut all_names: Vec<String> = methods.keys().cloned().collect();
                         // Also add field names (user may confuse field/method)
                         all_names.extend(instance_fields.borrow().keys().cloned());
-                        let hint = suggest_similar(method_name, all_names.iter().map(|s: &String| s.as_str()))
-                            .map(|s| format!("did you mean `{}`?", s));
+                        let hint = suggest_similar(
+                            method_name,
+                            all_names.iter().map(|s: &String| s.as_str()),
+                        )
+                        .map(|s| format!("did you mean `{}`?", s));
                         return self.runtime_error(
                             span,
-                            &format!("method '{}' not found on struct {}", method_name, struct_name),
+                            &format!(
+                                "method '{}' not found on struct {}",
+                                method_name, struct_name
+                            ),
                             hint.as_deref(),
                         );
                     }
@@ -1772,7 +1990,9 @@ impl Evaluator {
                     return self.runtime_error(
                         span,
                         &format!("struct definition not found: {}", current_name),
-                        Some("ensure the struct is defined or imported before calling methods on it"),
+                        Some(
+                            "ensure the struct is defined or imported before calling methods on it",
+                        ),
                     );
                 }
             }
@@ -1843,31 +2063,51 @@ impl Evaluator {
         value_on_right: bool,
         env: &Rc<RefCell<Environment>>,
     ) -> Rc<Object> {
-        if let Expression::Infix { operator, left, right, .. } = expr {
+        if let Expression::Infix {
+            operator,
+            left,
+            right,
+            ..
+        } = expr
+        {
             if operator == "or" {
-                let left_result = self.distribute_comparison(cmp_op, left, cmp_value, value_on_right, env);
-                if left_result.is_error() { return left_result; }
+                let left_result =
+                    self.distribute_comparison(cmp_op, left, cmp_value, value_on_right, env);
+                if left_result.is_error() {
+                    return left_result;
+                }
                 if left_result.is_truthy() {
                     return Rc::new(Object::Boolean(true));
                 }
-                let right_result = self.distribute_comparison(cmp_op, right, cmp_value, value_on_right, env);
-                if right_result.is_error() { return right_result; }
+                let right_result =
+                    self.distribute_comparison(cmp_op, right, cmp_value, value_on_right, env);
+                if right_result.is_error() {
+                    return right_result;
+                }
                 return Rc::new(Object::Boolean(right_result.is_truthy()));
             }
             if operator == "and" {
-                let left_result = self.distribute_comparison(cmp_op, left, cmp_value, value_on_right, env);
-                if left_result.is_error() { return left_result; }
+                let left_result =
+                    self.distribute_comparison(cmp_op, left, cmp_value, value_on_right, env);
+                if left_result.is_error() {
+                    return left_result;
+                }
                 if !left_result.is_truthy() {
                     return Rc::new(Object::Boolean(false));
                 }
-                let right_result = self.distribute_comparison(cmp_op, right, cmp_value, value_on_right, env);
-                if right_result.is_error() { return right_result; }
+                let right_result =
+                    self.distribute_comparison(cmp_op, right, cmp_value, value_on_right, env);
+                if right_result.is_error() {
+                    return right_result;
+                }
                 return Rc::new(Object::Boolean(right_result.is_truthy()));
             }
         }
         // Leaf: evaluate the expression and apply the comparison
         let val = self.eval_expression(expr, Rc::clone(env));
-        if val.is_error() { return val; }
+        if val.is_error() {
+            return val;
+        }
         if value_on_right {
             self.eval_infix_expression(cmp_op, val, Rc::clone(cmp_value), Span::default())
         } else {
@@ -1886,32 +2126,24 @@ impl Evaluator {
             (Object::Integer(l), Object::Integer(r)) => {
                 self.eval_integer_infix(operator, *l, *r, span)
             }
-            (Object::Float(l), Object::Float(r)) => {
-                self.eval_float_infix(operator, *l, *r, span)
-            }
+            (Object::Float(l), Object::Float(r)) => self.eval_float_infix(operator, *l, *r, span),
             (Object::Integer(l), Object::Float(r)) => {
                 self.eval_float_infix(operator, *l as f64, *r, span)
             }
             (Object::Float(l), Object::Integer(r)) => {
                 self.eval_float_infix(operator, *l, *r as f64, span)
             }
-            (Object::String(l), Object::String(r)) => {
-                self.eval_string_infix(operator, l, r, span)
-            }
-            (Object::Char(l), Object::Char(r)) => {
-                self.eval_char_infix(operator, *l, *r, span)
-            }
-            (Object::Boolean(l), Object::Boolean(r)) => {
-                match operator {
-                    "==" => Rc::new(Object::Boolean(l == r)),
-                    "!=" => Rc::new(Object::Boolean(l != r)),
-                    _ => self.runtime_error(
-                        span,
-                        &format!("unknown operator: BOOLEAN {} BOOLEAN", operator),
-                        Some("booleans only support == and != comparisons"),
-                    ),
-                }
-            }
+            (Object::String(l), Object::String(r)) => self.eval_string_infix(operator, l, r, span),
+            (Object::Char(l), Object::Char(r)) => self.eval_char_infix(operator, *l, *r, span),
+            (Object::Boolean(l), Object::Boolean(r)) => match operator {
+                "==" => Rc::new(Object::Boolean(l == r)),
+                "!=" => Rc::new(Object::Boolean(l != r)),
+                _ => self.runtime_error(
+                    span,
+                    &format!("unknown operator: BOOLEAN {} BOOLEAN", operator),
+                    Some("booleans only support == and != comparisons"),
+                ),
+            },
             // Byte arithmetic — promote to int
             (Object::Byte(l), Object::Byte(r)) => {
                 self.eval_integer_infix(operator, *l as i64, *r as i64, span)
@@ -1929,9 +2161,7 @@ impl Evaluator {
                 self.eval_float_infix(operator, *l, *r as f64, span)
             }
             // Uint arithmetic
-            (Object::Uint(l), Object::Uint(r)) => {
-                self.eval_uint_infix(operator, *l, *r, span)
-            }
+            (Object::Uint(l), Object::Uint(r)) => self.eval_uint_infix(operator, *l, *r, span),
             (Object::Uint(l), Object::Integer(r)) => {
                 self.eval_integer_infix(operator, *l as i64, *r, span)
             }
@@ -1951,22 +2181,20 @@ impl Evaluator {
                 self.eval_uint_infix(operator, *l as u64, *r, span)
             }
             // Tuple concatenation
-            (Object::Tuple(l), Object::Tuple(r)) => {
-                match operator {
-                    "+" => {
-                        let mut new = l.clone();
-                        new.extend(r.clone());
-                        Rc::new(Object::Tuple(new))
-                    }
-                    "==" => Rc::new(Object::Boolean(l == r)),
-                    "!=" => Rc::new(Object::Boolean(l != r)),
-                    _ => self.runtime_error(
-                        span,
-                        &format!("unknown operator: TUPLE {} TUPLE", operator),
-                        Some("tuples only support +, ==, and != operators"),
-                    ),
+            (Object::Tuple(l), Object::Tuple(r)) => match operator {
+                "+" => {
+                    let mut new = l.clone();
+                    new.extend(r.clone());
+                    Rc::new(Object::Tuple(new))
                 }
-            }
+                "==" => Rc::new(Object::Boolean(l == r)),
+                "!=" => Rc::new(Object::Boolean(l != r)),
+                _ => self.runtime_error(
+                    span,
+                    &format!("unknown operator: TUPLE {} TUPLE", operator),
+                    Some("tuples only support +, ==, and != operators"),
+                ),
+            },
             _ => {
                 if operator == "==" {
                     Rc::new(Object::Boolean(left == right))
@@ -1975,7 +2203,12 @@ impl Evaluator {
                 } else {
                     self.runtime_error(
                         span,
-                        &format!("type mismatch: {} {} {}", left.type_name(), operator, right.type_name()),
+                        &format!(
+                            "type mismatch: {} {} {}",
+                            left.type_name(),
+                            operator,
+                            right.type_name()
+                        ),
                         Some("operands must be the same type for this operator"),
                     )
                 }
@@ -1990,14 +2223,22 @@ impl Evaluator {
             "*" => Rc::new(Object::Integer(left * right)),
             "/" => {
                 if right == 0 {
-                    self.runtime_error(span, "division by zero", Some("ensure the divisor is not zero before dividing"))
+                    self.runtime_error(
+                        span,
+                        "division by zero",
+                        Some("ensure the divisor is not zero before dividing"),
+                    )
                 } else {
                     Rc::new(Object::Integer(left / right))
                 }
             }
             "%" => {
                 if right == 0 {
-                    self.runtime_error(span, "modulo by zero", Some("ensure the divisor is not zero before using %"))
+                    self.runtime_error(
+                        span,
+                        "modulo by zero",
+                        Some("ensure the divisor is not zero before using %"),
+                    )
                 } else {
                     Rc::new(Object::Integer(left % right))
                 }
@@ -2021,7 +2262,11 @@ impl Evaluator {
             "+" => Rc::new(Object::Uint(left.wrapping_add(right))),
             "-" => {
                 if right > left {
-                    self.runtime_error(span, "unsigned integer underflow", Some("subtraction would produce a negative value, which uint cannot hold"))
+                    self.runtime_error(
+                        span,
+                        "unsigned integer underflow",
+                        Some("subtraction would produce a negative value, which uint cannot hold"),
+                    )
                 } else {
                     Rc::new(Object::Uint(left - right))
                 }
@@ -2029,14 +2274,22 @@ impl Evaluator {
             "*" => Rc::new(Object::Uint(left.wrapping_mul(right))),
             "/" => {
                 if right == 0 {
-                    self.runtime_error(span, "division by zero", Some("ensure the divisor is not zero before dividing"))
+                    self.runtime_error(
+                        span,
+                        "division by zero",
+                        Some("ensure the divisor is not zero before dividing"),
+                    )
                 } else {
                     Rc::new(Object::Uint(left / right))
                 }
             }
             "%" => {
                 if right == 0 {
-                    self.runtime_error(span, "modulo by zero", Some("ensure the divisor is not zero before using %"))
+                    self.runtime_error(
+                        span,
+                        "modulo by zero",
+                        Some("ensure the divisor is not zero before using %"),
+                    )
                 } else {
                     Rc::new(Object::Uint(left % right))
                 }
@@ -2120,7 +2373,7 @@ impl Evaluator {
                     span,
                     "postfix operator requires identifier",
                     Some("use ++ or -- only on variable names, e.g. `count++`"),
-                )
+                );
             }
         };
 
@@ -2133,7 +2386,7 @@ impl Evaluator {
                     span,
                     &format!("identifier not found: {}", ident_name),
                     Some("make sure the variable is declared before using postfix operators"),
-                )
+                );
             }
         };
 
@@ -2141,7 +2394,10 @@ impl Evaluator {
         if env.borrow().is_immutable(&ident_name) {
             return self.runtime_error(
                 span,
-                &format!("cannot mutate immutable variable '{}'. use := to override", ident_name),
+                &format!(
+                    "cannot mutate immutable variable '{}'. use := to override",
+                    ident_name
+                ),
                 Some("immutable variables cannot be changed with ++ or --; use := to reassign"),
             );
         }
@@ -2159,9 +2415,13 @@ impl Evaluator {
             _ => {
                 return self.runtime_error(
                     span,
-                    &format!("unknown postfix operator: {}{}", current.type_name(), operator),
+                    &format!(
+                        "unknown postfix operator: {}{}",
+                        current.type_name(),
+                        operator
+                    ),
                     Some("postfix ++ and -- are only supported on integer values"),
-                )
+                );
             }
         };
 
@@ -2207,13 +2467,23 @@ impl Evaluator {
             }
             _ => self.runtime_error(
                 span,
-                &format!("index operator not supported: {}[{}]", left.type_name(), index.type_name()),
+                &format!(
+                    "index operator not supported: {}[{}]",
+                    left.type_name(),
+                    index.type_name()
+                ),
                 Some("indexing is supported on arrays, strings, tuples, and maps"),
             ),
         }
     }
 
-    fn eval_slice(&self, left: Rc<Object>, start: Option<usize>, end: Option<usize>, span: Span) -> Rc<Object> {
+    fn eval_slice(
+        &self,
+        left: Rc<Object>,
+        start: Option<usize>,
+        end: Option<usize>,
+        span: Span,
+    ) -> Rc<Object> {
         match left.as_ref() {
             Object::Array(arr) => {
                 let s = start.unwrap_or(0);
@@ -2277,7 +2547,10 @@ impl Evaluator {
         call_span: Span,
     ) -> Option<Rc<Object>> {
         // Count required params (no default, not optional)
-        let required = parameters.iter().filter(|p| p.default.is_none() && !p.optional).count();
+        let required = parameters
+            .iter()
+            .filter(|p| p.default.is_none() && !p.optional)
+            .count();
         let total_provided = args.len() + named_args.len();
 
         if total_provided < required {
@@ -2295,7 +2568,8 @@ impl Evaluator {
                 call_span,
                 &format!(
                     "wrong number of arguments: expected at most {}, got {}",
-                    parameters.len(), total_provided
+                    parameters.len(),
+                    total_provided
                 ),
                 None,
             ));
@@ -2308,7 +2582,10 @@ impl Evaluator {
                 if pos < args.len() {
                     return Some(self.runtime_error(
                         call_span,
-                        &format!("parameter '{}' was given both positionally and by name", name),
+                        &format!(
+                            "parameter '{}' was given both positionally and by name",
+                            name
+                        ),
                         None,
                     ));
                 }
@@ -2359,7 +2636,10 @@ impl Evaluator {
                                 "type mismatch for parameter '{}': expected {}, got {}",
                                 param.ident.value, expected, actual
                             ),
-                            Some(&format!("parameter '{}' requires type {}", param.ident.value, expected)),
+                            Some(&format!(
+                                "parameter '{}' requires type {}",
+                                param.ident.value, expected
+                            )),
                         ));
                     }
                 }
@@ -2396,7 +2676,9 @@ impl Evaluator {
                 env,
             } => {
                 let extended_env = Rc::new(RefCell::new(Environment::new_enclosed(Rc::clone(env))));
-                if let Some(err) = self.bind_params(parameters, &args, &named_args, &extended_env, call_span) {
+                if let Some(err) =
+                    self.bind_params(parameters, &args, &named_args, &extended_env, call_span)
+                {
                     return err;
                 }
 
@@ -2414,7 +2696,9 @@ impl Evaluator {
                 field_names,
             } => {
                 let extended_env = Rc::new(RefCell::new(Environment::new_enclosed(Rc::clone(env))));
-                if let Some(err) = self.bind_params(parameters, &args, &named_args, &extended_env, call_span) {
+                if let Some(err) =
+                    self.bind_params(parameters, &args, &named_args, &extended_env, call_span)
+                {
                     return err;
                 }
 
@@ -2437,7 +2721,12 @@ impl Evaluator {
                 if args.len() != fields.len() {
                     return self.runtime_error(
                         call_span,
-                        &format!("struct {} has {} fields, got {} arguments", name, fields.len(), args.len()),
+                        &format!(
+                            "struct {} has {} fields, got {} arguments",
+                            name,
+                            fields.len(),
+                            args.len()
+                        ),
                         None,
                     );
                 }
@@ -2448,8 +2737,14 @@ impl Evaluator {
                     if !type_matches(expected_type, &actual_type) {
                         return self.runtime_error(
                             call_span,
-                            &format!("type mismatch for field '{}': expected {}, got {}", field_name, expected_type, actual_type),
-                            Some(&format!("field '{}' requires type {}", field_name, expected_type)),
+                            &format!(
+                                "type mismatch for field '{}': expected {}, got {}",
+                                field_name, expected_type, actual_type
+                            ),
+                            Some(&format!(
+                                "field '{}' requires type {}",
+                                field_name, expected_type
+                            )),
                         );
                     }
                     instance_fields.insert(field_name.clone(), Rc::clone(arg));
@@ -2460,18 +2755,28 @@ impl Evaluator {
                     fields: Rc::new(RefCell::new(instance_fields)),
                 })
             }
-            _ => self.runtime_error(call_span, &format!("not a function: {}", func.type_name()), None),
+            _ => self.runtime_error(
+                call_span,
+                &format!("not a function: {}", func.type_name()),
+                None,
+            ),
         }
     }
 
-    fn eval_block(&mut self, statements: &[Statement], env: Rc<RefCell<Environment>>) -> Rc<Object> {
+    fn eval_block(
+        &mut self,
+        statements: &[Statement],
+        env: Rc<RefCell<Environment>>,
+    ) -> Rc<Object> {
         let mut result = Rc::new(Object::None);
 
         for stmt in statements {
             result = self.eval_statement(stmt, Rc::clone(&env));
 
             match result.as_ref() {
-                Object::Return(_) | Object::Error(_) | Object::Skip | Object::Stop => return result,
+                Object::Return(_) | Object::Error(_) | Object::Skip | Object::Stop => {
+                    return result;
+                }
                 _ => {}
             }
         }
@@ -2511,7 +2816,7 @@ impl Evaluator {
                     span,
                     &format!("cannot iterate over {}", iterable_val.type_name()),
                     Some("each loops support arrays, strings, tuples, sets, and maps"),
-                )
+                );
             }
         };
 
@@ -2584,7 +2889,8 @@ impl Evaluator {
             // If inline pattern, register it on the fly
             if let (Some(params), Some(condition)) = (&arm.inline_params, &arm.inline_condition) {
                 let param_names: Vec<String> = params.iter().map(|p| p.value.clone()).collect();
-                self.patterns.register(arm.pattern_name.clone(), param_names, condition.clone());
+                self.patterns
+                    .register(arm.pattern_name.clone(), param_names, condition.clone());
             }
 
             // Look up pattern
@@ -2595,7 +2901,7 @@ impl Evaluator {
                         span,
                         &format!("unknown pattern: {}", arm.pattern_name),
                         Some("define the pattern before using it in a choose expression"),
-                    )
+                    );
                 }
             };
 
@@ -2658,7 +2964,12 @@ impl Evaluator {
             (Object::Set(_), "set") => true,
             (Object::None, "None") => true,
             (Object::Function { .. }, "fun") => true,
-            (Object::StructInstance { struct_name: stn, .. }, name) => stn == name,
+            (
+                Object::StructInstance {
+                    struct_name: stn, ..
+                },
+                name,
+            ) => stn == name,
             _ => false,
         };
 
@@ -2681,7 +2992,9 @@ impl Evaluator {
                     )));
                 }
                 // A variable's type is mutable only if it has no type constraint
-                Rc::new(Object::Boolean(env.borrow().get_type_constraint(&ident.value).is_none()))
+                Rc::new(Object::Boolean(
+                    env.borrow().get_type_constraint(&ident.value).is_none(),
+                ))
             }
             Expression::DotAccess { .. } => {
                 // Struct fields have locked types
@@ -2855,12 +3168,7 @@ mod tests {
 
     #[test]
     fn test_char_expressions() {
-        let tests = vec![
-            ("`a`", 'a'),
-            ("`Z`", 'Z'),
-            ("`0`", '0'),
-            ("`!`", '!'),
-        ];
+        let tests = vec![("`a`", 'a'), ("`Z`", 'Z'), ("`0`", '0'), ("`!`", '!')];
 
         for (input, expected) in tests {
             let result = test_eval(input);
@@ -3361,9 +3669,8 @@ mod tests {
 
     #[test]
     fn test_type_wrap_tagged_error_preserves_existing_tag() {
-        let result = test_eval(
-            r#"<type<Error<override> || Value>>(<fail>(<Error<original>>("boom"))).tag"#,
-        );
+        let result =
+            test_eval(r#"<type<Error<override> || Value>>(<fail>(<Error<original>>("boom"))).tag"#);
         test_string(&result, "original");
     }
 
@@ -3383,11 +3690,13 @@ mod tests {
 
     #[test]
     fn test_main_block_executes_in_main_context() {
-        let result = test_eval(r#"
+        let result = test_eval(
+            r#"
             main {
                 42
             }
-        "#);
+        "#,
+        );
         test_integer(&result, 42);
     }
 
@@ -3612,11 +3921,7 @@ mod tests {
 
     #[test]
     fn test_len_array() {
-        let tests = vec![
-            ("len([])", 0),
-            ("len([1])", 1),
-            ("len([1, 2, 3])", 3),
-        ];
+        let tests = vec![("len([])", 0), ("len([1])", 1), ("len([1, 2, 3])", 3)];
 
         for (input, expected) in tests {
             let result = test_eval(input);
@@ -3626,11 +3931,7 @@ mod tests {
 
     #[test]
     fn test_len_string() {
-        let tests = vec![
-            ("len(\"\")", 0),
-            ("len(\"hello\")", 5),
-            ("len('world')", 5),
-        ];
+        let tests = vec![("len(\"\")", 0), ("len(\"hello\")", 5), ("len('world')", 5)];
 
         for (input, expected) in tests {
             let result = test_eval(input);
@@ -3950,7 +4251,9 @@ mod tests {
     fn test_immutable_assign_blocked() {
         let result = test_eval("x <int> = 10\nx = 20");
         match result.as_ref() {
-            Object::Error(msg) => assert!(msg.contains("cannot reassign immutable"), "got: {}", msg),
+            Object::Error(msg) => {
+                assert!(msg.contains("cannot reassign immutable"), "got: {}", msg)
+            }
             _ => panic!("Expected immutability error, got {:?}", result),
         }
     }
@@ -3987,7 +4290,11 @@ mod tests {
         // := overrides value immutability but type is still locked
         let result = test_eval("x <int> = 10\nx := \"hello\"");
         match result.as_ref() {
-            Object::Error(msg) => assert!(msg.contains("type mismatch") && msg.contains("locked"), "got: {}", msg),
+            Object::Error(msg) => assert!(
+                msg.contains("type mismatch") && msg.contains("locked"),
+                "got: {}",
+                msg
+            ),
             _ => panic!("Expected type locked error, got {:?}", result),
         }
     }
@@ -3997,7 +4304,11 @@ mod tests {
         // No implicit conversion on walrus reassignment — type is locked
         let result = test_eval("x <int> = 10\nx := 3.7");
         match result.as_ref() {
-            Object::Error(msg) => assert!(msg.contains("type mismatch") && msg.contains("locked"), "got: {}", msg),
+            Object::Error(msg) => assert!(
+                msg.contains("type mismatch") && msg.contains("locked"),
+                "got: {}",
+                msg
+            ),
             _ => panic!("Expected type locked error, got {:?}", result),
         }
     }
@@ -4059,7 +4370,11 @@ mod tests {
         // Type is locked even on mutable typed variables
         let result = test_eval("x <int> := 10\nx := \"hello\"");
         match result.as_ref() {
-            Object::Error(msg) => assert!(msg.contains("type mismatch") && msg.contains("locked"), "got: {}", msg),
+            Object::Error(msg) => assert!(
+                msg.contains("type mismatch") && msg.contains("locked"),
+                "got: {}",
+                msg
+            ),
             _ => panic!("Expected type locked error, got {:?}", result),
         }
     }
@@ -4227,7 +4542,9 @@ mod tests {
     fn test_is_mut_wrong_arg_count() {
         let result = test_eval("x := 1\ny := 2\nis_mut(x, y)");
         match result.as_ref() {
-            Object::Error(msg) => assert!(msg.contains("wrong number of arguments"), "got: {}", msg),
+            Object::Error(msg) => {
+                assert!(msg.contains("wrong number of arguments"), "got: {}", msg)
+            }
             _ => panic!("Expected error, got {:?}", result),
         }
     }
@@ -4351,7 +4668,9 @@ mod tests {
         let input = "fun add(a, b) { a + b }\nadd(1)";
         let result = test_eval(input);
         match result.as_ref() {
-            Object::Error(msg) => assert!(msg.contains("wrong number of arguments"), "got: {}", msg),
+            Object::Error(msg) => {
+                assert!(msg.contains("wrong number of arguments"), "got: {}", msg)
+            }
             _ => panic!("Expected error, got {:?}", result),
         }
     }
@@ -4796,7 +5115,9 @@ mod tests {
         "#;
         let result = test_eval(input);
         match result.as_ref() {
-            Object::Error(msg) => assert!(msg.contains("cannot reassign immutable"), "got: {}", msg),
+            Object::Error(msg) => {
+                assert!(msg.contains("cannot reassign immutable"), "got: {}", msg)
+            }
             _ => panic!("Expected error, got {:?}", result),
         }
     }
@@ -5267,12 +5588,18 @@ mod tests {
 
     #[test]
     fn test_map_insert() {
-        test_integer(&test_eval("m := {\"a\": 1}\nm := insert(m, \"b\", 2)\nm[\"b\"]"), 2);
+        test_integer(
+            &test_eval("m := {\"a\": 1}\nm := insert(m, \"b\", 2)\nm[\"b\"]"),
+            2,
+        );
     }
 
     #[test]
     fn test_map_remove() {
-        test_integer(&test_eval("m := {\"a\": 1, \"b\": 2}\nm := remove(m, \"a\")\nlen(m)"), 1);
+        test_integer(
+            &test_eval("m := {\"a\": 1, \"b\": 2}\nm := remove(m, \"a\")\nlen(m)"),
+            1,
+        );
     }
 
     #[test]
@@ -5351,7 +5678,10 @@ mod tests {
 
     #[test]
     fn test_set_remove() {
-        test_integer(&test_eval("s := set(1, 2, 3)\ns := remove(s, 2)\nlen(s)"), 2);
+        test_integer(
+            &test_eval("s := set(1, 2, 3)\ns := remove(s, 2)\nlen(s)"),
+            2,
+        );
     }
 
     #[test]
@@ -5521,7 +5851,11 @@ mod tests {
         "#;
         let result = test_eval(input);
         match result.as_ref() {
-            Object::Error(msg) => assert!(msg.contains("hidden"), "Expected hidden error, got: {}", msg),
+            Object::Error(msg) => assert!(
+                msg.contains("hidden"),
+                "Expected hidden error, got: {}",
+                msg
+            ),
             other => panic!("Expected Error, got {:?}", other),
         }
     }
@@ -5585,7 +5919,11 @@ mod tests {
         "#;
         let result = test_eval(input);
         match result.as_ref() {
-            Object::Error(msg) => assert!(msg.contains("hidden"), "Expected hidden error, got: {}", msg),
+            Object::Error(msg) => assert!(
+                msg.contains("hidden"),
+                "Expected hidden error, got: {}",
+                msg
+            ),
             other => panic!("Expected Error, got {:?}", other),
         }
     }
@@ -5604,7 +5942,11 @@ mod tests {
         "#;
         let result = test_eval(input);
         match result.as_ref() {
-            Object::Error(msg) => assert!(msg.contains("type mismatch"), "Expected type mismatch error, got: {}", msg),
+            Object::Error(msg) => assert!(
+                msg.contains("type mismatch"),
+                "Expected type mismatch error, got: {}",
+                msg
+            ),
             other => panic!("Expected Error, got {:?}", other),
         }
     }
@@ -5755,5 +6097,57 @@ mod tests {
         "#;
         let result = test_eval(input);
         test_string(&result, "Both 10 and 14 are of type int");
+    }
+
+    #[test]
+    fn test_toml_parse_with_nested_tables() {
+        let input = r#"
+            introduce toml
+            data := toml.parse("title = \"Oxigen\"\nports = [8000, 8001]\ncreated = 1979-05-27T07:32:00Z\n[owner]\nname = \"Javan\"\nactive = true")
+            data["owner"]["name"]
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "Javan");
+    }
+
+    #[test]
+    fn test_toml_parse_datetime_maps_to_string() {
+        let input = r#"
+            introduce toml
+            data := toml.parse("created = 1979-05-27T07:32:00Z")
+            data["created"]
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "1979-05-27T07:32:00Z");
+    }
+
+    #[test]
+    fn test_toml_read_file() {
+        let input = r#"
+            introduce io
+            introduce os
+            introduce toml
+
+            path := "/tmp/oxigen_test.toml"
+            io.write_file(path, "title = \"Oxigen\"\n[owner]\nname = \"Javan\"")
+            data := toml.read(path)
+            os.remove_file(path)
+            data["owner"]["name"]
+        "#;
+        let result = test_eval(input);
+        test_string(&result, "Javan");
+    }
+
+    #[test]
+    fn test_toml_parse_error() {
+        let input = r#"
+            introduce toml
+            toml.parse("title = ")
+        "#;
+        let result = test_eval(input);
+        match result.as_ref() {
+            Object::Error(msg) => assert!(msg.contains("toml parse error:")),
+            _ => panic!("Expected TOML parse error, got {:?}", result),
+        }
     }
 }

@@ -151,11 +151,15 @@ impl fmt::Display for Object {
                 write!(f, "[{}]", items.join(", "))
             }
             Object::Function { parameters, .. } => {
-                let params: Vec<String> = parameters.iter().map(|p| p.ident.value.clone()).collect();
+                let params: Vec<String> =
+                    parameters.iter().map(|p| p.ident.value.clone()).collect();
                 write!(f, "fun({})", params.join(", "))
             }
             Object::StructDef { name, .. } => write!(f, "struct {}", name),
-            Object::StructInstance { struct_name, fields } => {
+            Object::StructInstance {
+                struct_name,
+                fields,
+            } => {
                 let fields_ref = fields.borrow();
                 let items: Vec<String> = fields_ref
                     .iter()
@@ -164,7 +168,8 @@ impl fmt::Display for Object {
                 write!(f, "{} {{ {} }}", struct_name, items.join(", "))
             }
             Object::BoundMethod { parameters, .. } => {
-                let params: Vec<String> = parameters.iter().map(|p| p.ident.value.clone()).collect();
+                let params: Vec<String> =
+                    parameters.iter().map(|p| p.ident.value.clone()).collect();
                 write!(f, "fun({})", params.join(", "))
             }
             Object::Byte(n) => write!(f, "{}", n),
@@ -217,7 +222,10 @@ impl fmt::Debug for Object {
                 write!(f, "Function({:?})", parameters)
             }
             Object::StructDef { name, .. } => write!(f, "StructDef({})", name),
-            Object::StructInstance { struct_name, fields } => {
+            Object::StructInstance {
+                struct_name,
+                fields,
+            } => {
                 write!(f, "StructInstance({}, {:?})", struct_name, fields.borrow())
             }
             Object::BoundMethod { parameters, .. } => write!(f, "BoundMethod({:?})", parameters),
@@ -232,7 +240,9 @@ impl fmt::Debug for Object {
             Object::Skip => write!(f, "Skip"),
             Object::Stop => write!(f, "Stop"),
             Object::None => write!(f, "None"),
-            Object::ErrorValue { msg, tag } => write!(f, "ErrorValue(tag={:?}, msg={:?})", tag, msg),
+            Object::ErrorValue { msg, tag } => {
+                write!(f, "ErrorValue(tag={:?}, msg={:?})", tag, msg)
+            }
             Object::Value(val) => write!(f, "Value({:?})", val),
             Object::Error(msg) => write!(f, "Error({:?})", msg),
         }
@@ -248,7 +258,10 @@ impl PartialEq for Object {
             (Object::String(a), Object::String(b)) => a == b,
             (Object::Boolean(a), Object::Boolean(b)) => a == b,
             (Object::None, Object::None) => true,
-            (Object::ErrorValue { msg: a, tag: a_tag }, Object::ErrorValue { msg: b, tag: b_tag }) => a == b && a_tag == b_tag,
+            (
+                Object::ErrorValue { msg: a, tag: a_tag },
+                Object::ErrorValue { msg: b, tag: b_tag },
+            ) => a == b && a_tag == b_tag,
             (Object::Value(a), Object::Value(b)) => a == b,
             (Object::Array(a), Object::Array(b)) => a == b,
             (Object::Byte(a), Object::Byte(b)) => a == b,
@@ -258,10 +271,16 @@ impl PartialEq for Object {
             (Object::Set(a), Object::Set(b)) => {
                 a.len() == b.len() && a.iter().all(|item| b.iter().any(|bitem| item == bitem))
             }
-            (Object::StructInstance { struct_name: a_name, fields: a_fields },
-             Object::StructInstance { struct_name: b_name, fields: b_fields }) => {
-                a_name == b_name && *a_fields.borrow() == *b_fields.borrow()
-            }
+            (
+                Object::StructInstance {
+                    struct_name: a_name,
+                    fields: a_fields,
+                },
+                Object::StructInstance {
+                    struct_name: b_name,
+                    fields: b_fields,
+                },
+            ) => a_name == b_name && *a_fields.borrow() == *b_fields.borrow(),
             (Object::Module { name: a, .. }, Object::Module { name: b, .. }) => a == b,
             _ => false,
         }

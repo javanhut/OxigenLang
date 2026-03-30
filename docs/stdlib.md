@@ -260,6 +260,39 @@ m := {"name": "Oxigen", "version": 1}
 println(json.stringify(m))  // {"name":"Oxigen","version":1}
 ```
 
+## toml
+
+```oxi
+introduce toml
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `parse` | `parse(s)` | Parse TOML string into Oxigen values |
+| `read` | `read(path)` | Read and parse a TOML file |
+
+**Type mapping:**
+
+| TOML | Oxigen |
+|------|--------|
+| string | `String` |
+| integer | `Integer` |
+| float | `Float` |
+| boolean | `True`/`False` |
+| datetime/date/time | `String` |
+| array | `Array` |
+| table | `Map` |
+
+```oxi
+introduce toml
+
+config := toml.parse("title = \"Oxigen\"\n[owner]\nname = \"Javan\"")
+println(config["owner"]["name"])  // Javan
+
+settings := toml.read("Cargo.toml")
+println(settings["package"]["name"])  // oxigen
+```
+
 ## net
 
 ```oxi

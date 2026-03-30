@@ -1,0 +1,8 @@
+introduce io
+
+// Parse a TOML string into Oxigen values.
+// Tables become maps, arrays stay arrays, and date/time values become strings.
+fun parse(s <str>) { __toml_parse(s) }
+
+// Read and parse a TOML file from disk.
+fun read(path <str>) { parse(io.read_file(path)) }
