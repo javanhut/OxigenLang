@@ -7,7 +7,9 @@ Angle forms are one of Oxigen's core syntax families. The same `<...>` bracket s
 - typed walrus conversion
 - value constructors (creating error and success values)
 - explicit error and result handling
-- postfix effects on expressions (recovery, logging)
+- postfix effects on expressions (recovery with `guard`)
+- standalone logging with `<log>`
+- entry point marking with `main`
 
 The syntax stays the same, but the meaning depends on where the angle form appears in a statement.
 
@@ -23,10 +25,10 @@ Whenever you see `<...>` in Oxigen, look at what comes **before** the opening `<
 |---|---|---|
 | A variable name | Type annotation — declares what type this variable holds | `name <str> = "hello"` |
 | The keyword `as` or just `<type>` after a name | Zero-initialize — create an empty value of this type | `count <int>` |
-| Nothing (start of expression) | Constructor — build a value like an error or success wrapper | `<Error>("failed")` |
-| A completed expression | Effect — do something with the result of that expression | `expr <guard>("fallback")` |
+| Nothing (start of expression) | Constructor or utility — build a value, transform, or log | `<Error>("failed")`, `<log>("msg")` |
+| A completed expression | Effect — recover from an error on that expression | `expr <guard>("fallback")` |
 
-One bracket family, four roles. Position is everything.
+One bracket family, multiple roles. Position is everything.
 
 ---
 
@@ -324,7 +326,7 @@ Tags give you a way to group related errors without defining custom error types 
 <Error<retry_error>>("max retries hit")  // retryable error
 ```
 
-Later, when you catch errors with `guard` or `log`, you can filter by tag — only handling specific categories of errors and letting others propagate.
+Later, when you catch errors with `guard`, you can filter by tag — only handling specific categories of errors and letting others propagate.
 
 ### Public Fields on Error Values
 
@@ -792,85 +794,145 @@ Here:
 
 ---
 
-## 10. Side-Effect Observation with `log`
+## 10. Logging with `<log>`
 
-`<log>` intercepts matching errors and runs a handler for its **side effects** (like printing or recording). Unlike `guard`, **`log` does not recover from the error**. After the handler runs, the original error **continues propagating**.
+`<log>` is a standalone logging utility that writes timestamped messages to **stderr**. It is a prefix-position angle form — you call it on its own, not after an expression.
 
-Think of `log` as a window: you can observe the error as it passes through, but you do not catch it.
+Think of `<log>` as a simple, structured way to record what your program is doing. Because it writes to stderr, your program's actual output on stdout stays clean.
 
-### What the Syntax Means
+### Basic Form
 
 ```oxi
-parse(text) <log<Error>> err -> println("parse failed: {err.msg}")
+<log>("server started")
+```
+
+This prints the following to stderr:
+
+```
+2026-03-28 14:30:00: server started
 ```
 
 Breaking this down:
 
-1. `parse(text)` — the expression that might fail
-2. `<log` — start of the log effect
-3. `<Error>` — the filter: intercept errors (you can also use `<Error<tag>>` for specific tags)
-4. `>` — close the log angle bracket
-5. `err` — the binding name for the caught error
-6. `->` — separates the binding from the handler
-7. `println("parse failed: {err.msg}")` — the handler expression that runs for side effects
+1. `<log>` — the angle form that says "write a log message"
+2. `("server started")` — the message to log
 
-### How It Works, Step by Step
+The timestamp is automatically added in `YYYY-MM-DD HH:MM:SS` format. You do not need to format it yourself.
 
-```oxi
-parse(text) <log<Error>> err -> println("parse failed: {err.msg}")
-```
+### Tagged Form
 
-1. `parse(text)` is evaluated.
-2. **If it succeeds:** The value passes through unchanged. The handler does not run. `log` has no effect.
-3. **If it fails with a matching error:**
-   - The error is bound to `err` as an error value (with `.msg` and `.tag` fields).
-   - The handler expression `println(...)` runs — its side effect (printing to the console) happens.
-   - The handler's **return value is discarded**.
-   - The **original error continues propagating** — it is NOT caught, NOT replaced.
-4. **If it fails with a non-matching tagged error:** The handler does not run. The error propagates unchanged.
-
-### `log` vs `guard` — The Critical Difference
-
-| | `guard` | `log` |
-|---|---|---|
-| Purpose | **Recover** from an error | **Observe** an error without recovering |
-| What happens to the error | Caught and replaced by the fallback | Continues propagating after handler runs |
-| Handler's return value | Becomes the new value (replaces the error) | Discarded — does not affect anything |
-| Use when | You have a fallback value and want to keep going | You want to record, print, or log the error but still let it propagate |
-
-**Example showing the difference:**
+Add a tag inside nested angle brackets to categorize the message:
 
 ```oxi
-// guard: catches the error, returns "default" — program continues normally
-result := <fail>("boom") <guard>("default")
-// result is "default"
-
-// log: runs the handler, but the error still propagates — program halts
-<fail>("boom") <log<Error>> err -> println("saw: {err.msg}")
-// The println runs (you see "saw: boom" in the console)
-// But then the error continues propagating and the program halts
+<log<info>>("request received")
 ```
 
-### Tagged Filtering
+This prints:
 
-Just like `guard`, `log` supports tag filters:
+```
+2026-03-28 14:30:00: [INFO] request received
+```
+
+Breaking this down:
+
+1. `<log` — start of the log angle form
+2. `<info>` — the tag, nested inside the outer angle brackets
+3. `>` — close the outer angle bracket
+4. `("request received")` — the message
+
+The tag is **uppercased** in the output. You write `<log<info>>` in your code, but the output shows `[INFO]`.
+
+### Common Tags
+
+You can use **any identifier** as a tag. Here are some common choices:
 
 ```oxi
-request()
-    <log<Error<network>>> err -> println("network issue: {err.msg}")
+<log<info>>("user logged in")           // [INFO] user logged in
+<log<warn>>("disk space low")           // [WARN] disk space low
+<log<Error>>("file not found")          // [ERROR] file not found
+<log<debug>>("cache hit ratio: 0.95")   // [DEBUG] cache hit ratio: 0.95
 ```
 
-This only runs the handler for errors tagged `network`. Errors with other tags (or no tag) pass through without triggering the handler.
+Tags are free-form — there is no fixed list. Pick names that make sense for your application.
 
-### Why `log` Exists
+### Nested Tags
 
-`log` exists for scenarios where you want to **observe** errors without **hiding** them:
+For more specific categorization, nest tags inside tags:
 
-- **Debugging:** Print error details to the console while letting the error propagate to its normal handler.
-- **Telemetry:** Record the error to a log file or monitoring system without changing program behavior.
-- **Tracing:** See which errors pass through a particular point in your code.
+```oxi
+<log<Error<network>>>("connection lost")
+```
 
-If `log` caught the error (like `guard` does), you would accidentally swallow failures. `log` deliberately avoids that.
+This prints:
+
+```
+2026-03-28 14:30:00: [ERROR:NETWORK] connection lost
+```
+
+Both the outer and inner tags are uppercased and joined with a colon. This is useful when you want to distinguish between different subcategories of errors or events.
+
+### Tag-Only Form (No Message)
+
+Sometimes you just want to mark that something happened, without a detailed message. You can omit the parentheses entirely:
+
+```oxi
+<log<Error>>
+```
+
+This prints:
+
+```
+2026-03-28 14:30:00: [ERROR]
+```
+
+You can also use empty parentheses — the result is the same:
+
+```oxi
+<log<custom_tag>>()
+```
+
+This prints:
+
+```
+2026-03-28 14:30:00: [CUSTOM_TAG]
+```
+
+Both forms (no parens and empty parens) are equivalent when there is no message.
+
+### Return Value
+
+`<log>` always returns `None`. It exists purely for its side effect (writing to stderr). You would not normally assign its result to a variable, but if you do:
+
+```oxi
+x := <log>("hello")
+// x is None
+```
+
+### Key Facts
+
+| Property | Details |
+|---|---|
+| Output destination | **stderr** (not stdout) |
+| Timestamp format | `YYYY-MM-DD HH:MM:SS` |
+| Tag formatting | Uppercased in output |
+| Return value | `None` |
+| Parens required? | No — optional when there is no message |
+| Allowed tags | Any identifier (`info`, `Error`, `debug`, `my_tag`, etc.) |
+
+### When to Use `<log>`
+
+Use `<log>` whenever you want to record what your program is doing without affecting its output:
+
+- **Debugging:** Add `<log<debug>>("entering parse loop")` to trace execution flow.
+- **Error reporting:** After catching an error with `guard` or `option`, log the details with `<log<Error>>(err.msg)`.
+- **Monitoring:** Log important events like `<log<info>>("user {user_id} logged in")` for later review.
+- **Diagnostics:** Use nested tags like `<log<perf<slow>>>("query took 3.2s")` to categorize performance observations.
+
+Because `<log>` writes to stderr, you can redirect logs to a file while keeping your program's stdout output separate:
+
+```bash
+oxigen my_program.oxi 2> app.log
+```
 
 ---
 
@@ -1181,7 +1243,69 @@ choose result {
 
 ---
 
-## 13. Complete Error Handling Recipes
+## 13. Entry Point with `main`
+
+> **Note:** Although `main` is documented alongside angle forms for completeness (since it relates to module vs script behavior), it uses **keyword syntax**, not angle bracket syntax. `main` is a keyword, not an angle form.
+
+`main` marks the entry point of a script. Code inside `main` only runs when the file is executed directly — it is skipped when the file is imported as a module via `introduce`.
+
+Everything outside `main` (function definitions, struct definitions, patterns, etc.) runs in both contexts. This lets you write files that work as both libraries and scripts.
+
+### What the Syntax Means
+
+```oxi
+main {
+    println("running as script")
+}
+```
+
+Breaking this down:
+
+1. `main` — the keyword that says "this block is the script entry point"
+2. `{ ... }` — the block of statements to execute only when run directly
+
+### Library + Script Example
+
+```oxi
+// math_utils.oxi
+fun square(n <int>) { n * n }
+fun cube(n <int>) { n * n * n }
+
+main {
+    println(square(5))
+    println(cube(3))
+}
+```
+
+When run directly (`oxigen math_utils.oxi`): prints `25` and `27`.
+
+When imported via `introduce "math_utils"`: the functions `square` and `cube` are available, but nothing is printed.
+
+### Return Value
+
+`main` returns the value of the last expression in its body, or `None` if the body is empty. This is consistent with how all blocks work in Oxigen.
+
+### Indent Mode
+
+In `#[indent]` mode, use `main:` to start the block:
+
+```oxi
+#[indent]
+
+fun square(n <int>):
+    n * n
+
+main:
+    println(square(5))
+```
+
+### When to Use `main`
+
+Use `main` when you want a file to serve double duty — reusable definitions at the top, and a script entry point at the bottom. This is similar to Python's `if __name__ == "__main__":` pattern.
+
+---
+
+## 14. Complete Error Handling Recipes
 
 These recipes show how to combine angle forms for common scenarios. Each one explains what is happening and why it works.
 
@@ -1213,15 +1337,31 @@ Why it works: The keyword `guard err ->` binds the caught error to `err`. The `o
 
 ### Recipe: Log-Then-Recover
 
-Observe the error for debugging, then provide a fallback. Due to parser precedence, `<guard>` placed after a `<log>` handler becomes part of the handler expression — this means the guard catches the re-propagated error within the handler's scope:
+Log what you are about to do, then guard the operation with a fallback:
 
 ```oxi
-result := fetch_data()
-    <log<Error>> err -> println("[ERROR] {err.tag}: {err.msg}")
-    <guard>("cached fallback")
+<log<info>>("fetching data...")
+result := fetch_data() <guard>("cached fallback")
 ```
 
-Why it works: `<log>` runs `println(...)` for the side effect, then the original error continues. `<guard>` catches that error and replaces it with `"cached fallback"`.
+Why it works: `<log>` writes a timestamped message to stderr. Then `fetch_data()` runs. If it fails, `<guard>` catches the error and replaces it with `"cached fallback"`. The log line is always written, regardless of whether `fetch_data()` succeeds or fails.
+
+### Recipe: Log After Catching an Error
+
+Normalize the operation, inspect the outcome, and log errors before deciding what to do:
+
+```oxi
+result := <type<Error || Value>>(fetch_data())
+option {
+    is_error(result) -> {
+        <log<Error>>(result.msg)
+        "cached fallback"
+    },
+    result.value
+}
+```
+
+Why it works: `<type<Error || Value>>` catches any propagating error and turns it into an error value. The `option` block checks whether the result is an error. If so, it logs the error message to stderr with `<log<Error>>` and returns a fallback. If the call succeeded, it unwraps the value.
 
 ### Recipe: Normalize and Branch
 
@@ -1321,7 +1461,7 @@ Why it works: The error value is a regular value, so `choose` can match on it us
 
 ---
 
-## 14. Current Built-In Angle Forms Reference
+## 15. Current Built-In Angle Forms Reference
 
 ### Type-side (declaration position)
 
@@ -1359,31 +1499,95 @@ Used at the start of an expression to construct or transform:
 <fail>(<Error<tag>>("message"))     // propagate tagged error (HALTS)
 ```
 
+### Logging (standalone)
+
+Used as a standalone statement to write timestamped messages to stderr:
+
+```oxi
+<log>("message")                       // log message to stderr
+<log<tag>>("message")                  // log with tag to stderr
+<log<Error>>("message")                // log with Error tag
+<log<Error<sub_tag>>>("message")       // log with nested tags
+<log<tag>>                             // log tag only (no message)
+```
+
 ### Effect-side (postfix position)
 
-Used after a completed expression to apply recovery or observation:
+Used after a completed expression to apply recovery:
 
 ```oxi
 expr <guard>("fallback")                        // recover with fallback value
 expr <guard<Error<tag>>>("fallback")            // recover only if tag matches
 expr guard err -> fallback_expr                 // recover with error binding (keyword form)
-expr <log<Error>> err -> handler_expr           // observe error, keep propagating
-expr <log<Error<tag>>> err -> handler_expr      // observe only if tag matches
+```
+
+### Block-level (keyword syntax)
+
+Used at the top level of a file to control execution context. Note that `main` uses keyword syntax, not angle bracket syntax:
+
+```oxi
+main { ... }                                       // entry point — runs only when file is executed directly
 ```
 
 ---
 
-## 15. Design Rules
+## 16. Design Rules
 
 When reading or writing Oxigen code, these rules keep angle forms understandable:
 
 1. **Declaration position = types.** After a variable name, `<...>` is always a type annotation.
 2. **Prefix position = construction.** At the start of an expression, `<...>` constructs or transforms a value.
-3. **Postfix position = effects.** After a completed expression, `<...>` applies recovery or observation.
+3. **Postfix position = effects.** After a completed expression, `<...>` applies recovery (with `guard`).
 4. **`<Error>` creates values, `<fail>` creates propagation.** Never confuse the two. `<Error>` is data, `<fail>` is control flow.
 5. **`<Error<tag>>` for categories.** Use tags for lightweight error grouping without custom types.
 6. **`<type<Error || Value>>` for expected failure.** When you know a call might fail and you want to handle both paths explicitly without the program halting.
 7. **`guard` for recovery.** When you have a fallback and want to keep the program running.
-8. **`log` for observation.** When you want to see or record an error without swallowing it.
+8. **`<log>` for logging.** Use `<log>` to write timestamped messages to stderr with optional tags.
 9. **`option` + `<Error>` arm for structured recovery.** When multiple conditions or bodies inside an `option` might fail and you want one safety net.
 10. **`choose` does not have `<Error>`.** Wrap `choose` in `guard` or `option` if you need error recovery.
+11. **`main` for entry points.** Use `main` (keyword syntax, not an angle form) to mark code that should only run when the file is executed directly, not when imported as a module.
+
+---
+
+## 17. Error Messages
+
+All runtime errors in Oxigen include helpful context to make debugging easier. When something goes wrong, the error output tells you **where** the problem is, **what** the source code looks like at that point, and **how** you might fix it.
+
+### What You See
+
+Every runtime error includes three pieces of information:
+
+1. **Source position** — the line number and column where the error occurred.
+2. **Source code excerpt** — the actual line of code, with a caret (`^`) pointing to the exact position of the problem.
+3. **Hint** — a suggestion for how to fix the issue.
+
+### Example
+
+If your code divides by zero:
+
+```oxi
+result := 10 / 0
+```
+
+Oxigen prints:
+
+```
+error: division by zero
+  --> line 3:10
+  |
+3 | result := 10 / 0
+  |          ^
+  = hint: ensure the divisor is not zero before dividing
+```
+
+Reading this output:
+
+1. `error: division by zero` — what went wrong.
+2. `--> line 3:10` — the error is on line 3, column 10.
+3. `3 | result := 10 / 0` — the source code line.
+4. `^` — points to the exact position where the error was detected.
+5. `= hint: ensure the divisor is not zero before dividing` — a suggestion for fixing it.
+
+### Why This Matters
+
+Helpful error messages reduce the time you spend debugging. Instead of seeing a cryptic "runtime error" with no context, you get a clear pointer to the problem and a nudge toward the solution. This is especially useful when errors occur deep inside nested expressions or function calls — the source position and caret show you exactly where to look.

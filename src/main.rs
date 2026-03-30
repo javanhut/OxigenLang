@@ -19,6 +19,12 @@ use parser::Parser;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+
+    if args.iter().any(|a| a == "--version" || a == "-v") {
+        println!("oxigen {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     if let Some(file_path) = args.get(1)
         && file_path.ends_with(".oxi")
     {

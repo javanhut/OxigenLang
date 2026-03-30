@@ -12,6 +12,12 @@ cargo build --release
 
 The compiled binary will be at `target/release/oxigen` (or you can run directly with `cargo run`).
 
+Check the installed version:
+
+```bash
+oxigen --version
+```
+
 ## Your First Program
 
 Save the following code in a file named `hello.oxi`:
@@ -74,6 +80,12 @@ Hello from REPL
 | `version` | Show the OxigenLang version |
 
 The REPL maintains state across lines — variables, functions, structs, and patterns defined in one line are available in subsequent lines.
+
+### Command-Line Flags
+
+| Flag | Description |
+|------|-------------|
+| `--version`, `-v` | Print the version and exit |
 
 ## Exploring Indentation Mode
 

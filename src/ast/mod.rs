@@ -168,6 +168,10 @@ pub enum Statement {
         index: Expression,
         value: Expression,
     },
+    Main {
+        token: Token,
+        body: Vec<Statement>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -321,10 +325,9 @@ pub enum Expression {
     },
     Log {
         token: Token,
-        value: Box<Expression>,
-        binding: Identifier,
-        error_tag: Option<String>,
-        handler: Box<Expression>,
+        tag: Option<String>,
+        sub_tag: Option<String>,
+        message: Option<Box<Expression>>,
     },
     ErrorConstruct {
         token: Token,

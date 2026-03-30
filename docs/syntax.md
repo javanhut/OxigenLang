@@ -55,13 +55,15 @@ println("hi") unless condition                   // postfix unless guard
 println("hi") unless condition then println()    // postfix unless with alternative
 expr guard err -> fallback                       // recover from an error value
 expr <guard>(fallback)                           // preferred angle-effect recovery
-expr <log<Error>> err -> handler                 // handle/log matched errors explicitly
+<log>("message")                                 // log to stderr with timestamp
+<log<tag>>("message")                            // log with tag: [TAG] message
 <fail>("message")                                // preferred angle-effect failure
 fail "message"                                   // produce a runtime error
 each item in collection { body }                 // iteration
 repeat when condition { body }                   // while loop
 skip                                             // continue
 stop                                             // break
+main { body }                                   // runs only when file is executed directly
 ```
 
 ## Functions — [Full Guide](functions.md)
@@ -130,8 +132,9 @@ num <int> := "10"                                  // typed walrus conversion
 <Value>("ok")                                      // construct an explicit success wrapper
 <type<Error || Value>>(read_file("config"))        // normalize into expected-result space
 read_file("config") <guard>("")                    // recover from runtime error
-read_file("config") <log<Error>> err -> err.msg    // handle/log matched errors
+<log<Error>>("read failed")                        // log with Error tag to stderr
 <fail>("missing config")                           // propagate a runtime error
+main { ... }                                      // entry point (skipped when imported)
 ```
 
 ## Escape Sequences

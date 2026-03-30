@@ -170,11 +170,12 @@ Postfix guards do **not** work on:
 
 ## Angle Forms and Error Flow
 
-Oxigen uses angle forms for three related jobs:
+Oxigen uses angle forms for several related jobs:
 
 - type annotations and zero-initialization in declaration position
 - value constructors in expression position
 - effect handlers and transformations in expression position
+- entry points with `main` for code that runs only when executed directly
 
 The same bracket family is used consistently, but meaning comes from position.
 
@@ -208,7 +209,6 @@ After an already-completed expression, `<...>` is a postfix effect:
 
 ```oxi
 read_file("config") <guard>("")
-parse(text) <log<Error>> err -> println(err.msg)
 ```
 
 ## Error Values
@@ -320,26 +320,22 @@ When the keyword form binds an identifier, the bound error is only visible insid
 result := fail "boom" guard err -> err.msg
 ```
 
-## Logging and Handling with `log`
+## Standalone Logging with `log`
 
-Use `<log<Error>>` to intercept matched errors and run a handler expression.
-
-```oxi
-parsed := parse(text) <log<Error>> err -> println("parse failed: {err.msg}")
-```
-
-Tagged filtering works the same way:
+`<log>` is a standalone logging utility that writes timestamped, tagged messages to stderr.
 
 ```oxi
-result := request()
-    <log<Error<network>>> err -> println("network issue: {err.msg}")
+<log>("server started")
+<log<Info>>("listening on port 8080")
+<log<Error>>("connection refused")
+<log<Error<network>>>("timeout after 30s")
 ```
 
-Behavior:
+Output format: `YYYY-MM-DD HH:MM:SS: [TAG] message`
 
-- if the left expression succeeds, its value passes through unchanged
-- if it fails with a matching error, the handler runs for its side effects and the original error continues propagating
-- if the tag does not match, the original error keeps propagating
+Tags are uppercased automatically. When no tag is given, the output omits the tag bracket. `<log>` returns `None`.
+
+For the full reference, see [Angle Forms](angle_forms.md).
 
 ## Producing Failures with `fail`
 

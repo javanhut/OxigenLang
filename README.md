@@ -60,6 +60,7 @@ Run directly from the source tree without installing:
 cargo build --release
 cargo run -- path/to/script.oxi
 cargo run                        # starts the REPL
+cargo run -- --version           # print version
 ```
 
 ## Quick Example

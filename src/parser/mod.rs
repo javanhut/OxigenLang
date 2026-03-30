@@ -418,6 +418,13 @@ impl Parser {
                 return self.parse_contains_statement();
             }
         }
+        if self.curr_token.token_type == TokenType::Ident
+            && self.curr_token.literal == "main"
+            && self.peek_token.token_type == TokenType::LBrace
+        {
+            return self.parse_main_block();
+        }
+
         match self.curr_token.token_type {
             TokenType::Struct => self.parse_struct_definition(),
             TokenType::Each => self.parse_each_statement(),
@@ -879,7 +886,7 @@ impl Parser {
                     self.errors.push(Diagnostic::error_with_hint(
                         self.curr_token.span,
                         format!("unsupported effect filter '{}'", self.curr_token.literal),
-                        "only `Error` is supported as an effect filter",
+                        "only `Error` is supported as a filter for guard/fail",
                     ));
                     return None;
                 }
@@ -913,6 +920,96 @@ impl Parser {
             },
             value: "_err".to_string(),
         }
+    }
+
+    /// Parse `<log>`, `<log>("msg")`, `<log<tag>>`, `<log<tag>>("msg")`,
+    /// `<log<tag<sub>>>`, `<log<tag<sub>>>("msg")`.
+    /// Called when curr_token is `<` and peek_token is `log`.
+    fn parse_log_expression(&mut self) -> Option<Expression> {
+        let token = self.curr_token.clone(); // the '<'
+        self.next_token(); // move to 'log'
+
+        let mut tag: Option<String> = None;
+        let mut sub_tag: Option<String> = None;
+
+        if self.peek_token.token_type == TokenType::Lt {
+            // <log<tag...>>
+            self.next_token(); // consume inner '<'
+            self.next_token(); // move to tag name
+            if self.curr_token.token_type != TokenType::Ident {
+                self.errors.push(Diagnostic::error_with_hint(
+                    self.curr_token.span,
+                    format!("expected tag name after <log<, got {:?}", self.curr_token.literal),
+                    "use like: <log<debug>>(\"message\")",
+                ));
+                return None;
+            }
+            tag = Some(self.curr_token.literal.clone());
+
+            if self.peek_token.token_type == TokenType::Lt {
+                // <log<tag<sub>>>
+                self.next_token(); // consume sub '<'
+                self.next_token(); // move to sub_tag name
+                if self.curr_token.token_type != TokenType::Ident {
+                    self.errors.push(Diagnostic::error_with_hint(
+                        self.curr_token.span,
+                        format!("expected sub-tag name, got {:?}", self.curr_token.literal),
+                        "use like: <log<Error<network>>>(\"message\")",
+                    ));
+                    return None;
+                }
+                sub_tag = Some(self.curr_token.literal.clone());
+
+                // Close the nested brackets: expect >>> or >> >
+                if self.peek_token.token_type == TokenType::RShift {
+                    self.next_token(); // consume '>>' (closes sub and tag)
+                    if self.peek_token.token_type == TokenType::Gt {
+                        self.next_token(); // consume trailing '>' (closes log)
+                    }
+                } else {
+                    self.expect_peek(TokenType::Gt)?; // close sub '>'
+                    if self.peek_token.token_type == TokenType::RShift {
+                        self.next_token(); // consume '>>' (closes tag and log)
+                    } else {
+                        self.expect_peek(TokenType::Gt)?; // close tag '>'
+                        self.expect_peek(TokenType::Gt)?; // close log '>'
+                    }
+                }
+            } else if self.peek_token.token_type == TokenType::RShift {
+                // <log<tag>> — >> closes both tag and log
+                self.next_token(); // consume '>>'
+            } else {
+                self.expect_peek(TokenType::Gt)?; // close tag '>'
+                self.expect_peek(TokenType::Gt)?; // close log '>'
+            }
+        } else {
+            // <log> — no tags
+            self.expect_peek(TokenType::Gt)?; // close '>'
+        }
+
+        // Optional parenthesized message
+        let message = if self.peek_token.token_type == TokenType::LParen {
+            self.next_token(); // consume '('
+            if self.peek_token.token_type == TokenType::RParen {
+                // Empty parens: <log<tag>>()
+                self.next_token(); // consume ')'
+                None
+            } else {
+                self.next_token(); // move to message expression
+                let expr = self.parse_expression(Precedence::Lowest)?;
+                self.expect_peek(TokenType::RParen)?;
+                Some(Box::new(expr))
+            }
+        } else {
+            None
+        };
+
+        Some(Expression::Log {
+            token,
+            tag,
+            sub_tag,
+            message,
+        })
     }
 
     fn parse_angle_effect_with_target(
@@ -994,36 +1091,12 @@ impl Parser {
                 }
             }
             "log" => {
-                let Some(value) = value else {
-                    self.errors.push(Diagnostic::error(
-                        token.span,
-                        "<log<Error>> requires a target expression",
-                    ));
-                    return None;
-                };
-                self.next_token(); // move to binding identifier
-                if self.curr_token.token_type != TokenType::Ident {
-                    self.errors.push(Diagnostic::error_with_hint(
-                        self.curr_token.span,
-                        format!("expected identifier after <log<Error>>, got {:?}", self.curr_token.literal),
-                        "use like: value <log<Error>> err -> handler",
-                    ));
-                    return None;
-                }
-                let binding = Identifier {
-                    token: self.curr_token.clone(),
-                    value: self.curr_token.literal.clone(),
-                };
-                self.expect_peek(TokenType::Arrow)?;
-                self.next_token(); // move to handler
-                let handler = self.parse_expression(Precedence::Lowest)?;
-                Some(Expression::Log {
-                    token,
-                    value: Box::new(value),
-                    binding,
-                    error_tag: filter,
-                    handler: Box::new(handler),
-                })
+                self.errors.push(Diagnostic::error_with_hint(
+                    token.span,
+                    "<log> is no longer a postfix effect",
+                    "use <log>(\"message\") or <log<tag>>(\"message\") as a standalone expression",
+                ));
+                None
             }
             _ => {
                 self.errors.push(Diagnostic::error_with_hint(
@@ -1037,6 +1110,10 @@ impl Parser {
     }
 
     fn parse_angle_effect_expression(&mut self) -> Option<Expression> {
+        if self.peek_token.token_type == TokenType::Ident && self.peek_token.literal == "log" {
+            return self.parse_log_expression();
+        }
+
         if self.peek_token.token_type == TokenType::Ident && self.peek_token.literal == "type" {
             self.next_token(); // move to 'type'
             let token = self.curr_token.clone();
@@ -1755,6 +1832,13 @@ impl Parser {
     // ---------------- Statement parsers ----------------
 
     // each num in x { ... }
+    fn parse_main_block(&mut self) -> Option<Statement> {
+        let token = self.curr_token.clone(); // 'main'
+        self.expect_peek(TokenType::LBrace)?; // curr is now '{'
+        let body = self.parse_block()?;
+        Some(Statement::Main { token, body })
+    }
+
     fn parse_each_statement(&mut self) -> Option<Statement> {
         let token = self.curr_token.clone(); // 'each'
 
@@ -3216,27 +3300,114 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_angle_log_expression() {
-        let program = parse_ok("value := read(path) <log<Error>> err -> err.msg");
+    fn test_parse_log_with_message() {
+        let program = parse_ok("<log>(\"hello world\")");
         match &program.statements[0] {
-            Statement::Let {
-                value: Expression::Log { binding, .. },
-                ..
-            } => assert_eq!(binding.value, "err"),
-            other => panic!("Expected let with angle log expression, got {:?}", other),
+            Statement::Expr(Expression::Log { tag, sub_tag, message, .. }) => {
+                assert_eq!(*tag, None);
+                assert_eq!(*sub_tag, None);
+                assert!(message.is_some());
+            }
+            other => panic!("Expected log expression, got {:?}", other),
         }
     }
 
     #[test]
-    fn test_parse_tagged_angle_log_expression() {
-        let program = parse_ok("value := read(path) <log<Error<retry_error>>> err -> err.msg");
+    fn test_parse_log_with_tag() {
+        let program = parse_ok("<log<debug>>(\"info\")");
         match &program.statements[0] {
-            Statement::Let {
-                value: Expression::Log { error_tag, .. },
-                ..
-            } => assert_eq!(error_tag.as_deref(), Some("retry_error")),
-            other => panic!("Expected let with tagged angle log expression, got {:?}", other),
+            Statement::Expr(Expression::Log { tag, sub_tag, message, .. }) => {
+                assert_eq!(tag.as_deref(), Some("debug"));
+                assert_eq!(*sub_tag, None);
+                assert!(message.is_some());
+            }
+            other => panic!("Expected log expression with tag, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_parse_log_with_error_tag() {
+        let program = parse_ok("<log<Error>>(\"failure\")");
+        match &program.statements[0] {
+            Statement::Expr(Expression::Log { tag, sub_tag, message, .. }) => {
+                assert_eq!(tag.as_deref(), Some("Error"));
+                assert_eq!(*sub_tag, None);
+                assert!(message.is_some());
+            }
+            other => panic!("Expected log expression with Error tag, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_log_with_nested_tags() {
+        let program = parse_ok("<log<Error<network>>>(\"connection lost\")");
+        match &program.statements[0] {
+            Statement::Expr(Expression::Log { tag, sub_tag, message, .. }) => {
+                assert_eq!(tag.as_deref(), Some("Error"));
+                assert_eq!(sub_tag.as_deref(), Some("network"));
+                assert!(message.is_some());
+            }
+            other => panic!("Expected log expression with nested tags, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_log_no_parens() {
+        let program = parse_ok("<log<Error>>");
+        match &program.statements[0] {
+            Statement::Expr(Expression::Log { tag, sub_tag, message, .. }) => {
+                assert_eq!(tag.as_deref(), Some("Error"));
+                assert_eq!(*sub_tag, None);
+                assert!(message.is_none());
+            }
+            other => panic!("Expected log expression without parens, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_log_empty_parens() {
+        let program = parse_ok("<log<custom_tag>>()");
+        match &program.statements[0] {
+            Statement::Expr(Expression::Log { tag, sub_tag, message, .. }) => {
+                assert_eq!(tag.as_deref(), Some("custom_tag"));
+                assert_eq!(*sub_tag, None);
+                assert!(message.is_none());
+            }
+            other => panic!("Expected log expression with empty parens, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_log_nested_no_parens() {
+        let program = parse_ok("<log<Error<custom_error>>>");
+        match &program.statements[0] {
+            Statement::Expr(Expression::Log { tag, sub_tag, message, .. }) => {
+                assert_eq!(tag.as_deref(), Some("Error"));
+                assert_eq!(sub_tag.as_deref(), Some("custom_error"));
+                assert!(message.is_none());
+            }
+            other => panic!("Expected log expression with nested tags no parens, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_main_block() {
+        let program = parse_ok("main {\n  x := 5\n}");
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::Main { body, .. } => {
+                assert_eq!(body.len(), 1);
+            }
+            other => panic!("Expected Main statement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_main_block_with_surrounding_code() {
+        let program = parse_ok("x := 1\nmain {\n  x := 42\n}");
+        assert_eq!(program.statements.len(), 2);
+        assert!(matches!(&program.statements[0], Statement::Let { .. }));
+        assert!(matches!(&program.statements[1], Statement::Main { .. }));
     }
 
     #[test]
