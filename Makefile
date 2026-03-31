@@ -7,7 +7,7 @@ LIBDIR = $(PREFIX)/lib/oxigen/stdlib
 build:
 	cargo build --release
 
-install: build
+install:
 	@echo "Installing oxigen to $(BINDIR)..."
 	install -d $(BINDIR)
 	install -m 755 target/release/oxigen $(BINDIR)/oxigen
