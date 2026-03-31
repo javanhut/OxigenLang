@@ -1,0 +1,252 @@
+introduce os
+introduce strings
+introduce toml
+
+unsuccessful_system_call <Error> = <Error<unsuccessful_system_call>>("system code not 0")
+oxigen_repo_url <str> = "https://github.com/javanhut/OxigenLang.git"
+
+fun check_os() {
+  system <str> = os.name()
+  arch <str> = os.arch()
+  println("System: {system}, Architecture: {arch}")
+  op_sys <str> := option {
+    system == "macos" -> "darwin",
+    system == "linux" -> "linux",
+    system == "windows" -> "windows",
+    "unknown"
+  }
+  println("Operating system is known: {strings.upper(op_sys)}") unless op_sys == "unknown"
+  (system, arch, op_sys)
+}
+
+fun check_installation(package <str>) {
+  run_command <str> := "which {package}"
+  results <map> := os.exec(run_command)
+  out := results["stdout"]
+  code := results["code"]
+  success := option {
+    code != 0 -> {
+      println("[Error] system code: {code}")
+      <fail>(unsuccessful_system_call)
+    },
+    True
+  }
+  println("{strings.upper(package)} is installed at: {out}") unless not success then println("{strings.upper(package)} is not installed")
+  True
+}
+
+fun check_oxigen_version() {
+  run_command <str> := "oxigen --version"
+  results <map> := os.exec(run_command)
+  out := results["stdout"]
+  code := results["code"]
+  success := option {
+    code != 0 -> {
+      println("[Error] system code: {code}")
+      <fail>(unsuccessful_system_call)
+    },
+    True
+  }
+  (True, strings.split(out, ' ')[1]) unless not success then (False, "")
+}
+
+fun cleanup_tmp_dir(home_dir <str>, total_path <str>) {
+  os.chdir(home_dir)
+  option {
+    os.is_dir(total_path) -> {
+      os.rmdir(total_path)
+      <log<cleanup>>("Removed temp dir: {total_path}") unless os.is_dir(total_path) == True then <fail>("Failed to remove temp directory")
+    }
+  }
+}
+
+fun update_oxigen(home_dir <str>, total_path <str>) {
+  uninstall_command <str> = "sudo make uninstall"
+  build_command <str> = "make build"
+  install_command <str> = "sudo make install"
+
+  <log<uninstall>>("Uninstalling current version of oxigen...")
+  uninstall := os.exec(uninstall_command)
+  u_out, u_err, u_code := (uninstall["stdout"], uninstall["stderr"], uninstall["code"])
+  option {
+    u_code != 0 -> {
+      <log>(u_err) unless strings.trim(u_err) == ""
+      cleanup_tmp_dir(home_dir, total_path)
+      <log<Error>>("Failed to uninstall with code: {u_code}")
+      <fail>(unsuccessful_system_call)
+    },
+    <log<debug>>(u_out)
+  }
+
+  <log<build>>("Building updated version....")
+  build := os.exec(build_command)
+  b_out, b_err, b_code := (build["stdout"], build["stderr"], build["code"])
+  option {
+    b_code != 0 -> {
+      <log>(b_err) unless strings.trim(b_err) == ""
+      cleanup_tmp_dir(home_dir, total_path)
+      <log<Error>>("Failed to build with code: {b_code}")
+      <fail>(unsuccessful_system_call)
+    },
+    <log<debug>>(b_out)
+  }
+
+  <log<install>>("Installing updated version....")
+  install := os.exec(install_command)
+  i_out, i_err, i_code := (install["stdout"], install["stderr"], install["code"])
+  option {
+    i_code != 0 -> {
+      <log>(i_err) unless strings.trim(i_err) == ""
+      cleanup_tmp_dir(home_dir, total_path)
+      <log<Error>>("Failed to install with code: {i_code}")
+      <fail>(unsuccessful_system_call)
+    },
+    <log<debug>>(i_out)
+  }
+
+  cleanup_tmp_dir(home_dir, total_path)
+  <log<finished>>("Update has finished. Refresh your shell or reopen the terminal for the updated version.")
+}
+
+fun log_regression_and_cleanup(home_dir <str>, total_path <str>) {
+  <log<Regression>>("The installed version seems to be ahead of the repo version.
+You might have pulled from an experimental branch. Nothing to update...")
+  cleanup_tmp_dir(home_dir, total_path)
+}
+
+fun log_no_update_and_cleanup(home_dir <str>, total_path <str>) {
+  <log<debug>>("Nothing to update.")
+  cleanup_tmp_dir(home_dir, total_path)
+}
+
+main {
+  sys, arch, op_sys := check_os()
+  is_rust_installed := check_installation(package="rustc")
+  is_git_installed := check_installation(package="git")
+  is_oxigen_installed := check_installation(package="oxigen")
+  is_make_installed := check_installation(package="make")
+  installed_oxigen_ver <str>
+
+  option {
+    is_rust_installed and is_git_installed and is_make_installed -> println("All dependencies are installed"),
+    {
+      println("Missing dependencies:")
+      println("Missing Git") unless not is_git_installed
+      println("Missing Rust") unless not is_rust_installed
+      println("Missing Make") unless not is_make_installed
+      <fail>("Missing dependencies")
+    }
+  }
+
+  home_dir <str>
+
+  option {
+    is_oxigen_installed -> {
+      println("Oxigen is installed! Checking version number....")
+      has_version, ver := check_oxigen_version()
+      option {
+        has_version == False -> {
+          println("Oxigen is either out of date or missing from system binaries. Install Oxigen to update.")
+        },
+        {
+          println("Version Check: {ver}")
+          installed_oxigen_ver := strings.trim(ver)
+          println("Downloading oxigen into temp dir....")
+          maybe_home := os.env_get("HOME")
+          home_dir = option {
+            maybe_home == None -> <fail>("HOME is not set"),
+            maybe_home
+          }
+        }
+      }
+    }
+  }
+
+  path_to_home <str> := home_dir + "/"
+  tmp_dir_path <str> := ".oxigen_tmp"
+  total_path := path_to_home + tmp_dir_path
+
+  <log<debug>>("Making dir: {total_path}")
+  option {
+    os.is_dir(total_path) -> {
+      println("Directory exists. Removing...")
+      os.rmdir(total_path)
+      <log>("Successfully removed: {total_path}") unless os.is_dir(total_path) == True then <fail>("Failed to remove directory")
+    }
+  }
+
+  os.mkdir(total_path)
+  option {
+    os.is_dir(total_path) -> {
+      <log>("Successfully created tmp path at: {total_path}")
+    },
+    <fail>("Failed to create new directory.")
+  }
+
+  os.chdir(total_path)
+  results := os.exec("git clone {oxigen_repo_url}")
+  out, err, code := (results["stdout"], results["stderr"], results["code"])
+  option {
+    code != 0 -> {
+      <log>(err) unless strings.trim(err) == ""
+      cleanup_tmp_dir(home_dir, total_path)
+      <fail>("Failed to run command {code}")
+    },
+    {
+      <log<debug>>(out) unless strings.trim(out) == ""
+    }
+  }
+
+  os.chdir("OxigenLang")
+  cargo_info := toml.read("Cargo.toml")
+  package_ver <str> := strings.trim(cargo_info["package"]["version"])
+
+  option {
+    package_ver == installed_oxigen_ver -> {
+      same_version_error <Error> = <Error<same_version_error>>("Oxigen version is same as installed version.
+If you think oxigen has been updated do a git pull of latest repo and a clean install.")
+      <log<Error<same_version_error>>>
+      cleanup_tmp_dir(home_dir, total_path)
+      os.exit(1)
+    },
+    {
+      <log>("Versions differ. Checking if version is newer.")
+      semantic_version_split := fun(version_str <str>) {
+        major, minor, patch := strings.split(version_str, ".")
+        (int(major), int(minor), int(patch))
+      }
+
+      new_pull := semantic_version_split(package_ver)
+      installed_version := semantic_version_split(installed_oxigen_ver)
+      p_major, p_minor, p_patch := new_pull
+      i_major, i_minor, i_patch := installed_version
+
+      option {
+        p_major > i_major -> {
+          <log<update>>("Update is available. Version: v{package_ver}. Installing new Oxigen version...")
+          update_oxigen(home_dir, total_path)
+        },
+        p_major == i_major -> {
+          option {
+            p_minor > i_minor -> {
+              <log<update>>("Update is available. Version: v{package_ver}. Installing new Oxigen version...")
+              update_oxigen(home_dir, total_path)
+            },
+            p_minor == i_minor -> {
+              option {
+                p_patch > i_patch -> {
+                  <log<update>>("Update is available. Version: v{package_ver}. Installing new Oxigen version...")
+                  update_oxigen(home_dir, total_path)
+                },
+                p_patch == i_patch -> log_no_update_and_cleanup(home_dir, total_path),
+                log_regression_and_cleanup(home_dir, total_path)
+              }
+            },
+            log_regression_and_cleanup(home_dir, total_path)
+          }
+        },
+        log_regression_and_cleanup(home_dir, total_path)
+      }
+    }
+  }
+}
