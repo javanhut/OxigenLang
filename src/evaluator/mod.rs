@@ -268,6 +268,52 @@ impl Evaluator {
         }
     }
 
+    fn format_log_tag(tag: Option<&str>, sub_tag: Option<&str>) -> String {
+        match (tag, sub_tag) {
+            (Some(t), Some(s)) => format!("[{}:{}]", t.to_uppercase(), s.to_uppercase()),
+            (Some(t), None) => format!("[{}]", t.to_uppercase()),
+            _ => String::new(),
+        }
+    }
+
+    fn resolve_implicit_log_error(
+        tag: Option<&str>,
+        sub_tag: Option<&str>,
+        env: &Rc<RefCell<Environment>>,
+    ) -> Option<(String, String)> {
+        if tag == Some("Error") && sub_tag.is_none() {
+            return Some(("ERROR".to_string(), "generic".to_string()));
+        }
+
+        let binding_name = match (tag, sub_tag) {
+            (Some("Error"), Some(sub)) => Some(sub),
+            (Some(name), None) => Some(name),
+            _ => None,
+        }?;
+
+        let bound = env.borrow().get(binding_name)?;
+        let (bound_tag, msg) = Self::error_info_from(&bound)?;
+        let display_tag = bound_tag.unwrap_or_else(|| binding_name.to_string());
+        Some((display_tag.to_uppercase(), msg))
+    }
+
+    fn resolve_log_parts(
+        tag: Option<&str>,
+        sub_tag: Option<&str>,
+        explicit_msg: Option<String>,
+        env: &Rc<RefCell<Environment>>,
+    ) -> (String, Option<String>) {
+        if let Some(msg) = explicit_msg {
+            return (Self::format_log_tag(tag, sub_tag), Some(msg));
+        }
+
+        if let Some((resolved_tag, msg)) = Self::resolve_implicit_log_error(tag, sub_tag, env) {
+            return (format!("[{}]", resolved_tag), Some(msg));
+        }
+
+        (Self::format_log_tag(tag, sub_tag), None)
+    }
+
     fn error_or_value_union(target: &TypeAnnotation) -> Option<Option<String>> {
         if let TypeAnnotation::Union(types) = target {
             let mut has_value = false;
@@ -1857,7 +1903,7 @@ impl Evaluator {
                 message,
                 ..
             } => {
-                let msg_str = if let Some(msg_expr) = message {
+                let explicit_msg = if let Some(msg_expr) = message {
                     let evaluated = self.eval_expression(msg_expr, Rc::clone(&env));
                     if evaluated.is_error() {
                         return evaluated;
@@ -1867,11 +1913,8 @@ impl Evaluator {
                     None
                 };
 
-                let tag_str = match (tag, sub_tag) {
-                    (Some(t), Some(s)) => format!("[{}:{}]", t.to_uppercase(), s.to_uppercase()),
-                    (Some(t), None) => format!("[{}]", t.to_uppercase()),
-                    _ => String::new(),
-                };
+                let (tag_str, msg_str) =
+                    Self::resolve_log_parts(tag.as_deref(), sub_tag.as_deref(), explicit_msg, &env);
 
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -3532,6 +3575,53 @@ mod tests {
     fn test_log_no_message_returns_none() {
         let result = test_eval(r#"<log<Error>>"#);
         test_none(&result);
+    }
+
+    #[test]
+    fn test_log_error_without_message_uses_generic_message() {
+        let env = Rc::new(RefCell::new(Environment::new()));
+        let (tag, msg) = Evaluator::resolve_log_parts(Some("Error"), None, None, &env);
+        assert_eq!(tag, "[ERROR]");
+        assert_eq!(msg.as_deref(), Some("generic"));
+    }
+
+    #[test]
+    fn test_log_named_error_without_message_uses_bound_error_message() {
+        let env = Rc::new(RefCell::new(Environment::new()));
+        env.borrow_mut().set(
+            "same_version_error".to_string(),
+            Evaluator::tagged_error_value(
+                "Oxigen version is same as installed version.".to_string(),
+                Some("same_version_error".to_string()),
+            ),
+        );
+
+        let (tag, msg) = Evaluator::resolve_log_parts(Some("same_version_error"), None, None, &env);
+        assert_eq!(tag, "[SAME_VERSION_ERROR]");
+        assert_eq!(
+            msg.as_deref(),
+            Some("Oxigen version is same as installed version.")
+        );
+    }
+
+    #[test]
+    fn test_log_nested_error_without_message_uses_bound_error_message() {
+        let env = Rc::new(RefCell::new(Environment::new()));
+        env.borrow_mut().set(
+            "same_version_error".to_string(),
+            Evaluator::tagged_error_value(
+                "Oxigen version is same as installed version.".to_string(),
+                Some("same_version_error".to_string()),
+            ),
+        );
+
+        let (tag, msg) =
+            Evaluator::resolve_log_parts(Some("Error"), Some("same_version_error"), None, &env);
+        assert_eq!(tag, "[SAME_VERSION_ERROR]");
+        assert_eq!(
+            msg.as_deref(),
+            Some("Oxigen version is same as installed version.")
+        );
     }
 
     #[test]

@@ -882,7 +882,7 @@ Sometimes you just want to mark that something happened, without a detailed mess
 This prints:
 
 ```
-2026-03-28 14:30:00: [ERROR]
+2026-03-28 14:30:00: [ERROR] generic
 ```
 
 You can also use empty parentheses — the result is the same:
@@ -898,6 +898,21 @@ This prints:
 ```
 
 Both forms (no parens and empty parens) are equivalent when there is no message.
+
+If the tag refers to an in-scope error value, `<log>` uses that error's message automatically:
+
+```oxi
+same_version_error <Error> = <Error<same_version_error>>("already installed")
+
+<log<same_version_error>>
+<log<Error<same_version_error>>>
+```
+
+Both print:
+
+```
+2026-03-28 14:30:00: [SAME_VERSION_ERROR] already installed
+```
 
 ### Return Value
 
