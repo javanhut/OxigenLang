@@ -74,7 +74,9 @@ println(strings.upper("hello"))
 
 ### Exports
 
-All top-level bindings (functions, variables) in a module file are automatically exported. There is no explicit export mechanism.
+All top-level bindings (functions, variables, structs, and patterns) in a module file are automatically exported. There is no explicit export mechanism.
+
+Use top-level definitions for reusable module APIs, and put script-only work inside `main`. The `main` block is skipped when the file is imported with `introduce`.
 
 ```oxi
 // mylib.oxi
@@ -85,8 +87,11 @@ PI := 3.14159
 ```oxi
 // main.oxi
 introduce .mylib
-println(mylib.greet("World"))
-println(mylib.PI)
+
+main {
+    println(mylib.greet("World"))
+    println(mylib.PI)
+}
 ```
 
 ### Module Caching
@@ -156,5 +161,8 @@ fun pad_left(s, width, ch) {
 ```oxi
 // main.oxi
 introduce .utils.format
-println(format.pad_left("42", 5, "0"))
+
+main {
+    println(format.pad_left("42", 5, "0"))
+}
 ```

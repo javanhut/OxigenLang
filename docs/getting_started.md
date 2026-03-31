@@ -24,9 +24,11 @@ Save the following code in a file named `hello.oxi`:
 
 ```oxi
 // My first OxigenLang program
-name := "Explorer"
-println("Hello", name, "!")
-println("OxigenLang is a modern, lightweight, interpreted programming language.")
+main {
+    name := "Explorer"
+    println("Hello", name, "!")
+    println("OxigenLang is a modern, lightweight, interpreted programming language.")
+}
 ```
 
 Run it using the command:
@@ -41,6 +43,8 @@ You should see:
 Hello Explorer !
 OxigenLang is a modern, lightweight, interpreted programming language.
 ```
+
+`main { ... }` is the recommended entry point for runnable scripts. Definitions outside `main` remain available when the file is imported with `introduce`, while the `main` block only runs when the file is executed directly.
 
 ## Using the REPL
 
@@ -94,17 +98,18 @@ OxigenLang supports two block styles: brace-based (default) and Python-style ind
 ```oxi
 #[indent]
 
-x := 10
-result := option:
-    x > 0 -> "positive",
-    "not positive"
-println(x, "is", result)
+main:
+    x := 10
+    result := option:
+        x > 0 -> "positive",
+        "not positive"
+    println(x, "is", result)
 
-each i in [1, 2, 3]:
-    println("Iteration", i)
+    each i in [1, 2, 3]:
+        println("Iteration", i)
 ```
 
-In indentation mode, a colon `:` at the end of a line starts a new block, and returning to a previous indentation level closes the block. See the [Control Flow](control_flow.md) guide for more details on block styles.
+In indentation mode, a colon `:` at the end of a line starts a new block, and returning to a previous indentation level closes the block. Use `main:` as the indentation-mode equivalent of `main { ... }`. See the [Control Flow](control_flow.md) guide for more details on block styles.
 
 ## Quick Examples
 
@@ -116,11 +121,13 @@ Define reusable patterns and match against them with `choose`:
 pattern is_even(n) when n % 2 == 0
 pattern is_odd(n) when n % 2 != 0
 
-nums := [1, 2, 3, 4, 5]
-each n in nums {
-    choose n {
-        is_even -> println(n, "is even"),
-        is_odd -> println(n, "is odd")
+main {
+    nums := [1, 2, 3, 4, 5]
+    each n in nums {
+        choose n {
+            is_even -> println(n, "is even"),
+            is_odd -> println(n, "is odd")
+        }
     }
 }
 ```
@@ -142,20 +149,22 @@ Person contains {
     fun is_adult() { age >= 18 }
 }
 
-p := Person("Alice", 30)
-p.greet()
-println(p.is_adult())
-
-p.age = 15
-println(p.is_adult())
-
 struct Student(Person) {
     school <str>
 }
 
-s := Student("Bob", 20, "MIT")
-s.greet()
-println(s.school)
+main {
+    p := Person("Alice", 30)
+    p.greet()
+    println(p.is_adult())
+
+    p.age = 15
+    println(p.is_adult())
+
+    s := Student("Bob", 20, "MIT")
+    s.greet()
+    println(s.school)
+}
 ```
 
 See the full [Structs](structs.md) guide for details.
@@ -166,15 +175,18 @@ Functions are first-class values in OxigenLang:
 
 ```oxi
 fun add(a, b) { a + b }
-println(add(3, 4))
 
 fun greet(name <str>) {
     println("Hello, " + name + "!")
 }
-greet("World")
 
 double := fun(x) { x * 2 }
-println(double(5))
+
+main {
+    println(add(3, 4))
+    greet("World")
+    println(double(5))
+}
 ```
 
 See the full [Functions](functions.md) guide for details.
@@ -184,13 +196,15 @@ See the full [Functions](functions.md) guide for details.
 The `option` keyword provides multi-arm conditional expressions:
 
 ```oxi
-age := 25
-status := option {
-    age < 13 -> "child",
-    age < 20 -> "teenager",
-    "adult"
+main {
+    age := 25
+    status := option {
+        age < 13 -> "child",
+        age < 20 -> "teenager",
+        "adult"
+    }
+    println(status)
 }
-println(status)
 ```
 
 See the full [Control Flow](control_flow.md) guide for details.

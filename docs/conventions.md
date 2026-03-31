@@ -84,6 +84,26 @@ ratio <float> := float(count) / float(total)
 value := int("42")
 ```
 
+## Scripts and Modules
+
+### Use `main` for Script Entry Points
+
+Keep reusable definitions at the top level and put executable script logic inside `main`. This keeps module imports predictable because `main` is skipped when a file is brought in with `introduce`.
+
+```oxi
+introduce strings
+
+fun banner(name <str>) {
+    strings.upper("hello, {name}")
+}
+
+main {
+    println(banner("Oxigen"))
+}
+```
+
+Top-level statements still run when a file is executed directly, but `main` is the preferred convention for files that may serve as both scripts and modules.
+
 ## Functions
 
 ### Named Functions Over Anonymous Functions

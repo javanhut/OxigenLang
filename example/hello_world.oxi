@@ -1,13 +1,15 @@
-name <str> := "Javan"
-println("Hello, {name}")
-
 pattern is_even(x) when x % 2 == 0
 pattern is_odd(x) when x % 2 != 0
 
-nums <array> := range(10)
-each num in nums {
-    choose num {
-        is_even -> println("{num} is even")
-        is_odd -> println("{num} is odd")
+main {
+    name <str> := "Javan"
+    println("Hello, {name}")
+
+    nums <array> := range(10)
+    each num in nums {
+        choose num {
+            is_even -> println("{num} is even")
+            is_odd -> println("{num} is odd")
+        }
     }
 }

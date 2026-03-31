@@ -5,7 +5,7 @@ OxigenLang is a modern, lightweight, interpreted programming language implemente
 ## Features
 
 - **Module System**: Import standard library modules or local files with `introduce`/`intro`. Namespace imports, selective imports, and module caching.
-- **Standard Library**: 10 built-in modules — math, strings, array, io, os, time, random, path, json, and net (HTTP client with HTTPS support).
+- **Standard Library**: 11 built-in modules — math, strings, array, io, os, time, random, path, json, toml, and net (HTTP client with HTTPS support).
 - **Flexible Block Styles**: Choose between traditional brace-based blocks or Python-style indentation blocks with the `#[indent]` directive.
 - **Conditional Expressions**: Multi-arm `option` blocks, ternary shorthand, `unless` inverse conditionals, `unless ... then ...` fallback expressions, `when`/`unless` postfix guards, and short-circuit `and`/`or` logical operators.
 - **Pattern Matching**: Define reusable patterns with the `pattern` keyword and match against them with `choose`.
@@ -25,7 +25,7 @@ Requires [Rust](https://www.rust-lang.org/).
 ### Quick Install (Linux / macOS)
 
 ```bash
-git clone https://github.com/your-username/OxigenLang.git
+git clone https://github.com/javanhut/OxigenLang.git
 cd OxigenLang
 ./install.sh
 ```
@@ -79,45 +79,50 @@ Person contains {
     fun is_adult() { self.age >= 18 }
 }
 
-p <Person> := Person("Alice", 30)
-println(p.greet())
-println(p.is_adult())
-
 pattern is_even(n) when n % 2 == 0
 
-each i in range(6) {
-    choose i {
-        is_even -> println("{i} is even"),
-        else -> println("{i} is odd")
-    }
-}
-
-status <str> := option {
-    p.is_adult() -> "adult",
-    "minor"
-}
-println("{p.name} is an {status}")
-
-// Default and named arguments
 fun connect(host <str>, port <int> = 8080, tls? <bool>) {
     println("host={host} port={port} tls={tls}")
 }
-connect("example.com", tls=True)
 
-// Unpacking
-x, y := [10, 20]
-key, val := strings.split("name=Alice", "=")
+main {
+    p <Person> := Person("Alice", 30)
+    println(p.greet())
+    println(p.is_adult())
 
-// Index assignment
-config <map>
-config["debug"] = True
-config["version"] = "0.2.0"
+    each i in range(6) {
+        choose i {
+            is_even -> println("{i} is even"),
+            else -> println("{i} is odd")
+        }
+    }
 
-// Standard library
-println(math.sqrt(16))
-println(strings.upper("hello oxigen"))
-println(strings.strip("--heading--", "-"))
+    status <str> := option {
+        p.is_adult() -> "adult",
+        "minor"
+    }
+    println("{p.name} is an {status}")
+
+    // Default and named arguments
+    connect("example.com", tls=True)
+
+    // Unpacking
+    x, y := [10, 20]
+    key, val := strings.split("name=Alice", "=")
+
+    // Index assignment
+    config <map>
+    config["debug"] = True
+    config["version"] = "0.2.0"
+
+    // Standard library
+    println(math.sqrt(16))
+    println(strings.upper("hello oxigen"))
+    println(strings.strip("--heading--", "-"))
+}
 ```
+
+Use `main { ... }` for script-only execution. Definitions outside `main` remain importable, while the `main` block is skipped when the file is brought in with `introduce`. Top-level statements still run when a file is executed directly, but `main` is the recommended style for files that may also be imported.
 
 ## Documentation
 
@@ -139,7 +144,7 @@ For detailed information, see the [docs](docs/) directory:
 | [Type System](docs/type_system.md) | Type annotations, conversions, mutability control |
 | [Imports and Modules](docs/imports.md) | The `introduce` keyword and module system |
 | [Built-in Functions](docs/builtins.md) | Complete reference for all built-ins |
-| [Standard Library](docs/stdlib.md) | Full reference for all 10 stdlib modules |
+| [Standard Library](docs/stdlib.md) | Full reference for all 11 stdlib modules |
 
 ## License
 
