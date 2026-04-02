@@ -198,7 +198,7 @@ main {
   }
 
   os.chdir("OxigenLang")
-  cargo_info := toml.read("Cargo.toml")
+  cargo_info := toml.read("crates/oxigen-cli/Cargo.toml")
   package_ver <str> := strings.trim(cargo_info["package"]["version"])
 
   option {
