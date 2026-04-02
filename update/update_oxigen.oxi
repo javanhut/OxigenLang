@@ -61,9 +61,9 @@ fun cleanup_tmp_dir(home_dir <str>, total_path <str>) {
 }
 
 fun update_oxigen(home_dir <str>, total_path <str>) {
-  uninstall_command <str> = "sudo make uninstall"
-  build_command <str> = "make build"
-  install_command <str> = "sudo make install"
+  uninstall_command <str> = "./scripts/uninstall.sh"
+  build_command <str> = "cargo build --manifest-path Cargo.toml --release -p oxigen"
+  install_command <str> = "./scripts/install.sh"
 
   <log<uninstall>>("Uninstalling current version of oxigen...")
   uninstall := os.exec(uninstall_command)

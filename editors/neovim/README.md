@@ -11,7 +11,7 @@ Neovim integration for OxigenLang (`.oxi` files) with LSP support.
 cargo build --release -p oxigen-lsp
 
 # Install to ~/.oxigen/bin/ (alongside the interpreter)
-./install.sh --with-lsp
+./scripts/install.sh --with-lsp
 
 # Or install system-wide
 sudo make install-lsp

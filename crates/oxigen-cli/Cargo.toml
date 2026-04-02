@@ -8,5 +8,5 @@ name = "oxigen"
 path = "src/main.rs"
 
 [dependencies]
-oxigen-core = { path = "../oxigen-core" }
+oxigen-core = { path = "../../core" }
 rustyline = "15"

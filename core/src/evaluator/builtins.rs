@@ -2212,7 +2212,7 @@ fn builtin__toml_parse(args: Vec<Rc<Object>>) -> Rc<Object> {
         )));
     }
     match args[0].as_ref() {
-        Object::String(s) => match s.parse::<TomlValue>() {
+        Object::String(s) => match toml::from_str::<TomlValue>(s) {
             Ok(value) => toml_value_to_object(value),
             Err(e) => Rc::new(Object::Error(format!("toml parse error: {}", e))),
         },

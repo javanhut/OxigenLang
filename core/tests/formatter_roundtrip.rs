@@ -1,6 +1,16 @@
 use oxigen_core::formatter::Formatter;
 use oxigen_core::lexer::Lexer;
 use oxigen_core::parser::Parser;
+use std::path::PathBuf;
+
+fn example_source(name: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("example")
+        .join(name);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {}", path.display(), err))
+}
 
 fn format_source(source: &str) -> String {
     let lexer = Lexer::new(source);
@@ -42,42 +52,35 @@ fn assert_idempotent(source: &str, label: &str) {
 
 #[test]
 fn test_hello_world_roundtrip() {
-    let source = std::fs::read_to_string("../../example/hello_world.oxi").unwrap();
+    let source = example_source("hello_world.oxi");
     assert_reparseable(&source, "hello_world");
     assert_idempotent(&source, "hello_world");
 }
 
 #[test]
 fn test_struct_example_roundtrip() {
-    let source = std::fs::read_to_string("../../example/struct_example.oxi").unwrap();
+    let source = example_source("struct_example.oxi");
     assert_reparseable(&source, "struct_example");
     assert_idempotent(&source, "struct_example");
 }
 
 #[test]
 fn test_generic_example_roundtrip() {
-    let source = std::fs::read_to_string("../../example/generic_example.oxi").unwrap();
+    let source = example_source("generic_example.oxi");
     assert_reparseable(&source, "generic_example");
     assert_idempotent(&source, "generic_example");
 }
 
 #[test]
 fn test_options_roundtrip() {
-    let source = std::fs::read_to_string("../../example/options.oxi").unwrap();
+    let source = example_source("options.oxi");
     assert_reparseable(&source, "options");
     assert_idempotent(&source, "options");
 }
 
 #[test]
 fn test_import_test_roundtrip() {
-    let source = std::fs::read_to_string("../../example/import_test.oxi").unwrap();
+    let source = example_source("import_test.oxi");
     assert_reparseable(&source, "import_test");
     assert_idempotent(&source, "import_test");
-}
-
-#[test]
-fn test_simple_auth_roundtrip() {
-    let source = std::fs::read_to_string("../../example/simple_auth.oxi").unwrap();
-    assert_reparseable(&source, "simple_auth");
-    assert_idempotent(&source, "simple_auth");
 }

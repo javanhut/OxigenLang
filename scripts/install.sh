@@ -3,6 +3,12 @@ set -e
 
 # ── OxigenLang Installer ──
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+WORKSPACE_MANIFEST="$REPO_ROOT/Cargo.toml"
+TARGET_DIR="$REPO_ROOT/target/release"
+STDLIB_SRC_DIR="$REPO_ROOT/stdlib"
+
 INSTALL_DIR="$HOME/.oxigen"
 BIN_DIR="$INSTALL_DIR/bin"
 LIB_DIR="$INSTALL_DIR/lib/stdlib"
@@ -27,11 +33,11 @@ fi
 
 # Build
 echo "Building oxigen..."
-cargo build --release -p oxigen
+cargo build --manifest-path "$WORKSPACE_MANIFEST" --release -p oxigen
 
 if [ "$WITH_LSP" = true ]; then
     echo "Building oxigen-lsp..."
-    cargo build --release -p oxigen-lsp
+    cargo build --manifest-path "$WORKSPACE_MANIFEST" --release -p oxigen-lsp
 fi
 
 # Create directories
@@ -40,12 +46,12 @@ mkdir -p "$BIN_DIR"
 mkdir -p "$LIB_DIR"
 
 # Copy binary and stdlib
-cp target/release/oxigen "$BIN_DIR/oxigen"
+cp "$TARGET_DIR/oxigen" "$BIN_DIR/oxigen"
 chmod 755 "$BIN_DIR/oxigen"
-cp stdlib/*.oxi "$LIB_DIR/"
+cp "$STDLIB_SRC_DIR"/*.oxi "$LIB_DIR/"
 
 if [ "$WITH_LSP" = true ]; then
-    cp target/release/oxigen-lsp "$BIN_DIR/oxigen-lsp"
+    cp "$TARGET_DIR/oxigen-lsp" "$BIN_DIR/oxigen-lsp"
     chmod 755 "$BIN_DIR/oxigen-lsp"
 fi
 

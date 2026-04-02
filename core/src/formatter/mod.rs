@@ -119,24 +119,39 @@ impl Formatter {
                 self.push("stop");
             }
             Statement::If { condition, consequence, alternative, .. } => {
-                self.push("if ");
-                self.format_expression(condition);
-                self.push(" {");
-                self.newline();
-                self.indent += 1;
-                self.format_block(consequence);
-                self.indent -= 1;
-                self.push_indent();
-                self.push("}");
                 if let Some(alt) = alternative {
-                    self.push(" else {");
+                    if consequence.len() == 1 && alt.len() == 1 {
+                        self.format_statement(&consequence[0]);
+                        if let Some(inner) = strip_negation(condition) {
+                            self.push(" unless ");
+                            self.format_expression(inner);
+                        } else {
+                            self.push(" when ");
+                            self.format_expression(condition);
+                        }
+                        self.push(" then ");
+                        self.format_statement(&alt[0]);
+                        return;
+                    }
+                } else if let Some(inner) = strip_negation(condition) {
+                    self.push("unless ");
+                    self.format_expression(inner);
+                    self.push(" {");
                     self.newline();
                     self.indent += 1;
-                    self.format_block(alt);
+                    self.format_block(consequence);
                     self.indent -= 1;
                     self.push_indent();
                     self.push("}");
+                    return;
+                } else if consequence.len() == 1 {
+                    self.format_statement(&consequence[0]);
+                    self.push(" when ");
+                    self.format_expression(condition);
+                    return;
                 }
+
+                self.format_if_as_option(condition, consequence, alternative.as_deref());
             }
             Statement::Each { variable, iterable, body, .. } => {
                 self.push("each ");
@@ -666,6 +681,49 @@ impl Formatter {
         self.push_indent();
         self.push("}");
     }
+
+    fn format_if_as_option(
+        &mut self,
+        condition: &Expression,
+        consequence: &[Statement],
+        alternative: Option<&[Statement]>,
+    ) {
+        self.push("option {");
+        self.newline();
+        self.indent += 1;
+        self.push_indent();
+        self.format_expression(condition);
+        self.push(" -> ");
+        self.format_option_body(consequence);
+        self.newline();
+
+        if let Some(alt) = alternative {
+            self.push_indent();
+            self.format_option_body(alt);
+            self.newline();
+        }
+
+        self.indent -= 1;
+        self.push_indent();
+        self.push("}");
+    }
+
+    fn format_option_body(&mut self, body: &[Statement]) {
+        if body.len() == 1 {
+            if let Statement::Expr(expr) = &body[0] {
+                self.format_expression(expr);
+                return;
+            }
+        }
+
+        self.push("{");
+        self.newline();
+        self.indent += 1;
+        self.format_block(body);
+        self.indent -= 1;
+        self.push_indent();
+        self.push("}");
+    }
 }
 
 fn format_type_annotation(ann: &TypeAnnotation) -> String {
@@ -715,6 +773,18 @@ fn is_multiline_expr(expr: &Expression) -> bool {
         Expression::MapLiteral { entries, .. } => !entries.is_empty(),
         _ => false,
     }
+}
+
+fn strip_negation(expr: &Expression) -> Option<&Expression> {
+    if let Expression::Prefix {
+        operator, right, ..
+    } = expr
+    {
+        if operator == "not" {
+            return Some(right.as_ref());
+        }
+    }
+    None
 }
 
 fn escape_string(s: &str) -> String {

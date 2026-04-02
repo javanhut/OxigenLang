@@ -87,3 +87,24 @@ fn test_format_idempotent() {
     let second = format_source(&first);
     assert_eq!(first, second, "Formatter should be idempotent");
 }
+
+#[test]
+fn test_format_unless_statement() {
+    let input = "unless valid { 42 }";
+    let expected = "unless valid {\n    42\n}\n";
+    assert_eq!(format_source(input), expected);
+}
+
+#[test]
+fn test_format_postfix_when_guard() {
+    let input = "println(\"ok\") when ready";
+    let expected = "println(\"ok\") when ready\n";
+    assert_eq!(format_source(input), expected);
+}
+
+#[test]
+fn test_format_postfix_unless_then_guard() {
+    let input = "println(\"ok\") unless x == False then println(\"fallback\")";
+    let expected = "println(\"ok\") unless x == False then println(\"fallback\")\n";
+    assert_eq!(format_source(input), expected);
+}

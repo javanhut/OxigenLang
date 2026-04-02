@@ -27,7 +27,7 @@ Requires [Rust](https://www.rust-lang.org/).
 ```bash
 git clone https://github.com/javanhut/OxigenLang.git
 cd OxigenLang
-./install.sh
+./scripts/install.sh
 ```
 
 This builds oxigen, installs it to `~/.oxigen/`, and adds it to your PATH. Restart your shell or run:
@@ -39,7 +39,7 @@ export PATH="$HOME/.oxigen/bin:$PATH"
 ### Uninstall
 
 ```bash
-./uninstall.sh
+./scripts/uninstall.sh
 ```
 
 Removes the `~/.oxigen/` directory and cleans the PATH entry from your shell config.

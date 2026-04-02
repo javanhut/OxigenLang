@@ -1,7 +1,13 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/oxigen-core",
+    "core",
     "crates/oxigen-cli",
-    "crates/oxigen-lsp",
+    "lsp",
 ]
+
+[profile.test]
+# oxigen-core's test target pulls in a very large in-crate unit test surface.
+# Turning off debuginfo for test builds keeps `cargo test` from ballooning
+# memory during codegen/link while leaving normal dev builds unchanged.
+debug = 0

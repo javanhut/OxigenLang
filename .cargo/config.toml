@@ -1,0 +1,4 @@
+[build]
+# Keep peak RAM down during `cargo test` by avoiding multiple concurrent rustc
+# processes in this workspace.
+jobs = 1

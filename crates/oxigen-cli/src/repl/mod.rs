@@ -1,14 +1,14 @@
 use oxigen_core::evaluator::Evaluator;
 use oxigen_core::lexer::Lexer;
-use oxigen_core::object::environment::Environment;
 use oxigen_core::object::Object;
+use oxigen_core::object::environment::Environment;
 use oxigen_core::parser::Parser;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-const OXI_VERSION: &str = "0.1.0";
+const OXI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn run_repl() {
     let prompt: &str = ">> ";
