@@ -57,10 +57,10 @@ sudo make uninstall              # removes it
 Run directly from the source tree without installing:
 
 ```bash
-cargo build --release
-cargo run -- path/to/script.oxi
-cargo run                        # starts the REPL
-cargo run -- --version           # print version
+cargo build --release -p oxigen
+cargo run -p oxigen -- path/to/script.oxi
+cargo run -p oxigen --           # starts the REPL
+cargo run -p oxigen -- --version # print version
 ```
 
 ## Quick Example

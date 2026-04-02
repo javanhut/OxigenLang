@@ -108,3 +108,31 @@ fn test_format_postfix_unless_then_guard() {
     let expected = "println(\"ok\") unless x == False then println(\"fallback\")\n";
     assert_eq!(format_source(input), expected);
 }
+
+#[test]
+fn test_format_log_with_nested_tags() {
+    let input = "<log<Error<network>>>(\"connection lost\")";
+    let expected = "<log<Error<network>>>(\"connection lost\")\n";
+    assert_eq!(format_source(input), expected);
+}
+
+#[test]
+fn test_format_error_constructor() {
+    let input = "err <Error> = <Error<retry_error>>(\"bad input\")";
+    let expected = "err <Error> = <Error<retry_error>>(\"bad input\")\n";
+    assert_eq!(format_source(input), expected);
+}
+
+#[test]
+fn test_format_value_constructor() {
+    let input = "result := <Value>(\"ok\")";
+    let expected = "result := <Value>(\"ok\")\n";
+    assert_eq!(format_source(input), expected);
+}
+
+#[test]
+fn test_format_top_level_sections() {
+    let input = "introduce os\nintroduce strings\nx:=1\ny:=2\nfun first(){x}\nfun second(){y}";
+    let expected = "introduce os\nintroduce strings\n\nx := 1\ny := 2\n\nfun first() { x }\n\nfun second() { y }\n";
+    assert_eq!(format_source(input), expected);
+}

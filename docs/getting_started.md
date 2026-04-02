@@ -7,10 +7,10 @@ Welcome to OxigenLang! This guide walks you through installation, running your f
 Ensure you have [Rust](https://www.rust-lang.org/) installed. Clone the repository and build the project:
 
 ```bash
-cargo build --release
+cargo build --release -p oxigen
 ```
 
-The compiled binary will be at `target/release/oxigen` (or you can run directly with `cargo run`).
+The compiled binary will be at `target/release/oxigen` (or you can run directly with `cargo run -p oxigen -- ...`).
 
 Check the installed version:
 
@@ -34,7 +34,7 @@ main {
 Run it using the command:
 
 ```bash
-cargo run -- hello.oxi
+cargo run -p oxigen -- hello.oxi
 ```
 
 You should see:
@@ -51,13 +51,13 @@ OxigenLang is a modern, lightweight, interpreted programming language.
 The interactive REPL (Read-Eval-Print Loop) is perfect for testing small code snippets. Start it by running:
 
 ```bash
-cargo run
+cargo run -p oxigen --
 ```
 
 You'll see a prompt like this:
 
 ```
-Oxigen REPL v0.1.0
+Oxigen REPL v0.1.1
 Type 'exit' or 'quit' to exit, 'version' for version info
 >>
 ```

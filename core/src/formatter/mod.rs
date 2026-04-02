@@ -47,8 +47,7 @@ impl Formatter {
             self.format_statement(stmt);
             self.newline();
 
-            // Add blank line between top-level blocks (functions, structs, contains, main)
-            if i + 1 < stmts.len() && is_block_statement(stmt) {
+            if i + 1 < stmts.len() && should_add_top_level_blank_line(stmt, &stmts[i + 1]) {
                 self.newline();
             }
         }
@@ -574,14 +573,18 @@ impl Formatter {
                 self.format_expression(fallback);
             }
             Expression::Log { tag, sub_tag, message, .. } => {
-                self.push("@");
+                self.push("<log");
                 if let Some(t) = tag {
+                    self.push("<");
                     self.push(t);
                     if let Some(st) = sub_tag {
-                        self.push(".");
+                        self.push("<");
                         self.push(st);
+                        self.push(">");
                     }
+                    self.push(">");
                 }
+                self.push(">");
                 if let Some(msg) = message {
                     self.push("(");
                     self.format_expression(msg);
@@ -589,18 +592,19 @@ impl Formatter {
                 }
             }
             Expression::ErrorConstruct { tag, value, .. } => {
-                self.push("Error");
+                self.push("<Error");
                 if let Some(t) = tag {
                     self.push("<");
                     self.push(t);
                     self.push(">");
                 }
+                self.push(">");
                 self.push("(");
                 self.format_expression(value);
                 self.push(")");
             }
             Expression::ValueConstruct { value, .. } => {
-                self.push("Value(");
+                self.push("<Value>(");
                 self.format_expression(value);
                 self.push(")");
             }
@@ -757,14 +761,50 @@ fn format_type_annotation(ann: &TypeAnnotation) -> String {
     }
 }
 
-fn is_block_statement(stmt: &Statement) -> bool {
-    matches!(
-        stmt,
-        Statement::StructDef { .. }
-            | Statement::ContainsDef { .. }
-            | Statement::Main { .. }
-    ) || matches!(stmt, Statement::Let { value: Expression::FunctionLiteral { .. }, .. })
-      || matches!(stmt, Statement::TypedLet { value: Expression::FunctionLiteral { .. }, .. })
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TopLevelSection {
+    Import,
+    Variable,
+    Definition,
+    Other,
+}
+
+fn top_level_section(stmt: &Statement) -> TopLevelSection {
+    match stmt {
+        Statement::Introduce { .. } => TopLevelSection::Import,
+        Statement::Let { value, .. } => match value {
+            Expression::FunctionLiteral { token, .. } if token.token_type == TokenType::Function => {
+                TopLevelSection::Definition
+            }
+            _ => TopLevelSection::Variable,
+        },
+        Statement::TypedLet { value, .. } => match value {
+            Expression::FunctionLiteral { token, .. } if token.token_type == TokenType::Function => {
+                TopLevelSection::Definition
+            }
+            _ => TopLevelSection::Variable,
+        },
+        Statement::TypedDeclare { .. } | Statement::Assign { .. } => TopLevelSection::Variable,
+        Statement::Pattern { .. }
+        | Statement::StructDef { .. }
+        | Statement::ContainsDef { .. }
+        | Statement::Main { .. } => TopLevelSection::Definition,
+        _ => TopLevelSection::Other,
+    }
+}
+
+fn should_add_top_level_blank_line(current: &Statement, next: &Statement) -> bool {
+    let current_section = top_level_section(current);
+    let next_section = top_level_section(next);
+
+    if current_section == TopLevelSection::Definition && next_section == TopLevelSection::Definition
+    {
+        return true;
+    }
+
+    current_section != TopLevelSection::Other
+        && next_section != TopLevelSection::Other
+        && current_section != next_section
 }
 
 fn is_multiline_expr(expr: &Expression) -> bool {
