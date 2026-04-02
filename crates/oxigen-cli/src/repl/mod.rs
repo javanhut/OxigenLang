@@ -1,8 +1,8 @@
-use crate::evaluator::Evaluator;
-use crate::lexer::Lexer;
-use crate::object::Object;
-use crate::object::environment::Environment;
-use crate::parser::Parser;
+use oxigen_core::evaluator::Evaluator;
+use oxigen_core::lexer::Lexer;
+use oxigen_core::object::environment::Environment;
+use oxigen_core::object::Object;
+use oxigen_core::parser::Parser;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::cell::RefCell;
