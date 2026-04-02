@@ -1,0 +1,12 @@
+[package]
+name = "oxigen"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "oxigen"
+path = "src/main.rs"
+
+[dependencies]
+oxigen-core = { path = "../oxigen-core" }
+rustyline = "15"

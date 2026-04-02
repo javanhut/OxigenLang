@@ -2,10 +2,13 @@ PREFIX ?= /usr/local
 BINDIR = $(PREFIX)/bin
 LIBDIR = $(PREFIX)/lib/oxigen/stdlib
 
-.PHONY: build install uninstall clean
+.PHONY: build build-lsp install install-lsp install-all uninstall clean
 
 build:
-	cargo build --release
+	cargo build --release -p oxigen
+
+build-lsp:
+	cargo build --release -p oxigen-lsp
 
 install:
 	@echo "Installing oxigen to $(BINDIR)..."
@@ -19,9 +22,19 @@ install:
 	@echo "  Binary: $(BINDIR)/oxigen"
 	@echo "  Stdlib: $(LIBDIR)/"
 
+install-lsp: build-lsp
+	@echo "Installing oxigen-lsp to $(BINDIR)..."
+	install -d $(BINDIR)
+	install -m 755 target/release/oxigen-lsp $(BINDIR)/oxigen-lsp
+	@echo "oxigen-lsp installed successfully."
+	@echo "  Binary: $(BINDIR)/oxigen-lsp"
+
+install-all: install install-lsp
+
 uninstall:
 	@echo "Uninstalling oxigen..."
 	rm -f $(BINDIR)/oxigen
+	rm -f $(BINDIR)/oxigen-lsp
 	rm -rf $(PREFIX)/lib/oxigen
 	@echo "Oxigen uninstalled."
 

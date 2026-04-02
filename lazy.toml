@@ -11,7 +11,10 @@ libdir = "{{prefix}}/lib/oxigen/stdlib"
 [commands]
 
 [commands.build]
-run = ["cargo build --release"]
+run = ["cargo build --release -p oxigen"]
+
+[commands.build-lsp]
+run = ["cargo build --release -p oxigen-lsp"]
 
 [commands.install]
 run = [
@@ -28,14 +31,26 @@ run = [
 ]
 dep = ["build"]
 
+[commands.install-lsp]
+run = [
+  "echo \"Installing oxigen-lsp to {{bindir}}...\"",
+  "install -d {{bindir}}",
+  "install -m 755 target/release/oxigen-lsp {{bindir}}/oxigen-lsp",
+  "echo \"oxigen-lsp installed successfully.\"",
+]
+dep = ["build-lsp"]
+
+[commands.install-all]
+dep = ["install", "install-lsp"]
+
 [commands.uninstall]
 run = [
   "echo \"Uninstalling oxigen...\"",
   "rm -f {{bindir}}/oxigen",
+  "rm -f {{bindir}}/oxigen-lsp",
   "rm -rf {{prefix}}/lib/oxigen",
   "echo \"Oxigen uninstalled.\"",
 ]
 
 [commands.clean]
 run = ["cargo clean"]
-

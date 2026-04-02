@@ -6,6 +6,14 @@ set -e
 INSTALL_DIR="$HOME/.oxigen"
 BIN_DIR="$INSTALL_DIR/bin"
 LIB_DIR="$INSTALL_DIR/lib/stdlib"
+WITH_LSP=false
+
+# Parse arguments
+for arg in "$@"; do
+    case "$arg" in
+        --with-lsp) WITH_LSP=true ;;
+    esac
+done
 
 echo "=== OxigenLang Installer ==="
 echo ""
@@ -19,7 +27,12 @@ fi
 
 # Build
 echo "Building oxigen..."
-cargo build --release
+cargo build --release -p oxigen
+
+if [ "$WITH_LSP" = true ]; then
+    echo "Building oxigen-lsp..."
+    cargo build --release -p oxigen-lsp
+fi
 
 # Create directories
 echo "Installing to $INSTALL_DIR..."
@@ -30,6 +43,11 @@ mkdir -p "$LIB_DIR"
 cp target/release/oxigen "$BIN_DIR/oxigen"
 chmod 755 "$BIN_DIR/oxigen"
 cp stdlib/*.oxi "$LIB_DIR/"
+
+if [ "$WITH_LSP" = true ]; then
+    cp target/release/oxigen-lsp "$BIN_DIR/oxigen-lsp"
+    chmod 755 "$BIN_DIR/oxigen-lsp"
+fi
 
 # Detect shell and rc file
 add_to_path() {
@@ -85,6 +103,9 @@ echo "=== OxigenLang installed successfully ==="
 echo ""
 echo "  Binary:  $BIN_DIR/oxigen"
 echo "  Stdlib:  $LIB_DIR/"
+if [ "$WITH_LSP" = true ]; then
+    echo "  LSP:     $BIN_DIR/oxigen-lsp"
+fi
 echo ""
 echo "Restart your shell or run:"
 echo "  export PATH=\"$BIN_DIR:\$PATH\""
