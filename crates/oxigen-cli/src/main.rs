@@ -25,17 +25,41 @@ fn read_source(file_path: &str) -> String {
     }
 }
 
-fn shebang_line(source: &str) -> Option<&str> {
-    source
-        .starts_with("#!")
-        .then(|| source.lines().next().unwrap_or(source))
+fn is_header_line(line: &str, allow_shebang: bool) -> bool {
+    if allow_shebang && line.starts_with("#!") {
+        return true;
+    }
+
+    line == "#[indent]" || (line.starts_with("#[location=") && line.ends_with(']'))
 }
 
-fn restore_shebang(source: &str, body: String) -> String {
-    match shebang_line(source) {
-        Some(line) if body.is_empty() => format!("{}\n", line),
-        Some(line) => format!("{}\n{}", line, body),
-        None => body,
+fn header_prefix(source: &str) -> String {
+    let mut header_lines = Vec::new();
+
+    for (idx, line) in source.lines().enumerate() {
+        if is_header_line(line, idx == 0) {
+            header_lines.push(line);
+        } else {
+            break;
+        }
+    }
+
+    if header_lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", header_lines.join("\n"))
+    }
+}
+
+fn restore_header(source: &str, body: String) -> String {
+    let header = header_prefix(source);
+
+    if header.is_empty() {
+        body
+    } else if body.is_empty() {
+        header
+    } else {
+        format!("{header}{body}")
     }
 }
 
@@ -131,7 +155,7 @@ fn fmt_files(paths: &[String]) {
             std::process::exit(1);
         }
 
-        let formatted = restore_shebang(&contents, Formatter::format(&program));
+        let formatted = restore_header(&contents, Formatter::format(&program));
 
         if formatted != contents {
             if let Err(e) = fs::write(path, &formatted) {

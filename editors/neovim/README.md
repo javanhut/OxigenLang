@@ -110,7 +110,7 @@ The LSP server provides:
 
 - **Diagnostics** -- Real-time parse error reporting with hints
 - **Completion** -- Keywords, builtin functions, type names, and stdlib modules
-- **Hover** -- Documentation for keywords, builtins, and types
+- **Hover** -- Documentation for keywords, builtins, types, shebangs, and file directives
 - **Document Symbols** -- Outline of functions, structs, patterns, and variables
 - **Formatting** -- Format documents via LSP or `oxigen fmt`
 
@@ -123,5 +123,6 @@ The included `syntax/oxigen.lua` provides basic syntax highlighting for:
 - String literals and interpolation
 - Numbers and floats
 - Comments (`//`)
+- Executable headers and directives (`#!`, `#[indent]`, `#[location=...]`)
 - Type annotations (`<int>`, `<str>`, etc.)
 - Operators (`:=`, `->`, `||`, etc.)

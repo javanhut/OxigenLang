@@ -42,6 +42,7 @@ impl Lexer {
     fn preprocess_input(input: &str) -> (&str, usize, bool) {
         let mut effective_input = input;
         let mut start_line = 1;
+        let mut indent_mode = false;
 
         // Allow executable Oxigen scripts to start with a Unix shebang line.
         if effective_input.starts_with("#!") {
@@ -53,18 +54,40 @@ impl Lexer {
             }
         }
 
-        let indent_directive = "#[indent]";
-        let indent_mode = effective_input.trim_start().starts_with(indent_directive);
-
-        if indent_mode {
-            let start = effective_input.find(indent_directive).unwrap() + indent_directive.len();
-            let skipped = &effective_input[..start];
-            let newlines = skipped.chars().filter(|&c| c == '\n').count();
-            effective_input = &effective_input[start..];
+        while let Some((rest, newlines, enables_indent)) =
+            Self::strip_top_level_directive(effective_input)
+        {
+            effective_input = rest;
             start_line += newlines;
+            indent_mode |= enables_indent;
         }
 
         (effective_input, start_line, indent_mode)
+    }
+
+    fn strip_top_level_directive(input: &str) -> Option<(&str, usize, bool)> {
+        let trimmed = input.trim_start();
+        if !trimmed.starts_with("#[") {
+            return None;
+        }
+
+        let offset = input.len() - trimmed.len();
+        let end = trimmed.find(']')?;
+        let directive = &trimmed[..=end];
+
+        let enables_indent = directive == "#[indent]";
+        let is_location =
+            directive.starts_with("#[location=") && directive.len() > "#[location=]".len();
+
+        if !enables_indent && !is_location {
+            return None;
+        }
+
+        let start = offset + directive.len();
+        let skipped = &input[..start];
+        let newlines = skipped.chars().filter(|&c| c == '\n').count();
+
+        Some((&input[start..], newlines, enables_indent))
     }
 
     /// Returns the current span (line, column) for the character being processed.

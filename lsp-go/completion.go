@@ -91,6 +91,8 @@ const (
 	contextAfterIntroduce
 	contextAfterModuleDot
 	contextTypeAnnotation
+	contextHeaderDirective
+	contextShebang
 )
 
 func detectCompletionContext(source string, pos Position, stdlibPath string) (completionContext, string) {
@@ -107,6 +109,15 @@ func detectCompletionContext(source string, pos Position, stdlibPath string) (co
 	}
 	textBefore := line[:col]
 	trimmed := strings.TrimSpace(textBefore)
+	trimmedLeft := strings.TrimLeft(textBefore, " \t")
+
+	if strings.HasPrefix(trimmedLeft, "#[") {
+		return contextHeaderDirective, ""
+	}
+
+	if lineIdx == 0 && strings.HasPrefix(trimmedLeft, "#!") {
+		return contextShebang, ""
+	}
 
 	// Check for introduce/intro context
 	if trimmed == "introduce" || trimmed == "intro" ||
@@ -153,6 +164,10 @@ func getCompletions(source string, pos Position, stdlibPath string) []Completion
 	ctx, moduleName := detectCompletionContext(source, pos, stdlibPath)
 
 	switch ctx {
+	case contextHeaderDirective:
+		return headerDirectiveCompletions()
+	case contextShebang:
+		return shebangCompletions()
 	case contextAfterIntroduce:
 		return moduleCompletions(stdlibPath)
 	case contextAfterModuleDot:
@@ -161,6 +176,33 @@ func getCompletions(source string, pos Position, stdlibPath string) []Completion
 		return typeCompletions()
 	default:
 		return generalCompletions()
+	}
+}
+
+func headerDirectiveCompletions() []CompletionItem {
+	kwKind := CompletionKindKeyword
+	return []CompletionItem{
+		{
+			Label:  "#[indent]",
+			Kind:   &kwKind,
+			Detail: "Enable indentation-based block syntax for this file",
+		},
+		{
+			Label:  "#[location=/usr/local/bin/oxigen]",
+			Kind:   &kwKind,
+			Detail: "Record the preferred Oxigen interpreter path as file metadata",
+		},
+	}
+}
+
+func shebangCompletions() []CompletionItem {
+	kwKind := CompletionKindKeyword
+	return []CompletionItem{
+		{
+			Label:  "#!/usr/bin/env oxigen",
+			Kind:   &kwKind,
+			Detail: "Portable shebang for directly executable Oxigen scripts",
+		},
 	}
 }
 

@@ -469,7 +469,7 @@ each num in range(10) {
 
 ### Indentation-Based Blocks
 
-Enable indentation mode by adding the `#[indent]` directive at the very top of your file:
+Enable indentation mode by adding the `#[indent]` directive near the top of your file. It can appear on its own or after a shebang / `#[location=...]` header:
 
 ```oxi
 #[indent]

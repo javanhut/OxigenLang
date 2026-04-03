@@ -90,6 +90,23 @@ fn test_indent_directive_stripped() {
 }
 
 #[test]
+fn test_location_directive_is_stripped() {
+    let input = "#[location=/usr/local/bin/oxigen]\nx := 5";
+    let tokens = collect_tokens(input);
+
+    let x_tok = tokens.iter().find(|t| t.literal == "x").unwrap();
+    assert_eq!(x_tok.span.line, 2);
+
+    let has_location_tokens = tokens
+        .iter()
+        .any(|t| t.literal == "#" || t.literal == "location");
+    assert!(
+        !has_location_tokens,
+        "#[location=...] directive should be stripped"
+    );
+}
+
+#[test]
 fn test_indent_and_brace_produce_same_structure() {
     // Simple equivalent programs
     let indent_input = "#[indent]\neach x:\n  print(x)\n";
@@ -146,6 +163,24 @@ fn test_shebang_then_indent_directive_still_enables_indent_mode() {
     assert!(
         has_rbrace,
         "Indent mode should still close blocks after a shebang"
+    );
+}
+
+#[test]
+fn test_shebang_location_and_indent_headers_can_coexist() {
+    let input = "#!/usr/local/bin/oxigen\n#[location=/usr/local/bin/oxigen]\n#[indent]\neach num in x:\n  print(num)\n";
+    let tokens = collect_tokens(input);
+
+    let has_lbrace = tokens.iter().any(|t| t.token_type == TokenType::LBrace);
+    let has_rbrace = tokens.iter().any(|t| t.token_type == TokenType::RBrace);
+
+    assert!(
+        has_lbrace,
+        "Indent mode should survive multiple header lines"
+    );
+    assert!(
+        has_rbrace,
+        "Dedent handling should survive multiple header lines"
     );
 }
 

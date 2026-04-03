@@ -3,6 +3,15 @@ package main
 import "strings"
 
 func getHoverInfo(source string, pos Position) *Hover {
+	if info := headerHover(source, pos); info != "" {
+		return &Hover{
+			Contents: MarkupContent{
+				Kind:  "markdown",
+				Value: info,
+			},
+		}
+	}
+
 	word := getWordAtPosition(source, pos)
 	if word == "" {
 		return nil
@@ -18,6 +27,26 @@ func getHoverInfo(source string, pos Position) *Hover {
 			Kind:  "markdown",
 			Value: info,
 		},
+	}
+}
+
+func headerHover(source string, pos Position) string {
+	lines := strings.Split(source, "\n")
+	lineIdx := int(pos.Line)
+	if lineIdx >= len(lines) {
+		return ""
+	}
+
+	line := strings.TrimSpace(lines[lineIdx])
+	switch {
+	case lineIdx == 0 && strings.HasPrefix(line, "#!"):
+		return "**#!** — Unix shebang for direct execution\n\nUse a real shebang such as `#!/usr/bin/env oxigen` or `#!/usr/local/bin/oxigen` when you want to run a script with `./script.oxi`."
+	case strings.HasPrefix(line, "#[indent]"):
+		return "**#[indent]** — Enable indentation-based block syntax for this file."
+	case strings.HasPrefix(line, "#[location="):
+		return "**#[location=...]** — File metadata for the preferred Oxigen interpreter path.\n\nThis directive is preserved by Oxigen tooling, but direct execution still requires a real shebang on the first line."
+	default:
+		return ""
 	}
 }
 
@@ -122,6 +151,10 @@ func keywordHover(word string) string {
 		return "**from** — Selective import from a module\n\n```oxigen\nintroduce {name} from module\n```"
 	case "then":
 		return "**then** — Consequence branch in postfix conditionals"
+	case "indent":
+		return "**indent** — Header directive name used in `#[indent]` to enable indentation-based syntax."
+	case "location":
+		return "**location** — Header directive name used in `#[location=/path/to/oxigen]`."
 	default:
 		return ""
 	}

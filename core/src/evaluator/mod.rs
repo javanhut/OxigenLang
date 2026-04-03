@@ -117,7 +117,12 @@ pub fn find_stdlib_path() -> PathBuf {
     if candidate.is_dir() {
         return candidate;
     }
-    // 4. User install: ~/.oxigen/lib/stdlib
+    // 4. Parent of current working directory (useful when tests run from a crate dir)
+    let candidate = PathBuf::from("..").join("stdlib");
+    if candidate.is_dir() {
+        return candidate;
+    }
+    // 5. User install: ~/.oxigen/lib/stdlib
     if let Ok(home) = std::env::var("HOME") {
         let candidate = PathBuf::from(home)
             .join(".oxigen")

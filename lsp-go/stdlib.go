@@ -58,16 +58,20 @@ func findStdlibPath() string {
 			return candidate
 		}
 	}
-	// 3. User install: ~/.oxigen/lib/stdlib
+	// 3. Current working directory
+	if isDir("stdlib") {
+		return "stdlib"
+	}
+	// 4. Parent of current working directory
+	if isDir(filepath.Join("..", "stdlib")) {
+		return filepath.Join("..", "stdlib")
+	}
+	// 5. User install: ~/.oxigen/lib/stdlib
 	if home, err := os.UserHomeDir(); err == nil {
 		candidate := filepath.Join(home, ".oxigen", "lib", "stdlib")
 		if isDir(candidate) {
 			return candidate
 		}
-	}
-	// 4. Current working directory
-	if isDir("stdlib") {
-		return "stdlib"
 	}
 	return ""
 }

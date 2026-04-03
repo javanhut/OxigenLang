@@ -109,6 +109,7 @@ To make a script executable directly on Unix-like systems, add a shebang as the 
 
 ```oxi
 #!/usr/local/bin/oxigen
+#[location=/usr/local/bin/oxigen]
 introduce os
 
 main {
@@ -125,9 +126,11 @@ chmod +x hello.oxi
 
 If Oxigen is on your `PATH`, `#!/usr/bin/env oxigen` is also valid.
 
+Oxigen also recognizes `#[location=/path/to/oxigen]` as top-of-file metadata and preserves it during formatting. Use it when you want the interpreter path recorded in the file, but keep the real shebang on line 1 if you want `./hello.oxi` to work.
+
 ## Exploring Indentation Mode
 
-OxigenLang supports two block styles: brace-based (default) and Python-style indentation blocks. To enable indentation mode, add `#[indent]` at the top of your file:
+OxigenLang supports two block styles: brace-based (default) and Python-style indentation blocks. To enable indentation mode, add `#[indent]` near the top of your file. It can appear by itself or after a shebang / `#[location=...]` header:
 
 ```oxi
 #[indent]

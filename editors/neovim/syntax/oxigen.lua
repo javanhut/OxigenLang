@@ -61,7 +61,10 @@ syn match oxigenFloat /\<\d\+\.\d\+\>/
 syn match oxigenComment /\/\/.*/
 syn region oxigenComment start=/\/\*/ end=/\*\//
 
-" Directives: #[indent], #[main]
+" Executable script header
+syn match oxigenShebang /^#!.*/
+
+" Directives: #[indent], #[location=...]
 syn match oxigenPreProc /#\[.\{-}\]/
 
 " Operators
@@ -86,6 +89,7 @@ hi def link oxigenInterp Special
 hi def link oxigenNumber Number
 hi def link oxigenFloat Float
 hi def link oxigenComment Comment
+hi def link oxigenShebang PreProc
 hi def link oxigenOperator Operator
 hi def link oxigenType Type
 hi def link oxigenDirective Special

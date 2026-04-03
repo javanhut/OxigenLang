@@ -142,6 +142,30 @@ fn fmt_preserves_shebang_line() {
     assert!(formatted.contains("main {"));
 }
 
+#[test]
+fn fmt_preserves_location_and_indent_directives() {
+    let dir = temp_dir("fmt-location");
+    let script = write_script(
+        &dir,
+        "fmt_location.oxi",
+        "#!/usr/bin/env oxigen\n#[location=/usr/bin/env oxigen]\n#[indent]\nmain:\n  println(1)\n",
+    );
+
+    let output = Command::new(oxigen_bin())
+        .current_dir(workspace_root())
+        .arg("fmt")
+        .arg(&script)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+
+    let formatted = fs::read_to_string(&script).unwrap();
+    assert!(formatted.starts_with("#!/usr/bin/env oxigen\n"));
+    assert!(formatted.contains("#[location=/usr/bin/env oxigen]\n"));
+    assert!(formatted.contains("#[indent]\n"));
+}
+
 #[cfg(unix)]
 #[test]
 fn executable_script_runs_via_shebang() {

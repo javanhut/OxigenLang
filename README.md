@@ -169,6 +169,7 @@ To run a script directly, add a real shebang as the first line and make the file
 
 ```oxi
 #!/usr/local/bin/oxigen
+#[location=/usr/local/bin/oxigen]
 introduce os
 
 main {
@@ -182,6 +183,8 @@ chmod +x script.oxi
 ```
 
 If Oxigen is on your `PATH`, `#!/usr/bin/env oxigen` also works.
+
+Oxigen also accepts a top-of-file `#[location=/path/to/oxigen]` directive and preserves it during formatting. That directive is file metadata for tooling and should match the interpreter path you expect, but direct execution still depends on the real `#!` line because the OS only reads the shebang.
 
 ## Documentation
 

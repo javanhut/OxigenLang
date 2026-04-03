@@ -9,9 +9,9 @@ WORKSPACE_MANIFEST="$REPO_ROOT/Cargo.toml"
 TARGET_DIR="$REPO_ROOT/target/release"
 STDLIB_SRC_DIR="$REPO_ROOT/stdlib"
 
-INSTALL_DIR="$HOME/.oxigen"
-BIN_DIR="$INSTALL_DIR/bin"
-LIB_DIR="$INSTALL_DIR/lib/stdlib"
+PREFIX="${PREFIX:-/usr/local}"
+BIN_DIR="$PREFIX/bin"
+LIB_DIR="$PREFIX/lib/oxigen/stdlib"
 WITH_LSP=false
 
 # Parse arguments
@@ -31,6 +31,15 @@ if ! command -v cargo &> /dev/null; then
     exit 1
 fi
 
+# Check write permissions
+if [ ! -w "$BIN_DIR" ]; then
+    echo "Error: No write permission to $BIN_DIR"
+    echo "Run with sudo or set PREFIX to a writable location:"
+    echo "  sudo ./scripts/install.sh"
+    echo "  PREFIX=~/.local ./scripts/install.sh"
+    exit 1
+fi
+
 # Build
 echo "Building oxigen..."
 cargo build --manifest-path "$WORKSPACE_MANIFEST" --release -p oxigen
@@ -41,7 +50,7 @@ if [ "$WITH_LSP" = true ]; then
 fi
 
 # Create directories
-echo "Installing to $INSTALL_DIR..."
+echo "Installing to $PREFIX..."
 mkdir -p "$BIN_DIR"
 mkdir -p "$LIB_DIR"
 
@@ -55,54 +64,9 @@ if [ "$WITH_LSP" = true ]; then
     chmod 755 "$BIN_DIR/oxigen-lsp"
 fi
 
-# Detect shell and rc file
-add_to_path() {
-    local rc_file="$1"
-    local path_line="export PATH=\"$BIN_DIR:\$PATH\""
-    local marker="# OxigenLang"
-
-    if [ -f "$rc_file" ] && grep -q "$marker" "$rc_file"; then
-        echo "  Path already configured in $rc_file"
-        return
-    fi
-
-    echo "" >> "$rc_file"
-    echo "$marker" >> "$rc_file"
-    echo "$path_line" >> "$rc_file"
-    echo "  Added oxigen to PATH in $rc_file"
-}
-
-SHELL_NAME="$(basename "$SHELL")"
-case "$SHELL_NAME" in
-    zsh)
-        add_to_path "$HOME/.zshrc"
-        ;;
-    bash)
-        # macOS uses .bash_profile, Linux uses .bashrc
-        if [ "$(uname)" = "Darwin" ]; then
-            add_to_path "$HOME/.bash_profile"
-        else
-            add_to_path "$HOME/.bashrc"
-        fi
-        ;;
-    fish)
-        FISH_CONFIG="$HOME/.config/fish/config.fish"
-        mkdir -p "$(dirname "$FISH_CONFIG")"
-        if [ -f "$FISH_CONFIG" ] && grep -q "OxigenLang" "$FISH_CONFIG"; then
-            echo "  Path already configured in $FISH_CONFIG"
-        else
-            echo "" >> "$FISH_CONFIG"
-            echo "# OxigenLang" >> "$FISH_CONFIG"
-            echo "set -gx PATH $BIN_DIR \$PATH" >> "$FISH_CONFIG"
-            echo "  Added oxigen to PATH in $FISH_CONFIG"
-        fi
-        ;;
-    *)
-        echo "  Unknown shell: $SHELL_NAME"
-        echo "  Add this to your shell config manually:"
-        echo "    export PATH=\"$BIN_DIR:\$PATH\""
-        ;;
-esac
+# Clean up build artifacts
+echo "Cleaning up build artifacts..."
+rm -rf "$REPO_ROOT/target"
 
 echo ""
 echo "=== OxigenLang installed successfully ==="
@@ -112,9 +76,6 @@ echo "  Stdlib:  $LIB_DIR/"
 if [ "$WITH_LSP" = true ]; then
     echo "  LSP:     $BIN_DIR/oxigen-lsp"
 fi
-echo ""
-echo "Restart your shell or run:"
-echo "  export PATH=\"$BIN_DIR:\$PATH\""
 echo ""
 echo "Then try:"
 echo "  oxigen --version"

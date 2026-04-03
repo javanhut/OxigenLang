@@ -166,6 +166,14 @@ each i in [1, 2, 3]:
     println(i)
 ```
 
+```oxi
+#!/usr/bin/env oxigen        // direct execution
+#[location=/usr/bin/env oxigen] // preserved interpreter metadata
+#[indent]
+each i in [1, 2, 3]:
+    println(i)
+```
+
 ## Built-in Functions — [Full Guide](builtins.md)
 
 | Category     | Functions                                          |
