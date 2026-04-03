@@ -37,7 +37,7 @@ cargo build --manifest-path "$WORKSPACE_MANIFEST" --release -p oxigen
 
 if [ "$WITH_LSP" = true ]; then
     echo "Building oxigen-lsp..."
-    cargo build --manifest-path "$WORKSPACE_MANIFEST" --release -p oxigen-lsp
+    (cd "$REPO_ROOT/lsp-go" && go build -o "$TARGET_DIR/oxigen-lsp" .)
 fi
 
 # Create directories

@@ -8,7 +8,7 @@ build:
 	cargo build --release -p oxigen
 
 build-lsp:
-	cargo build --release -p oxigen-lsp
+	cd lsp-go && go build -o ../target/release/oxigen-lsp .
 
 install:
 	@echo "Installing oxigen to $(BINDIR)..."
@@ -40,3 +40,4 @@ uninstall:
 
 clean:
 	cargo clean
+	rm -f lsp-go/oxigen-lsp

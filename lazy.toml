@@ -14,7 +14,7 @@ libdir = "{{prefix}}/lib/oxigen/stdlib"
 run = ["cargo build --release -p oxigen"]
 
 [commands.build-lsp]
-run = ["cargo build --release -p oxigen-lsp"]
+run = ["cd lsp-go && go build -o ../target/release/oxigen-lsp ."]
 
 [commands.install]
 run = [

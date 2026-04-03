@@ -59,9 +59,31 @@ Run directly from the source tree without installing:
 ```bash
 cargo build --release -p oxigen
 cargo run -p oxigen -- path/to/script.oxi
-cargo run -p oxigen --           # starts the REPL
-cargo run -p oxigen -- --version # print version
+cargo run -p oxigen --              # starts the REPL
+cargo run -p oxigen -- --version    # print version
+cargo run -p oxigen -- fmt file.oxi # format a file
+cargo run -p oxigen -- check file.oxi # parse and report errors as JSON
 ```
+
+## Editor Support
+
+OxigenLang ships with a language server (LSP) and Neovim integration. The LSP is written in Go and provides diagnostics, completion, hover, document symbols, and formatting.
+
+### Build the LSP
+
+Requires [Go](https://go.dev/) 1.22+:
+
+```bash
+make build-lsp
+```
+
+Or include it with the installer:
+
+```bash
+./scripts/install.sh --with-lsp
+```
+
+See [editors/neovim/README.md](editors/neovim/README.md) for Neovim setup instructions.
 
 ## Quick Example
 

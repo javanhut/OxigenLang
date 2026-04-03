@@ -13,6 +13,8 @@ use oxigen_core::object;
 use oxigen_core::object::environment::Environment;
 use oxigen_core::parser::Parser;
 
+use serde_json::json;
+
 fn run_file(file_path: &str) {
     let contents =
         fs::read_to_string(file_path).expect("Should have been able to read this file");
@@ -44,6 +46,40 @@ fn run_file(file_path: &str) {
         object::Object::ErrorValue { .. } => println!("{}", result),
         _ => println!("{}", result),
     }
+}
+
+fn check_file(file_path: &str) {
+    let contents = match fs::read_to_string(file_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error reading {}: {}", file_path, e);
+            std::process::exit(1);
+        }
+    };
+
+    let lexer = Lexer::new(&contents);
+    let mut parser = Parser::new(lexer, &contents);
+    let _program = parser.parse_program();
+
+    let diagnostics: Vec<serde_json::Value> = parser
+        .errors()
+        .iter()
+        .map(|d| {
+            let severity = match d.severity {
+                oxigen_core::parser::Severity::Error => "error",
+                oxigen_core::parser::Severity::Warning => "warning",
+            };
+            json!({
+                "line": d.span.line,
+                "column": d.span.column,
+                "message": d.message,
+                "suggestion": d.suggestion,
+                "severity": severity
+            })
+        })
+        .collect();
+
+    println!("{}", serde_json::to_string(&diagnostics).unwrap());
 }
 
 fn fmt_files(paths: &[String]) {
@@ -98,6 +134,14 @@ fn main() {
     }
 
     match args.get(1).map(|s| s.as_str()) {
+        Some("check") => {
+            if let Some(path) = args.get(2) {
+                check_file(path);
+            } else {
+                eprintln!("Usage: oxigen check <file.oxi>");
+                std::process::exit(1);
+            }
+        }
         Some("fmt") => fmt_files(&args[2..]),
         Some(path) if path.ends_with(".oxi") => run_file(path),
         _ => repl::run_repl(),

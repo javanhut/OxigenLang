@@ -1,9 +1,9 @@
 introduce os
 introduce io
 introduce strings
+introduce json
 
 unsuccessful_system_call <Error> = <Error<unsuccessful_system_call>>("Failed to do system call.")
-
 
 fun check_installation(package <str>) {
     run_command <str> := "which {package}"
@@ -22,57 +22,62 @@ fun check_installation(package <str>) {
     True
 }
 
-
 fun check_and_install_configs() {
-  home_path := os.env_get("HOME") <guard>("")
-  path <str> := home_path + "/.config/nvim" unless home_path == "" then "~/.config/nvim"
-  dir_exist <bool> := os.is_dir(path=path)
-  option {
-    dir_exist -> {
-      // Copy ftdetect and syntax files directly into the nvim config dirs
-      os.exec("mkdir -p {path}/ftdetect {path}/syntax {path}/lsp")
-      results := os.exec("cp editors/neovim/ftdetect/oxigen.lua {path}/ftdetect/oxigen.lua")
-      out, err, code := (results["stdout"], results["stderr"], results["code"])
-      option {
-        code != 0 -> {
-          <log<error_code>>("Failed with err: {err}, code: {code}")
-          <fail>(unsuccessful_system_call)
-        },
-        <log>(out)
-      }
-      results := os.exec("cp editors/neovim/syntax/oxigen.lua {path}/syntax/oxigen.lua")
-      out, err, code := (results["stdout"], results["stderr"], results["code"])
-      option {
-        code != 0 -> {
-          <log<error_code>>("Failed with err: {err}, code: {code}")
-          <fail>(unsuccessful_system_call)
-        },
-        <log>(out)
-      }
-      results := os.exec("cp editors/neovim/lsp/oxigen_lsp.lua {path}/lsp/oxigen_lsp.lua")
-      out, err, code := (results["stdout"], results["stderr"], results["code"])
-      option {
-        code != 0 -> {
-          <log<error_code>>("Failed with err: {err}, code: {code}")
-          <fail>(unsuccessful_system_call)
-        },
-        <log>(out)
-      }
-      <log>("Neovim config files installed successfully.")
-    },
-    <fail>(<Error<directory_not_exist>>("Directory doesn't exist."))
-  }
-  None
+    home_path := os.env_get("HOME") guard _err -> ""
+    path <str> := home_path + "/.config/nvim" unless home_path == "" then "~/.config/nvim"
+    dir_exist <bool> := os.is_dir(path=path)
+    option {
+        dir_exist -> {
+            os.exec("mkdir -p {path}/ftdetect {path}/syntax {path}/lsp")
+            results := os.exec("cp editors/neovim/ftdetect/oxigen.lua {path}/ftdetect/oxigen.lua")
+            out, err, code := (results["stdout"], results["stderr"], results["code"])
+            option {
+                code != 0 -> {
+                    <log<error_code>>("Failed with err: {err}, code: {code}")
+                    fail unsuccessful_system_call
+                }
+                <log>(out)
+            }
+            results := os.exec("cp editors/neovim/syntax/oxigen.lua {path}/syntax/oxigen.lua")
+            out, err, code := (results["stdout"], results["stderr"], results["code"])
+            option {
+                code != 0 -> {
+                    <log<error_code>>("Failed with err: {err}, code: {code}")
+                    fail unsuccessful_system_call
+                }
+                <log>(out)
+            }
+            results := os.exec("cp editors/neovim/lsp/oxigen_lsp.lua {path}/lsp/oxigen_lsp.lua")
+            out, err, code := (results["stdout"], results["stderr"], results["code"])
+            option {
+                code != 0 -> {
+                    <log<error_code>>("Failed with err: {err}, code: {code}")
+                    fail unsuccessful_system_call
+                }
+                <log>(out)
+            }
+            <log>("Neovim config files installed successfully.")
+        }
+        fail <Error<directory_not_exist>>("Directory doesn't exist.")
+    }
+    None
 }
-
-
 
 main {
-is_nvim_installed := check_installation(package="nvim")
-option {
-  is_nvim_installed -> {
-    <log>("All dependencies are installed.")
-    check_and_install_configs()
-  }
-}
+    is_nvim_installed := check_installation(package="nvim")
+    option {
+        is_nvim_installed -> {
+            <log>("All dependencies are installed.")
+            check_and_install_configs()
+            is_lsp_installed := check_installation(package="oxigen-lsp")
+            option {
+                not is_lsp_installed -> {
+                    <log>("")
+                    <log>("oxigen-lsp not found on PATH.")
+                    <log>("Build it with: make build-lsp  (requires Go 1.22+)")
+                    <log>("Or install with: ./scripts/install.sh --with-lsp")
+                }
+            }
+        }
+    }
 }

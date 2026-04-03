@@ -85,10 +85,14 @@ Hello from REPL
 
 The REPL maintains state across lines — variables, functions, structs, and patterns defined in one line are available in subsequent lines.
 
-### Command-Line Flags
+### Command-Line Usage
 
-| Flag | Description |
-|------|-------------|
+| Command / Flag | Description |
+|----------------|-------------|
+| `oxigen file.oxi` | Execute a script |
+| `oxigen` | Start the interactive REPL |
+| `oxigen fmt file.oxi [...]` | Format one or more `.oxi` files in-place |
+| `oxigen check file.oxi` | Parse a file and output diagnostics as JSON |
 | `--version`, `-v` | Print the version and exit |
 
 ## Exploring Indentation Mode

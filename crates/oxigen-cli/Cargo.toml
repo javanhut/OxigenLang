@@ -10,3 +10,4 @@ path = "src/main.rs"
 [dependencies]
 oxigen-core = { path = "../../core" }
 rustyline = "15"
+serde_json = "1"

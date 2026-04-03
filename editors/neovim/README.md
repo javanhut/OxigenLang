@@ -6,9 +6,11 @@ Neovim integration for OxigenLang (`.oxi` files) with LSP, formatting, and compl
 
 ### 1. Build and install the LSP server
 
+Requires [Go](https://go.dev/) 1.22+.
+
 ```bash
 # From the repo root
-cargo build --release -p oxigen-lsp
+make build-lsp
 
 # Install to ~/.oxigen/bin/ (alongside the interpreter)
 ./scripts/install.sh --with-lsp
@@ -17,7 +19,7 @@ cargo build --release -p oxigen-lsp
 sudo make install-lsp
 ```
 
-Ensure `oxigen-lsp` is on your `$PATH`.
+Ensure `oxigen-lsp` is on your `$PATH`. The LSP also requires the `oxigen` interpreter binary (used for diagnostics and formatting).
 
 ### 2. Copy editor files
 

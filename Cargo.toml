@@ -3,7 +3,6 @@ resolver = "3"
 members = [
     "core",
     "crates/oxigen-cli",
-    "lsp",
 ]
 
 [profile.test]

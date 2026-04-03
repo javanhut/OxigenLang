@@ -21,6 +21,10 @@ syn match oxigenFuncName /\w\+/ contained
 syn match oxigenModule /\w\+/ contained
 syn match oxigenStructName /\w\+/ contained
 
+" Method calls: os.exec(...), strings.upper(...)
+syn match oxigenMethodCall /\<\w\+\.\zs\w\+\ze\s*(/
+syn match oxigenModuleRef /\<\w\+\ze\.\w\+\s*(/
+
 " Builtins
 syn keyword oxigenBuiltin print println len push first last rest
 syn keyword oxigenBuiltin type ord chr str int float range chars
@@ -90,6 +94,8 @@ hi def link oxigenVariable Identifier
 hi def link oxigenFuncName Function
 hi def link oxigenModule Include
 hi def link oxigenStructName Type
+hi def link oxigenMethodCall Function
+hi def link oxigenModuleRef Include
 hi def link oxigenPreProc PreProc
 ]])
 
