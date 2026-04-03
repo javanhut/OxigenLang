@@ -1,6 +1,6 @@
 # OxigenLang Neovim Support
 
-Neovim integration for OxigenLang (`.oxi` files) with LSP support.
+Neovim integration for OxigenLang (`.oxi` files) with LSP, formatting, and completion support.
 
 ## Installation
 
@@ -19,40 +19,52 @@ sudo make install-lsp
 
 Ensure `oxigen-lsp` is on your `$PATH`.
 
-### 2. Neovim setup
+### 2. Copy editor files
 
-#### Using lazy.nvim
+Copy the filetype detection, syntax highlighting, and LSP config files into your Neovim config directory:
 
-Add the `editors/neovim` directory as a local plugin for filetype detection and syntax highlighting:
-
-```lua
-{
-    dir = "/path/to/OxigenLang/editors/neovim",
-    ft = "oxigen",
-}
+```bash
+# From the repo root
+mkdir -p ~/.config/nvim/ftdetect ~/.config/nvim/syntax ~/.config/nvim/lsp
+cp editors/neovim/ftdetect/oxigen.lua ~/.config/nvim/ftdetect/
+cp editors/neovim/syntax/oxigen.lua ~/.config/nvim/syntax/
+cp editors/neovim/lsp/oxigen_lsp.lua ~/.config/nvim/lsp/
 ```
 
-#### Manual filetype detection
+Or use the provided script:
 
-Add to your Neovim config (`init.lua`):
-
-```lua
-vim.filetype.add({
-    extension = {
-        oxi = "oxigen",
-    },
-})
+```bash
+oxigen scripts/cp_to_neovim.oxi
 ```
+
+> **Note:** These files must be placed directly in `~/.config/nvim/ftdetect/`, `~/.config/nvim/syntax/`, and `~/.config/nvim/lsp/` — not in a subdirectory. Neovim only discovers them from its runtimepath root.
 
 ### 3. LSP configuration
 
-#### Using nvim-lspconfig
+#### Neovim 0.11+ (native)
+
+The `lsp/oxigen_lsp.lua` file you copied in step 2 is auto-discovered by Neovim 0.11+. Just enable it in your LSP config:
+
+```lua
+vim.lsp.enable("oxigen_lsp")
+```
+
+If you use NvChad, add `"oxigen_lsp"` to your servers list in `lua/configs/lspconfig.lua`:
+
+```lua
+local servers = {
+  -- your other servers...
+  "oxigen_lsp",
+}
+vim.lsp.enable(servers)
+```
+
+#### Neovim < 0.11 (nvim-lspconfig)
 
 ```lua
 local lspconfig = require('lspconfig')
 local configs = require('lspconfig.configs')
 
--- Register the oxigen LSP server
 if not configs.oxigen_lsp then
     configs.oxigen_lsp = {
         default_config = {
@@ -67,27 +79,38 @@ end
 lspconfig.oxigen_lsp.setup({})
 ```
 
-#### Using mason.nvim (custom registry)
+### 4. Formatting
 
-If you prefer mason.nvim for managing the LSP server:
+The `oxigen fmt` command formats `.oxi` files in-place. To enable format-on-save with [conform.nvim](https://github.com/stevearc/conform.nvim):
 
 ```lua
--- In your mason config, after oxigen-lsp is published to crates.io:
-require('mason-lspconfig').setup({
-    ensure_installed = { 'oxigen_lsp' },
+require("conform").setup({
+  formatters_by_ft = {
+    oxigen = { "oxigen_fmt" },
+  },
+  formatters = {
+    oxigen_fmt = {
+      command = "oxigen",
+      args = function(self, ctx)
+        return { "fmt", ctx.filename }
+      end,
+      stdin = false,
+    },
+  },
 })
 ```
 
-For local development before crates.io publishing, use the lspconfig approach above.
+The LSP server also supports `textDocument/formatting`, so if you prefer LSP-based formatting no extra setup is needed beyond enabling the LSP.
 
 ## Features
 
 The LSP server provides:
 
-- **Diagnostics** — Real-time parse error reporting with hints
-- **Completion** — Keywords, builtin functions, type names, and stdlib modules
-- **Hover** — Documentation for keywords, builtins, and types
-- **Document Symbols** — Outline of functions, structs, patterns, and variables
+- **Diagnostics** -- Real-time parse error reporting with hints
+- **Completion** -- Keywords, builtin functions, type names, and stdlib modules
+- **Hover** -- Documentation for keywords, builtins, and types
+- **Document Symbols** -- Outline of functions, structs, patterns, and variables
+- **Formatting** -- Format documents via LSP or `oxigen fmt`
 
 ## Syntax Highlighting
 
