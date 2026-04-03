@@ -15,9 +15,32 @@ use oxigen_core::parser::Parser;
 
 use serde_json::json;
 
-fn run_file(file_path: &str) {
-    let contents =
-        fs::read_to_string(file_path).expect("Should have been able to read this file");
+fn read_source(file_path: &str) -> String {
+    match fs::read_to_string(file_path) {
+        Ok(contents) => contents,
+        Err(err) => {
+            eprintln!("Error reading {}: {}", file_path, err);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn shebang_line(source: &str) -> Option<&str> {
+    source
+        .starts_with("#!")
+        .then(|| source.lines().next().unwrap_or(source))
+}
+
+fn restore_shebang(source: &str, body: String) -> String {
+    match shebang_line(source) {
+        Some(line) if body.is_empty() => format!("{}\n", line),
+        Some(line) => format!("{}\n{}", line, body),
+        None => body,
+    }
+}
+
+fn run_file(file_path: &str, script_args: &[String]) {
+    let contents = read_source(file_path);
 
     let lexer = Lexer::new(&contents);
     let mut parser = Parser::new(lexer, &contents);
@@ -35,6 +58,7 @@ fn run_file(file_path: &str) {
     let env = Rc::new(RefCell::new(Environment::new()));
     let mut evaluator = Evaluator::new_with_path(file_path_buf);
     evaluator.set_source(&contents);
+    evaluator.set_script_args(script_args);
     let result = evaluator.eval_program(&program, env);
 
     match result.as_ref() {
@@ -49,13 +73,7 @@ fn run_file(file_path: &str) {
 }
 
 fn check_file(file_path: &str) {
-    let contents = match fs::read_to_string(file_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error reading {}: {}", file_path, e);
-            std::process::exit(1);
-        }
-    };
+    let contents = read_source(file_path);
 
     let lexer = Lexer::new(&contents);
     let mut parser = Parser::new(lexer, &contents);
@@ -113,7 +131,7 @@ fn fmt_files(paths: &[String]) {
             std::process::exit(1);
         }
 
-        let formatted = Formatter::format(&program);
+        let formatted = restore_shebang(&contents, Formatter::format(&program));
 
         if formatted != contents {
             if let Err(e) = fs::write(path, &formatted) {
@@ -128,12 +146,10 @@ fn fmt_files(paths: &[String]) {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    if args.iter().any(|a| a == "--version" || a == "-v") {
-        println!("oxigen {}", env!("CARGO_PKG_VERSION"));
-        return;
-    }
-
     match args.get(1).map(|s| s.as_str()) {
+        Some("--version") | Some("-v") => {
+            println!("oxigen {}", env!("CARGO_PKG_VERSION"));
+        }
         Some("check") => {
             if let Some(path) = args.get(2) {
                 check_file(path);
@@ -143,7 +159,7 @@ fn main() {
             }
         }
         Some("fmt") => fmt_files(&args[2..]),
-        Some(path) if path.ends_with(".oxi") => run_file(path),
+        Some(path) if path.ends_with(".oxi") => run_file(path, &args[2..]),
         _ => repl::run_repl(),
     }
 }

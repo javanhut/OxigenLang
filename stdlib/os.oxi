@@ -19,6 +19,9 @@ fun env_vars() { __env_vars() }
 // Get the current working directory.
 fun cwd() { __cwd() }
 
+// Get the arguments passed to the running script.
+fun args() { __args }
+
 // Change the current working directory.
 fun chdir(path <str>) { __chdir(path) }
 

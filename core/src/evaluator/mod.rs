@@ -5,8 +5,8 @@ use crate::ast::{
     TypedParam,
 };
 use crate::lexer::Lexer;
-use crate::object::environment::{Environment, PatternRegistry};
 use crate::object::Object;
+use crate::object::environment::{Environment, PatternRegistry};
 use crate::parser::Parser;
 use crate::token::Span;
 use builtins::get_builtins;
@@ -112,7 +112,12 @@ pub fn find_stdlib_path() -> PathBuf {
             }
         }
     }
-    // 3. User install: ~/.oxigen/lib/stdlib
+    // 3. Current working directory (preferred for local development)
+    let candidate = PathBuf::from("stdlib");
+    if candidate.is_dir() {
+        return candidate;
+    }
+    // 4. User install: ~/.oxigen/lib/stdlib
     if let Ok(home) = std::env::var("HOME") {
         let candidate = PathBuf::from(home)
             .join(".oxigen")
@@ -121,11 +126,6 @@ pub fn find_stdlib_path() -> PathBuf {
         if candidate.is_dir() {
             return candidate;
         }
-    }
-    // 4. Current working directory
-    let candidate = PathBuf::from("stdlib");
-    if candidate.is_dir() {
-        return candidate;
     }
     // Fallback
     PathBuf::from("stdlib")
@@ -139,8 +139,11 @@ impl Default for Evaluator {
 
 impl Evaluator {
     pub fn new() -> Self {
+        let mut builtins = get_builtins();
+        builtins.insert("__args".to_string(), Rc::new(Object::Array(Vec::new())));
+
         Evaluator {
-            builtins: get_builtins(),
+            builtins,
             patterns: PatternRegistry::new(),
             struct_defs: HashMap::new(),
             current_file: None,
@@ -153,8 +156,11 @@ impl Evaluator {
     }
 
     pub fn new_with_path(file_path: PathBuf) -> Self {
+        let mut builtins = get_builtins();
+        builtins.insert("__args".to_string(), Rc::new(Object::Array(Vec::new())));
+
         Evaluator {
-            builtins: get_builtins(),
+            builtins,
             patterns: PatternRegistry::new(),
             struct_defs: HashMap::new(),
             current_file: Some(file_path),
@@ -168,6 +174,15 @@ impl Evaluator {
 
     pub fn set_source(&mut self, source: &str) {
         self.source = source.to_string();
+    }
+
+    pub fn set_script_args(&mut self, script_args: &[String]) {
+        let args = script_args
+            .iter()
+            .map(|arg| Rc::new(Object::String(arg.clone())))
+            .collect();
+        self.builtins
+            .insert("__args".to_string(), Rc::new(Object::Array(args)));
     }
 
     /// Format a runtime error with source context, matching the parser error style.

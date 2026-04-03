@@ -66,7 +66,12 @@ impl Formatter {
             Statement::Let { name, value } => {
                 // Named functions: `fun name(params) { body }`
                 // The parser stores them as Let { name, FunctionLiteral { token: Function } }
-                if let Expression::FunctionLiteral { token, parameters, body } = value {
+                if let Expression::FunctionLiteral {
+                    token,
+                    parameters,
+                    body,
+                } = value
+                {
                     if token.token_type == TokenType::Function {
                         self.push("fun ");
                         self.push(&name.value);
@@ -81,7 +86,12 @@ impl Formatter {
                 self.push(" := ");
                 self.format_expression(value);
             }
-            Statement::TypedLet { name, type_ann, value, walrus } => {
+            Statement::TypedLet {
+                name,
+                type_ann,
+                value,
+                walrus,
+            } => {
                 self.push(&name.value);
                 self.push(" <");
                 self.push(&format_type_annotation(type_ann));
@@ -117,7 +127,12 @@ impl Formatter {
             Statement::Stop => {
                 self.push("stop");
             }
-            Statement::If { condition, consequence, alternative, .. } => {
+            Statement::If {
+                condition,
+                consequence,
+                alternative,
+                ..
+            } => {
                 if let Some(alt) = alternative {
                     if consequence.len() == 1 && alt.len() == 1 {
                         self.format_statement(&consequence[0]);
@@ -152,7 +167,12 @@ impl Formatter {
 
                 self.format_if_as_option(condition, consequence, alternative.as_deref());
             }
-            Statement::Each { variable, iterable, body, .. } => {
+            Statement::Each {
+                variable,
+                iterable,
+                body,
+                ..
+            } => {
                 self.push("each ");
                 self.push(&variable.value);
                 self.push(" in ");
@@ -165,7 +185,9 @@ impl Formatter {
                 self.push_indent();
                 self.push("}");
             }
-            Statement::Repeat { condition, body, .. } => {
+            Statement::Repeat {
+                condition, body, ..
+            } => {
                 self.push("repeat ");
                 self.format_expression(condition);
                 self.push(" {");
@@ -176,7 +198,12 @@ impl Formatter {
                 self.push_indent();
                 self.push("}");
             }
-            Statement::Pattern { name, params, condition, .. } => {
+            Statement::Pattern {
+                name,
+                params,
+                condition,
+                ..
+            } => {
                 self.push("pattern ");
                 self.push(&name.value);
                 self.push("(");
@@ -220,7 +247,12 @@ impl Formatter {
                 self.push_indent();
                 self.push("}");
             }
-            Statement::StructDef { name, parent, fields, .. } => {
+            Statement::StructDef {
+                name,
+                parent,
+                fields,
+                ..
+            } => {
                 self.push("struct ");
                 self.push(&name.value);
                 if let Some(p) = parent {
@@ -246,7 +278,11 @@ impl Formatter {
                 self.push_indent();
                 self.push("}");
             }
-            Statement::ContainsDef { struct_name, methods, .. } => {
+            Statement::ContainsDef {
+                struct_name,
+                methods,
+                ..
+            } => {
                 self.push(&struct_name.value);
                 self.push(" contains {");
                 self.newline();
@@ -259,7 +295,10 @@ impl Formatter {
                     self.push("fun ");
                     self.push(&method_name.value);
                     // The method_expr should be a FunctionLiteral
-                    if let Expression::FunctionLiteral { parameters, body, .. } = method_expr {
+                    if let Expression::FunctionLiteral {
+                        parameters, body, ..
+                    } = method_expr
+                    {
                         self.push("(");
                         self.format_params(parameters);
                         self.push(")");
@@ -271,21 +310,33 @@ impl Formatter {
                 self.push_indent();
                 self.push("}");
             }
-            Statement::DotAssign { object, field, value, .. } => {
+            Statement::DotAssign {
+                object,
+                field,
+                value,
+                ..
+            } => {
                 self.format_expression(object);
                 self.push(".");
                 self.push(&field.value);
                 self.push(" = ");
                 self.format_expression(value);
             }
-            Statement::IndexAssign { object, index, value, .. } => {
+            Statement::IndexAssign {
+                object,
+                index,
+                value,
+                ..
+            } => {
                 self.format_expression(object);
                 self.push("[");
                 self.format_expression(index);
                 self.push("] = ");
                 self.format_expression(value);
             }
-            Statement::Introduce { path, selective, .. } => {
+            Statement::Introduce {
+                path, selective, ..
+            } => {
                 if let Some(names) = selective {
                     self.push("introduce {");
                     for (i, name) in names.iter().enumerate() {
@@ -365,14 +416,21 @@ impl Formatter {
                 }
                 self.push("]");
             }
-            Expression::Prefix { operator, right, .. } => {
+            Expression::Prefix {
+                operator, right, ..
+            } => {
                 self.push(operator);
                 if operator == "not" {
                     self.push(" ");
                 }
                 self.format_expression(right);
             }
-            Expression::Infix { left, operator, right, .. } => {
+            Expression::Infix {
+                left,
+                operator,
+                right,
+                ..
+            } => {
                 self.format_expression(left);
                 self.push(" ");
                 self.push(operator);
@@ -383,7 +441,12 @@ impl Formatter {
                 self.format_expression(left);
                 self.push(operator);
             }
-            Expression::Call { function, args, named_args, .. } => {
+            Expression::Call {
+                function,
+                args,
+                named_args,
+                ..
+            } => {
                 self.format_expression(function);
                 self.push("(");
                 for (i, arg) in args.iter().enumerate() {
@@ -413,13 +476,19 @@ impl Formatter {
                 self.format_expression(inner);
                 self.push(")");
             }
-            Expression::FunctionLiteral { parameters, body, .. } => {
+            Expression::FunctionLiteral {
+                parameters, body, ..
+            } => {
                 self.push("fun(");
                 self.format_params(parameters);
                 self.push(")");
                 self.format_function_body(body);
             }
-            Expression::StructLiteral { struct_name, field_values, .. } => {
+            Expression::StructLiteral {
+                struct_name,
+                field_values,
+                ..
+            } => {
                 self.push(struct_name);
                 self.push("(");
                 for (i, (name, val)) in field_values.iter().enumerate() {
@@ -437,7 +506,9 @@ impl Formatter {
                 self.push(".");
                 self.push(&field.value);
             }
-            Expression::Slice { left, start, end, .. } => {
+            Expression::Slice {
+                left, start, end, ..
+            } => {
                 self.format_expression(left);
                 self.push("[");
                 if let Some(s) = start {
@@ -478,7 +549,12 @@ impl Formatter {
                 }
                 self.push("}");
             }
-            Expression::Option { arms, default, error_default, .. } => {
+            Expression::Option {
+                arms,
+                default,
+                error_default,
+                ..
+            } => {
                 self.push("option {");
                 self.newline();
                 self.indent += 1;
@@ -561,7 +637,13 @@ impl Formatter {
                 self.push_indent();
                 self.push("}");
             }
-            Expression::Guard { value, binding, error_tag, fallback, .. } => {
+            Expression::Guard {
+                value,
+                binding,
+                error_tag,
+                fallback,
+                ..
+            } => {
                 self.format_expression(value);
                 self.push(" guard ");
                 if let Some(tag) = error_tag {
@@ -572,7 +654,12 @@ impl Formatter {
                 self.push(" -> ");
                 self.format_expression(fallback);
             }
-            Expression::Log { tag, sub_tag, message, .. } => {
+            Expression::Log {
+                tag,
+                sub_tag,
+                message,
+                ..
+            } => {
                 self.push("<log");
                 if let Some(t) = tag {
                     self.push("<");
@@ -618,7 +705,12 @@ impl Formatter {
                 self.push("fail ");
                 self.format_expression(value);
             }
-            Expression::Unless { consequence, condition, alternative, .. } => {
+            Expression::Unless {
+                consequence,
+                condition,
+                alternative,
+                ..
+            } => {
                 self.format_expression(consequence);
                 self.push(" unless ");
                 self.format_expression(condition);
@@ -750,13 +842,11 @@ fn format_type_annotation(ann: &TypeAnnotation) -> String {
             None => "Error".to_string(),
         },
         TypeAnnotation::ValueType => "Value".to_string(),
-        TypeAnnotation::Union(types) => {
-            types
-                .iter()
-                .map(|t| format!("<{}>", format_type_annotation(t)))
-                .collect::<Vec<_>>()
-                .join(" || ")
-        }
+        TypeAnnotation::Union(types) => types
+            .iter()
+            .map(|t| format!("<{}>", format_type_annotation(t)))
+            .collect::<Vec<_>>()
+            .join(" || "),
         TypeAnnotation::Struct(name) => name.clone(),
     }
 }
@@ -773,13 +863,17 @@ fn top_level_section(stmt: &Statement) -> TopLevelSection {
     match stmt {
         Statement::Introduce { .. } => TopLevelSection::Import,
         Statement::Let { value, .. } => match value {
-            Expression::FunctionLiteral { token, .. } if token.token_type == TokenType::Function => {
+            Expression::FunctionLiteral { token, .. }
+                if token.token_type == TokenType::Function =>
+            {
                 TopLevelSection::Definition
             }
             _ => TopLevelSection::Variable,
         },
         Statement::TypedLet { value, .. } => match value {
-            Expression::FunctionLiteral { token, .. } if token.token_type == TokenType::Function => {
+            Expression::FunctionLiteral { token, .. }
+                if token.token_type == TokenType::Function =>
+            {
                 TopLevelSection::Definition
             }
             _ => TopLevelSection::Variable,

@@ -130,6 +130,7 @@ introduce os
 | `exec` | `exec(cmd)` | Run shell command, returns map with `stdout`, `stderr`, `code` |
 | `name` | `name()` | OS name ("linux", "macos", "windows") |
 | `arch` | `arch()` | CPU architecture ("x86_64", "aarch64") |
+| `args` | `args()` | Arguments passed to the current script |
 | `env_get` | `env_get(key)` | Get environment variable (None if unset) |
 | `env_set` | `env_set(key, val)` | Set environment variable |
 | `env_vars` | `env_vars()` | All environment variables as a map |
@@ -151,6 +152,7 @@ result := os.exec("echo hello")
 println(result["stdout"])  // hello
 println(os.name())         // linux
 println(os.cwd())          // /current/directory
+println(os.args())         // [Alice, --flag=value]
 ```
 
 ## time

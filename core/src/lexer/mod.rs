@@ -1,4 +1,4 @@
-use crate::token::{token_map, Span, Token, TokenType};
+use crate::token::{Span, Token, TokenType, token_map};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
@@ -20,18 +20,7 @@ pub struct Lexer {
 
 impl Lexer {
     pub fn new(input: &str) -> Self {
-        let indent_directive = "#[indent]";
-        let indent_mode = input.trim_start().starts_with(indent_directive);
-
-        // If indent mode, skip past the directive
-        let (effective_input, start_line) = if indent_mode {
-            let start = input.find(indent_directive).unwrap() + indent_directive.len();
-            let skipped = &input[..start];
-            let newlines = skipped.chars().filter(|&c| c == '\n').count();
-            (&input[start..], 1 + newlines)
-        } else {
-            (input, 1)
-        };
+        let (effective_input, start_line, indent_mode) = Self::preprocess_input(input);
 
         let mut l = Self {
             input: effective_input.chars().collect(),
@@ -48,6 +37,34 @@ impl Lexer {
         };
         l.read_char();
         l
+    }
+
+    fn preprocess_input(input: &str) -> (&str, usize, bool) {
+        let mut effective_input = input;
+        let mut start_line = 1;
+
+        // Allow executable Oxigen scripts to start with a Unix shebang line.
+        if effective_input.starts_with("#!") {
+            if let Some(newline) = effective_input.find('\n') {
+                effective_input = &effective_input[newline + 1..];
+                start_line += 1;
+            } else {
+                effective_input = "";
+            }
+        }
+
+        let indent_directive = "#[indent]";
+        let indent_mode = effective_input.trim_start().starts_with(indent_directive);
+
+        if indent_mode {
+            let start = effective_input.find(indent_directive).unwrap() + indent_directive.len();
+            let skipped = &effective_input[..start];
+            let newlines = skipped.chars().filter(|&c| c == '\n').count();
+            effective_input = &effective_input[start..];
+            start_line += newlines;
+        }
+
+        (effective_input, start_line, indent_mode)
     }
 
     /// Returns the current span (line, column) for the character being processed.

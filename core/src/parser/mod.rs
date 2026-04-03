@@ -1262,7 +1262,7 @@ impl Parser {
             let mut elements = vec![first];
             while self.peek_token.token_type == TokenType::Comma {
                 self.next_token(); // consume ','
-                                   // Trailing comma: (a,)
+                // Trailing comma: (a,)
                 if self.peek_token.token_type == TokenType::RParen {
                     break;
                 }

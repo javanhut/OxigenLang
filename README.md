@@ -59,6 +59,7 @@ Run directly from the source tree without installing:
 ```bash
 cargo build --release -p oxigen
 cargo run -p oxigen -- path/to/script.oxi
+cargo run -p oxigen -- path/to/script.oxi Alice --flag=value
 cargo run -p oxigen --              # starts the REPL
 cargo run -p oxigen -- --version    # print version
 cargo run -p oxigen -- fmt file.oxi # format a file
@@ -145,6 +146,42 @@ main {
 ```
 
 Use `main { ... }` for script-only execution. Definitions outside `main` remain importable, while the `main` block is skipped when the file is brought in with `introduce`. Top-level statements still run when a file is executed directly, but `main` is the recommended style for files that may also be imported.
+
+## Script Args And Executable Files
+
+Pass script arguments after the `.oxi` path:
+
+```bash
+oxigen example/script_args.oxi Alice --flag=value
+```
+
+Read them from Oxigen with `os.args()`:
+
+```oxi
+introduce os
+
+main {
+    println(os.args())
+}
+```
+
+To run a script directly, add a real shebang as the first line and make the file executable:
+
+```oxi
+#!/usr/local/bin/oxigen
+introduce os
+
+main {
+    println(os.args())
+}
+```
+
+```bash
+chmod +x script.oxi
+./script.oxi Alice
+```
+
+If Oxigen is on your `PATH`, `#!/usr/bin/env oxigen` also works.
 
 ## Documentation
 

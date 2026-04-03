@@ -89,11 +89,41 @@ The REPL maintains state across lines — variables, functions, structs, and pat
 
 | Command / Flag | Description |
 |----------------|-------------|
-| `oxigen file.oxi` | Execute a script |
+| `oxigen file.oxi [args...]` | Execute a script and forward remaining args |
 | `oxigen` | Start the interactive REPL |
 | `oxigen fmt file.oxi [...]` | Format one or more `.oxi` files in-place |
 | `oxigen check file.oxi` | Parse a file and output diagnostics as JSON |
 | `--version`, `-v` | Print the version and exit |
+
+Scripts can read forwarded arguments through `os.args()`:
+
+```oxi
+introduce os
+
+main {
+    println(os.args())
+}
+```
+
+To make a script executable directly on Unix-like systems, add a shebang as the first line:
+
+```oxi
+#!/usr/local/bin/oxigen
+introduce os
+
+main {
+    println("Hello from", os.args())
+}
+```
+
+Then mark it executable and run it:
+
+```bash
+chmod +x hello.oxi
+./hello.oxi Alice
+```
+
+If Oxigen is on your `PATH`, `#!/usr/bin/env oxigen` is also valid.
 
 ## Exploring Indentation Mode
 

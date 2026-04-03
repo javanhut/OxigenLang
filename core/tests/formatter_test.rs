@@ -6,7 +6,11 @@ fn format_source(source: &str) -> String {
     let lexer = Lexer::new(source);
     let mut parser = Parser::new(lexer, source);
     let program = parser.parse_program();
-    assert!(parser.errors().is_empty(), "Parse errors: {:?}", parser.errors());
+    assert!(
+        parser.errors().is_empty(),
+        "Parse errors: {:?}",
+        parser.errors()
+    );
     Formatter::format(&program)
 }
 

@@ -118,6 +118,38 @@ fn test_indent_and_brace_produce_same_structure() {
 }
 
 #[test]
+fn test_shebang_line_is_stripped() {
+    let input = "#!/usr/local/bin/oxigen\nx := 5";
+    let tokens = collect_tokens(input);
+
+    assert_eq!(tokens[0].literal, "x");
+    assert_eq!(tokens[0].span.line, 2);
+    assert!(
+        tokens
+            .iter()
+            .all(|t| t.literal != "#" && t.literal != "!" && t.literal != "/usr/local/bin/oxigen")
+    );
+}
+
+#[test]
+fn test_shebang_then_indent_directive_still_enables_indent_mode() {
+    let input = "#!/usr/local/bin/oxigen\n#[indent]\neach num in x:\n  print(num)\n";
+    let tokens = collect_tokens(input);
+
+    let has_lbrace = tokens.iter().any(|t| t.token_type == TokenType::LBrace);
+    let has_rbrace = tokens.iter().any(|t| t.token_type == TokenType::RBrace);
+
+    assert!(
+        has_lbrace,
+        "Indent mode should still open blocks after a shebang"
+    );
+    assert!(
+        has_rbrace,
+        "Indent mode should still close blocks after a shebang"
+    );
+}
+
+#[test]
 fn test_span_tracking() {
     let input = "x := 5\ny := 10";
     let tokens = collect_tokens(input);
