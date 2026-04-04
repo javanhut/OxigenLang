@@ -95,7 +95,21 @@ fn test_format_idempotent() {
 #[test]
 fn test_format_unless_statement() {
     let input = "unless valid { 42 }";
-    let expected = "unless valid {\n    42\n}\n";
+    let expected = "42 unless valid\n";
+    assert_eq!(format_source(input), expected);
+}
+
+#[test]
+fn test_format_postfix_unless_guard() {
+    let input = "println(\"ok\") unless debug == True";
+    let expected = "println(\"ok\") unless debug == True\n";
+    assert_eq!(format_source(input), expected);
+}
+
+#[test]
+fn test_format_unless_block_multi_statement() {
+    let input = "unless valid { x = 1\ny = 2 }";
+    let expected = "unless valid {\n    x = 1\n    y = 2\n}\n";
     assert_eq!(format_source(input), expected);
 }
 

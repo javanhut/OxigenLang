@@ -148,15 +148,21 @@ impl Formatter {
                         return;
                     }
                 } else if let Some(inner) = strip_negation(condition) {
-                    self.push("unless ");
-                    self.format_expression(inner);
-                    self.push(" {");
-                    self.newline();
-                    self.indent += 1;
-                    self.format_block(consequence);
-                    self.indent -= 1;
-                    self.push_indent();
-                    self.push("}");
+                    if consequence.len() == 1 {
+                        self.format_statement(&consequence[0]);
+                        self.push(" unless ");
+                        self.format_expression(inner);
+                    } else {
+                        self.push("unless ");
+                        self.format_expression(inner);
+                        self.push(" {");
+                        self.newline();
+                        self.indent += 1;
+                        self.format_block(consequence);
+                        self.indent -= 1;
+                        self.push_indent();
+                        self.push("}");
+                    }
                     return;
                 } else if consequence.len() == 1 {
                     self.format_statement(&consequence[0]);
