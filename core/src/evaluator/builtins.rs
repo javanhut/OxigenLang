@@ -2276,7 +2276,10 @@ fn builtin__toml_stringify(args: Vec<Rc<Object>>) -> Rc<Object> {
         )));
     }
     match object_to_toml_value(&args[0]) {
-        Ok(value) => Rc::new(Object::String(value.to_string())),
+        Ok(value) => match toml::to_string_pretty(&value) {
+            Ok(s) => Rc::new(Object::String(s)),
+            Err(e) => Rc::new(Object::Error(format!("toml stringify error: {}", e))),
+        },
         Err(e) => Rc::new(Object::Error(format!("toml stringify error: {}", e))),
     }
 }

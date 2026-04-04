@@ -233,43 +233,20 @@ println(path.stem("data.csv"))       // data
 introduce json
 ```
 
-### Parsing and Serialization
-
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `parse` | `parse(s)` | Parse JSON string into Oxigen values |
 | `stringify` | `stringify(val)` | Serialize Oxigen value to JSON string |
 | `read` | `read(path)` | Read and parse a JSON file |
 | `write` | `write(path, val)` | Write an Oxigen value to a JSON file |
-
-### Querying
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `get` | `get(obj, key)` | Get value by key, returns None if missing |
 | `get_in` | `get_in(obj, path)` | Get nested value by dotted path (e.g. `"user.address.city"`) |
-| `has_key` | `has_key(obj, key)` | Check if key exists |
-| `has_key_in` | `has_key_in(obj, path)` | Check if dotted key path exists |
-| `object_keys` | `object_keys(obj)` | All top-level keys |
-| `object_values` | `object_values(obj)` | All top-level values |
-
-### Updating
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `set` | `set(obj, key, val)` | Set key-value pair, returns updated map |
 | `set_in` | `set_in(obj, path, val)` | Set nested value by dotted path, creates intermediate objects |
-| `del` | `del(obj, key)` | Remove key, returns updated map |
 | `del_in` | `del_in(obj, path)` | Remove nested key by dotted path |
-
-### Merging and Construction
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
+| `has_key_in` | `has_key_in(obj, path)` | Check if dotted key path exists |
 | `merge` | `merge(a, b)` | Shallow merge, keys in `b` overwrite `a` |
 | `deep_merge` | `deep_merge(a, b)` | Recursive merge for nested objects |
-| `object` | `object()` | Create empty JSON object |
-| `from_pairs` | `from_pairs(ks, vs)` | Create object from parallel key/value arrays |
+
+For basic map operations use the global builtins directly: `has(m, key)`, `keys(m)`, `values(m)`, `insert(m, key, val)`, `remove(m, key)`.
 
 **Type mapping:**
 
@@ -297,6 +274,11 @@ println(json.stringify(m))  // {"name":"Oxigen","version":1}
 json.write("config.json", {"debug": True, "level": 3})
 config := json.read("config.json")
 
+// Basic map operations use builtins directly
+println(has(config, "debug"))   // True
+println(keys(config))           // [debug, level]
+config = insert(config, "name", "MyApp")
+
 // Nested access and updates
 user := {"name": "Alice", "address": {"city": "NYC", "zip": "10001"}}
 println(json.get_in(user, "address.city"))  // NYC
@@ -317,43 +299,20 @@ config := json.merge(defaults, overrides)
 introduce toml
 ```
 
-### Parsing and Serialization
-
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `parse` | `parse(s)` | Parse TOML string into Oxigen values |
-| `stringify` | `stringify(val)` | Serialize a map to TOML string |
+| `stringify` | `stringify(val)` | Serialize a map to a proper TOML document |
 | `read` | `read(path)` | Read and parse a TOML file |
 | `write` | `write(path, val)` | Write a map to a TOML file |
-
-### Querying
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `get` | `get(tbl, key)` | Get value by key, returns None if missing |
 | `get_in` | `get_in(tbl, path)` | Get nested value by dotted path (e.g. `"server.port"`) |
-| `has_key` | `has_key(tbl, key)` | Check if key exists |
-| `has_key_in` | `has_key_in(tbl, path)` | Check if dotted key path exists |
-| `table_keys` | `table_keys(tbl)` | All top-level keys |
-| `table_values` | `table_values(tbl)` | All top-level values |
-
-### Updating
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `set` | `set(tbl, key, val)` | Set key-value pair, returns updated map |
 | `set_in` | `set_in(tbl, path, val)` | Set nested value by dotted path, creates intermediate tables |
-| `del` | `del(tbl, key)` | Remove key, returns updated map |
 | `del_in` | `del_in(tbl, path)` | Remove nested key by dotted path |
-
-### Merging and Construction
-
-| Function | Signature | Description |
-|----------|-----------|-------------|
+| `has_key_in` | `has_key_in(tbl, path)` | Check if dotted key path exists |
 | `merge` | `merge(a, b)` | Shallow merge, keys in `b` overwrite `a` |
 | `deep_merge` | `deep_merge(a, b)` | Recursive merge for nested tables |
-| `table` | `table()` | Create empty TOML table |
-| `from_pairs` | `from_pairs(ks, vs)` | Create table from parallel key/value arrays |
+
+For basic map operations use the global builtins directly: `has(m, key)`, `keys(m)`, `values(m)`, `insert(m, key, val)`, `remove(m, key)`.
 
 **Type mapping:**
 
@@ -367,13 +326,19 @@ introduce toml
 | array | `Array` |
 | table | `Map` |
 
+`stringify` produces proper TOML document format with `[section]` headers, `[[array_of_tables]]` syntax, and blank lines between sections:
+
 ```oxi
 introduce toml
 
-// Parse and stringify
-config := toml.parse("title = \"Oxigen\"\n[owner]\nname = \"Javan\"")
-println(config["owner"]["name"])  // Javan
+// stringify produces proper TOML documents
+config := {"title": "MyApp", "server": {"host": "localhost", "port": 8080}}
 println(toml.stringify(config))
+// title = "MyApp"
+//
+// [server]
+// host = "localhost"
+// port = 8080
 
 // File I/O
 settings := toml.read("Cargo.toml")
@@ -381,18 +346,17 @@ println(settings["package"]["name"])  // oxigen
 
 toml.write("output.toml", {"title": "My App", "version": 1})
 
-// Nested access and updates
-cfg := toml.read("config.toml")
-println(toml.get_in(cfg, "server.port"))
+// Basic map operations use builtins directly
+println(has(config, "title"))   // True
+println(keys(config))           // [title, server]
+config = insert(config, "debug", True)
+config = remove(config, "debug")
 
-cfg = toml.set_in(cfg, "server.host", "0.0.0.0")
-cfg = toml.del_in(cfg, "database.password")
-toml.write("config.toml", cfg)
-
-// Merging
-defaults := {"port": 8080, "debug": False}
-overrides := {"debug": True}
-final := toml.merge(defaults, overrides)
+// Dotted-path access for nested tables
+println(toml.get_in(config, "server.host"))  // localhost
+config = toml.set_in(config, "server.ssl", True)
+println(toml.has_key_in(config, "server.ssl"))  // True
+config = toml.del_in(config, "server.ssl")
 
 // Deep merge preserves nested structure
 a := {"server": {"host": "localhost", "port": 8080}}

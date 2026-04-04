@@ -5,7 +5,8 @@ introduce strings
 // Tables become maps, arrays stay arrays, and date/time values become strings.
 fun parse(s <str>) { __toml_parse(s) }
 
-// Serialize an Oxigen map to a TOML string.
+// Serialize an Oxigen map to a TOML document string.
+// Produces proper TOML with [section] headers and [[array_of_tables]] syntax.
 fun stringify(val <map>) { __toml_stringify(val) }
 
 // Read and parse a TOML file from disk.
@@ -13,11 +14,6 @@ fun read(path <str>) { parse(io.read_file(path)) }
 
 // Write an Oxigen map to a TOML file on disk.
 fun write(path <str>, val <map>) { io.write_file(path, stringify(val)) }
-
-// Get a value by key from a TOML map. Returns None if missing.
-fun get(tbl <map>, key <str>) {
-    option { has(tbl, key) -> tbl[key], None }
-}
 
 // Get a nested value using a dotted key path (e.g. "server.port").
 // Returns None if any segment is missing.
@@ -34,11 +30,6 @@ fun get_in(tbl <map>, path <str>) {
     current
 }
 
-// Set a key-value pair in a TOML map, returning the updated map.
-fun set(tbl <map>, key <str>, val <generic>) {
-    insert(tbl, key, val)
-}
-
 // Set a nested value using a dotted key path (e.g. "server.port").
 // Creates intermediate tables as needed. Returns the updated root map.
 fun set_in(tbl <map>, path <str>, val <generic>) {
@@ -48,11 +39,6 @@ fun set_in(tbl <map>, path <str>, val <generic>) {
     rest := strings.join(parts[1:], ".")
     child := option { has(tbl, first) and type(tbl[first]) == "MAP" -> tbl[first], {} }
     insert(tbl, first, set_in(child, rest, val))
-}
-
-// Remove a key from a TOML map, returning the updated map.
-fun del(tbl <map>, key <str>) {
-    remove(tbl, key)
 }
 
 // Remove a nested key using a dotted key path.
@@ -67,12 +53,7 @@ fun del_in(tbl <map>, path <str>) {
     insert(tbl, first, del_in(child, rest))
 }
 
-// Check whether a key exists in a TOML map.
-fun has_key(tbl <map>, key <str>) {
-    has(tbl, key)
-}
-
-// Check whether a dotted key path exists.
+// Check whether a dotted key path exists (e.g. "database.credentials.password").
 fun has_key_in(tbl <map>, path <str>) {
     parts := strings.split(path, ".")
     current := tbl
@@ -86,17 +67,7 @@ fun has_key_in(tbl <map>, path <str>) {
     True
 }
 
-// Return all top-level keys of a TOML map.
-fun table_keys(tbl <map>) {
-    keys(tbl)
-}
-
-// Return all top-level values of a TOML map.
-fun table_values(tbl <map>) {
-    values(tbl)
-}
-
-// Merge two TOML maps. Keys in `b` overwrite keys in `a`.
+// Merge two maps. Keys in `b` overwrite keys in `a`.
 fun merge(a <map>, b <map>) {
     result := a
     b_keys := keys(b)
@@ -109,7 +80,7 @@ fun merge(a <map>, b <map>) {
     result
 }
 
-// Deep merge two TOML maps. Nested tables are merged recursively;
+// Deep merge two maps. Nested tables are merged recursively;
 // non-table values in `b` overwrite those in `a`.
 fun deep_merge(a <map>, b <map>) {
     result := a
@@ -125,22 +96,6 @@ fun deep_merge(a <map>, b <map>) {
             },
             { result = insert(result, k, b_val) }
         }
-        i++
-    }
-    result
-}
-
-// Create an empty TOML table (map).
-fun table() {
-    {}
-}
-
-// Create a TOML table from parallel arrays of keys and values.
-fun from_pairs(ks <array>, vs <array>) {
-    result := {}
-    i <int>
-    repeat when i < len(ks) {
-        result = insert(result, ks[i], vs[i])
         i++
     }
     result

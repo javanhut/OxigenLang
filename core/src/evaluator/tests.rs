@@ -3138,3 +3138,41 @@ fn test_toml_parse_error() {
         _ => panic!("Expected TOML parse error, got {:?}", result),
     }
 }
+
+#[test]
+fn test_toml_stringify_document_format() {
+    let input = r#"
+            introduce toml
+            data := {"title": "MyApp", "server": {"host": "localhost", "port": 8080}}
+            toml.stringify(data)
+        "#;
+    let result = test_eval(input);
+    match result.as_ref() {
+        Object::String(s) => {
+            assert!(
+                s.contains("[server]"),
+                "Expected [server] section header, got: {}",
+                s
+            );
+            assert!(
+                s.contains("host = \"localhost\""),
+                "Expected host key, got: {}",
+                s
+            );
+            assert!(s.contains("port = 8080"), "Expected port key, got: {}", s);
+        }
+        _ => panic!("Expected STRING, got {:?}", result),
+    }
+}
+
+#[test]
+fn test_toml_stringify_roundtrip() {
+    let input = r#"
+            introduce toml
+            original := {"title": "Test", "server": {"host": "localhost", "port": 8080}}
+            reparsed := toml.parse(toml.stringify(original))
+            reparsed["server"]["host"]
+        "#;
+    let result = test_eval(input);
+    test_string(&result, "localhost");
+}

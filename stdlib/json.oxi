@@ -14,11 +14,6 @@ fun read(path <str>) { parse(io.read_file(path)) }
 // Write an Oxigen value to a JSON file on disk.
 fun write(path <str>, val <generic>) { io.write_file(path, stringify(val)) }
 
-// Get a value by key from a JSON object (map). Returns None if missing.
-fun get(obj <map>, key <str>) {
-    option { has(obj, key) -> obj[key], None }
-}
-
 // Get a nested value using a dotted key path (e.g. "user.address.city").
 // Returns None if any segment is missing.
 fun get_in(obj <map>, path <str>) {
@@ -34,11 +29,6 @@ fun get_in(obj <map>, path <str>) {
     current
 }
 
-// Set a key-value pair in a JSON object, returning the updated map.
-fun set(obj <map>, key <str>, val <generic>) {
-    insert(obj, key, val)
-}
-
 // Set a nested value using a dotted key path (e.g. "user.address.city").
 // Creates intermediate objects as needed. Returns the updated root map.
 fun set_in(obj <map>, path <str>, val <generic>) {
@@ -48,11 +38,6 @@ fun set_in(obj <map>, path <str>, val <generic>) {
     rest := strings.join(parts[1:], ".")
     child := option { has(obj, first) and type(obj[first]) == "MAP" -> obj[first], {} }
     insert(obj, first, set_in(child, rest, val))
-}
-
-// Remove a key from a JSON object, returning the updated map.
-fun del(obj <map>, key <str>) {
-    remove(obj, key)
 }
 
 // Remove a nested key using a dotted key path.
@@ -67,12 +52,7 @@ fun del_in(obj <map>, path <str>) {
     insert(obj, first, del_in(child, rest))
 }
 
-// Check whether a key exists in a JSON object.
-fun has_key(obj <map>, key <str>) {
-    has(obj, key)
-}
-
-// Check whether a dotted key path exists.
+// Check whether a dotted key path exists (e.g. "user.address.city").
 fun has_key_in(obj <map>, path <str>) {
     parts := strings.split(path, ".")
     current := obj
@@ -86,17 +66,7 @@ fun has_key_in(obj <map>, path <str>) {
     True
 }
 
-// Return all top-level keys of a JSON object.
-fun object_keys(obj <map>) {
-    keys(obj)
-}
-
-// Return all top-level values of a JSON object.
-fun object_values(obj <map>) {
-    values(obj)
-}
-
-// Merge two JSON objects. Keys in `b` overwrite keys in `a`.
+// Merge two maps. Keys in `b` overwrite keys in `a`.
 fun merge(a <map>, b <map>) {
     result := a
     b_keys := keys(b)
@@ -109,7 +79,7 @@ fun merge(a <map>, b <map>) {
     result
 }
 
-// Deep merge two JSON objects. Nested objects are merged recursively;
+// Deep merge two maps. Nested objects are merged recursively;
 // non-object values in `b` overwrite those in `a`.
 fun deep_merge(a <map>, b <map>) {
     result := a
@@ -125,22 +95,6 @@ fun deep_merge(a <map>, b <map>) {
             },
             { result = insert(result, k, b_val) }
         }
-        i++
-    }
-    result
-}
-
-// Create an empty JSON object (map).
-fun object() {
-    {}
-}
-
-// Create a JSON object from parallel arrays of keys and values.
-fun from_pairs(ks <array>, vs <array>) {
-    result := {}
-    i <int>
-    repeat when i < len(ks) {
-        result = insert(result, ks[i], vs[i])
         i++
     }
     result

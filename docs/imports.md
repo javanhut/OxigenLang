@@ -122,8 +122,8 @@ OxigenLang ships with the following standard library modules:
 | `time`     | Timestamps, sleep, elapsed time measurement          |
 | `random`   | Random number generation                             |
 | `path`     | File path manipulation                               |
-| `json`     | JSON parsing, serialization, and object manipulation  |
-| `toml`     | TOML parsing, serialization, and table manipulation   |
+| `json`     | JSON parsing, serialization, dotted-path access, and merging |
+| `toml`     | TOML parsing, serialization, dotted-path access, and merging |
 | `net`      | HTTP client (GET, POST, PUT, DELETE, etc.)           |
 
 See the [Standard Library Reference](stdlib.md) for full details on each module.
