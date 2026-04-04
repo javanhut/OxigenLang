@@ -286,6 +286,10 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
         "__toml_parse".to_string(),
         Rc::new(Object::Builtin(builtin__toml_parse)),
     );
+    builtins.insert(
+        "__toml_stringify".to_string(),
+        Rc::new(Object::Builtin(builtin__toml_stringify)),
+    );
 
     // HTTP builtins
     builtins.insert(
@@ -2220,6 +2224,60 @@ fn builtin__toml_parse(args: Vec<Rc<Object>>) -> Rc<Object> {
             "__toml_parse: expected STRING, got {}",
             args[0].type_name()
         ))),
+    }
+}
+
+fn object_to_toml_value(obj: &Object) -> Result<TomlValue, String> {
+    match obj {
+        Object::String(s) => Ok(TomlValue::String(s.clone())),
+        Object::Integer(n) => Ok(TomlValue::Integer(*n)),
+        Object::Float(f) => {
+            if f.is_nan() || f.is_infinite() {
+                Err("TOML does not support NaN or Infinity".to_string())
+            } else {
+                Ok(TomlValue::Float(*f))
+            }
+        }
+        Object::Boolean(b) => Ok(TomlValue::Boolean(*b)),
+        Object::Uint(n) => Ok(TomlValue::Integer(*n as i64)),
+        Object::Byte(n) => Ok(TomlValue::Integer(*n as i64)),
+        Object::Char(c) => Ok(TomlValue::String(c.to_string())),
+        Object::Array(arr) => {
+            let items: Result<Vec<TomlValue>, String> =
+                arr.iter().map(|e| object_to_toml_value(e)).collect();
+            Ok(TomlValue::Array(items?))
+        }
+        Object::Tuple(elements) => {
+            let items: Result<Vec<TomlValue>, String> =
+                elements.iter().map(|e| object_to_toml_value(e)).collect();
+            Ok(TomlValue::Array(items?))
+        }
+        Object::Map(entries) => {
+            let mut table = toml::map::Map::new();
+            for (k, v) in entries {
+                let key = match k.as_ref() {
+                    Object::String(s) => s.clone(),
+                    _ => return Err(format!("TOML table keys must be strings, got {}", k.type_name())),
+                };
+                table.insert(key, object_to_toml_value(v)?);
+            }
+            Ok(TomlValue::Table(table))
+        }
+        Object::None => Err("TOML does not support null/None values".to_string()),
+        _ => Err(format!("cannot serialize {} to TOML", obj.type_name())),
+    }
+}
+
+fn builtin__toml_stringify(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!(
+            "__toml_stringify: expected 1 argument, got {}",
+            args.len()
+        )));
+    }
+    match object_to_toml_value(&args[0]) {
+        Ok(value) => Rc::new(Object::String(value.to_string())),
+        Err(e) => Rc::new(Object::Error(format!("toml stringify error: {}", e))),
     }
 }
 

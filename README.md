@@ -30,21 +30,29 @@ cd OxigenLang
 ./scripts/install.sh
 ```
 
-This builds oxigen, installs it to `~/.oxigen/`, and adds it to your PATH. Restart your shell or run:
+This builds oxigen and installs it to `/usr/local/bin` (requires sudo):
 
 ```bash
-export PATH="$HOME/.oxigen/bin:$PATH"
+sudo ./scripts/install.sh
 ```
+
+Or install to a custom prefix:
+
+```bash
+PREFIX=~/.local ./scripts/install.sh
+```
+
+The build artifacts are cleaned up automatically after installation.
 
 ### Uninstall
 
 ```bash
-./scripts/uninstall.sh
+sudo ./scripts/uninstall.sh
 ```
 
-Removes the `~/.oxigen/` directory and cleans the PATH entry from your shell config.
+Removes the oxigen binary and stdlib from `/usr/local/`.
 
-### System-Wide Install
+### Makefile
 
 ```bash
 sudo make install                # installs to /usr/local/

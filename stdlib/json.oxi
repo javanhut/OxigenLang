@@ -1,6 +1,147 @@
-// Parse a JSON string into Oxigen values
-// Objects become maps, arrays stay arrays, null becomes None
+introduce io
+introduce strings
+
+// Parse a JSON string into Oxigen values.
+// Objects become maps, arrays stay arrays, null becomes None.
 fun parse(s <str>) { __json_parse(s) }
 
-// Serialize an Oxigen value to a JSON string
+// Serialize an Oxigen value to a JSON string.
 fun stringify(val <generic>) { __json_stringify(val) }
+
+// Read and parse a JSON file from disk.
+fun read(path <str>) { parse(io.read_file(path)) }
+
+// Write an Oxigen value to a JSON file on disk.
+fun write(path <str>, val <generic>) { io.write_file(path, stringify(val)) }
+
+// Get a value by key from a JSON object (map). Returns None if missing.
+fun get(obj <map>, key <str>) {
+    option { has(obj, key) -> obj[key], None }
+}
+
+// Get a nested value using a dotted key path (e.g. "user.address.city").
+// Returns None if any segment is missing.
+fun get_in(obj <map>, path <str>) {
+    parts := strings.split(path, ".")
+    current := obj
+    i <int>
+    repeat when i < len(parts) {
+        give None when type(current) != "MAP"
+        give None when not has(current, parts[i])
+        current = current[parts[i]]
+        i++
+    }
+    current
+}
+
+// Set a key-value pair in a JSON object, returning the updated map.
+fun set(obj <map>, key <str>, val <generic>) {
+    insert(obj, key, val)
+}
+
+// Set a nested value using a dotted key path (e.g. "user.address.city").
+// Creates intermediate objects as needed. Returns the updated root map.
+fun set_in(obj <map>, path <str>, val <generic>) {
+    parts := strings.split(path, ".")
+    give insert(obj, parts[0], val) when len(parts) == 1
+    first := parts[0]
+    rest := strings.join(parts[1:], ".")
+    child := option { has(obj, first) and type(obj[first]) == "MAP" -> obj[first], {} }
+    insert(obj, first, set_in(child, rest, val))
+}
+
+// Remove a key from a JSON object, returning the updated map.
+fun del(obj <map>, key <str>) {
+    remove(obj, key)
+}
+
+// Remove a nested key using a dotted key path.
+// Returns the updated root map.
+fun del_in(obj <map>, path <str>) {
+    parts := strings.split(path, ".")
+    give remove(obj, parts[0]) when len(parts) == 1
+    first := parts[0]
+    rest := strings.join(parts[1:], ".")
+    child := option { has(obj, first) and type(obj[first]) == "MAP" -> obj[first] }
+    give obj when type(child) != "MAP"
+    insert(obj, first, del_in(child, rest))
+}
+
+// Check whether a key exists in a JSON object.
+fun has_key(obj <map>, key <str>) {
+    has(obj, key)
+}
+
+// Check whether a dotted key path exists.
+fun has_key_in(obj <map>, path <str>) {
+    parts := strings.split(path, ".")
+    current := obj
+    i <int>
+    repeat when i < len(parts) {
+        give False when type(current) != "MAP"
+        give False when not has(current, parts[i])
+        current = current[parts[i]]
+        i++
+    }
+    True
+}
+
+// Return all top-level keys of a JSON object.
+fun object_keys(obj <map>) {
+    keys(obj)
+}
+
+// Return all top-level values of a JSON object.
+fun object_values(obj <map>) {
+    values(obj)
+}
+
+// Merge two JSON objects. Keys in `b` overwrite keys in `a`.
+fun merge(a <map>, b <map>) {
+    result := a
+    b_keys := keys(b)
+    i <int>
+    repeat when i < len(b_keys) {
+        k := b_keys[i]
+        result = insert(result, k, b[k])
+        i++
+    }
+    result
+}
+
+// Deep merge two JSON objects. Nested objects are merged recursively;
+// non-object values in `b` overwrite those in `a`.
+fun deep_merge(a <map>, b <map>) {
+    result := a
+    b_keys := keys(b)
+    i <int>
+    repeat when i < len(b_keys) {
+        k := b_keys[i]
+        b_val := b[k]
+        a_val := option { has(result, k) -> result[k], None }
+        option {
+            type(a_val) == "MAP" and type(b_val) == "MAP" -> {
+                result = insert(result, k, deep_merge(a_val, b_val))
+            },
+            { result = insert(result, k, b_val) }
+        }
+        i++
+    }
+    result
+}
+
+// Create an empty JSON object (map).
+fun object() {
+    {}
+}
+
+// Create a JSON object from parallel arrays of keys and values.
+fun from_pairs(ks <array>, vs <array>) {
+    result := {}
+    i <int>
+    repeat when i < len(ks) {
+        result = insert(result, ks[i], vs[i])
+        i++
+    }
+    result
+}
