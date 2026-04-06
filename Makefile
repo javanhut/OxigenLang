@@ -10,7 +10,7 @@ build:
 build-lsp:
 	cd lsp-go && go build -o ../target/release/oxigen-lsp .
 
-install:
+install: build
 	@echo "Installing oxigen to $(BINDIR)..."
 	install -d $(BINDIR)
 	install -m 755 target/release/oxigen $(BINDIR)/oxigen
