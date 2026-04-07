@@ -343,7 +343,7 @@ fn builtin_len(args: Vec<Rc<Object>>) -> Rc<Object> {
     }
 }
 
-fn builtin_push(args: Vec<Rc<Object>>) -> Rc<Object> {
+fn builtin_push(mut args: Vec<Rc<Object>>) -> Rc<Object> {
     if args.len() != 2 {
         return Rc::new(Object::Error(format!(
             "wrong number of arguments. got={}, want=2",
@@ -351,16 +351,17 @@ fn builtin_push(args: Vec<Rc<Object>>) -> Rc<Object> {
         )));
     }
 
-    match args[0].as_ref() {
+    let new_elem = Rc::clone(&args[1]);
+
+    // Try to reuse the array in-place if we hold the only reference
+    match Rc::make_mut(&mut args[0]) {
         Object::Array(arr) => {
-            let mut new_arr = arr.clone();
-            new_arr.push(Rc::clone(&args[1]));
-            Rc::new(Object::Array(new_arr))
+            arr.push(new_elem);
+            Rc::clone(&args[0])
         }
-        obj => Rc::new(Object::Error(format!(
-            "argument to `push` must be ARRAY, got {}",
-            obj.type_name()
-        ))),
+        _ => Rc::new(Object::Error(
+            "argument to `push` must be ARRAY".to_string(),
+        )),
     }
 }
 
@@ -574,7 +575,7 @@ fn builtin_range(args: Vec<Rc<Object>>) -> Rc<Object> {
     match args[0].as_ref() {
         Object::Integer(n) => {
             let n = *n;
-            let mut num_range: Vec<Rc<Object>> = Vec::new();
+            let mut num_range: Vec<Rc<Object>> = Vec::with_capacity(n as usize);
             for i in 0..n {
                 num_range.push(Rc::new(Object::Integer(i)));
             }

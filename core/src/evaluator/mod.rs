@@ -1081,9 +1081,13 @@ impl Evaluator {
                                     None,
                                 );
                             }
-                            let mut new_elements = elements.clone();
-                            new_elements[index] = val.clone();
-                            Rc::new(Object::Array(new_elements))
+                            // Mutate in place via Rc::make_mut to avoid full clone
+                            // when this is the only reference
+                            let mut obj_mut = obj;
+                            if let Object::Array(elems) = Rc::make_mut(&mut obj_mut) {
+                                elems[index] = val.clone();
+                            }
+                            obj_mut
                         }
                         _ => {
                             return self.runtime_error(
@@ -2511,10 +2515,19 @@ impl Evaluator {
             }
             (Object::String(s), Object::Integer(idx)) => {
                 let idx = *idx as usize;
-                if idx >= s.len() {
-                    Rc::new(Object::None)
+                if s.is_ascii() {
+                    // Fast path: O(1) byte indexing for ASCII strings
+                    if idx >= s.len() {
+                        Rc::new(Object::None)
+                    } else {
+                        Rc::new(Object::String(String::from(s.as_bytes()[idx] as char)))
+                    }
                 } else {
-                    Rc::new(Object::String(s.chars().nth(idx).unwrap().to_string()))
+                    // Slow path: O(n) char iteration for UTF-8
+                    match s.chars().nth(idx) {
+                        Some(c) => Rc::new(Object::String(c.to_string())),
+                        None => Rc::new(Object::None),
+                    }
                 }
             }
             (Object::Tuple(elements), Object::Integer(idx)) => {
@@ -2888,13 +2901,14 @@ impl Evaluator {
             }
         };
 
+        // Reuse a single loop environment instead of allocating per iteration
+        let loop_env = Rc::new(RefCell::new(Environment::new_enclosed(Rc::clone(&env))));
         for element in elements {
-            let loop_env = Rc::new(RefCell::new(Environment::new_enclosed(Rc::clone(&env))));
             loop_env
                 .borrow_mut()
                 .set(variable.value.clone(), Rc::clone(&element));
 
-            let result = self.eval_block(body, loop_env);
+            let result = self.eval_block(body, Rc::clone(&loop_env));
 
             match result.as_ref() {
                 Object::Skip => continue,

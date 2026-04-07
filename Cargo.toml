@@ -5,6 +5,11 @@ members = [
     "crates/oxigen-cli",
 ]
 
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
 [profile.test]
 # oxigen-core's test target pulls in a very large in-crate unit test surface.
 # Turning off debuginfo for test builds keeps `cargo test` from ballooning
