@@ -24,7 +24,7 @@ impl Environment {
 
     pub fn new_enclosed(outer: Rc<RefCell<Environment>>) -> Self {
         Environment {
-            store: HashMap::new(),
+            store: HashMap::with_capacity(4),
             type_constraints: HashMap::new(),
             immutable_vars: HashSet::new(),
             outer: Some(outer),

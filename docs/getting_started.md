@@ -89,7 +89,8 @@ The REPL maintains state across lines — variables, functions, structs, and pat
 
 | Command / Flag | Description |
 |----------------|-------------|
-| `oxigen file.oxi [args...]` | Execute a script and forward remaining args |
+| `oxigen file.oxi [args...]` | Execute a script (uses the bytecode VM by default) |
+| `oxigen file.oxi --tree-walk` | Execute using the tree-walking interpreter (fallback) |
 | `oxigen` | Start the interactive REPL |
 | `oxigen fmt file.oxi [...]` | Format one or more `.oxi` files in-place |
 | `oxigen check file.oxi` | Parse a file and output diagnostics as JSON |

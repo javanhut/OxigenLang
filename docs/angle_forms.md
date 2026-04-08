@@ -796,9 +796,9 @@ Here:
 
 ## 10. Logging with `<log>`
 
-`<log>` is a standalone logging utility that writes timestamped messages to **stderr**. It is a prefix-position angle form — you call it on its own, not after an expression.
+`<log>` is a standalone logging utility that writes timestamped messages to **stdout**. It is a prefix-position angle form — you call it on its own, not after an expression.
 
-Think of `<log>` as a simple, structured way to record what your program is doing. Because it writes to stderr, your program's actual output on stdout stays clean.
+Think of `<log>` as a simple, structured way to record what your program is doing.
 
 ### Basic Form
 
@@ -927,7 +927,7 @@ x := <log>("hello")
 
 | Property | Details |
 |---|---|
-| Output destination | **stderr** (not stdout) |
+| Output destination | **stdout** |
 | Timestamp format | `YYYY-MM-DD HH:MM:SS` |
 | Tag formatting | Uppercased in output |
 | Return value | `None` |
