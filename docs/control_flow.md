@@ -322,7 +322,7 @@ result := fail "boom" guard err -> err.msg
 
 ## Standalone Logging with `log`
 
-`<log>` is a standalone logging utility that writes timestamped, tagged messages to stderr.
+`<log>` is a standalone logging utility that writes timestamped, tagged messages to stdout.
 
 ```oxi
 <log>("server started")

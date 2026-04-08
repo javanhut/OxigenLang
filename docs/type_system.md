@@ -245,6 +245,19 @@ d <int>
 is_type_mut(d)
 ```
 
+## The `<generic>` Type
+
+`<generic>` accepts any type. Because it implies the variable can hold values of any type, it is incompatible with strict immutable assignment (`=`):
+
+```oxi
+x <generic> := 42      // ok — value mutable, accepts any type
+x = "hello"            // ok — reassignment allowed
+
+y <generic> = 42       // compile error — <generic> cannot be used with '='
+```
+
+Use `:=` when you need a variable that can hold any type.
+
 ## Summary Table
 
 | Declaration     | Value Mutable | Type Locked | `=` allowed | `++`/`--` allowed |
