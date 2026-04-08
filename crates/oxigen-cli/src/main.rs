@@ -222,9 +222,13 @@ fn fmt_files(paths: &[String]) {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // Check for --vm flag anywhere in args
-    let use_vm = args.iter().any(|a| a == "--vm");
-    let filtered_args: Vec<String> = args.iter().filter(|a| a.as_str() != "--vm").cloned().collect();
+    // VM is the default. --tree-walk falls back to the tree-walking interpreter.
+    let use_tree_walk = args.iter().any(|a| a == "--tree-walk");
+    let filtered_args: Vec<String> = args
+        .iter()
+        .filter(|a| a.as_str() != "--tree-walk" && a.as_str() != "--vm")
+        .cloned()
+        .collect();
 
     match filtered_args.get(1).map(|s| s.as_str()) {
         Some("--version") | Some("-v") => {
@@ -240,10 +244,10 @@ fn main() {
         }
         Some("fmt") => fmt_files(&filtered_args[2..]),
         Some(path) if path.ends_with(".oxi") => {
-            if use_vm {
-                run_file_vm(path, &filtered_args[2..]);
-            } else {
+            if use_tree_walk {
                 run_file(path, &filtered_args[2..]);
+            } else {
+                run_file_vm(path, &filtered_args[2..]);
             }
         }
         _ => repl::run_repl(),
