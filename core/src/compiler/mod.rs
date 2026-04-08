@@ -83,6 +83,9 @@ pub struct Compiler {
     /// When true, the next Let/TypedLet/TypedDeclare should Dup the value
     /// before defining the variable so it's preserved for implicit return.
     dup_next_define: bool,
+    /// When true, Choose/If won't pop their result value (used when they're
+    /// the last statement of a block that needs to produce a value).
+    suppress_statement_pop: bool,
 }
 
 impl Compiler {
@@ -91,6 +94,7 @@ impl Compiler {
             frames: Vec::new(),
             errors: Vec::new(),
             dup_next_define: false,
+            suppress_statement_pop: false,
         };
         // Push the top-level script frame.
         compiler.frames.push(CompilerFrame::new(None, 0));
@@ -836,11 +840,13 @@ impl Compiler {
             Statement::Choose {
                 subject, arms, ..
             } => {
-                // Store subject in a temporary local so we can reference it multiple times
+                // Store subject as a temporary global so pattern functions can access it
+                // without affecting the local stack layout
                 self.compile_expression(subject);
-                self.begin_scope();
-                self.add_local("__choose_subject__", false, None);
-                let subject_slot = self.resolve_local("__choose_subject__").unwrap();
+                let temp_name = "__choose_tmp__";
+                let temp_const =
+                    self.make_constant(Value::String(temp_name.into()), line);
+                self.emit_op_u16(OpCode::DefineGlobal, temp_const, line);
 
                 let mut end_jumps = Vec::new();
                 let mut has_else = false;
@@ -874,14 +880,16 @@ impl Compiler {
                         line,
                     );
                     self.emit_op_u16(OpCode::GetGlobal, pg_const, line);
-                    self.emit_op_u16(OpCode::GetLocal, subject_slot, line);
+                    let subj_const =
+                        self.make_constant(Value::String(temp_name.into()), line);
+                    self.emit_op_u16(OpCode::GetGlobal, subj_const, line);
                     self.emit_op_u8(OpCode::Call, 1, line);
 
                     // Check result
                     let skip = self.emit_jump(OpCode::JumpIfFalse, line);
                     self.emit_op(OpCode::Pop, line); // pop True
 
-                    // Compile arm body
+                    // Compile arm body — result goes on stack
                     self.compile_expression(&arm.body);
                     let end = self.emit_jump(OpCode::Jump, line);
                     end_jumps.push(end);
@@ -898,9 +906,10 @@ impl Compiler {
                     self.patch_jump(j);
                 }
 
-                // Choose is a statement — discard the result value
-                self.emit_op(OpCode::Pop, line);
-                self.end_scope(line);
+                // Choose is a statement — discard the result value (unless suppressed)
+                if !self.suppress_statement_pop {
+                    self.emit_op(OpCode::Pop, line);
+                }
             }
 
             Statement::Introduce { path, selective, .. } => {
@@ -1399,6 +1408,34 @@ impl Compiler {
 
     /// Compile a block of statements as an expression — the last Expr statement's
     /// value is kept on the stack (not popped). Used for option arms, function bodies, etc.
+    /// Compile the last statement of a block keeping its value on the stack.
+    /// For Expr, keeps the expression value. For Choose/If, suppresses the
+    /// trailing Pop so the result is preserved.
+    fn compile_last_statement_as_value(&mut self, stmt: &Statement, line: u32) {
+        match stmt {
+            Statement::Expr(expr) => {
+                self.compile_expression(expr);
+            }
+            Statement::Choose { .. } => {
+                // Choose produces a value but normally pops it.
+                self.suppress_statement_pop = true;
+                self.compile_statement(stmt);
+                self.suppress_statement_pop = false;
+            }
+            Statement::If { alternative: Some(_), .. } => {
+                // If/else with both branches produces a value.
+                // One-armed if (guard) does not.
+                self.suppress_statement_pop = true;
+                self.compile_statement(stmt);
+                self.suppress_statement_pop = false;
+            }
+            _ => {
+                self.compile_statement(stmt);
+                self.emit_op(OpCode::None, line);
+            }
+        }
+    }
+
     fn compile_block_as_expression(&mut self, stmts: &[Statement], line: u32) {
         if stmts.is_empty() {
             self.emit_op(OpCode::None, line);
@@ -1407,13 +1444,7 @@ impl Compiler {
         for (i, stmt) in stmts.iter().enumerate() {
             let is_last = i == stmts.len() - 1;
             if is_last {
-                if let Statement::Expr(expr) = stmt {
-                    // Last expression: keep value on stack
-                    self.compile_expression(expr);
-                } else {
-                    self.compile_statement(stmt);
-                    self.emit_op(OpCode::None, line);
-                }
+                self.compile_last_statement_as_value(stmt, line);
             } else {
                 self.compile_statement(stmt);
             }
@@ -1646,7 +1677,7 @@ impl Compiler {
             }
         }
 
-        // Compile body — last expression is implicit return
+        // Compile body — last expression/statement is implicit return
         if body.is_empty() {
             self.emit_op(OpCode::None, line);
             self.emit_op(OpCode::Return, line);
@@ -1654,16 +1685,8 @@ impl Compiler {
             for (i, stmt) in body.iter().enumerate() {
                 let is_last = i == body.len() - 1;
                 if is_last {
-                    if let Statement::Expr(expr) = stmt {
-                        // Last expression: compile without Pop, use as return value
-                        self.compile_expression(expr);
-                        self.emit_op(OpCode::Return, line);
-                    } else {
-                        self.compile_statement(stmt);
-                        // After the last non-expr statement, return None
-                        self.emit_op(OpCode::None, line);
-                        self.emit_op(OpCode::Return, line);
-                    }
+                    self.compile_last_statement_as_value(stmt, line);
+                    self.emit_op(OpCode::Return, line);
                 } else {
                     self.compile_statement(stmt);
                 }

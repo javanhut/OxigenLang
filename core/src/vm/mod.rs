@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-const STACK_MAX: usize = 16384;
-const FRAMES_MAX: usize = 256;
+const STACK_MAX: usize = 262144; // 256K stack slots
+const FRAMES_MAX: usize = 16384; // 16K call frames — supports deep recursion
 
 /// A call frame: one per active function invocation.
 #[derive(Debug)]
@@ -138,6 +138,9 @@ impl VM {
     // ── Stack Operations ───────────────────────────────────────────────
 
     fn push(&mut self, value: Value) {
+        if self.stack.len() >= STACK_MAX {
+            panic!("stack overflow: exceeded {} slots", STACK_MAX);
+        }
         self.stack.push(value);
     }
 
@@ -1005,7 +1008,10 @@ impl VM {
                     let val = match &iterable {
                         Value::Array(a) => a.borrow().get(idx).cloned().unwrap_or(Value::None),
                         Value::String(s) => {
-                            s.chars().nth(idx).map(Value::Char).unwrap_or(Value::None)
+                            s.chars()
+                                .nth(idx)
+                                .map(|c| Value::String(c.to_string().into()))
+                                .unwrap_or(Value::None)
                         }
                         Value::Tuple(t) => t.get(idx).cloned().unwrap_or(Value::None),
                         Value::Set(s) => s.borrow().get(idx).cloned().unwrap_or(Value::None),
@@ -1125,6 +1131,24 @@ impl VM {
             (Value::Float(l), Value::Byte(r)) => Ok(Value::Float(l + *r as f64)),
             (Value::Uint(l), Value::Float(r)) => Ok(Value::Float(*l as f64 + r)),
             (Value::Float(l), Value::Uint(r)) => Ok(Value::Float(l + *r as f64)),
+            (Value::String(l), Value::Char(r)) => {
+                let mut s = String::with_capacity(l.len() + r.len_utf8());
+                s.push_str(l);
+                s.push(*r);
+                Ok(Value::String(s.into()))
+            }
+            (Value::Char(l), Value::String(r)) => {
+                let mut s = String::with_capacity(l.len_utf8() + r.len());
+                s.push(*l);
+                s.push_str(r);
+                Ok(Value::String(s.into()))
+            }
+            (Value::Char(l), Value::Char(r)) => {
+                let mut s = String::with_capacity(l.len_utf8() + r.len_utf8());
+                s.push(*l);
+                s.push(*r);
+                Ok(Value::String(s.into()))
+            }
             (Value::Tuple(l), Value::Tuple(r)) => {
                 let mut new = (**l).clone();
                 new.extend((**r).clone());
@@ -1572,7 +1596,10 @@ impl VM {
                 } else {
                     *i as usize
                 };
-                Ok(s.chars().nth(idx).map(Value::Char).unwrap_or(Value::None))
+                Ok(s.chars()
+                    .nth(idx)
+                    .map(|c| Value::String(c.to_string().into()))
+                    .unwrap_or(Value::None))
             }
             (Value::Tuple(t), Value::Integer(i)) => {
                 let idx = if *i < 0 {
