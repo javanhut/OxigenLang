@@ -684,6 +684,17 @@ impl Evaluator {
                 value,
                 walrus,
             } => {
+                // <generic> with = is not allowed — generic implies type mutability
+                if !walrus && matches!(type_ann, TypeAnnotation::Generic) {
+                    return self.runtime_error(
+                        name.token.span,
+                        &format!(
+                            "<generic> cannot be used with '=' (immutable). use ':=' for '{}'",
+                            name.value
+                        ),
+                        None,
+                    );
+                }
                 let val = self.eval_expression(value, Rc::clone(&env));
                 if val.is_error() {
                     return val;
@@ -1965,7 +1976,7 @@ impl Evaluator {
                     (true, None) => format!("{}: <empty log>", timestamp),
                 };
 
-                eprintln!("{}", output);
+                println!("{}", output);
                 Rc::new(Object::None)
             }
             Expression::Unless {

@@ -6,12 +6,14 @@ use std::rc::Rc;
 
 mod repl;
 
+use oxigen_core::compiler::Compiler;
 use oxigen_core::evaluator::Evaluator;
 use oxigen_core::formatter::Formatter;
 use oxigen_core::lexer::Lexer;
 use oxigen_core::object;
 use oxigen_core::object::environment::Environment;
 use oxigen_core::parser::Parser;
+use oxigen_core::vm::VM;
 
 use serde_json::json;
 
@@ -60,6 +62,56 @@ fn restore_header(source: &str, body: String) -> String {
         header
     } else {
         format!("{header}{body}")
+    }
+}
+
+fn run_file_vm(file_path: &str, script_args: &[String]) {
+    let contents = read_source(file_path);
+
+    let lexer = Lexer::new(&contents);
+    let mut parser = Parser::new(lexer, &contents);
+    let program = parser.parse_program();
+
+    let errors = parser.errors();
+    if !errors.is_empty() {
+        eprintln!("{}", parser.format_errors());
+        std::process::exit(1);
+    }
+
+    let compiler = Compiler::new();
+    let function = match compiler.compile(&program) {
+        Ok(f) => f,
+        Err(errors) => {
+            for err in &errors {
+                eprintln!("{}", err);
+            }
+            std::process::exit(1);
+        }
+    };
+
+    let file_path_buf = PathBuf::from(file_path)
+        .canonicalize()
+        .expect("Could not resolve file path");
+    let mut vm = VM::new();
+    vm.set_source(&contents);
+    vm.set_file(file_path_buf);
+    vm.set_script_args(script_args);
+
+    match vm.run(function) {
+        Ok(result) => {
+            match &result {
+                oxigen_core::vm::value::Value::None => {}
+                oxigen_core::vm::value::Value::Error(msg) => {
+                    eprintln!("Error: {}", msg);
+                    std::process::exit(1);
+                }
+                _ => println!("{}", result),
+            }
+        }
+        Err(err) => {
+            eprintln!("{}", err);
+            std::process::exit(1);
+        }
     }
 }
 
@@ -170,20 +222,30 @@ fn fmt_files(paths: &[String]) {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    match args.get(1).map(|s| s.as_str()) {
+    // Check for --vm flag anywhere in args
+    let use_vm = args.iter().any(|a| a == "--vm");
+    let filtered_args: Vec<String> = args.iter().filter(|a| a.as_str() != "--vm").cloned().collect();
+
+    match filtered_args.get(1).map(|s| s.as_str()) {
         Some("--version") | Some("-v") => {
             println!("oxigen {}", env!("CARGO_PKG_VERSION"));
         }
         Some("check") => {
-            if let Some(path) = args.get(2) {
+            if let Some(path) = filtered_args.get(2) {
                 check_file(path);
             } else {
                 eprintln!("Usage: oxigen check <file.oxi>");
                 std::process::exit(1);
             }
         }
-        Some("fmt") => fmt_files(&args[2..]),
-        Some(path) if path.ends_with(".oxi") => run_file(path, &args[2..]),
+        Some("fmt") => fmt_files(&filtered_args[2..]),
+        Some(path) if path.ends_with(".oxi") => {
+            if use_vm {
+                run_file_vm(path, &filtered_args[2..]);
+            } else {
+                run_file(path, &filtered_args[2..]);
+            }
+        }
         _ => repl::run_repl(),
     }
 }
