@@ -456,7 +456,14 @@ impl Compiler {
                     self.emit_op(OpCode::Dup, line);
                 }
                 if self.current_frame().scope_depth > 0 {
-                    self.add_local(&name.value, mutable, Some(type_name));
+                    // If a local with the same name already exists at the current or
+                    // enclosing scope, update it (same as Let behavior for := re-declarations)
+                    if let Some(slot) = self.resolve_local(&name.value) {
+                        self.emit_op_u16(OpCode::SetLocal, slot, line);
+                        self.emit_op(OpCode::Pop, line);
+                    } else {
+                        self.add_local(&name.value, mutable, Some(type_name));
+                    }
                 } else {
                     let name_const =
                         self.make_constant(Value::String(name.value.as_str().into()), line);
@@ -484,7 +491,12 @@ impl Compiler {
                     self.emit_op(OpCode::Dup, line);
                 }
                 if self.current_frame().scope_depth > 0 {
-                    self.add_local(&name.value, true, Some(type_name));
+                    if let Some(slot) = self.resolve_local(&name.value) {
+                        self.emit_op_u16(OpCode::SetLocal, slot, line);
+                        self.emit_op(OpCode::Pop, line);
+                    } else {
+                        self.add_local(&name.value, true, Some(type_name));
+                    }
                 } else {
                     let name_const =
                         self.make_constant(Value::String(name.value.as_str().into()), line);
@@ -535,10 +547,12 @@ impl Compiler {
                 let then_jump = self.emit_jump(OpCode::JumpIfFalse, line);
                 self.emit_op(OpCode::Pop, line); // pop condition (true path)
 
-                // Compile consequence
+                // Compile consequence in its own scope
+                self.begin_scope();
                 for s in consequence {
                     self.compile_statement(s);
                 }
+                self.end_scope(line);
 
                 // Always jump over the false-path Pop (and alternative if present)
                 let else_jump = self.emit_jump(OpCode::Jump, line);
@@ -546,9 +560,11 @@ impl Compiler {
                 self.emit_op(OpCode::Pop, line); // pop condition (false path)
 
                 if let Some(alt) = alternative {
+                    self.begin_scope();
                     for s in alt {
                         self.compile_statement(s);
                     }
+                    self.end_scope(line);
                 }
                 self.patch_jump(else_jump);
             }
@@ -1441,10 +1457,27 @@ impl Compiler {
             self.emit_op(OpCode::None, line);
             return;
         }
+        // Wrap in a scope so locals are cleaned up.
+        self.begin_scope();
         for (i, stmt) in stmts.iter().enumerate() {
             let is_last = i == stmts.len() - 1;
             if is_last {
-                self.compile_last_statement_as_value(stmt, line);
+                // For the last statement, we need its value on the stack.
+                // End scope first only if the last statement is a simple expression
+                // that won't reference locals from this block.
+                match stmt {
+                    Statement::Expr(_) => {
+                        self.end_scope(line);
+                        self.compile_last_statement_as_value(stmt, line);
+                    }
+                    _ => {
+                        // Last statement may reference block locals (e.g. Repeat using j).
+                        // Compile it within the scope, then clean up.
+                        self.compile_statement(stmt);
+                        self.end_scope(line);
+                        self.emit_op(OpCode::None, line);
+                    }
+                }
             } else {
                 self.compile_statement(stmt);
             }
