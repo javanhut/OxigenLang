@@ -165,6 +165,8 @@ pub enum Statement {
     Unpack {
         names: Vec<Identifier>,
         value: Expression,
+        values: Option<Vec<Expression>>,
+        reassign: bool,
     },
     IndexAssign {
         token: Token,
@@ -196,7 +198,7 @@ pub struct ChooseArm {
     pub pattern_name: String, // "ten", "eleven", or "else"
     pub inline_params: Option<Vec<Identifier>>,
     pub inline_condition: Option<Expression>,
-    pub body: Expression,
+    pub body: Vec<Statement>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

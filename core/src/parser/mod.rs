@@ -421,9 +421,12 @@ impl Parser {
 
     fn parse_statement_inner(&mut self) -> Option<Statement> {
         if self.curr_token.token_type == TokenType::Ident {
-            // Check for unpacking: x, y := expr
+            // Check for unpacking: x, y := expr  or  x, y = expr
             if self.peek_token.token_type == TokenType::Comma && self.is_unpack_statement() {
                 return self.parse_unpack_statement();
+            }
+            if self.peek_token.token_type == TokenType::Comma && self.is_unpack_reassign_statement() {
+                return self.parse_unpack_reassign_statement();
             }
             if self.peek_token.token_type == TokenType::Walrus {
                 return self.parse_let_statement();
@@ -547,9 +550,90 @@ impl Parser {
 
         // move to expression
         self.next_token();
-        let value = self.parse_expression(Precedence::Lowest)?;
+        let first_value = self.parse_expression(Precedence::Lowest)?;
 
-        Some(Statement::Unpack { names, value })
+        // Check for multi-expression RHS: a, b := expr1, expr2
+        if self.peek_token.token_type == TokenType::Comma {
+            let mut values = vec![first_value.clone()];
+            while self.peek_token.token_type == TokenType::Comma {
+                self.next_token(); // consume ','
+                self.next_token(); // move to next expression
+                values.push(self.parse_expression(Precedence::Lowest)?);
+            }
+            Some(Statement::Unpack { names, value: first_value, values: Some(values), reassign: false })
+        } else {
+            Some(Statement::Unpack { names, value: first_value, values: None, reassign: false })
+        }
+    }
+
+    /// Lookahead to check if this is an unpack reassignment: ident, ident, ... =
+    fn is_unpack_reassign_statement(&mut self) -> bool {
+        let mut idx = 0; // peek_nth(0) is peek_token
+        loop {
+            let tt = self.peek_nth(idx).token_type.clone();
+            match tt {
+                TokenType::Comma => {
+                    let next = self.peek_nth(idx + 1).token_type.clone();
+                    if next != TokenType::Ident {
+                        return false;
+                    }
+                    idx += 2; // skip comma + ident
+                }
+                TokenType::Assign => return true,
+                _ => return false,
+            }
+        }
+    }
+
+    fn parse_unpack_reassign_statement(&mut self) -> Option<Statement> {
+        let mut names = Vec::new();
+
+        // First identifier (curr_token)
+        names.push(Identifier {
+            token: self.curr_token.clone(),
+            value: self.curr_token.literal.clone(),
+        });
+
+        // Parse remaining: , ident, ident, ...
+        while self.peek_token.token_type == TokenType::Comma {
+            self.next_token(); // consume ','
+            self.next_token(); // move to next ident
+            if self.curr_token.token_type != TokenType::Ident {
+                self.errors.push(Diagnostic::error_with_hint(
+                    self.curr_token.span,
+                    format!(
+                        "expected identifier in unpack, got {:?}",
+                        self.curr_token.literal
+                    ),
+                    "unpack reassign syntax: x, y = expr",
+                ));
+                return None;
+            }
+            names.push(Identifier {
+                token: self.curr_token.clone(),
+                value: self.curr_token.literal.clone(),
+            });
+        }
+
+        // consume '='
+        self.expect_peek(TokenType::Assign)?;
+
+        // move to expression
+        self.next_token();
+        let first_value = self.parse_expression(Precedence::Lowest)?;
+
+        // Check for multi-expression RHS: a, b = expr1, expr2
+        if self.peek_token.token_type == TokenType::Comma {
+            let mut values = vec![first_value.clone()];
+            while self.peek_token.token_type == TokenType::Comma {
+                self.next_token(); // consume ','
+                self.next_token(); // move to next expression
+                values.push(self.parse_expression(Precedence::Lowest)?);
+            }
+            Some(Statement::Unpack { names, value: first_value, values: Some(values), reassign: true })
+        } else {
+            Some(Statement::Unpack { names, value: first_value, values: None, reassign: true })
+        }
     }
 
     fn parse_typed_let_statement(&mut self) -> Option<Statement> {
@@ -2054,7 +2138,12 @@ impl Parser {
                 self.expect_peek(TokenType::Arrow)?; // '->'
                 self.next_token(); // move to body expression
 
-                let body = self.parse_expression(Precedence::Lowest)?;
+                let body = if self.curr_token.token_type == TokenType::LBrace {
+                    self.parse_block()?
+                } else {
+                    let stmt = self.parse_statement()?;
+                    vec![stmt]
+                };
 
                 arms.push(ChooseArm {
                     pattern_name,
@@ -2069,7 +2158,12 @@ impl Parser {
                 self.expect_peek(TokenType::Arrow)?; // '->'
                 self.next_token(); // move to body expression
 
-                let body = self.parse_expression(Precedence::Lowest)?;
+                let body = if self.curr_token.token_type == TokenType::LBrace {
+                    self.parse_block()?
+                } else {
+                    let stmt = self.parse_statement()?;
+                    vec![stmt]
+                };
 
                 arms.push(ChooseArm {
                     pattern_name,

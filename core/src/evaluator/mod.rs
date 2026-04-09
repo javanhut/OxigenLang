@@ -1136,41 +1136,86 @@ impl Evaluator {
                 path,
                 selective,
             } => self.eval_introduce(token.span, path, selective, Rc::clone(&env)),
-            Statement::Unpack { names, value } => {
-                let val = self.eval_expression(value, Rc::clone(&env));
-                if val.is_error() {
-                    return val;
-                }
-                let elements = match val.as_ref() {
-                    Object::Array(arr) => arr.clone(),
-                    Object::Tuple(t) => t.clone(),
-                    _ => {
+            Statement::Unpack { names, value, values, reassign } => {
+                // Collect the values to assign
+                let elements = if let Some(exprs) = values {
+                    // Multi-expression: a, b := expr1, expr2
+                    if exprs.len() != names.len() {
                         let span = names.first().map(|n| n.token.span).unwrap_or_default();
                         return self.runtime_error(
                             span,
-                            &format!("cannot unpack {}, expected array or tuple", val.type_name()),
-                            None,
+                            &format!(
+                                "unpack length mismatch: expected {} values, got {}",
+                                names.len(),
+                                exprs.len()
+                            ),
+                            Some("number of names on the left must match number of expressions on the right"),
                         );
                     }
+                    let mut elems = Vec::new();
+                    for expr in exprs {
+                        let val = self.eval_expression(expr, Rc::clone(&env));
+                        if val.is_error() {
+                            return val;
+                        }
+                        elems.push(val);
+                    }
+                    elems
+                } else {
+                    // Single-expression unpack: a, b := tuple_or_array
+                    let val = self.eval_expression(value, Rc::clone(&env));
+                    if val.is_error() {
+                        return val;
+                    }
+                    let elems = match val.as_ref() {
+                        Object::Array(arr) => arr.clone(),
+                        Object::Tuple(t) => t.clone(),
+                        _ => {
+                            let span = names.first().map(|n| n.token.span).unwrap_or_default();
+                            return self.runtime_error(
+                                span,
+                                &format!("cannot unpack {}, expected array or tuple", val.type_name()),
+                                None,
+                            );
+                        }
+                    };
+                    if elems.len() != names.len() {
+                        let span = names.first().map(|n| n.token.span).unwrap_or_default();
+                        return self.runtime_error(
+                            span,
+                            &format!(
+                                "unpack length mismatch: expected {} values, got {}",
+                                names.len(),
+                                elems.len()
+                            ),
+                            Some(&format!(
+                                "the right side has {} elements but the left side has {} names",
+                                elems.len(),
+                                names.len()
+                            )),
+                        );
+                    }
+                    elems
                 };
-                if elements.len() != names.len() {
-                    let span = names.first().map(|n| n.token.span).unwrap_or_default();
-                    return self.runtime_error(
-                        span,
-                        &format!(
-                            "unpack length mismatch: expected {} values, got {}",
-                            names.len(),
-                            elements.len()
-                        ),
-                        Some(&format!(
-                            "the right side has {} elements but the left side has {} names",
-                            elements.len(),
-                            names.len()
-                        )),
-                    );
-                }
+
                 for (name, element) in names.iter().zip(elements.iter()) {
-                    env.borrow_mut().set(name.value.clone(), Rc::clone(element));
+                    if name.value == "_" {
+                        continue;
+                    }
+                    if *reassign {
+                        // Reassignment: variable must already exist
+                        let existing = env.borrow().get(&name.value);
+                        if existing.is_none() {
+                            return self.runtime_error(
+                                name.token.span,
+                                &format!("identifier not found: {}", name.value),
+                                Some("use `:=` to declare new variables"),
+                            );
+                        }
+                        env.borrow_mut().update(&name.value, Rc::clone(element));
+                    } else {
+                        env.borrow_mut().set(name.value.clone(), Rc::clone(element));
+                    }
                 }
                 Rc::new(Object::None)
             }
@@ -2976,7 +3021,7 @@ impl Evaluator {
         for arm in arms {
             // Handle 'else' arm
             if arm.pattern_name == "else" {
-                return self.eval_expression(&arm.body, Rc::clone(&env));
+                return self.eval_block(&arm.body, Rc::clone(&env));
             }
 
             // If inline pattern, register it on the fly
@@ -3013,7 +3058,7 @@ impl Evaluator {
             }
 
             if matches.is_truthy() {
-                return self.eval_expression(&arm.body, Rc::clone(&env));
+                return self.eval_block(&arm.body, Rc::clone(&env));
             }
         }
 

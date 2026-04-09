@@ -246,7 +246,20 @@ impl Formatter {
                         self.format_expression(cond);
                     }
                     self.push(" -> ");
-                    self.format_expression(&arm.body);
+                    if arm.body.len() == 1 {
+                        if let Statement::Expr(e) = &arm.body[0] {
+                            self.format_expression(e);
+                            self.newline();
+                            continue;
+                        }
+                    }
+                    self.push("{");
+                    self.newline();
+                    self.indent += 1;
+                    self.format_block(&arm.body);
+                    self.indent -= 1;
+                    self.push_indent();
+                    self.push("}");
                     self.newline();
                 }
                 self.indent -= 1;
@@ -358,15 +371,24 @@ impl Formatter {
                     self.push(&path.segments.join("."));
                 }
             }
-            Statement::Unpack { names, value } => {
+            Statement::Unpack { names, value, values, reassign } => {
                 for (i, name) in names.iter().enumerate() {
                     if i > 0 {
                         self.push(", ");
                     }
                     self.push(&name.value);
                 }
-                self.push(" := ");
-                self.format_expression(value);
+                self.push(if *reassign { " = " } else { " := " });
+                if let Some(exprs) = values {
+                    for (i, expr) in exprs.iter().enumerate() {
+                        if i > 0 {
+                            self.push(", ");
+                        }
+                        self.format_expression(expr);
+                    }
+                } else {
+                    self.format_expression(value);
+                }
             }
             Statement::Main { body, .. } => {
                 self.push("main {");

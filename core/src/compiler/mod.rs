@@ -708,17 +708,30 @@ impl Compiler {
                 self.emit_op(OpCode::Return, line);
             }
 
-            Statement::Unpack { names, value } => {
-                self.compile_expression(value);
-                self.emit_op_u8(OpCode::Unpack, names.len() as u8, line);
-                // Unpack pushes N values onto stack in order
-                for name in names {
-                    if self.current_frame().scope_depth > 0 {
-                        self.add_local(&name.value, true, None);
+            Statement::Unpack { names, value, values, reassign } => {
+                if let Some(exprs) = values {
+                    // Multi-expression: a, b := expr1, expr2
+                    for (name, expr) in names.iter().zip(exprs.iter()) {
+                        self.compile_expression(expr);
+                        self.compile_unpack_bind(name, *reassign, line);
+                    }
+                } else {
+                    // Single-expression unpack: a, b := tuple_or_array
+                    self.compile_expression(value);
+                    self.emit_op_u8(OpCode::Unpack, names.len() as u8, line);
+                    if *reassign {
+                        // Reassign pops from top of stack, so iterate in reverse
+                        // so that name[last] gets element[last] (top), etc.
+                        for name in names.iter().rev() {
+                            self.compile_unpack_bind(name, true, line);
+                        }
                     } else {
-                        let name_const =
-                            self.make_constant(Value::String(name.value.as_str().into()), line);
-                        self.emit_op_u16(OpCode::DefineGlobal, name_const, line);
+                        // Define path: add_local assigns sequential stack slots,
+                        // so iterate forward. Use add_local even for "_" to
+                        // occupy the slot correctly without shifting the stack.
+                        for name in names {
+                            self.compile_unpack_define(name, line);
+                        }
                     }
                 }
             }
@@ -870,7 +883,7 @@ impl Compiler {
                 for arm in arms {
                     if arm.pattern_name == "else" {
                         has_else = true;
-                        self.compile_expression(&arm.body);
+                        self.compile_block_as_expression(&arm.body, line);
                         break;
                     }
 
@@ -906,7 +919,7 @@ impl Compiler {
                     self.emit_op(OpCode::Pop, line); // pop True
 
                     // Compile arm body — result goes on stack
-                    self.compile_expression(&arm.body);
+                    self.compile_block_as_expression(&arm.body, line);
                     let end = self.emit_jump(OpCode::Jump, line);
                     end_jumps.push(end);
 
@@ -1452,6 +1465,52 @@ impl Compiler {
         }
     }
 
+    /// Define a local/global for unpack. For "_", still occupies the stack slot
+    /// via add_local so it doesn't shift positions for subsequent names.
+    fn compile_unpack_define(&mut self, name: &crate::ast::Identifier, line: u32) {
+        if self.current_frame().scope_depth > 0 {
+            // add_local for both "_" and real names — "_" just occupies the slot
+            self.add_local(&name.value, true, None);
+        } else {
+            if name.value == "_" {
+                self.emit_op(OpCode::Pop, line);
+            } else {
+                let name_const =
+                    self.make_constant(Value::String(name.value.as_str().into()), line);
+                self.emit_op_u16(OpCode::DefineGlobal, name_const, line);
+            }
+        }
+    }
+
+    fn compile_unpack_bind(&mut self, name: &crate::ast::Identifier, reassign: bool, line: u32) {
+        if name.value == "_" {
+            self.emit_op(OpCode::Pop, line);
+        } else if reassign {
+            // Reassignment: set existing variable
+            if let Some(slot) = self.resolve_local(&name.value) {
+                self.emit_op_u16(OpCode::SetLocal, slot, line);
+                self.emit_op(OpCode::Pop, line);
+            } else {
+                let frame_idx = self.frames.len() - 1;
+                if let Some(uv_idx) = self.resolve_upvalue(frame_idx, &name.value) {
+                    self.emit_op_u16(OpCode::SetUpvalue, uv_idx, line);
+                    self.emit_op(OpCode::Pop, line);
+                } else {
+                    let name_const =
+                        self.make_constant(Value::String(name.value.as_str().into()), line);
+                    self.emit_op_u16(OpCode::SetGlobal, name_const, line);
+                    self.emit_op(OpCode::Pop, line);
+                }
+            }
+        } else if self.current_frame().scope_depth > 0 {
+            self.add_local(&name.value, true, None);
+        } else {
+            let name_const =
+                self.make_constant(Value::String(name.value.as_str().into()), line);
+            self.emit_op_u16(OpCode::DefineGlobal, name_const, line);
+        }
+    }
+
     fn compile_block_as_expression(&mut self, stmts: &[Statement], line: u32) {
         if stmts.is_empty() {
             self.emit_op(OpCode::None, line);
@@ -1463,16 +1522,14 @@ impl Compiler {
             let is_last = i == stmts.len() - 1;
             if is_last {
                 // For the last statement, we need its value on the stack.
-                // End scope first only if the last statement is a simple expression
-                // that won't reference locals from this block.
+                // Compile within the scope so the expression can reference
+                // block locals, then clean up.
                 match stmt {
                     Statement::Expr(_) => {
-                        self.end_scope(line);
                         self.compile_last_statement_as_value(stmt, line);
+                        self.end_scope(line);
                     }
                     _ => {
-                        // Last statement may reference block locals (e.g. Repeat using j).
-                        // Compile it within the scope, then clean up.
                         self.compile_statement(stmt);
                         self.end_scope(line);
                         self.emit_op(OpCode::None, line);

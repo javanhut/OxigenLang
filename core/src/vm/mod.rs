@@ -47,7 +47,7 @@ pub struct VMError {
 
 impl std::fmt::Display for VMError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[line {}] Runtime error: {}", self.line, self.message)
+        write!(f, "{}", self.message)
     }
 }
 
@@ -162,10 +162,43 @@ impl VM {
         }
     }
 
+    fn format_error(&self, message: &str, hint: Option<&str>) -> String {
+        let line_num = self.current_line() as usize;
+        let mut out = String::new();
+
+        out.push_str(&format!("error: {}\n", message));
+        out.push_str(&format!("  --> line {}\n", line_num));
+
+        if !self.source.is_empty() {
+            if let Some(source_line) = self.source.lines().nth(line_num.saturating_sub(1)) {
+                let line_str = format!("{}", line_num);
+                let padding = " ".repeat(line_str.len());
+                out.push_str(&format!("{} |\n", padding));
+                out.push_str(&format!("{} | {}\n", line_str, source_line));
+                out.push_str(&format!("{} |", padding));
+            }
+        }
+
+        if let Some(hint) = hint {
+            out.push_str(&format!("\n  = hint: {}", hint));
+        }
+
+        out
+    }
+
     fn runtime_error(&self, message: &str) -> VMError {
+        let line = self.current_line();
         VMError {
-            message: message.to_string(),
-            line: self.current_line(),
+            message: self.format_error(message, None),
+            line,
+        }
+    }
+
+    fn runtime_error_hint(&self, message: &str, hint: &str) -> VMError {
+        let line = self.current_line();
+        VMError {
+            message: self.format_error(message, Some(hint)),
+            line,
         }
     }
 
@@ -341,7 +374,10 @@ impl VM {
                         Value::Float(f) => self.push(Value::Float(-f)),
                         _ => {
                             return Err(
-                                self.runtime_error("negation is only supported for numbers")
+                                self.runtime_error_hint(
+                                    &format!("negation is only supported for numbers, got {}", val.type_name()),
+                                    "only <int> and <float> values can be negated",
+                                )
                             )
                         }
                     }
@@ -373,10 +409,10 @@ impl VM {
                         match self.globals.get(name_str.as_ref()) {
                             Some(val) => self.push(val.clone()),
                             None => {
-                                return Err(self.runtime_error(&format!(
-                                    "undefined variable: {}",
-                                    name_str
-                                )));
+                                return Err(self.runtime_error_hint(
+                                    &format!("undefined variable: {}", name_str),
+                                    "use `:=` to declare new variables",
+                                ));
                             }
                         }
                     } else {
@@ -388,17 +424,17 @@ impl VM {
                     let name = self.frames[frame_idx].read_constant(idx).clone();
                     if let Value::String(name_str) = &name {
                         if !self.globals.contains_key(name_str.as_ref()) {
-                            return Err(self.runtime_error(&format!(
-                                "undefined variable: {}",
-                                name_str
-                            )));
+                            return Err(self.runtime_error_hint(
+                                &format!("undefined variable: {}", name_str),
+                                "use `:=` to declare new variables, or `=` to reassign an existing typed variable",
+                            ));
                         }
                         // Check immutability
                         if let Some(false) = self.global_mutability.get(name_str.as_ref()) {
-                            return Err(self.runtime_error(&format!(
-                                "cannot reassign immutable variable '{}'. use := to override",
-                                name_str
-                            )));
+                            return Err(self.runtime_error_hint(
+                                &format!("cannot reassign immutable variable '{}'", name_str),
+                                "use `:=` to override an immutable binding",
+                            ));
                         }
                         let val = self.peek(0).clone();
                         self.globals.insert(name_str.to_string(), val);
@@ -693,10 +729,10 @@ impl VM {
                                         self.push(method);
                                         // TODO: bind self
                                     } else {
-                                        return Err(self.runtime_error(&format!(
-                                            "field '{}' not found on {}",
-                                            fname, inst.struct_name
-                                        )));
+                                        return Err(self.runtime_error_hint(
+                                            &format!("field '{}' not found on {}", fname, inst.struct_name),
+                                            "check the struct definition for available fields and methods",
+                                        ));
                                     }
                                 }
                             }
@@ -704,10 +740,10 @@ impl VM {
                                 match m.globals.get(fname.as_ref()) {
                                     Some(val) => self.push(val.clone()),
                                     None => {
-                                        return Err(self.runtime_error(&format!(
-                                            "module '{}' has no member '{}'",
-                                            m.name, fname
-                                        )));
+                                        return Err(self.runtime_error_hint(
+                                            &format!("module '{}' has no member '{}'", m.name, fname),
+                                            "check the module's public API for available members",
+                                        ));
                                     }
                                 }
                             }
@@ -727,11 +763,10 @@ impl VM {
                                 }
                             }
                             _ => {
-                                return Err(self.runtime_error(&format!(
-                                    "cannot access field '{}' on {}",
-                                    fname,
-                                    object.type_name()
-                                )));
+                                return Err(self.runtime_error_hint(
+                                    &format!("cannot access field '{}' on {}", fname, object.type_name()),
+                                    "field access is only supported on struct instances, modules, and error values",
+                                ));
                             }
                         }
                     }
@@ -751,10 +786,10 @@ impl VM {
                                     .insert(fname.to_string(), value);
                             }
                             _ => {
-                                return Err(self.runtime_error(&format!(
-                                    "cannot set field on {}",
-                                    object.type_name()
-                                )));
+                                return Err(self.runtime_error_hint(
+                                    &format!("cannot set field on {}", object.type_name()),
+                                    "field assignment is only supported on struct instances",
+                                ));
                             }
                         }
                     }
@@ -944,7 +979,10 @@ impl VM {
                         }
                         _ => {
                             return Err(
-                                self.runtime_error("can only unpack arrays and tuples")
+                                self.runtime_error_hint(
+                                    &format!("can only unpack arrays and tuples, got {}", value.type_name()),
+                                    "unpack syntax: `a, b := [1, 2]` or `a, b := (1, 2)`",
+                                )
                             );
                         }
                     }
@@ -978,7 +1016,10 @@ impl VM {
                         Value::Map(m) => m.borrow().len() as i64,
                         _ => {
                             return Err(
-                                self.runtime_error(&format!("cannot iterate over {}", iterable.type_name()))
+                                self.runtime_error_hint(
+                                    &format!("cannot iterate over {}", iterable.type_name()),
+                                    "each loops work with arrays, tuples, strings, sets, and maps",
+                                )
                             )
                         }
                     };
@@ -1154,11 +1195,10 @@ impl VM {
                 new.extend((**r).clone());
                 Ok(Value::Tuple(Rc::new(new)))
             }
-            _ => Err(self.runtime_error(&format!(
-                "type mismatch: {} + {}",
-                a.type_name(),
-                b.type_name()
-            ))),
+            _ => Err(self.runtime_error_hint(
+                &format!("type mismatch: {} + {}", a.type_name(), b.type_name()),
+                "operands must be compatible numeric types, strings, or collections",
+            )),
         }
     }
 
@@ -1180,11 +1220,10 @@ impl VM {
             }
             (Value::Uint(l), Value::Integer(r)) => Ok(Value::Integer(*l as i64 - r)),
             (Value::Integer(l), Value::Uint(r)) => Ok(Value::Integer(l - *r as i64)),
-            _ => Err(self.runtime_error(&format!(
-                "type mismatch: {} - {}",
-                a.type_name(),
-                b.type_name()
-            ))),
+            _ => Err(self.runtime_error_hint(
+                &format!("type mismatch: {} - {}", a.type_name(), b.type_name()),
+                "operands must be compatible numeric types",
+            )),
         }
     }
 
@@ -1196,11 +1235,10 @@ impl VM {
             (Value::Float(l), Value::Integer(r)) => Ok(Value::Float(l * *r as f64)),
             (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer(*l as i64 * *r as i64)),
             (Value::Uint(l), Value::Uint(r)) => Ok(Value::Uint(l.wrapping_mul(*r))),
-            _ => Err(self.runtime_error(&format!(
-                "type mismatch: {} * {}",
-                a.type_name(),
-                b.type_name()
-            ))),
+            _ => Err(self.runtime_error_hint(
+                &format!("type mismatch: {} * {}", a.type_name(), b.type_name()),
+                "operands must be compatible numeric types",
+            )),
         }
     }
 
@@ -1223,11 +1261,10 @@ impl VM {
                     Ok(Value::Uint(l / r))
                 }
             }
-            _ => Err(self.runtime_error(&format!(
-                "type mismatch: {} / {}",
-                a.type_name(),
-                b.type_name()
-            ))),
+            _ => Err(self.runtime_error_hint(
+                &format!("type mismatch: {} / {}", a.type_name(), b.type_name()),
+                "operands must be compatible numeric types",
+            )),
         }
     }
 
@@ -1250,11 +1287,10 @@ impl VM {
                     Ok(Value::Uint(l % r))
                 }
             }
-            _ => Err(self.runtime_error(&format!(
-                "type mismatch: {} % {}",
-                a.type_name(),
-                b.type_name()
-            ))),
+            _ => Err(self.runtime_error_hint(
+                &format!("type mismatch: {} % {}", a.type_name(), b.type_name()),
+                "operands must be compatible numeric types",
+            )),
         }
     }
 
@@ -1270,11 +1306,10 @@ impl VM {
             (Value::Char(l), Value::Char(r)) => Ok(Value::Boolean(l < r)),
             (Value::Uint(l), Value::Uint(r)) => Ok(Value::Boolean(l < r)),
             (Value::Byte(l), Value::Byte(r)) => Ok(Value::Boolean(l < r)),
-            _ => Err(self.runtime_error(&format!(
-                "cannot compare {} < {}",
-                a.type_name(),
-                b.type_name()
-            ))),
+            _ => Err(self.runtime_error_hint(
+                &format!("cannot compare {} < {}", a.type_name(), b.type_name()),
+                "comparison requires matching numeric types or chars",
+            )),
         }
     }
 
@@ -1286,11 +1321,10 @@ impl VM {
             (Value::Float(l), Value::Integer(r)) => Ok(Value::Boolean(*l <= (*r as f64))),
             (Value::Char(l), Value::Char(r)) => Ok(Value::Boolean(l <= r)),
             (Value::Uint(l), Value::Uint(r)) => Ok(Value::Boolean(l <= r)),
-            _ => Err(self.runtime_error(&format!(
-                "cannot compare {} <= {}",
-                a.type_name(),
-                b.type_name()
-            ))),
+            _ => Err(self.runtime_error_hint(
+                &format!("cannot compare {} <= {}", a.type_name(), b.type_name()),
+                "comparison requires matching numeric types or chars",
+            )),
         }
     }
 
@@ -1302,11 +1336,10 @@ impl VM {
             (Value::Float(l), Value::Integer(r)) => Ok(Value::Boolean(*l > (*r as f64))),
             (Value::Char(l), Value::Char(r)) => Ok(Value::Boolean(l > r)),
             (Value::Uint(l), Value::Uint(r)) => Ok(Value::Boolean(l > r)),
-            _ => Err(self.runtime_error(&format!(
-                "cannot compare {} > {}",
-                a.type_name(),
-                b.type_name()
-            ))),
+            _ => Err(self.runtime_error_hint(
+                &format!("cannot compare {} > {}", a.type_name(), b.type_name()),
+                "comparison requires matching numeric types or chars",
+            )),
         }
     }
 
@@ -1318,11 +1351,10 @@ impl VM {
             (Value::Float(l), Value::Integer(r)) => Ok(Value::Boolean(*l >= (*r as f64))),
             (Value::Char(l), Value::Char(r)) => Ok(Value::Boolean(l >= r)),
             (Value::Uint(l), Value::Uint(r)) => Ok(Value::Boolean(l >= r)),
-            _ => Err(self.runtime_error(&format!(
-                "cannot compare {} >= {}",
-                a.type_name(),
-                b.type_name()
-            ))),
+            _ => Err(self.runtime_error_hint(
+                &format!("cannot compare {} >= {}", a.type_name(), b.type_name()),
+                "comparison requires matching numeric types or chars",
+            )),
         }
     }
 
@@ -1375,10 +1407,10 @@ impl VM {
                 })));
                 Ok(())
             }
-            _ => Err(self.runtime_error(&format!(
-                "cannot call {}",
-                callee.type_name()
-            ))),
+            _ => Err(self.runtime_error_hint(
+                &format!("cannot call {}", callee.type_name()),
+                "only functions, closures, builtins, and struct constructors are callable",
+            )),
         }
     }
 
@@ -1410,10 +1442,10 @@ impl VM {
                     return self.call_closure(closure, arg_count + 1, &[]);
                 }
 
-                Err(self.runtime_error(&format!(
-                    "method '{}' not found on {}",
-                    method_name, inst.struct_name
-                )))
+                Err(self.runtime_error_hint(
+                    &format!("method '{}' not found on {}", method_name, inst.struct_name),
+                    "check the struct definition for available methods",
+                ))
             }
             Value::Array(_) | Value::String(_) | Value::Map(_) | Value::Set(_) | Value::Tuple(_) => {
                 // Built-in method syntax: collection.method(args)
@@ -1431,11 +1463,10 @@ impl VM {
                     self.stack.insert(instance_idx + 1, instance);
                     return self.call_value(arg_count + 1, &[]);
                 }
-                Err(self.runtime_error(&format!(
-                    "method '{}' not found on {}",
-                    method_name,
-                    instance.type_name()
-                )))
+                Err(self.runtime_error_hint(
+                    &format!("method '{}' not found on {}", method_name, instance.type_name()),
+                    "check available built-in methods for this type",
+                ))
             }
             Value::Module(m) => {
                 // Module method call: module.func(args)
@@ -1443,16 +1474,15 @@ impl VM {
                     self.stack[instance_idx] = func;
                     return self.call_value(arg_count, &[]);
                 }
-                Err(self.runtime_error(&format!(
-                    "module '{}' has no function '{}'",
-                    m.name, method_name
-                )))
+                Err(self.runtime_error_hint(
+                    &format!("module '{}' has no function '{}'", m.name, method_name),
+                    "check the module's public API for available functions",
+                ))
             }
-            _ => Err(self.runtime_error(&format!(
-                "cannot call method '{}' on {}",
-                method_name,
-                instance.type_name()
-            ))),
+            _ => Err(self.runtime_error_hint(
+                &format!("cannot call method '{}' on {}", method_name, instance.type_name()),
+                "methods can only be called on struct instances, collections, and modules",
+            )),
         }
     }
 
@@ -1470,10 +1500,10 @@ impl VM {
                     continue;
                 }
             }
-            return Err(self.runtime_error(&format!(
-                "method '{}' not found on {}",
-                method_name, struct_name
-            )));
+            return Err(self.runtime_error_hint(
+                &format!("method '{}' not found on {}", method_name, struct_name),
+                "check the struct definition and its parent for available methods",
+            ));
         }
     }
 
@@ -1490,10 +1520,10 @@ impl VM {
             // Extend stack to full arity if needed
             let total_provided = arg_count + named_args.len();
             if total_provided > expected && !closure.function.params.iter().any(|p| p.optional) {
-                return Err(self.runtime_error(&format!(
-                    "expected {} arguments but got {}",
-                    expected, total_provided
-                )));
+                return Err(self.runtime_error_hint(
+                    &format!("expected {} arguments but got {}", expected, total_provided),
+                    "check the function signature for required and optional parameters",
+                ));
             }
 
             // Fill positional slots up to arity with None (will be overwritten by named args)
@@ -1521,7 +1551,10 @@ impl VM {
         }
 
         if self.frames.len() >= FRAMES_MAX {
-            return Err(self.runtime_error("stack overflow"));
+            return Err(self.runtime_error_hint(
+                "stack overflow",
+                "check for infinite recursion or deeply nested calls",
+            ));
         }
 
         let slot_offset = self.stack.len() - expected - 1; // -1 for the function itself
@@ -1618,11 +1651,10 @@ impl VM {
                 }
                 Ok(Value::None)
             }
-            _ => Err(self.runtime_error(&format!(
-                "cannot index {} with {}",
-                collection.type_name(),
-                index.type_name()
-            ))),
+            _ => Err(self.runtime_error_hint(
+                &format!("cannot index {} with {}", collection.type_name(), index.type_name()),
+                "arrays and tuples use <int> indices, maps use key values, strings use <int> indices",
+            )),
         }
     }
 
@@ -1656,10 +1688,10 @@ impl VM {
                 borrowed.push((index, value));
                 Ok(())
             }
-            _ => Err(self.runtime_error(&format!(
-                "cannot assign to index on {}",
-                collection.type_name()
-            ))),
+            _ => Err(self.runtime_error_hint(
+                &format!("cannot assign to index on {}", collection.type_name()),
+                "index assignment is supported on arrays and maps",
+            )),
         }
     }
 
@@ -1720,10 +1752,10 @@ impl VM {
                     Ok(Value::String("".into()))
                 }
             }
-            _ => Err(self.runtime_error(&format!(
-                "cannot slice {}",
-                collection.type_name()
-            ))),
+            _ => Err(self.runtime_error_hint(
+                &format!("cannot slice {}", collection.type_name()),
+                "slicing is supported on arrays, strings, and tuples: collection[start:end]",
+            )),
         }
     }
 
@@ -1744,10 +1776,10 @@ impl VM {
 
         // Check circular imports
         if self.import_stack.contains(&module_path) {
-            return Err(self.runtime_error(&format!(
-                "circular import: {}",
-                module_path.display()
-            )));
+            return Err(self.runtime_error_hint(
+                &format!("circular import: {}", module_path.display()),
+                "two modules are importing each other — restructure to break the cycle",
+            ));
         }
 
         // Read, lex, parse, compile, and execute the module
@@ -1861,7 +1893,10 @@ impl VM {
             }
         }
 
-        Err(self.runtime_error(&format!("module not found: {}", path_str)))
+        Err(self.runtime_error_hint(
+            &format!("module not found: {}", path_str),
+            "check that the module file exists and the path is correct",
+        ))
     }
 
     // ── Type Wrap / Conversion ──────────────────────────────────────────
