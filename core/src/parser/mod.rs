@@ -2444,6 +2444,7 @@ impl Parser {
     fn parse_block(&mut self) -> Option<Vec<Statement>> {
         let mut statements = Vec::new();
 
+        let open_brace_span = self.curr_token.span;
         self.next_token(); // move past '{'
 
         // Skip leading newlines
@@ -2463,6 +2464,15 @@ impl Parser {
             while self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
             }
+        }
+
+        if self.curr_token.token_type == TokenType::Eof {
+            self.errors.push(Diagnostic::error_with_hint(
+                open_brace_span,
+                "unclosed block: expected '}' before end of file",
+                "add a closing '}' to match this opening brace",
+            ));
+            return None;
         }
 
         Some(statements)

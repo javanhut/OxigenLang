@@ -117,6 +117,16 @@ impl Compiler {
                             self.compile_expression(expr);
                             self.emit_op(OpCode::Return, 0);
                         }
+                        // Named function definitions should not be implicitly
+                        // returned — treat them like other statements.
+                        Statement::Let {
+                            value: Expression::FunctionLiteral { .. },
+                            ..
+                        } => {
+                            self.compile_statement(stmt);
+                            self.emit_op(OpCode::None, 0);
+                            self.emit_op(OpCode::Return, 0);
+                        }
                         Statement::Let { .. }
                         | Statement::TypedLet { .. }
                         | Statement::TypedDeclare { .. } => {
@@ -398,7 +408,16 @@ impl Compiler {
             }
 
             Statement::Let { name, value } => {
-                self.compile_expression(value);
+                // If the value is a function literal, pass the name so the
+                // closure carries it (instead of showing as "anonymous").
+                if let Expression::FunctionLiteral {
+                    parameters, body, ..
+                } = value
+                {
+                    self.compile_function(Some(&name.value), parameters, body, line);
+                } else {
+                    self.compile_expression(value);
+                }
                 if self.dup_next_define {
                     self.emit_op(OpCode::Dup, line);
                 }
