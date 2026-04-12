@@ -589,15 +589,7 @@ impl Formatter {
                 for arm in arms {
                     self.push_indent();
                     self.format_expression(&arm.condition);
-                    self.push(" -> ");
-                    if arm.body.len() == 1 {
-                        if let Statement::Expr(e) = &arm.body[0] {
-                            self.format_expression(e);
-                            self.newline();
-                            continue;
-                        }
-                    }
-                    self.push("{");
+                    self.push(" -> {");
                     self.newline();
                     self.indent += 1;
                     self.format_block(&arm.body);
@@ -608,58 +600,25 @@ impl Formatter {
                 }
                 if let Some(err_default) = error_default {
                     self.push_indent();
-                    self.push("error -> ");
-                    if err_default.len() == 1 {
-                        if let Statement::Expr(e) = &err_default[0] {
-                            self.format_expression(e);
-                            self.newline();
-                        } else {
-                            self.push("{");
-                            self.newline();
-                            self.indent += 1;
-                            self.format_block(err_default);
-                            self.indent -= 1;
-                            self.push_indent();
-                            self.push("}");
-                            self.newline();
-                        }
-                    } else {
-                        self.push("{");
-                        self.newline();
-                        self.indent += 1;
-                        self.format_block(err_default);
-                        self.indent -= 1;
-                        self.push_indent();
-                        self.push("}");
-                        self.newline();
-                    }
+                    self.push("error -> {");
+                    self.newline();
+                    self.indent += 1;
+                    self.format_block(err_default);
+                    self.indent -= 1;
+                    self.push_indent();
+                    self.push("}");
+                    self.newline();
                 }
                 if let Some(def) = default {
                     self.push_indent();
-                    if def.len() == 1 {
-                        if let Statement::Expr(e) = &def[0] {
-                            self.format_expression(e);
-                            self.newline();
-                        } else {
-                            self.push("{");
-                            self.newline();
-                            self.indent += 1;
-                            self.format_block(def);
-                            self.indent -= 1;
-                            self.push_indent();
-                            self.push("}");
-                            self.newline();
-                        }
-                    } else {
-                        self.push("{");
-                        self.newline();
-                        self.indent += 1;
-                        self.format_block(def);
-                        self.indent -= 1;
-                        self.push_indent();
-                        self.push("}");
-                        self.newline();
-                    }
+                    self.push("{");
+                    self.newline();
+                    self.indent += 1;
+                    self.format_block(def);
+                    self.indent -= 1;
+                    self.push_indent();
+                    self.push("}");
+                    self.newline();
                 }
                 self.indent -= 1;
                 self.push_indent();
@@ -730,8 +689,9 @@ impl Formatter {
                 self.push(">");
             }
             Expression::Fail { value, .. } => {
-                self.push("fail ");
+                self.push("<fail>(");
                 self.format_expression(value);
+                self.push(")");
             }
             Expression::Unless {
                 consequence,
@@ -833,13 +793,6 @@ impl Formatter {
     }
 
     fn format_option_body(&mut self, body: &[Statement]) {
-        if body.len() == 1 {
-            if let Statement::Expr(expr) = &body[0] {
-                self.format_expression(expr);
-                return;
-            }
-        }
-
         self.push("{");
         self.newline();
         self.indent += 1;
