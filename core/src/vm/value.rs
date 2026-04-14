@@ -115,7 +115,7 @@ pub struct ObjStructInstance {
 #[derive(Debug)]
 pub struct ObjModule {
     pub name: String,
-    pub globals: HashMap<String, Value>,
+    pub globals: Rc<HashMap<String, Value>>,
 }
 
 // ── Value methods ──────────────────────────────────────────────────────

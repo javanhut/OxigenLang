@@ -17,6 +17,9 @@ struct CallFrame {
     closure: Rc<ObjClosure>,
     ip: usize,
     slot_offset: usize,
+    /// When executing a module function, holds the module's globals
+    /// so `GetGlobal` can resolve module-scoped variables (e.g. `io` in `toml`).
+    module_globals: Option<Rc<HashMap<String, Value>>>,
 }
 
 impl CallFrame {
@@ -130,6 +133,7 @@ impl VM {
             closure,
             ip: 0,
             slot_offset: 0,
+            module_globals: None,
         });
 
         self.execute()
@@ -406,8 +410,16 @@ impl VM {
                     let idx = self.frames[frame_idx].read_u16();
                     let name = self.frames[frame_idx].read_constant(idx).clone();
                     if let Value::String(name_str) = &name {
-                        match self.globals.get(name_str.as_ref()) {
-                            Some(val) => self.push(val.clone()),
+                        // Check module globals first (for module-scoped variables),
+                        // then fall back to the main VM globals.
+                        let found = self.frames[frame_idx]
+                            .module_globals
+                            .as_ref()
+                            .and_then(|mg| mg.get(name_str.as_ref()))
+                            .cloned()
+                            .or_else(|| self.globals.get(name_str.as_ref()).cloned());
+                        match found {
+                            Some(val) => self.push(val),
                             None => {
                                 return Err(self.runtime_error_hint(
                                     &format!("undefined variable: {}", name_str),
@@ -1405,7 +1417,7 @@ impl VM {
 
         match callee {
             Value::Closure(closure) => {
-                self.call_closure(closure, arg_count, named_args)
+                self.call_closure(closure, arg_count, named_args, None)
             }
             Value::Builtin(func) => {
                 let start = self.stack.len() - arg_count;
@@ -1461,7 +1473,7 @@ impl VM {
                 if let Some(Value::Closure(closure)) = field_val {
                     // Callable field — treat as regular call
                     self.stack[instance_idx] = Value::Closure(Rc::clone(&closure));
-                    return self.call_closure(closure, arg_count, &[]);
+                    return self.call_closure(closure, arg_count, &[], None);
                 }
 
                 // Look up method on struct def (with inheritance)
@@ -1474,7 +1486,7 @@ impl VM {
                     self.stack[instance_idx] = Value::Closure(Rc::clone(&closure));
                     // Insert instance as first arg (self) right after the closure
                     self.stack.insert(instance_idx + 1, instance);
-                    return self.call_closure(closure, arg_count + 1, &[]);
+                    return self.call_closure(closure, arg_count + 1, &[], None);
                 }
 
                 Err(self.runtime_error_hint(
@@ -1506,7 +1518,17 @@ impl VM {
             Value::Module(m) => {
                 // Module method call: module.func(args)
                 if let Some(func) = m.globals.get(method_name).cloned() {
-                    self.stack[instance_idx] = func;
+                    self.stack[instance_idx] = func.clone();
+                    // Pass the module's globals so the function can access
+                    // module-scoped variables (e.g. `io` inside `toml`).
+                    if let Value::Closure(closure) = func {
+                        return self.call_closure(
+                            closure,
+                            arg_count,
+                            &[],
+                            Some(Rc::clone(&m.globals)),
+                        );
+                    }
                     return self.call_value(arg_count, &[]);
                 }
                 Err(self.runtime_error_hint(
@@ -1547,6 +1569,7 @@ impl VM {
         closure: Rc<ObjClosure>,
         arg_count: usize,
         named_args: &[(String, Value)],
+        module_globals: Option<Rc<HashMap<String, Value>>>,
     ) -> Result<(), VMError> {
         let expected = closure.function.arity as usize;
 
@@ -1594,10 +1617,17 @@ impl VM {
 
         let slot_offset = self.stack.len() - expected - 1; // -1 for the function itself
 
+        // Inherit module globals from the current frame if not explicitly provided,
+        // so nested calls within a module function retain module scope access.
+        let inherited_mg = module_globals.or_else(|| {
+            self.frames.last().and_then(|f| f.module_globals.clone())
+        });
+
         self.frames.push(CallFrame {
             closure,
             ip: 0,
             slot_offset,
+            module_globals: inherited_mg,
         });
 
         Ok(())
@@ -1860,7 +1890,7 @@ impl VM {
         // Create module from sub-VM globals (excluding builtins)
         let module = Rc::new(ObjModule {
             name: path_str.to_string(),
-            globals: sub_vm.globals,
+            globals: Rc::new(sub_vm.globals),
         });
 
         self.module_cache
