@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"log"
 	"os"
 	"sync"
+	"time"
 )
 
 type documentState struct {
@@ -20,11 +22,16 @@ type Server struct {
 	writerMu   sync.Mutex
 	oxigenBin  string
 	stdlibPath string
+
+	diagMu     sync.Mutex
+	diagTimers map[string]*time.Timer // per-URI debounce
+	diagCancel context.CancelFunc     // cancels the in-flight run
 }
 
 func NewServer() *Server {
 	return &Server{
 		documents:  make(map[string]*documentState),
+		diagTimers: make(map[string]*time.Timer),
 		writer:     bufio.NewWriter(os.Stdout),
 		oxigenBin:  findOxigenBinary(),
 		stdlibPath: findStdlibPath(),
@@ -180,7 +187,8 @@ func (s *Server) handleDidOpen(msg Request) {
 	}
 	s.mu.Unlock()
 
-	s.publishDiagnostics(params.TextDocument.URI, params.TextDocument.Text, &params.TextDocument.Version)
+	// Run diagnostics immediately on first open (no debounce), but async
+	go s.runDiagnostics(params.TextDocument.URI, params.TextDocument.Text, params.TextDocument.Version)
 }
 
 func (s *Server) handleDidChange(msg Request) {
@@ -201,7 +209,7 @@ func (s *Server) handleDidChange(msg Request) {
 	}
 	s.mu.Unlock()
 
-	s.publishDiagnostics(params.TextDocument.URI, text, &params.TextDocument.Version)
+	s.scheduleDiagnostics(params.TextDocument.URI, text, params.TextDocument.Version)
 }
 
 func (s *Server) handleDidClose(msg Request) {
@@ -209,6 +217,14 @@ func (s *Server) handleDidClose(msg Request) {
 	if err := json.Unmarshal(msg.Params, &params); err != nil {
 		return
 	}
+
+	// Stop any pending debounce timer for this URI
+	s.diagMu.Lock()
+	if t, ok := s.diagTimers[params.TextDocument.URI]; ok {
+		t.Stop()
+		delete(s.diagTimers, params.TextDocument.URI)
+	}
+	s.diagMu.Unlock()
 
 	s.mu.Lock()
 	delete(s.documents, params.TextDocument.URI)
@@ -323,16 +339,46 @@ func (s *Server) handleFormatting(msg Request) {
 	}
 }
 
-// ── Diagnostics publishing ──
+// ── Diagnostics scheduling ──
 
-func (s *Server) publishDiagnostics(uri, content string, version *int) {
-	diagnostics := getDiagnostics(content, s.oxigenBin)
+const diagDebounce = 300 * time.Millisecond
+const diagTimeout = 10 * time.Second
+
+func (s *Server) scheduleDiagnostics(uri, content string, version int) {
+	s.diagMu.Lock()
+	if t, ok := s.diagTimers[uri]; ok {
+		t.Stop()
+	}
+	s.diagTimers[uri] = time.AfterFunc(diagDebounce, func() {
+		s.diagMu.Lock()
+		delete(s.diagTimers, uri)
+		s.diagMu.Unlock()
+		s.runDiagnostics(uri, content, version)
+	})
+	s.diagMu.Unlock()
+}
+
+func (s *Server) runDiagnostics(uri, content string, version int) {
+	s.diagMu.Lock()
+	if s.diagCancel != nil {
+		s.diagCancel()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), diagTimeout)
+	s.diagCancel = cancel
+	s.diagMu.Unlock()
+	defer cancel()
+
+	diagnostics := getDiagnosticsCtx(ctx, content, s.oxigenBin)
+	if ctx.Err() != nil {
+		return // cancelled by a newer edit or timed out
+	}
 	if diagnostics == nil {
 		diagnostics = []Diagnostic{}
 	}
+	v := version
 	s.notify("textDocument/publishDiagnostics", PublishDiagnosticsParams{
 		URI:         uri,
-		Version:     version,
+		Version:     &v,
 		Diagnostics: diagnostics,
 	})
 }

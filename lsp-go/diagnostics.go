@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -14,7 +15,7 @@ type checkDiagnostic struct {
 	Severity   string  `json:"severity"`
 }
 
-func getDiagnostics(content, oxigenBin string) []Diagnostic {
+func getDiagnosticsCtx(ctx context.Context, content, oxigenBin string) []Diagnostic {
 	tmpFile, err := os.CreateTemp("", "oxigen-check-*.oxi")
 	if err != nil {
 		return []Diagnostic{}
@@ -25,8 +26,11 @@ func getDiagnostics(content, oxigenBin string) []Diagnostic {
 	tmpFile.WriteString(content)
 	tmpFile.Close()
 
-	cmd := exec.Command(oxigenBin, "check", tmpPath)
+	cmd := exec.CommandContext(ctx, oxigenBin, "check", tmpPath)
 	output, err := cmd.Output()
+	if ctx.Err() != nil {
+		return nil // cancelled or timed out
+	}
 	if err != nil {
 		// oxigen check not available or failed — return empty
 		if _, ok := err.(*exec.ExitError); !ok {
