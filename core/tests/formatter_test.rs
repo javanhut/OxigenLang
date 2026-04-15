@@ -85,6 +85,36 @@ fn test_format_array_literal() {
 }
 
 #[test]
+fn test_format_long_array_multiline() {
+    let input = "[100000, 200000, 300000, 400000, 500000, 600000, 700000, 800000, 900000, 1000000]";
+    let expected = "[\n    100000,\n    200000,\n    300000,\n    400000,\n    500000,\n    600000,\n    700000,\n    800000,\n    900000,\n    1000000,\n]\n";
+    assert_eq!(format_source(input), expected);
+}
+
+#[test]
+fn test_format_empty_array() {
+    let input = "[]";
+    let expected = "[]\n";
+    assert_eq!(format_source(input), expected);
+}
+
+#[test]
+fn test_format_long_array_idempotent() {
+    let input = "[100000, 200000, 300000, 400000, 500000, 600000, 700000, 800000, 900000, 1000000]";
+    let first = format_source(input);
+    let second = format_source(&first);
+    assert_eq!(first, second, "Long array formatting should be idempotent");
+}
+
+#[test]
+fn test_format_array_with_prefix_column() {
+    let input = "long_variable_name_here := [100000, 200000, 300000, 400000, 500000, 600000]";
+    let result = format_source(input);
+    // The array should fold because prefix + inline width > 80
+    assert!(result.contains('\n'), "Array after long prefix should fold to multi-line");
+}
+
+#[test]
 fn test_format_idempotent() {
     let input = "x <int> := 10\nname <str> := \"hello\"\n";
     let first = format_source(input);

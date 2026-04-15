@@ -26,6 +26,26 @@ impl Formatter {
         }
     }
 
+    fn current_column(&self) -> usize {
+        match self.output.rfind('\n') {
+            Some(i) => self.output.len() - i - 1,
+            None => self.output.len(),
+        }
+    }
+
+    fn array_inline_width(&self, elements: &[Expression]) -> usize {
+        let mut f = Formatter::new();
+        f.push("[");
+        for (i, elem) in elements.iter().enumerate() {
+            if i > 0 {
+                f.push(", ");
+            }
+            f.format_expression(elem);
+        }
+        f.push("]");
+        f.output.lines().map(|l| l.len()).max().unwrap_or(0)
+    }
+
     fn push(&mut self, s: &str) {
         self.output.push_str(s);
     }
@@ -435,14 +455,38 @@ impl Formatter {
                 self.push("None");
             }
             Expression::Array { elements, .. } => {
-                self.push("[");
-                for (i, elem) in elements.iter().enumerate() {
-                    if i > 0 {
-                        self.push(", ");
-                    }
-                    self.format_expression(elem);
+                if elements.is_empty() {
+                    self.push("[]");
+                    return;
                 }
-                self.push("]");
+
+                const MAX_WIDTH: usize = 80;
+                let col = self.current_column();
+                let inline = self.array_inline_width(elements);
+
+                if col + inline <= MAX_WIDTH {
+                    self.push("[");
+                    for (i, elem) in elements.iter().enumerate() {
+                        if i > 0 {
+                            self.push(", ");
+                        }
+                        self.format_expression(elem);
+                    }
+                    self.push("]");
+                } else {
+                    self.push("[");
+                    self.newline();
+                    self.indent += 1;
+                    for elem in elements.iter() {
+                        self.push_indent();
+                        self.format_expression(elem);
+                        self.push(",");
+                        self.newline();
+                    }
+                    self.indent -= 1;
+                    self.push_indent();
+                    self.push("]");
+                }
             }
             Expression::Prefix {
                 operator, right, ..

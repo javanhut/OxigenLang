@@ -116,6 +116,50 @@ fn test_parse_array_literal() {
     }
 }
 
+#[test]
+fn test_parse_multiline_array() {
+    let program = parse_ok("[\n1,\n2,\n3\n]");
+    match &program.statements[0] {
+        Statement::Expr(Expression::Array { elements, .. }) => {
+            assert_eq!(elements.len(), 3);
+        }
+        _ => panic!("Expected array expression"),
+    }
+}
+
+#[test]
+fn test_parse_array_trailing_comma() {
+    let program = parse_ok("[1, 2, 3,]");
+    match &program.statements[0] {
+        Statement::Expr(Expression::Array { elements, .. }) => {
+            assert_eq!(elements.len(), 3);
+        }
+        _ => panic!("Expected array expression"),
+    }
+}
+
+#[test]
+fn test_parse_multiline_array_trailing_comma() {
+    let program = parse_ok("[\n\"a\",\n\"b\",\n]");
+    match &program.statements[0] {
+        Statement::Expr(Expression::Array { elements, .. }) => {
+            assert_eq!(elements.len(), 2);
+        }
+        _ => panic!("Expected array expression"),
+    }
+}
+
+#[test]
+fn test_parse_empty_multiline_array() {
+    let program = parse_ok("[\n]");
+    match &program.statements[0] {
+        Statement::Expr(Expression::Array { elements, .. }) => {
+            assert_eq!(elements.len(), 0);
+        }
+        _ => panic!("Expected array expression"),
+    }
+}
+
 // ==================== EXPRESSION PARSING TESTS ====================
 
 #[test]

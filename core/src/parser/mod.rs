@@ -1945,18 +1945,42 @@ impl Parser {
     fn parse_expression_list(&mut self, end: TokenType) -> Option<Vec<Expression>> {
         let mut args = Vec::new();
 
-        // Handle empty args: f()
+        // Skip newlines after the opening bracket.
+        while self.peek_token.token_type == TokenType::Newline {
+            self.next_token();
+        }
+
+        // Empty: `[]` or `[\n]`
         if self.peek_token.token_type == end {
-            self.next_token(); // consume end
+            self.next_token();
             return Some(args);
         }
 
-        self.next_token(); // first arg
+        self.next_token(); // first element
         args.push(self.parse_expression(Precedence::Lowest)?);
 
-        while self.peek_token.token_type == TokenType::Comma {
+        loop {
+            // Skip newlines between an element and the following comma or `]`.
+            while self.peek_token.token_type == TokenType::Newline {
+                self.next_token();
+            }
+
+            if self.peek_token.token_type != TokenType::Comma {
+                break;
+            }
             self.next_token(); // consume comma
-            self.next_token(); // next arg
+
+            // Skip newlines after the comma.
+            while self.peek_token.token_type == TokenType::Newline {
+                self.next_token();
+            }
+
+            // Trailing comma: `[1, 2,]` or `[1, 2,\n]`
+            if self.peek_token.token_type == end {
+                break;
+            }
+
+            self.next_token();
             args.push(self.parse_expression(Precedence::Lowest)?);
         }
 
