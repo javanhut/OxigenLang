@@ -397,20 +397,8 @@ fn test_parse_repeat_unless_statement() {
             condition, body, ..
         } => {
             match condition {
-                Expression::Prefix {
-                    token,
-                    operator,
-                    right,
-                } => {
-                    assert_eq!(token.token_type, TokenType::Not);
-                    assert_eq!(token.literal, "not");
-                    assert_eq!(operator, "not");
-                    match right.as_ref() {
-                        Expression::Infix { operator, .. } => assert_eq!(operator, ">"),
-                        _ => panic!("Expected infix condition inside negation"),
-                    }
-                }
-                _ => panic!("Expected negated repeat condition"),
+                Expression::Infix { operator, .. } => assert_eq!(operator, "<="),
+                _ => panic!("Expected inverted repeat condition"),
             }
             assert_eq!(body.len(), 1);
         }

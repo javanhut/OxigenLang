@@ -65,7 +65,17 @@ fn restore_header(source: &str, body: String) -> String {
     }
 }
 
-fn run_file_vm(file_path: &str, script_args: &[String]) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JitMode {
+    /// Default tiering: compile after 50 calls.
+    Default,
+    /// `--jit`: compile on first call (threshold = 1).
+    Eager,
+    /// `--no-jit`: never compile.
+    Disabled,
+}
+
+fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
     let contents = read_source(file_path);
 
     let lexer = Lexer::new(&contents);
@@ -93,21 +103,27 @@ fn run_file_vm(file_path: &str, script_args: &[String]) {
         .canonicalize()
         .expect("Could not resolve file path");
     let mut vm = VM::new();
+    match jit_mode {
+        JitMode::Eager => {
+            vm.jit.set_threshold(1);
+            vm.jit.set_loop_threshold(1);
+        }
+        JitMode::Disabled => vm.jit.disable(),
+        JitMode::Default => {}
+    }
     vm.set_source(&contents);
     vm.set_file(file_path_buf);
     vm.set_script_args(script_args);
 
     match vm.run(function) {
-        Ok(result) => {
-            match &result {
-                oxigen_core::vm::value::Value::None => {}
-                oxigen_core::vm::value::Value::Error(msg) => {
-                    eprintln!("Error: {}", msg);
-                    std::process::exit(1);
-                }
-                _ => println!("{}", result),
+        Ok(result) => match &result {
+            oxigen_core::vm::value::Value::None => {}
+            oxigen_core::vm::value::Value::Error(msg) => {
+                eprintln!("Error: {}", msg);
+                std::process::exit(1);
             }
-        }
+            _ => println!("{}", result),
+        },
         Err(err) => {
             eprintln!("{}", err);
             std::process::exit(1);
@@ -224,9 +240,23 @@ fn main() {
 
     // VM is the default. --tree-walk falls back to the tree-walking interpreter.
     let use_tree_walk = args.iter().any(|a| a == "--tree-walk");
+    let no_jit = args.iter().any(|a| a == "--no-jit");
+    let eager_jit = !no_jit
+        && (args.iter().any(|a| a == "--jit")
+            || env::var("OXIGEN_JIT").map(|v| v != "0").unwrap_or(false));
+    let jit_mode = if no_jit {
+        JitMode::Disabled
+    } else if eager_jit {
+        JitMode::Eager
+    } else {
+        JitMode::Default
+    };
     let filtered_args: Vec<String> = args
         .iter()
-        .filter(|a| a.as_str() != "--tree-walk" && a.as_str() != "--vm")
+        .filter(|a| {
+            let s = a.as_str();
+            s != "--tree-walk" && s != "--vm" && s != "--jit" && s != "--no-jit"
+        })
         .cloned()
         .collect();
 
@@ -247,7 +277,7 @@ fn main() {
             if use_tree_walk {
                 run_file(path, &filtered_args[2..]);
             } else {
-                run_file_vm(path, &filtered_args[2..]);
+                run_file_vm(path, &filtered_args[2..], jit_mode);
             }
         }
         _ => repl::run_repl(),

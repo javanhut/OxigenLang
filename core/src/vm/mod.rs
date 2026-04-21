@@ -2,6 +2,7 @@ pub mod builtins;
 pub mod value;
 
 use crate::compiler::opcode::OpCode;
+use crate::jit::JitEngine;
 use crate::vm::value::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -41,6 +42,13 @@ impl CallFrame {
     }
 }
 
+/// Opaque handle returned by `VM::frames_pop` to the JIT runtime so it can
+/// complete a Return without depending on the private `CallFrame` layout.
+#[allow(dead_code)]
+pub(crate) struct CallFrameHandle {
+    pub(crate) slot_offset: usize,
+}
+
 /// Runtime error with source information.
 #[derive(Debug)]
 pub struct VMError {
@@ -77,6 +85,13 @@ pub struct VM {
     // Global variable metadata for is_mut/is_type_mut
     global_mutability: HashMap<String, bool>,
     global_type_constraints: HashMap<String, Option<String>>,
+
+    /// Version counter for the globals map — bumped on every write.
+    /// Used by the JIT's GetGlobal inline cache to detect staleness.
+    pub(crate) globals_version: u64,
+
+    /// Baseline JIT engine. Stub/no-op when the `jit` feature is off.
+    pub jit: JitEngine,
 }
 
 impl VM {
@@ -98,6 +113,8 @@ impl VM {
             script_args: Vec::new(),
             global_mutability: HashMap::new(),
             global_type_constraints: HashMap::new(),
+            globals_version: 0,
+            jit: JitEngine::new(),
         }
     }
 
@@ -112,11 +129,34 @@ impl VM {
     pub fn set_script_args(&mut self, args: &[String]) {
         self.script_args = args.to_vec();
         // Make script args available as __args global
-        let args_val: Vec<Value> = args.iter().map(|a| Value::String(a.as_str().into())).collect();
+        let args_val: Vec<Value> = args
+            .iter()
+            .map(|a| Value::String(a.as_str().into()))
+            .collect();
         self.globals.insert(
             "__args".to_string(),
             Value::Array(Rc::new(RefCell::new(args_val))),
         );
+    }
+
+    fn maybe_compile_current_loop_hot_function(&mut self, frame_idx: usize) {
+        let closure = Rc::clone(&self.frames[frame_idx].closure);
+        let loop_count = closure.loop_count.get().saturating_add(1);
+        closure.loop_count.set(loop_count);
+
+        if closure.jit_state.get() != 0 || loop_count < self.jit.loop_threshold() {
+            return;
+        }
+
+        if let Some(thunk) = self
+            .jit
+            .maybe_compile_loop_thunk(&closure.function, loop_count)
+        {
+            closure.jit_thunk.set(Some(thunk));
+            closure.jit_state.set(1);
+        } else {
+            closure.jit_state.set(2);
+        }
     }
 
     /// Run a compiled function.
@@ -124,36 +164,558 @@ impl VM {
         let closure = Rc::new(ObjClosure {
             function: Rc::new(function),
             upvalues: Vec::new(),
+            call_count: std::cell::Cell::new(0),
+            loop_count: std::cell::Cell::new(0),
+            jit_state: std::cell::Cell::new(0),
+            jit_thunk: std::cell::Cell::new(None),
         });
 
-        // Push the closure itself onto the stack (slot 0)
+        // Push the closure itself onto the stack (slot 0) — this is the
+        // callee slot that `call_closure` expects.
         self.stack.push(Value::Closure(Rc::clone(&closure)));
 
-        self.frames.push(CallFrame {
-            closure,
-            ip: 0,
-            slot_offset: 0,
-            module_globals: None,
-        });
+        // Route the top-level through `call_closure` so it participates in
+        // JIT tiering just like any other call. `call_closure` pushes the
+        // frame, bumps the counter, and (if hot) hands off to the JIT; if
+        // the JIT drives the call to completion the frame is already gone
+        // and `execute_until(0)` is a no-op.
+        self.call_closure(closure, 0, &[], None)?;
 
-        self.execute()
+        self.execute_until(0)?;
+        Ok(self.pop())
+    }
+
+    // ── Opcode handlers (shared between interpreter and JIT runtime) ──
+
+    /// Read the name string at constant index `name_idx`. The compiler
+    /// guarantees globals use string constants, but we defensively return
+    /// an error if that invariant is broken.
+    fn name_constant(&self, name_idx: u16) -> Result<Rc<str>, VMError> {
+        match self.current_constant(name_idx) {
+            Value::String(s) => Ok(s),
+            _ => Err(self.runtime_error("invalid global name")),
+        }
+    }
+
+    pub(crate) fn handle_get_global(&mut self, name_idx: u16) -> Result<(), VMError> {
+        let name = self.name_constant(name_idx)?;
+        let frame = self.frames.last().unwrap();
+        let found = frame
+            .module_globals
+            .as_ref()
+            .and_then(|mg| mg.get(name.as_ref()))
+            .cloned()
+            .or_else(|| self.globals.get(name.as_ref()).cloned());
+        match found {
+            Some(val) => {
+                self.push(val);
+                Ok(())
+            }
+            None => Err(self.runtime_error_hint(
+                &format!("undefined variable: {}", name),
+                "use `:=` to declare new variables",
+            )),
+        }
+    }
+
+    pub(crate) fn handle_set_global(&mut self, name_idx: u16) -> Result<(), VMError> {
+        let name = self.name_constant(name_idx)?;
+        if !self.globals.contains_key(name.as_ref()) {
+            return Err(self.runtime_error_hint(
+                &format!("undefined variable: {}", name),
+                "use `:=` to declare new variables, or `=` to reassign an existing typed variable",
+            ));
+        }
+        if let Some(false) = self.global_mutability.get(name.as_ref()) {
+            return Err(self.runtime_error_hint(
+                &format!("cannot reassign immutable variable '{}'", name),
+                "use `:=` to override an immutable binding",
+            ));
+        }
+        let val = self.peek(0).clone();
+        self.globals.insert(name.to_string(), val);
+        self.globals_version = self.globals_version.wrapping_add(1);
+        Ok(())
+    }
+
+    pub(crate) fn handle_define_global(&mut self, name_idx: u16) -> Result<(), VMError> {
+        let name = self.name_constant(name_idx)?;
+        let val = self.pop();
+        self.globals.insert(name.to_string(), val);
+        self.globals_version = self.globals_version.wrapping_add(1);
+        Ok(())
+    }
+
+    pub(crate) fn handle_define_global_typed(
+        &mut self,
+        name_idx: u16,
+        mutable: bool,
+        type_idx: u16,
+    ) -> Result<(), VMError> {
+        let name = self.name_constant(name_idx)?;
+        let type_name = self.current_constant(type_idx);
+        let val = self.pop();
+        self.globals.insert(name.to_string(), val);
+        self.global_mutability.insert(name.to_string(), mutable);
+        if let Value::String(tn) = type_name {
+            self.global_type_constraints
+                .insert(name.to_string(), Some(tn.to_string()));
+        }
+        self.globals_version = self.globals_version.wrapping_add(1);
+        Ok(())
+    }
+
+    pub(crate) fn handle_get_upvalue(&mut self, idx: u16) -> Result<(), VMError> {
+        let upvalue = Rc::clone(&self.frames.last().unwrap().closure.upvalues[idx as usize]);
+        let val = match &*upvalue.borrow() {
+            Upvalue::Open(slot) => self.stack[*slot].clone(),
+            Upvalue::Closed(val) => val.clone(),
+        };
+        self.push(val);
+        Ok(())
+    }
+
+    pub(crate) fn handle_set_upvalue(&mut self, idx: u16) -> Result<(), VMError> {
+        let val = self.peek(0).clone();
+        let upvalue = Rc::clone(&self.frames.last().unwrap().closure.upvalues[idx as usize]);
+        match &mut *upvalue.borrow_mut() {
+            Upvalue::Open(slot) => {
+                self.stack[*slot] = val;
+            }
+            Upvalue::Closed(v) => {
+                *v = val;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn handle_close_upvalue(&mut self) {
+        let stack_top = self.stack.len() - 1;
+        self.close_upvalues(stack_top);
+        self.pop();
+    }
+
+    pub(crate) fn handle_struct_literal(
+        &mut self,
+        name_idx: u16,
+        field_count: u8,
+    ) -> Result<(), VMError> {
+        let name = self.current_constant(name_idx);
+        let Value::String(struct_name) = name else {
+            return Err(self.runtime_error("expected struct name"));
+        };
+        let field_count = field_count as usize;
+        let mut fields = HashMap::new();
+        let start = self.stack.len() - field_count * 2;
+        let flat: Vec<Value> = self.stack.drain(start..).collect();
+        for pair in flat.chunks(2) {
+            if let Value::String(fname) = &pair[0] {
+                fields.insert(fname.to_string(), pair[1].clone());
+            }
+        }
+        self.push(Value::StructInstance(Rc::new(ObjStructInstance {
+            struct_name: struct_name.to_string(),
+            fields: RefCell::new(fields),
+        })));
+        Ok(())
+    }
+
+    pub(crate) fn handle_get_field(&mut self, field_idx: u16) -> Result<(), VMError> {
+        let field_name = self.current_constant(field_idx);
+        let object = self.pop();
+        let Value::String(fname) = &field_name else {
+            return Err(self.runtime_error("invalid field name"));
+        };
+
+        match &object {
+            Value::StructInstance(inst) => {
+                let field_val = {
+                    let fields = inst.fields.borrow();
+                    fields.get(fname.as_ref()).cloned()
+                };
+                if let Some(val) = field_val {
+                    self.push(val);
+                    return Ok(());
+                }
+                let method_val =
+                    if let Some(Value::StructDef(def)) = self.globals.get(&inst.struct_name) {
+                        let methods = def.methods.borrow();
+                        methods.get(fname.as_ref()).cloned()
+                    } else {
+                        None
+                    };
+                if let Some(method) = method_val {
+                    self.push(method);
+                    Ok(())
+                } else {
+                    Err(self.runtime_error_hint(
+                        &format!("field '{}' not found on {}", fname, inst.struct_name),
+                        "check the struct definition for available fields and methods",
+                    ))
+                }
+            }
+            Value::Module(m) => match m.globals.get(fname.as_ref()) {
+                Some(val) => {
+                    self.push(val.clone());
+                    Ok(())
+                }
+                None => Err(self.runtime_error_hint(
+                    &format!("module '{}' has no member '{}'", m.name, fname),
+                    "check the module's public API for available members",
+                )),
+            },
+            Value::ErrorValue { msg, tag } => match fname.as_ref() {
+                "msg" => {
+                    self.push(Value::String(Rc::clone(msg)));
+                    Ok(())
+                }
+                "tag" => {
+                    match tag {
+                        Some(t) => self.push(Value::String(Rc::clone(t))),
+                        None => self.push(Value::None),
+                    }
+                    Ok(())
+                }
+                _ => Err(self.runtime_error(&format!("ErrorValue has no field '{}'", fname))),
+            },
+            Value::Map(entries) => {
+                let entries = entries.borrow();
+                let key = Value::String(Rc::clone(fname));
+                let mut found = None;
+                for (k, v) in entries.iter() {
+                    if *k == key {
+                        found = Some(v.clone());
+                        break;
+                    }
+                }
+                drop(entries);
+                self.push(found.unwrap_or(Value::None));
+                Ok(())
+            }
+            Value::EnumDef(def) => {
+                let variant = def
+                    .variants
+                    .iter()
+                    .find(|v| v.name.as_str() == fname.as_ref());
+                match variant {
+                    Some(v) => match &v.kind {
+                        crate::vm::value::VmEnumVariantKind::Unit(disc) => {
+                            self.push(Value::EnumInstance(Rc::new(
+                                crate::vm::value::ObjEnumInstance {
+                                    enum_name: def.name.clone(),
+                                    variant_name: v.name.clone(),
+                                    payload: crate::vm::value::VmEnumPayload::Unit(
+                                        disc.clone(),
+                                    ),
+                                },
+                            )));
+                            Ok(())
+                        }
+                        crate::vm::value::VmEnumVariantKind::Tuple(_) => {
+                            Err(self.runtime_error_hint(
+                                &format!(
+                                    "variant '{}' of enum {} requires arguments",
+                                    v.name, def.name
+                                ),
+                                "use EnumName.Variant(args) to construct tuple variants",
+                            ))
+                        }
+                        crate::vm::value::VmEnumVariantKind::Struct(_) => {
+                            Err(self.runtime_error_hint(
+                                &format!(
+                                    "variant '{}' of enum {} requires struct fields",
+                                    v.name, def.name
+                                ),
+                                "use EnumName.Variant { field: value } for struct variants",
+                            ))
+                        }
+                    },
+                    None => Err(self.runtime_error(&format!(
+                        "enum {} has no variant '{}'",
+                        def.name, fname
+                    ))),
+                }
+            }
+            Value::EnumInstance(inst) => {
+                let name = fname.as_ref();
+                match name {
+                    "name" => {
+                        self.push(Value::String(inst.variant_name.as_str().into()));
+                        Ok(())
+                    }
+                    "value" => match &inst.payload {
+                        crate::vm::value::VmEnumPayload::Unit(Some(v)) => {
+                            self.push(v.clone());
+                            Ok(())
+                        }
+                        crate::vm::value::VmEnumPayload::Unit(None) => {
+                            self.push(Value::None);
+                            Ok(())
+                        }
+                        _ => Err(self
+                            .runtime_error(".value is only defined on unit variants")),
+                    },
+                    other => match &inst.payload {
+                        crate::vm::value::VmEnumPayload::Tuple(items) => {
+                            let idx_opt = other.parse::<usize>().ok().or_else(|| {
+                                self.globals.get(&inst.enum_name).and_then(|gv| {
+                                    if let Value::EnumDef(def) = gv {
+                                        def.variants
+                                            .iter()
+                                            .find(|v| v.name == inst.variant_name)
+                                            .and_then(|v| match &v.kind {
+                                                crate::vm::value::VmEnumVariantKind::Tuple(
+                                                    names,
+                                                ) => names.iter().position(|n| n == other),
+                                                _ => None,
+                                            })
+                                    } else {
+                                        None
+                                    }
+                                })
+                            });
+                            match idx_opt.and_then(|i| items.get(i).cloned()) {
+                                Some(v) => {
+                                    self.push(v);
+                                    Ok(())
+                                }
+                                None => Err(self.runtime_error(&format!(
+                                    "tuple variant {}.{} has no field '{}'",
+                                    inst.enum_name, inst.variant_name, other
+                                ))),
+                            }
+                        }
+                        crate::vm::value::VmEnumPayload::Struct(fields) => {
+                            match fields.iter().find(|(k, _)| k == other) {
+                                Some((_, v)) => {
+                                    self.push(v.clone());
+                                    Ok(())
+                                }
+                                None => Err(self.runtime_error(&format!(
+                                    "struct variant {}.{} has no field '{}'",
+                                    inst.enum_name, inst.variant_name, other
+                                ))),
+                            }
+                        }
+                        crate::vm::value::VmEnumPayload::Unit(_) => {
+                            Err(self.runtime_error(&format!(
+                                "unit variant {}.{} has no field '{}'",
+                                inst.enum_name, inst.variant_name, other
+                            )))
+                        }
+                    },
+                }
+            }
+            _ => Err(self.runtime_error_hint(
+                &format!("cannot access field '{}' on {}", fname, object.type_name()),
+                "field access is supported on structs, enums, modules, maps, and error values",
+            )),
+        }
+    }
+
+    pub(crate) fn handle_set_field(&mut self, field_idx: u16) -> Result<(), VMError> {
+        let field_name = self.current_constant(field_idx);
+        let value = self.pop();
+        let object = self.pop();
+        let Value::String(fname) = &field_name else {
+            return Err(self.runtime_error("invalid field name"));
+        };
+        match &object {
+            Value::StructInstance(inst) => {
+                inst.fields.borrow_mut().insert(fname.to_string(), value);
+                Ok(())
+            }
+            Value::Map(entries) => {
+                let mut entries = entries.borrow_mut();
+                let key = Value::String(Rc::clone(fname));
+                let mut found = false;
+                for (k, v) in entries.iter_mut() {
+                    if *k == key {
+                        *v = value.clone();
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    entries.push((key, value));
+                }
+                Ok(())
+            }
+            _ => Err(self.runtime_error_hint(
+                &format!("cannot set field on {}", object.type_name()),
+                "field assignment is supported on struct instances and maps",
+            )),
+        }
+    }
+
+    pub(crate) fn handle_define_method(
+        &mut self,
+        struct_name_idx: u16,
+        method_count: u8,
+    ) -> Result<(), VMError> {
+        let struct_name = self.current_constant(struct_name_idx);
+        let Value::String(name_str) = struct_name else {
+            return Err(self.runtime_error("invalid struct name"));
+        };
+        let method_count = method_count as usize;
+        let start = self.stack.len() - method_count * 2;
+        let flat: Vec<Value> = self.stack.drain(start..).collect();
+        if let Some(Value::StructDef(def)) = self.globals.get(name_str.as_ref()) {
+            let mut methods = def.methods.borrow_mut();
+            for pair in flat.chunks(2) {
+                if let Value::String(mname) = &pair[1] {
+                    methods.insert(mname.to_string(), pair[0].clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn handle_method_call(
+        &mut self,
+        method_idx: u16,
+        arg_count: u8,
+    ) -> Result<(), VMError> {
+        let method_name = self.current_constant(method_idx);
+        let Value::String(mname) = method_name else {
+            return Err(self.runtime_error("invalid method name"));
+        };
+        self.call_method(&mname, arg_count as usize, &[])
+    }
+
+    /// Handle the `Closure` opcode. Reads the upvalue descriptors starting
+    /// at `descriptors_offset` in the current frame's chunk. On return the
+    /// new closure is on top of the stack.
+    pub(crate) fn handle_closure(
+        &mut self,
+        fn_const_idx: u16,
+        descriptors_offset: usize,
+    ) -> Result<(), VMError> {
+        let constant = self.current_constant(fn_const_idx);
+        let Value::Closure(template) = constant else {
+            return Err(self.runtime_error("expected closure constant"));
+        };
+
+        let upvalue_count = template.function.upvalue_count as usize;
+
+        // Snapshot what we need from the current frame so we can call
+        // mutable methods below without conflicting borrows.
+        let (chunk_rc, parent_upvalues, slot_offset) = {
+            let frame = self.frames.last().unwrap();
+            (
+                Rc::clone(&frame.closure.function),
+                frame.closure.upvalues.clone(),
+                frame.slot_offset,
+            )
+        };
+        let code = &chunk_rc.chunk.code;
+
+        let mut upvalues = Vec::with_capacity(upvalue_count);
+        let mut off = descriptors_offset;
+        for _ in 0..upvalue_count {
+            let is_local = code[off] == 1;
+            off += 1;
+            let index = ((code[off] as u16) << 8) | (code[off + 1] as u16);
+            off += 2;
+
+            if is_local {
+                let abs_slot = slot_offset + index as usize;
+                let upvalue = self.capture_upvalue(abs_slot);
+                upvalues.push(upvalue);
+            } else {
+                upvalues.push(Rc::clone(&parent_upvalues[index as usize]));
+            }
+        }
+
+        let closure = Rc::new(ObjClosure {
+            function: Rc::clone(&template.function),
+            upvalues,
+            call_count: std::cell::Cell::new(0),
+            loop_count: std::cell::Cell::new(0),
+            jit_state: std::cell::Cell::new(0),
+            jit_thunk: std::cell::Cell::new(None),
+        });
+        self.push(Value::Closure(closure));
+        Ok(())
     }
 
     // ── Stack Operations ───────────────────────────────────────────────
 
-    fn push(&mut self, value: Value) {
+    pub(crate) fn push(&mut self, value: Value) {
         if self.stack.len() >= STACK_MAX {
             panic!("stack overflow: exceeded {} slots", STACK_MAX);
         }
         self.stack.push(value);
     }
 
-    fn pop(&mut self) -> Value {
+    pub(crate) fn pop(&mut self) -> Value {
         self.stack.pop().expect("stack underflow")
     }
 
-    fn peek(&self, distance: usize) -> &Value {
+    pub(crate) fn peek(&self, distance: usize) -> &Value {
         &self.stack[self.stack.len() - 1 - distance]
+    }
+
+    /// Stack slot `n` counted from 0 at the bottom. Used by the JIT
+    /// runtime to read/write locals without constructing a CallFrame
+    /// reference.
+    #[allow(dead_code)]
+    pub(crate) fn stack_slot(&self, n: usize) -> &Value {
+        &self.stack[n]
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn set_stack_slot(&mut self, n: usize, v: Value) {
+        self.stack[n] = v;
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn current_slot_offset(&self) -> usize {
+        self.frames.last().map(|f| f.slot_offset).unwrap_or(0)
+    }
+
+    /// Clone the constant at `idx` from the current frame's chunk. Used by
+    /// the JIT runtime's `jit_push_constant` helper.
+    pub(crate) fn current_constant(&self, idx: u16) -> Value {
+        let frame = self.frames.last().unwrap();
+        frame.closure.function.chunk.constants[idx as usize].clone()
+    }
+
+    /// Pop the topmost call frame. Returns `None` if there is none.
+    /// Used by the JIT runtime's `jit_op_return` helper.
+    #[allow(dead_code)]
+    pub(crate) fn frames_pop(&mut self) -> Option<CallFrameHandle> {
+        self.frames.pop().map(|f| CallFrameHandle {
+            slot_offset: f.slot_offset,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn stack_truncate(&mut self, len: usize) {
+        self.stack.truncate(len);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn frames_len(&self) -> usize {
+        self.frames.len()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn stack_as_mut_ptr(&mut self) -> *mut Value {
+        self.stack.as_mut_ptr()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn stack_len(&self) -> usize {
+        self.stack.len()
+    }
+
+    /// Shrink the stack by `n` elements, dropping the values. Used by the
+    /// JIT's inline int fast path to commit a binop result.
+    #[allow(dead_code)]
+    pub(crate) fn stack_shrink(&mut self, n: usize) {
+        let new_len = self.stack.len().saturating_sub(n);
+        self.stack.truncate(new_len);
     }
 
     fn current_line(&self) -> u32 {
@@ -190,7 +752,7 @@ impl VM {
         out
     }
 
-    fn runtime_error(&self, message: &str) -> VMError {
+    pub(crate) fn runtime_error(&self, message: &str) -> VMError {
         let line = self.current_line();
         VMError {
             message: self.format_error(message, None),
@@ -198,7 +760,7 @@ impl VM {
         }
     }
 
-    fn runtime_error_hint(&self, message: &str, hint: &str) -> VMError {
+    pub(crate) fn runtime_error_hint(&self, message: &str, hint: &str) -> VMError {
         let line = self.current_line();
         VMError {
             message: self.format_error(message, Some(hint)),
@@ -208,7 +770,22 @@ impl VM {
 
     // ── Main Execution Loop ────────────────────────────────────────────
 
-    fn execute(&mut self) -> Result<Value, VMError> {
+    /// Drive the interpreter until the current frame's depth returns to
+    /// `stop_depth`. The top-level entry point uses `stop_depth = 0`; the
+    /// JIT helper passes in its pre-call depth so it can re-enter the
+    /// interpreter for a single callee activation without restarting the
+    /// outer loop.
+    ///
+    /// On normal exit the last-popped frame's return value sits on top of
+    /// the stack. `run()` consumes it; the JIT helper leaves it for its
+    /// caller.
+    pub(crate) fn execute_until(&mut self, stop_depth: usize) -> Result<(), VMError> {
+        // If the frame we were supposed to drive has already been popped
+        // (e.g. the JIT ran the whole call to completion before we got
+        // here), there is nothing to do.
+        if self.frames.len() <= stop_depth {
+            return Ok(());
+        }
         loop {
             let frame_idx = self.frames.len() - 1;
 
@@ -216,10 +793,7 @@ impl VM {
             let op = match OpCode::from_byte(instruction) {
                 Some(op) => op,
                 None => {
-                    return Err(self.runtime_error(&format!(
-                        "unknown opcode: {}",
-                        instruction
-                    )));
+                    return Err(self.runtime_error(&format!("unknown opcode: {}", instruction)));
                 }
             };
 
@@ -353,9 +927,7 @@ impl VM {
                     let b = self.pop();
                     let a = self.pop();
                     match (&a, &b) {
-                        (Value::Integer(l), Value::Integer(r)) => {
-                            self.push(Value::Integer(l << r))
-                        }
+                        (Value::Integer(l), Value::Integer(r)) => self.push(Value::Integer(l << r)),
                         _ => return Err(self.runtime_error("<< requires integers")),
                     }
                 }
@@ -363,9 +935,7 @@ impl VM {
                     let b = self.pop();
                     let a = self.pop();
                     match (&a, &b) {
-                        (Value::Integer(l), Value::Integer(r)) => {
-                            self.push(Value::Integer(l >> r))
-                        }
+                        (Value::Integer(l), Value::Integer(r)) => self.push(Value::Integer(l >> r)),
                         _ => return Err(self.runtime_error(">> requires integers")),
                     }
                 }
@@ -377,12 +947,13 @@ impl VM {
                         Value::Integer(n) => self.push(Value::Integer(-n)),
                         Value::Float(f) => self.push(Value::Float(-f)),
                         _ => {
-                            return Err(
-                                self.runtime_error_hint(
-                                    &format!("negation is only supported for numbers, got {}", val.type_name()),
-                                    "only <int> and <float> values can be negated",
-                                )
-                            )
+                            return Err(self.runtime_error_hint(
+                                &format!(
+                                    "negation is only supported for numbers, got {}",
+                                    val.type_name()
+                                ),
+                                "only <int> and <float> values can be negated",
+                            ));
                         }
                     }
                 }
@@ -408,107 +979,34 @@ impl VM {
                 }
                 OpCode::GetGlobal => {
                     let idx = self.frames[frame_idx].read_u16();
-                    let name = self.frames[frame_idx].read_constant(idx).clone();
-                    if let Value::String(name_str) = &name {
-                        // Check module globals first (for module-scoped variables),
-                        // then fall back to the main VM globals.
-                        let found = self.frames[frame_idx]
-                            .module_globals
-                            .as_ref()
-                            .and_then(|mg| mg.get(name_str.as_ref()))
-                            .cloned()
-                            .or_else(|| self.globals.get(name_str.as_ref()).cloned());
-                        match found {
-                            Some(val) => self.push(val),
-                            None => {
-                                return Err(self.runtime_error_hint(
-                                    &format!("undefined variable: {}", name_str),
-                                    "use `:=` to declare new variables",
-                                ));
-                            }
-                        }
-                    } else {
-                        return Err(self.runtime_error("invalid global name"));
-                    }
+                    self.handle_get_global(idx)?;
                 }
                 OpCode::SetGlobal => {
                     let idx = self.frames[frame_idx].read_u16();
-                    let name = self.frames[frame_idx].read_constant(idx).clone();
-                    if let Value::String(name_str) = &name {
-                        if !self.globals.contains_key(name_str.as_ref()) {
-                            return Err(self.runtime_error_hint(
-                                &format!("undefined variable: {}", name_str),
-                                "use `:=` to declare new variables, or `=` to reassign an existing typed variable",
-                            ));
-                        }
-                        // Check immutability
-                        if let Some(false) = self.global_mutability.get(name_str.as_ref()) {
-                            return Err(self.runtime_error_hint(
-                                &format!("cannot reassign immutable variable '{}'", name_str),
-                                "use `:=` to override an immutable binding",
-                            ));
-                        }
-                        let val = self.peek(0).clone();
-                        self.globals.insert(name_str.to_string(), val);
-                    }
+                    self.handle_set_global(idx)?;
                 }
                 OpCode::DefineGlobal => {
                     let idx = self.frames[frame_idx].read_u16();
-                    let name = self.frames[frame_idx].read_constant(idx).clone();
-                    if let Value::String(name_str) = &name {
-                        let val = self.pop();
-                        self.globals.insert(name_str.to_string(), val);
-                    }
+                    self.handle_define_global(idx)?;
                 }
                 OpCode::DefineGlobalTyped => {
                     let name_idx = self.frames[frame_idx].read_u16();
                     let mutable = self.frames[frame_idx].read_byte() == 1;
                     let type_idx = self.frames[frame_idx].read_u16();
-                    let name = self.frames[frame_idx].read_constant(name_idx).clone();
-                    let type_name = self.frames[frame_idx].read_constant(type_idx).clone();
-
-                    if let Value::String(name_str) = &name {
-                        let val = self.pop();
-                        self.globals.insert(name_str.to_string(), val);
-                        self.global_mutability.insert(name_str.to_string(), mutable);
-                        if let Value::String(tn) = type_name {
-                            self.global_type_constraints
-                                .insert(name_str.to_string(), Some(tn.to_string()));
-                        }
-                    }
+                    self.handle_define_global_typed(name_idx, mutable, type_idx)?;
                 }
 
                 // ── Upvalues ────────────────────────────────────────
                 OpCode::GetUpvalue => {
-                    let idx = self.frames[frame_idx].read_u16() as usize;
-                    let upvalue = Rc::clone(
-                        &self.frames[frame_idx].closure.upvalues[idx],
-                    );
-                    let val = match &*upvalue.borrow() {
-                        Upvalue::Open(slot) => self.stack[*slot].clone(),
-                        Upvalue::Closed(val) => val.clone(),
-                    };
-                    self.push(val);
+                    let idx = self.frames[frame_idx].read_u16();
+                    self.handle_get_upvalue(idx)?;
                 }
                 OpCode::SetUpvalue => {
-                    let idx = self.frames[frame_idx].read_u16() as usize;
-                    let val = self.peek(0).clone();
-                    let upvalue = Rc::clone(
-                        &self.frames[frame_idx].closure.upvalues[idx],
-                    );
-                    match &mut *upvalue.borrow_mut() {
-                        Upvalue::Open(slot) => {
-                            self.stack[*slot] = val;
-                        }
-                        Upvalue::Closed(v) => {
-                            *v = val;
-                        }
-                    }
+                    let idx = self.frames[frame_idx].read_u16();
+                    self.handle_set_upvalue(idx)?;
                 }
                 OpCode::CloseUpvalue => {
-                    let stack_top = self.stack.len() - 1;
-                    self.close_upvalues(stack_top);
-                    self.pop();
+                    self.handle_close_upvalue();
                 }
 
                 // ── Control Flow ────────────────────────────────────
@@ -530,6 +1028,7 @@ impl VM {
                 }
                 OpCode::Loop => {
                     let offset = self.frames[frame_idx].read_u16() as usize;
+                    self.maybe_compile_current_loop_hot_function(frame_idx);
                     self.frames[frame_idx].ip -= offset;
                 }
                 OpCode::PopJumpIfFalse => {
@@ -542,38 +1041,18 @@ impl VM {
 
                 // ── Functions ───────────────────────────────────────
                 OpCode::Closure => {
-                    let idx = self.frames[frame_idx].read_u16();
-                    let constant = self.frames[frame_idx].read_constant(idx).clone();
-
-                    if let Value::Closure(template) = constant {
-                        let upvalue_count = template.function.upvalue_count as usize;
-                        let mut upvalues = Vec::with_capacity(upvalue_count);
-
-                        for _ in 0..upvalue_count {
-                            let is_local = self.frames[frame_idx].read_byte() == 1;
-                            let index = self.frames[frame_idx].read_u16() as usize;
-
-                            if is_local {
-                                let abs_slot =
-                                    self.frames[frame_idx].slot_offset + index;
-                                let upvalue = self.capture_upvalue(abs_slot);
-                                upvalues.push(upvalue);
-                            } else {
-                                let uv = Rc::clone(
-                                    &self.frames[frame_idx].closure.upvalues[index],
-                                );
-                                upvalues.push(uv);
-                            }
+                    let fn_idx = self.frames[frame_idx].read_u16();
+                    let upvalue_count = match self.frames[frame_idx].read_constant(fn_idx) {
+                        Value::Closure(t) => t.function.upvalue_count as usize,
+                        _ => {
+                            return Err(self.runtime_error("expected closure constant"));
                         }
-
-                        let closure = Rc::new(ObjClosure {
-                            function: Rc::clone(&template.function),
-                            upvalues,
-                        });
-                        self.push(Value::Closure(closure));
-                    } else {
-                        return Err(self.runtime_error("expected closure constant"));
-                    }
+                    };
+                    let descriptors_offset = self.frames[frame_idx].ip;
+                    // Skip past the upvalue descriptors; `handle_closure`
+                    // reads them directly from the chunk.
+                    self.frames[frame_idx].ip += 3 * upvalue_count;
+                    self.handle_closure(fn_idx, descriptors_offset)?;
                 }
 
                 OpCode::Call => {
@@ -609,11 +1088,15 @@ impl VM {
                     // Pop the function's stack slots
                     self.stack.truncate(frame.slot_offset);
 
-                    if self.frames.is_empty() {
-                        return Ok(result);
-                    }
-
+                    // Leave the return value on the stack for the caller.
+                    // The top-level `run()` pops it after `execute_until`
+                    // returns. Nested frames consume it as the `Call`
+                    // opcode's result.
                     self.push(result);
+
+                    if self.frames.len() <= stop_depth {
+                        return Ok(());
+                    }
                 }
 
                 // ── Collections ─────────────────────────────────────
@@ -689,276 +1172,24 @@ impl VM {
 
                 OpCode::StructLiteral => {
                     let name_idx = self.frames[frame_idx].read_u16();
-                    let field_count = self.frames[frame_idx].read_byte() as usize;
-                    let name = self.frames[frame_idx].read_constant(name_idx).clone();
-
-                    if let Value::String(struct_name) = name {
-                        // Pop field name-value pairs
-                        let mut fields = HashMap::new();
-                        let start = self.stack.len() - field_count * 2;
-                        let flat: Vec<Value> = self.stack.drain(start..).collect();
-                        for pair in flat.chunks(2) {
-                            if let Value::String(fname) = &pair[0] {
-                                fields.insert(fname.to_string(), pair[1].clone());
-                            }
-                        }
-                        self.push(Value::StructInstance(Rc::new(ObjStructInstance {
-                            struct_name: struct_name.to_string(),
-                            fields: RefCell::new(fields),
-                        })));
-                    } else {
-                        return Err(self.runtime_error("expected struct name"));
-                    }
+                    let field_count = self.frames[frame_idx].read_byte();
+                    self.handle_struct_literal(name_idx, field_count)?;
                 }
 
                 OpCode::GetField => {
                     let field_idx = self.frames[frame_idx].read_u16();
-                    let field_name = self.frames[frame_idx].read_constant(field_idx).clone();
-                    let object = self.pop();
-
-                    if let Value::String(fname) = &field_name {
-                        match &object {
-                            Value::StructInstance(inst) => {
-                                let field_val = {
-                                    let fields = inst.fields.borrow();
-                                    fields.get(fname.as_ref()).cloned()
-                                };
-                                if let Some(val) = field_val {
-                                    self.push(val);
-                                } else {
-                                    // Check methods on the struct def
-                                    let method_val = {
-                                        if let Some(Value::StructDef(def)) =
-                                            self.globals.get(&inst.struct_name)
-                                        {
-                                            let methods = def.methods.borrow();
-                                            methods.get(fname.as_ref()).cloned()
-                                        } else {
-                                            None
-                                        }
-                                    };
-                                    if let Some(method) = method_val {
-                                        self.push(method);
-                                        // TODO: bind self
-                                    } else {
-                                        return Err(self.runtime_error_hint(
-                                            &format!("field '{}' not found on {}", fname, inst.struct_name),
-                                            "check the struct definition for available fields and methods",
-                                        ));
-                                    }
-                                }
-                            }
-                            Value::Module(m) => {
-                                match m.globals.get(fname.as_ref()) {
-                                    Some(val) => self.push(val.clone()),
-                                    None => {
-                                        return Err(self.runtime_error_hint(
-                                            &format!("module '{}' has no member '{}'", m.name, fname),
-                                            "check the module's public API for available members",
-                                        ));
-                                    }
-                                }
-                            }
-                            Value::ErrorValue { msg, tag } => {
-                                match fname.as_ref() {
-                                    "msg" => self.push(Value::String(Rc::clone(msg))),
-                                    "tag" => match tag {
-                                        Some(t) => self.push(Value::String(Rc::clone(t))),
-                                        None => self.push(Value::None),
-                                    },
-                                    _ => {
-                                        return Err(self.runtime_error(&format!(
-                                            "ErrorValue has no field '{}'",
-                                            fname
-                                        )));
-                                    }
-                                }
-                            }
-                            Value::Map(entries) => {
-                                let entries = entries.borrow();
-                                let key = Value::String(Rc::clone(fname));
-                                let mut found = None;
-                                for (k, v) in entries.iter() {
-                                    if *k == key {
-                                        found = Some(v.clone());
-                                        break;
-                                    }
-                                }
-                                drop(entries);
-                                self.push(found.unwrap_or(Value::None));
-                            }
-                            Value::EnumDef(def) => {
-                                let name = Rc::clone(fname);
-                                let variant = def.variants.iter().find(|v| v.name.as_str() == name.as_ref());
-                                match variant {
-                                    Some(v) => match &v.kind {
-                                        crate::vm::value::VmEnumVariantKind::Unit(disc) => {
-                                            self.push(Value::EnumInstance(Rc::new(
-                                                crate::vm::value::ObjEnumInstance {
-                                                    enum_name: def.name.clone(),
-                                                    variant_name: v.name.clone(),
-                                                    payload: crate::vm::value::VmEnumPayload::Unit(disc.clone()),
-                                                },
-                                            )));
-                                        }
-                                        crate::vm::value::VmEnumVariantKind::Tuple(_) => {
-                                            return Err(self.runtime_error_hint(
-                                                &format!("variant '{}' of enum {} requires arguments", v.name, def.name),
-                                                "use EnumName.Variant(args) to construct tuple variants",
-                                            ));
-                                        }
-                                        crate::vm::value::VmEnumVariantKind::Struct(_) => {
-                                            return Err(self.runtime_error_hint(
-                                                &format!("variant '{}' of enum {} requires struct fields", v.name, def.name),
-                                                "use EnumName.Variant { field: value } for struct variants",
-                                            ));
-                                        }
-                                    },
-                                    None => {
-                                        return Err(self.runtime_error(&format!(
-                                            "enum {} has no variant '{}'",
-                                            def.name, name
-                                        )));
-                                    }
-                                }
-                            }
-                            Value::EnumInstance(inst) => {
-                                let name = fname.as_ref();
-                                match name {
-                                    "name" => self.push(Value::String(inst.variant_name.as_str().into())),
-                                    "value" => match &inst.payload {
-                                        crate::vm::value::VmEnumPayload::Unit(Some(v)) => {
-                                            self.push(v.clone());
-                                        }
-                                        crate::vm::value::VmEnumPayload::Unit(None) => {
-                                            self.push(Value::None);
-                                        }
-                                        _ => {
-                                            return Err(self.runtime_error(
-                                                ".value is only defined on unit variants",
-                                            ));
-                                        }
-                                    },
-                                    other => match &inst.payload {
-                                        crate::vm::value::VmEnumPayload::Tuple(items) => {
-                                            let idx_opt = other.parse::<usize>().ok().or_else(|| {
-                                                self.globals.get(&inst.enum_name).and_then(|gv| {
-                                                    if let Value::EnumDef(def) = gv {
-                                                        def.variants
-                                                            .iter()
-                                                            .find(|v| v.name == inst.variant_name)
-                                                            .and_then(|v| match &v.kind {
-                                                                crate::vm::value::VmEnumVariantKind::Tuple(names) => {
-                                                                    names.iter().position(|n| n == other)
-                                                                }
-                                                                _ => None,
-                                                            })
-                                                    } else {
-                                                        None
-                                                    }
-                                                })
-                                            });
-                                            match idx_opt.and_then(|i| items.get(i).cloned()) {
-                                                Some(v) => self.push(v),
-                                                None => {
-                                                    return Err(self.runtime_error(&format!(
-                                                        "tuple variant {}.{} has no field '{}'",
-                                                        inst.enum_name, inst.variant_name, other
-                                                    )));
-                                                }
-                                            }
-                                        }
-                                        crate::vm::value::VmEnumPayload::Struct(fields) => {
-                                            match fields.iter().find(|(k, _)| k == other) {
-                                                Some((_, v)) => self.push(v.clone()),
-                                                None => {
-                                                    return Err(self.runtime_error(&format!(
-                                                        "struct variant {}.{} has no field '{}'",
-                                                        inst.enum_name, inst.variant_name, other
-                                                    )));
-                                                }
-                                            }
-                                        }
-                                        crate::vm::value::VmEnumPayload::Unit(_) => {
-                                            return Err(self.runtime_error(&format!(
-                                                "unit variant {}.{} has no field '{}'",
-                                                inst.enum_name, inst.variant_name, other
-                                            )));
-                                        }
-                                    },
-                                }
-                            }
-                            _ => {
-                                return Err(self.runtime_error_hint(
-                                    &format!("cannot access field '{}' on {}", fname, object.type_name()),
-                                    "field access is supported on structs, enums, modules, maps, and error values",
-                                ));
-                            }
-                        }
-                    }
+                    self.handle_get_field(field_idx)?;
                 }
 
                 OpCode::SetField => {
                     let field_idx = self.frames[frame_idx].read_u16();
-                    let field_name = self.frames[frame_idx].read_constant(field_idx).clone();
-                    let value = self.pop();
-                    let object = self.pop();
-
-                    if let Value::String(fname) = &field_name {
-                        match &object {
-                            Value::StructInstance(inst) => {
-                                inst.fields
-                                    .borrow_mut()
-                                    .insert(fname.to_string(), value);
-                            }
-                            Value::Map(entries) => {
-                                let mut entries = entries.borrow_mut();
-                                let key = Value::String(Rc::clone(fname));
-                                let mut found = false;
-                                for (k, v) in entries.iter_mut() {
-                                    if *k == key {
-                                        *v = value.clone();
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                                if !found {
-                                    entries.push((key, value.clone()));
-                                }
-                            }
-                            _ => {
-                                return Err(self.runtime_error_hint(
-                                    &format!("cannot set field on {}", object.type_name()),
-                                    "field assignment is supported on struct instances and maps",
-                                ));
-                            }
-                        }
-                    }
+                    self.handle_set_field(field_idx)?;
                 }
 
                 OpCode::DefineMethod => {
                     let struct_name_idx = self.frames[frame_idx].read_u16();
-                    let method_count = self.frames[frame_idx].read_byte() as usize;
-                    let struct_name = self.frames[frame_idx]
-                        .read_constant(struct_name_idx)
-                        .clone();
-
-                    if let Value::String(name_str) = struct_name {
-                        // Pop method name-closure pairs from stack
-                        let start = self.stack.len() - method_count * 2;
-                        let flat: Vec<Value> = self.stack.drain(start..).collect();
-
-                        if let Some(Value::StructDef(def)) =
-                            self.globals.get(name_str.as_ref())
-                        {
-                            let mut methods = def.methods.borrow_mut();
-                            for pair in flat.chunks(2) {
-                                if let Value::String(mname) = &pair[1] {
-                                    methods.insert(mname.to_string(), pair[0].clone());
-                                }
-                            }
-                        }
-                    }
+                    let method_count = self.frames[frame_idx].read_byte();
+                    self.handle_define_method(struct_name_idx, method_count)?;
                 }
 
                 // ── Pattern Matching ────────────────────────────────
@@ -1010,9 +1241,7 @@ impl VM {
                     let binding_hi = self.frames[frame_idx].read_byte();
                     let binding_lo = self.frames[frame_idx].read_byte();
                     let binding_idx = ((binding_hi as u16) << 8) | (binding_lo as u16);
-                    let binding_name = self.frames[frame_idx]
-                        .read_constant(binding_idx)
-                        .clone();
+                    let binding_name = self.frames[frame_idx].read_constant(binding_idx).clone();
 
                     let value = self.peek(0).clone();
                     if let Value::ErrorValue { .. } = &value {
@@ -1096,7 +1325,11 @@ impl VM {
 
                     let tag_str = match (&tag, &sub) {
                         (Some(t), Some(s)) => {
-                            format!("[{}:{}]", format!("{}", t).to_uppercase(), format!("{}", s).to_uppercase())
+                            format!(
+                                "[{}:{}]",
+                                format!("{}", t).to_uppercase(),
+                                format!("{}", s).to_uppercase()
+                            )
                         }
                         (Some(t), None) => format!("[{}]", format!("{}", t).to_uppercase()),
                         _ => String::new(),
@@ -1154,12 +1387,13 @@ impl VM {
                             }
                         }
                         _ => {
-                            return Err(
-                                self.runtime_error_hint(
-                                    &format!("can only unpack arrays and tuples, got {}", value.type_name()),
-                                    "unpack syntax: `a, b := [1, 2]` or `a, b := (1, 2)`",
-                                )
-                            );
+                            return Err(self.runtime_error_hint(
+                                &format!(
+                                    "can only unpack arrays and tuples, got {}",
+                                    value.type_name()
+                                ),
+                                "unpack syntax: `a, b := [1, 2]` or `a, b := (1, 2)`",
+                            ));
                         }
                     }
                 }
@@ -1191,12 +1425,10 @@ impl VM {
                         Value::Set(s) => s.borrow().len() as i64,
                         Value::Map(m) => m.borrow().len() as i64,
                         _ => {
-                            return Err(
-                                self.runtime_error_hint(
-                                    &format!("cannot iterate over {}", iterable.type_name()),
-                                    "each loops work with arrays, tuples, strings, sets, and maps",
-                                )
-                            )
+                            return Err(self.runtime_error_hint(
+                                &format!("cannot iterate over {}", iterable.type_name()),
+                                "each loops work with arrays, tuples, strings, sets, and maps",
+                            ));
                         }
                     };
                     self.push(Value::Integer(len));
@@ -1224,12 +1456,11 @@ impl VM {
                     };
                     let val = match &iterable {
                         Value::Array(a) => a.borrow().get(idx).cloned().unwrap_or(Value::None),
-                        Value::String(s) => {
-                            s.chars()
-                                .nth(idx)
-                                .map(|c| Value::String(c.to_string().into()))
-                                .unwrap_or(Value::None)
-                        }
+                        Value::String(s) => s
+                            .chars()
+                            .nth(idx)
+                            .map(|c| Value::String(c.to_string().into()))
+                            .unwrap_or(Value::None),
                         Value::Tuple(t) => t.get(idx).cloned().unwrap_or(Value::None),
                         Value::Set(s) => s.borrow().get(idx).cloned().unwrap_or(Value::None),
                         Value::Map(m) => {
@@ -1249,16 +1480,8 @@ impl VM {
                 // ── Method Call ──────────────────────────────────
                 OpCode::MethodCall => {
                     let method_idx = self.frames[frame_idx].read_u16();
-                    let arg_count = self.frames[frame_idx].read_byte() as usize;
-                    let method_name = self.frames[frame_idx]
-                        .read_constant(method_idx)
-                        .clone();
-
-                    if let Value::String(mname) = method_name {
-                        self.call_method(&mname, arg_count, &[])?;
-                    } else {
-                        return Err(self.runtime_error("invalid method name"));
-                    }
+                    let arg_count = self.frames[frame_idx].read_byte();
+                    self.handle_method_call(method_idx, arg_count)?;
                 }
 
                 OpCode::MethodCallNamed => {
@@ -1523,7 +1746,7 @@ impl VM {
 
     // ── Arithmetic Helpers ──────────────────────────────────────────────
 
-    fn binary_add(&self, a: Value, b: Value) -> Result<Value, VMError> {
+    pub(crate) fn binary_add(&self, a: Value, b: Value) -> Result<Value, VMError> {
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l + r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l + r)),
@@ -1575,7 +1798,7 @@ impl VM {
         }
     }
 
-    fn binary_sub(&self, a: Value, b: Value) -> Result<Value, VMError> {
+    pub(crate) fn binary_sub(&self, a: Value, b: Value) -> Result<Value, VMError> {
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l - r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l - r)),
@@ -1600,7 +1823,7 @@ impl VM {
         }
     }
 
-    fn binary_mul(&self, a: Value, b: Value) -> Result<Value, VMError> {
+    pub(crate) fn binary_mul(&self, a: Value, b: Value) -> Result<Value, VMError> {
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l * r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l * r)),
@@ -1615,7 +1838,7 @@ impl VM {
         }
     }
 
-    fn binary_div(&self, a: Value, b: Value) -> Result<Value, VMError> {
+    pub(crate) fn binary_div(&self, a: Value, b: Value) -> Result<Value, VMError> {
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 if *r == 0 {
@@ -1641,7 +1864,7 @@ impl VM {
         }
     }
 
-    fn binary_mod(&self, a: Value, b: Value) -> Result<Value, VMError> {
+    pub(crate) fn binary_mod(&self, a: Value, b: Value) -> Result<Value, VMError> {
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 if *r == 0 {
@@ -1669,7 +1892,7 @@ impl VM {
 
     // ── Comparison Helpers ──────────────────────────────────────────────
 
-    fn compare_less(&self, a: Value, b: Value) -> Result<Value, VMError> {
+    pub(crate) fn compare_less(&self, a: Value, b: Value) -> Result<Value, VMError> {
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l < r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l < r)),
@@ -1686,7 +1909,7 @@ impl VM {
         }
     }
 
-    fn compare_less_equal(&self, a: Value, b: Value) -> Result<Value, VMError> {
+    pub(crate) fn compare_less_equal(&self, a: Value, b: Value) -> Result<Value, VMError> {
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l <= r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l <= r)),
@@ -1701,7 +1924,7 @@ impl VM {
         }
     }
 
-    fn compare_greater(&self, a: Value, b: Value) -> Result<Value, VMError> {
+    pub(crate) fn compare_greater(&self, a: Value, b: Value) -> Result<Value, VMError> {
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l > r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l > r)),
@@ -1716,7 +1939,7 @@ impl VM {
         }
     }
 
-    fn compare_greater_equal(&self, a: Value, b: Value) -> Result<Value, VMError> {
+    pub(crate) fn compare_greater_equal(&self, a: Value, b: Value) -> Result<Value, VMError> {
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l >= r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l >= r)),
@@ -1733,7 +1956,7 @@ impl VM {
 
     // ── Function Calling ────────────────────────────────────────────────
 
-    fn call_value(
+    pub(crate) fn call_value(
         &mut self,
         arg_count: usize,
         named_args: &[(String, Value)],
@@ -1742,9 +1965,7 @@ impl VM {
         let callee = self.stack[callee_idx].clone();
 
         match callee {
-            Value::Closure(closure) => {
-                self.call_closure(closure, arg_count, named_args, None)
-            }
+            Value::Closure(closure) => self.call_closure(closure, arg_count, named_args, None),
             Value::Builtin(func) => {
                 let start = self.stack.len() - arg_count;
                 let args: Vec<Value> = self.stack.drain(start..).collect();
@@ -1774,9 +1995,10 @@ impl VM {
 
                 let mut fields = HashMap::new();
                 for (i, (field_name, field_type, _)) in def.fields.iter().enumerate() {
-                    let val = args.get(i).cloned().unwrap_or_else(|| {
-                        Self::zero_value_for_type(field_type)
-                    });
+                    let val = args
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| Self::zero_value_for_type(field_type));
                     fields.insert(field_name.clone(), val);
                 }
 
@@ -1793,8 +2015,23 @@ impl VM {
         }
     }
 
+    /// Fast positional-only closure call used by the JIT `Call` helper.
+    /// Returns `Ok(false)` when the callee is not a closure so the caller
+    /// can fall back to the generic `call_value` path for builtins,
+    /// constructors, and future callable forms.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub(crate) fn call_closure_from_stack(&mut self, arg_count: usize) -> Result<bool, VMError> {
+        let callee_idx = self.stack.len() - 1 - arg_count;
+        let Value::Closure(closure) = &self.stack[callee_idx] else {
+            return Ok(false);
+        };
+        let closure = Rc::clone(closure);
+        self.call_closure(closure, arg_count, &[], None)?;
+        Ok(true)
+    }
+
     /// Call a method on an object. Stack: [instance, arg1, ..., argN]
-    fn call_method(
+    pub(crate) fn call_method(
         &mut self,
         method_name: &str,
         arg_count: usize,
@@ -1831,7 +2068,11 @@ impl VM {
                     "check the struct definition for available methods",
                 ))
             }
-            Value::Array(_) | Value::String(_) | Value::Map(_) | Value::Set(_) | Value::Tuple(_) => {
+            Value::Array(_)
+            | Value::String(_)
+            | Value::Map(_)
+            | Value::Set(_)
+            | Value::Tuple(_) => {
                 // Built-in method syntax: collection.method(args)
                 // Convert to builtin call: __method(collection, args)
                 let builtin_name = format!("__{}", method_name);
@@ -1848,7 +2089,11 @@ impl VM {
                     return self.call_value(arg_count + 1, named_args);
                 }
                 Err(self.runtime_error_hint(
-                    &format!("method '{}' not found on {}", method_name, instance.type_name()),
+                    &format!(
+                        "method '{}' not found on {}",
+                        method_name,
+                        instance.type_name()
+                    ),
                     "check available built-in methods for this type",
                 ))
             }
@@ -1928,7 +2173,11 @@ impl VM {
                 }
             }
             _ => Err(self.runtime_error_hint(
-                &format!("cannot call method '{}' on {}", method_name, instance.type_name()),
+                &format!(
+                    "cannot call method '{}' on {}",
+                    method_name,
+                    instance.type_name()
+                ),
                 "methods can only be called on struct instances, collections, and modules",
             )),
         }
@@ -1964,6 +2213,13 @@ impl VM {
     ) -> Result<(), VMError> {
         let expected = closure.function.arity as usize;
 
+        // Bump the JIT's hot-function counter. Actual JIT invocation is
+        // attempted after the frame is pushed (see below) so the JIT helper
+        // can drive `execute_until` for its own frame.
+        closure
+            .call_count
+            .set(closure.call_count.get().saturating_add(1));
+
         // Handle named arguments: fill in any missing positional args
         if !named_args.is_empty() {
             // Extend stack to full arity if needed
@@ -1983,12 +2239,7 @@ impl VM {
             // Place named args into their correct slots
             let slot_base = self.stack.len() - expected;
             for (name, val) in named_args {
-                if let Some(idx) = closure
-                    .function
-                    .params
-                    .iter()
-                    .position(|p| p.name == *name)
-                {
+                if let Some(idx) = closure.function.params.iter().position(|p| p.name == *name) {
                     self.stack[slot_base + idx] = val.clone();
                 }
             }
@@ -2010,23 +2261,63 @@ impl VM {
 
         // Inherit module globals from the current frame if not explicitly provided,
         // so nested calls within a module function retain module scope access.
-        let inherited_mg = module_globals.or_else(|| {
-            self.frames.last().and_then(|f| f.module_globals.clone())
-        });
+        let inherited_mg =
+            module_globals.or_else(|| self.frames.last().and_then(|f| f.module_globals.clone()));
+
+        // Remember the pre-call depth so the JIT helper (if we enter it)
+        // can drive `execute_until` for exactly this one activation.
+        let stop_depth = self.frames.len();
 
         self.frames.push(CallFrame {
-            closure,
+            closure: Rc::clone(&closure),
             ip: 0,
             slot_offset,
             module_globals: inherited_mg,
         });
+
+        // Ask the JIT: is this function compiled (or can it be)? If so,
+        // invoke it; it will drive `execute_until(stop_depth)` for this one
+        // frame and leave the return value on the stack. A bailout means
+        // we should just return — the outer `execute_until` will pick up
+        // the pushed frame and dispatch as usual.
+        let count = closure.call_count.get();
+        let thunk = match closure.jit_state.get() {
+            1 => closure.jit_thunk.get(),
+            2 => None,
+            _ => {
+                let thunk = self
+                    .jit
+                    .maybe_compile_loop_entry_thunk(&closure.function)
+                    .or_else(|| self.jit.maybe_compile_thunk(&closure.function, count));
+                if let Some(thunk) = thunk {
+                    closure.jit_thunk.set(Some(thunk));
+                    closure.jit_state.set(1);
+                } else if count >= self.jit.threshold() {
+                    closure.jit_state.set(2);
+                }
+                thunk
+            }
+        };
+
+        if let Some(thunk) = thunk {
+            let vm_ptr = self as *mut VM;
+            let exit = unsafe { self.jit.invoke_thunk(vm_ptr, thunk, stop_depth) };
+            match exit {
+                crate::jit::JitExit::Returned => {}
+                crate::jit::JitExit::Bailout => {
+                    closure.jit_thunk.set(None);
+                    closure.jit_state.set(2);
+                }
+                crate::jit::JitExit::RuntimeError(err) => return Err(err),
+            }
+        }
 
         Ok(())
     }
 
     // ── Upvalue Management ──────────────────────────────────────────────
 
-    fn capture_upvalue(&mut self, stack_slot: usize) -> Rc<RefCell<Upvalue>> {
+    pub(crate) fn capture_upvalue(&mut self, stack_slot: usize) -> Rc<RefCell<Upvalue>> {
         // Check if we already have an open upvalue for this slot
         for uv in &self.open_upvalues {
             if let Upvalue::Open(slot) = &*uv.borrow() {
@@ -2041,7 +2332,7 @@ impl VM {
         upvalue
     }
 
-    fn close_upvalues(&mut self, last: usize) {
+    pub(crate) fn close_upvalues(&mut self, last: usize) {
         let mut i = 0;
         while i < self.open_upvalues.len() {
             let should_close = {
@@ -2068,7 +2359,7 @@ impl VM {
 
     // ── Index Operations ────────────────────────────────────────────────
 
-    fn eval_index(&self, collection: Value, index: Value) -> Result<Value, VMError> {
+    pub(crate) fn eval_index(&self, collection: Value, index: Value) -> Result<Value, VMError> {
         match (&collection, &index) {
             (Value::Array(arr), Value::Integer(i)) => {
                 let borrowed = arr.borrow();
@@ -2163,14 +2454,22 @@ impl VM {
                 let len = borrowed.len() as i64;
                 let s = match start {
                     Some(Value::Integer(i)) => {
-                        if i < 0 { (len + i) as usize } else { i as usize }
+                        if i < 0 {
+                            (len + i) as usize
+                        } else {
+                            i as usize
+                        }
                     }
                     None => 0,
                     _ => return Err(self.runtime_error("slice index must be integer")),
                 };
                 let e = match end {
                     Some(Value::Integer(i)) => {
-                        if i < 0 { (len + i) as usize } else { i as usize }
+                        if i < 0 {
+                            (len + i) as usize
+                        } else {
+                            i as usize
+                        }
                     }
                     None => len as usize,
                     _ => return Err(self.runtime_error("slice index must be integer")),
@@ -2188,14 +2487,22 @@ impl VM {
                 let len = s.len() as i64;
                 let start_idx = match start {
                     Some(Value::Integer(i)) => {
-                        if i < 0 { (len + i) as usize } else { i as usize }
+                        if i < 0 {
+                            (len + i) as usize
+                        } else {
+                            i as usize
+                        }
                     }
                     None => 0,
                     _ => return Err(self.runtime_error("slice index must be integer")),
                 };
                 let end_idx = match end {
                     Some(Value::Integer(i)) => {
-                        if i < 0 { (len + i) as usize } else { i as usize }
+                        if i < 0 {
+                            (len + i) as usize
+                        } else {
+                            i as usize
+                        }
                     }
                     None => len as usize,
                     _ => return Err(self.runtime_error("slice index must be integer")),
@@ -2217,11 +2524,7 @@ impl VM {
 
     // ── Module System ───────────────────────────────────────────────────
 
-    fn import_module(
-        &mut self,
-        path_str: &str,
-        selective_names: &[String],
-    ) -> Result<(), VMError> {
+    fn import_module(&mut self, path_str: &str, selective_names: &[String]) -> Result<(), VMError> {
         // Resolve the module path
         let module_path = self.resolve_module_path(path_str)?;
 
@@ -2284,8 +2587,7 @@ impl VM {
             globals: Rc::new(sub_vm.globals),
         });
 
-        self.module_cache
-            .insert(module_path, Rc::clone(&module));
+        self.module_cache.insert(module_path, Rc::clone(&module));
 
         self.bind_module(&module, path_str, selective_names)
     }
@@ -2298,13 +2600,8 @@ impl VM {
     ) -> Result<(), VMError> {
         if selective_names.is_empty() {
             // Namespace import
-            let name = path_str
-                .rsplit('/')
-                .next()
-                .unwrap_or(path_str)
-                .to_string();
-            self.globals
-                .insert(name, Value::Module(Rc::clone(module)));
+            let name = path_str.rsplit('/').next().unwrap_or(path_str).to_string();
+            self.globals.insert(name, Value::Module(Rc::clone(module)));
         } else {
             // Selective import
             for name in selective_names {
@@ -2323,9 +2620,9 @@ impl VM {
                 let base = current.parent().unwrap_or(current);
                 let resolved = base.join(path_str).with_extension("oxi");
                 if resolved.exists() {
-                    return resolved.canonicalize().map_err(|e| {
-                        self.runtime_error(&format!("cannot resolve path: {}", e))
-                    });
+                    return resolved
+                        .canonicalize()
+                        .map_err(|e| self.runtime_error(&format!("cannot resolve path: {}", e)));
                 }
             }
         }
@@ -2333,9 +2630,9 @@ impl VM {
         // Stdlib import
         let stdlib = self.stdlib_path.join(path_str).with_extension("oxi");
         if stdlib.exists() {
-            return stdlib.canonicalize().map_err(|e| {
-                self.runtime_error(&format!("cannot resolve stdlib path: {}", e))
-            });
+            return stdlib
+                .canonicalize()
+                .map_err(|e| self.runtime_error(&format!("cannot resolve stdlib path: {}", e)));
         }
 
         // Relative to current file (without ./ prefix)
@@ -2343,9 +2640,9 @@ impl VM {
             let base = current.parent().unwrap_or(current);
             let resolved = base.join(path_str).with_extension("oxi");
             if resolved.exists() {
-                return resolved.canonicalize().map_err(|e| {
-                    self.runtime_error(&format!("cannot resolve path: {}", e))
-                });
+                return resolved
+                    .canonicalize()
+                    .map_err(|e| self.runtime_error(&format!("cannot resolve path: {}", e)));
             }
         }
 
@@ -2379,7 +2676,7 @@ impl VM {
         }
     }
 
-    fn type_wrap(&self, target: &str, value: Value) -> Result<Value, VMError> {
+    pub(crate) fn type_wrap(&self, target: &str, value: Value) -> Result<Value, VMError> {
         // Check for Error/Value union pattern: "VALUE || ERROR" or "ERROR || VALUE"
         if target.contains(" || ") {
             let parts: Vec<&str> = target.split(" || ").collect();
@@ -2415,10 +2712,7 @@ impl VM {
                     return Ok(converted);
                 }
             }
-            return Err(self.runtime_error(&format!(
-                "cannot convert {} to {}",
-                actual, target
-            )));
+            return Err(self.runtime_error(&format!("cannot convert {} to {}", actual, target)));
         }
 
         // Single type target
@@ -2432,10 +2726,8 @@ impl VM {
                         tag: tag.map(|t| t.into()),
                     })
                 } else {
-                    Err(self.runtime_error(&format!(
-                        "cannot convert {} to ERROR",
-                        value.type_name()
-                    )))
+                    Err(self
+                        .runtime_error(&format!("cannot convert {} to ERROR", value.type_name())))
                 }
             }
             t if t.starts_with("ERROR<") && t.ends_with('>') => {
@@ -2480,78 +2772,65 @@ impl VM {
     fn convert_to_type(&self, value: &Value, target: &str) -> Result<Value, VMError> {
         match target {
             "GENERIC" => Ok(value.clone()),
-            "NONE" => match value {
-                Value::None => Ok(Value::None),
-                _ => Err(self.runtime_error(&format!(
-                    "cannot convert {} to NONE",
-                    value.type_name()
-                ))),
-            },
+            "NONE" => {
+                match value {
+                    Value::None => Ok(Value::None),
+                    _ => Err(self
+                        .runtime_error(&format!("cannot convert {} to NONE", value.type_name()))),
+                }
+            }
             "INTEGER" => match value {
                 Value::Integer(_) => Ok(value.clone()),
                 Value::Float(f) => Ok(Value::Integer(*f as i64)),
-                Value::String(s) => s
-                    .parse::<i64>()
-                    .map(Value::Integer)
-                    .map_err(|_| {
-                        self.runtime_error(&format!(
-                            "cannot convert STRING \"{}\" to INTEGER",
-                            s
-                        ))
-                    }),
+                Value::String(s) => s.parse::<i64>().map(Value::Integer).map_err(|_| {
+                    self.runtime_error(&format!("cannot convert STRING \"{}\" to INTEGER", s))
+                }),
                 Value::Boolean(b) => Ok(Value::Integer(if *b { 1 } else { 0 })),
                 Value::Byte(b) => Ok(Value::Integer(*b as i64)),
                 Value::Uint(u) => Ok(Value::Integer(*u as i64)),
                 Value::Char(c) => Ok(Value::Integer(*c as i64)),
-                _ => Err(self.runtime_error(&format!(
-                    "cannot convert {} to INTEGER",
-                    value.type_name()
-                ))),
+                _ => {
+                    Err(self
+                        .runtime_error(&format!("cannot convert {} to INTEGER", value.type_name())))
+                }
             },
-            "FLOAT" => match value {
-                Value::Float(_) => Ok(value.clone()),
-                Value::Integer(n) => Ok(Value::Float(*n as f64)),
-                Value::String(s) => s.parse::<f64>().map(Value::Float).map_err(|_| {
-                    self.runtime_error(&format!(
-                        "cannot convert STRING \"{}\" to FLOAT",
-                        s
-                    ))
-                }),
-                Value::Boolean(b) => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
-                Value::Byte(b) => Ok(Value::Float(*b as f64)),
-                Value::Uint(u) => Ok(Value::Float(*u as f64)),
-                _ => Err(self.runtime_error(&format!(
-                    "cannot convert {} to FLOAT",
-                    value.type_name()
-                ))),
-            },
+            "FLOAT" => {
+                match value {
+                    Value::Float(_) => Ok(value.clone()),
+                    Value::Integer(n) => Ok(Value::Float(*n as f64)),
+                    Value::String(s) => s.parse::<f64>().map(Value::Float).map_err(|_| {
+                        self.runtime_error(&format!("cannot convert STRING \"{}\" to FLOAT", s))
+                    }),
+                    Value::Boolean(b) => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
+                    Value::Byte(b) => Ok(Value::Float(*b as f64)),
+                    Value::Uint(u) => Ok(Value::Float(*u as f64)),
+                    _ => Err(self
+                        .runtime_error(&format!("cannot convert {} to FLOAT", value.type_name()))),
+                }
+            }
             "STRING" => Ok(Value::String(format!("{}", value).into())),
             "BOOLEAN" => match value {
                 Value::Boolean(_) => Ok(value.clone()),
                 _ => Ok(Value::Boolean(value.is_truthy())),
             },
-            "CHAR" => match value {
-                Value::Char(_) => Ok(value.clone()),
-                Value::Integer(n) => char::from_u32(*n as u32)
-                    .map(Value::Char)
-                    .ok_or_else(|| {
-                        self.runtime_error(&format!("invalid char code: {}", n))
-                    }),
-                Value::String(s) => {
-                    let mut chars = s.chars();
-                    match (chars.next(), chars.next()) {
-                        (Some(c), None) => Ok(Value::Char(c)),
-                        _ => Err(self.runtime_error(&format!(
-                            "cannot convert string '{}' to CHAR",
-                            s
-                        ))),
+            "CHAR" => {
+                match value {
+                    Value::Char(_) => Ok(value.clone()),
+                    Value::Integer(n) => char::from_u32(*n as u32)
+                        .map(Value::Char)
+                        .ok_or_else(|| self.runtime_error(&format!("invalid char code: {}", n))),
+                    Value::String(s) => {
+                        let mut chars = s.chars();
+                        match (chars.next(), chars.next()) {
+                            (Some(c), None) => Ok(Value::Char(c)),
+                            _ => Err(self
+                                .runtime_error(&format!("cannot convert string '{}' to CHAR", s))),
+                        }
                     }
+                    _ => Err(self
+                        .runtime_error(&format!("cannot convert {} to CHAR", value.type_name()))),
                 }
-                _ => Err(self.runtime_error(&format!(
-                    "cannot convert {} to CHAR",
-                    value.type_name()
-                ))),
-            },
+            }
             "BYTE" => match value {
                 Value::Byte(_) => Ok(value.clone()),
                 Value::Integer(n) => {
@@ -2566,63 +2845,61 @@ impl VM {
                 }
                 Value::Uint(u) => {
                     if *u > 255 {
-                        Err(self.runtime_error(&format!(
-                            "cannot convert UINT {} to BYTE (0-255)",
-                            u
-                        )))
+                        Err(self
+                            .runtime_error(&format!("cannot convert UINT {} to BYTE (0-255)", u)))
                     } else {
                         Ok(Value::Byte(*u as u8))
                     }
                 }
                 Value::Char(c) => Ok(Value::Byte(*c as u8)),
                 Value::Boolean(b) => Ok(Value::Byte(if *b { 1 } else { 0 })),
-                _ => Err(self.runtime_error(&format!(
-                    "cannot convert {} to BYTE",
-                    value.type_name()
-                ))),
-            },
-            "UINT" => match value {
-                Value::Uint(_) => Ok(value.clone()),
-                Value::Integer(n) => Ok(Value::Uint(*n as u64)),
-                Value::Float(f) => Ok(Value::Uint(*f as u64)),
-                Value::Byte(b) => Ok(Value::Uint(*b as u64)),
-                _ => Err(self.runtime_error(&format!(
-                    "cannot convert {} to UINT",
-                    value.type_name()
-                ))),
-            },
-            "ARRAY" => match value {
-                Value::Array(_) => Ok(value.clone()),
-                Value::String(s) => {
-                    let elements: Vec<Value> =
-                        s.chars().map(|c| Value::String(c.to_string().into())).collect();
-                    Ok(Value::Array(Rc::new(RefCell::new(elements))))
+                _ => {
+                    Err(self
+                        .runtime_error(&format!("cannot convert {} to BYTE", value.type_name())))
                 }
-                _ => Err(self.runtime_error(&format!(
-                    "cannot convert {} to ARRAY",
-                    value.type_name()
-                ))),
             },
-            "TUPLE" => match value {
-                Value::Tuple(_) => Ok(value.clone()),
-                _ => Err(self.runtime_error(&format!(
-                    "cannot convert {} to TUPLE",
-                    value.type_name()
-                ))),
-            },
+            "UINT" => {
+                match value {
+                    Value::Uint(_) => Ok(value.clone()),
+                    Value::Integer(n) => Ok(Value::Uint(*n as u64)),
+                    Value::Float(f) => Ok(Value::Uint(*f as u64)),
+                    Value::Byte(b) => Ok(Value::Uint(*b as u64)),
+                    _ => Err(self
+                        .runtime_error(&format!("cannot convert {} to UINT", value.type_name()))),
+                }
+            }
+            "ARRAY" => {
+                match value {
+                    Value::Array(_) => Ok(value.clone()),
+                    Value::String(s) => {
+                        let elements: Vec<Value> = s
+                            .chars()
+                            .map(|c| Value::String(c.to_string().into()))
+                            .collect();
+                        Ok(Value::Array(Rc::new(RefCell::new(elements))))
+                    }
+                    _ => Err(self
+                        .runtime_error(&format!("cannot convert {} to ARRAY", value.type_name()))),
+                }
+            }
+            "TUPLE" => {
+                match value {
+                    Value::Tuple(_) => Ok(value.clone()),
+                    _ => Err(self
+                        .runtime_error(&format!("cannot convert {} to TUPLE", value.type_name()))),
+                }
+            }
             "MAP" => match value {
                 Value::Map(_) => Ok(value.clone()),
-                _ => Err(self.runtime_error(&format!(
-                    "cannot convert {} to MAP",
-                    value.type_name()
-                ))),
+                _ => {
+                    Err(self.runtime_error(&format!("cannot convert {} to MAP", value.type_name())))
+                }
             },
             "SET" => match value {
                 Value::Set(_) => Ok(value.clone()),
-                _ => Err(self.runtime_error(&format!(
-                    "cannot convert {} to SET",
-                    value.type_name()
-                ))),
+                _ => {
+                    Err(self.runtime_error(&format!("cannot convert {} to SET", value.type_name())))
+                }
             },
             "VALUE" => Ok(Value::Wrapped(Rc::new(value.clone()))),
             "ENUM" => match value {

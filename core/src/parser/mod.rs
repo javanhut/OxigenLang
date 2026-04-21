@@ -276,6 +276,50 @@ impl Parser {
         }
     }
 
+    fn negate_loop_condition(expr: Expression) -> Expression {
+        if let Expression::Infix {
+            token,
+            left,
+            operator,
+            right,
+        } = expr
+        {
+            let inverted = match operator.as_str() {
+                "==" => "!=",
+                "!=" => "==",
+                "<" => ">=",
+                "<=" => ">",
+                ">" => "<=",
+                ">=" => "<",
+                _ => {
+                    return Expression::Prefix {
+                        token: Token {
+                            token_type: TokenType::Not,
+                            literal: "not".to_string(),
+                            span: Span::default(),
+                        },
+                        operator: "not".to_string(),
+                        right: Box::new(Expression::Infix {
+                            token,
+                            left,
+                            operator,
+                            right,
+                        }),
+                    };
+                }
+            };
+
+            return Expression::Infix {
+                token,
+                left,
+                operator: inverted.to_string(),
+                right,
+            };
+        }
+
+        Self::negate_expression(expr)
+    }
+
     fn is_type_name_token(tt: &TokenType) -> bool {
         matches!(tt, TokenType::Ident | TokenType::None)
     }
@@ -425,7 +469,8 @@ impl Parser {
             if self.peek_token.token_type == TokenType::Comma && self.is_unpack_statement() {
                 return self.parse_unpack_statement();
             }
-            if self.peek_token.token_type == TokenType::Comma && self.is_unpack_reassign_statement() {
+            if self.peek_token.token_type == TokenType::Comma && self.is_unpack_reassign_statement()
+            {
                 return self.parse_unpack_reassign_statement();
             }
             if self.peek_token.token_type == TokenType::Walrus {
@@ -561,9 +606,19 @@ impl Parser {
                 self.next_token(); // move to next expression
                 values.push(self.parse_expression(Precedence::Lowest)?);
             }
-            Some(Statement::Unpack { names, value: first_value, values: Some(values), reassign: false })
+            Some(Statement::Unpack {
+                names,
+                value: first_value,
+                values: Some(values),
+                reassign: false,
+            })
         } else {
-            Some(Statement::Unpack { names, value: first_value, values: None, reassign: false })
+            Some(Statement::Unpack {
+                names,
+                value: first_value,
+                values: None,
+                reassign: false,
+            })
         }
     }
 
@@ -631,9 +686,19 @@ impl Parser {
                 self.next_token(); // move to next expression
                 values.push(self.parse_expression(Precedence::Lowest)?);
             }
-            Some(Statement::Unpack { names, value: first_value, values: Some(values), reassign: true })
+            Some(Statement::Unpack {
+                names,
+                value: first_value,
+                values: Some(values),
+                reassign: true,
+            })
         } else {
-            Some(Statement::Unpack { names, value: first_value, values: None, reassign: true })
+            Some(Statement::Unpack {
+                names,
+                value: first_value,
+                values: None,
+                reassign: true,
+            })
         }
     }
 
@@ -2125,7 +2190,7 @@ impl Parser {
         let raw_condition = self.parse_expression(Precedence::Lowest)?;
 
         let condition = if negate {
-            Self::negate_expression(raw_condition)
+            Self::negate_loop_condition(raw_condition)
         } else {
             raw_condition
         };

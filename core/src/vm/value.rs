@@ -1,5 +1,6 @@
 use crate::compiler::opcode::Chunk;
-use std::cell::RefCell;
+use crate::jit::CompiledThunk;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
@@ -7,11 +8,79 @@ use std::rc::Rc;
 /// Built-in function signature for the VM.
 pub type BuiltinFn = fn(Vec<Value>) -> Value;
 
+/// Numeric tag of `Value::Integer` under the `#[repr(u8)]` layout. The
+/// JIT's fast path loads this byte from stack memory to decide between
+/// inline arithmetic and the slow-path helper.
+pub const VALUE_TAG_INTEGER: u8 = 0;
+
+/// Numeric tag of `Value::Float`. Used by the JIT's inline GetLocal fast
+/// path to skip the generic clone-and-push helper for float locals.
+pub const VALUE_TAG_FLOAT: u8 = 1;
+
+/// Byte offset of the i64 payload inside a `Value::Integer(i64)`. With
+/// `#[repr(u8)]` the discriminant occupies byte 0, and the payload is
+/// aligned to the variant's natural alignment (8 for i64 / Rc). Used by
+/// the JIT fast path.
+pub const VALUE_INT_PAYLOAD_OFFSET: usize = 8;
+
+/// `size_of::<Value>()` — pinned by `#[repr(u8)]`. Const-evaluated at
+/// build time.
+pub const VALUE_SIZE: usize = core::mem::size_of::<Value>();
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    /// The JIT's inline int fast path relies on these exact layout
+    /// invariants — if any of them break, disable the fast path until
+    /// the layout is re-verified.
+    #[test]
+    fn value_integer_layout_is_pinned() {
+        let v = Value::Integer(0xDEAD_BEEF_CAFE_BABE_u64 as i64);
+        let ptr = &v as *const Value as *const u8;
+        // Tag byte at offset 0.
+        let tag = unsafe { *ptr };
+        assert_eq!(tag, VALUE_TAG_INTEGER, "Integer tag should be 0");
+
+        // i64 payload at VALUE_INT_PAYLOAD_OFFSET, host-endian.
+        let payload = unsafe {
+            ptr.add(VALUE_INT_PAYLOAD_OFFSET)
+                .cast::<i64>()
+                .read_unaligned()
+        };
+        assert_eq!(payload, 0xDEAD_BEEF_CAFE_BABE_u64 as i64);
+
+        // Value size is a multiple of its alignment (8).
+        assert_eq!(VALUE_SIZE % 8, 0);
+    }
+
+    #[test]
+    fn value_float_layout_is_pinned() {
+        let v = Value::Float(3.141592653589793);
+        let ptr = &v as *const Value as *const u8;
+        let tag = unsafe { *ptr };
+        assert_eq!(tag, VALUE_TAG_FLOAT, "Float tag should be 1");
+        let payload = unsafe {
+            ptr.add(VALUE_INT_PAYLOAD_OFFSET)
+                .cast::<u64>()
+                .read_unaligned()
+        };
+        assert_eq!(f64::from_bits(payload), 3.141592653589793);
+    }
+}
+
 /// Runtime value for the OxigenLang VM.
 ///
 /// Unlike the tree-walking interpreter's `Object`, control flow signals
 /// (Return, Skip, Stop) are NOT values — they are handled by VM mechanics.
+///
+/// `#[repr(u8)]` pins the discriminant byte to offset 0 so the JIT's
+/// inline int+int fast path can read the tag directly from memory without
+/// going through Rust enum pattern matching. The variant order below
+/// defines the numeric tag values — do NOT reorder without updating
+/// [`VALUE_TAG_INTEGER`] below.
 #[derive(Clone)]
+#[repr(u8)]
 pub enum Value {
     // Primitives
     Integer(i64),
@@ -45,7 +114,10 @@ pub enum Value {
     Module(Rc<ObjModule>),
 
     // Error handling
-    ErrorValue { msg: Rc<str>, tag: Option<Rc<str>> },
+    ErrorValue {
+        msg: Rc<str>,
+        tag: Option<Rc<str>>,
+    },
     /// Value(...) wrapper (success side of error handling)
     Wrapped(Rc<Value>),
     /// Terminal error — stops execution
@@ -60,6 +132,11 @@ pub struct Function {
     pub chunk: Chunk,
     pub upvalue_count: u16,
     pub params: Vec<ParamInfo>,
+    pub locals: Vec<LocalInfo>,
+    /// Whether the compiler emitted at least one backward-loop opcode for
+    /// this function. Used by smart JIT tiering to compile loop-heavy
+    /// single-call functions at entry instead of after they finish.
+    pub has_loop: bool,
 }
 
 impl Function {
@@ -70,6 +147,8 @@ impl Function {
             chunk: Chunk::new(),
             upvalue_count: 0,
             params: Vec::new(),
+            locals: Vec::new(),
+            has_loop: false,
         }
     }
 }
@@ -83,11 +162,33 @@ pub struct ParamInfo {
     pub type_ann: Option<String>,
 }
 
+/// Compiler-provided metadata for a runtime local slot. `mutable` tracks
+/// value mutability; `type_constraint` tracks Oxigen's separate type lock.
+#[derive(Debug, Clone, Default)]
+pub struct LocalInfo {
+    pub mutable: bool,
+    pub type_constraint: Option<String>,
+}
+
 /// A closure: a compiled function + captured upvalues.
 #[derive(Debug)]
 pub struct ObjClosure {
     pub function: Rc<Function>,
     pub upvalues: Vec<Rc<RefCell<Upvalue>>>,
+    /// How many times this closure has been called. Used by the JIT engine
+    /// for hot-function detection. Interior mutability keeps closures
+    /// cheaply shareable through `Rc`.
+    pub call_count: Cell<u32>,
+    /// Number of loop backedges executed by this closure. Used by smart
+    /// JIT tiering so single-call long-running loops can compile.
+    pub loop_count: Cell<u32>,
+    /// Cached JIT state for this closure: 0 = unknown/cold, 1 = compiled,
+    /// 2 = compile failed. This avoids a compiled-entry HashMap lookup on
+    /// every hot recursive call.
+    pub jit_state: Cell<u8>,
+    /// Cached native entry point for compiled closures. Present only when
+    /// `jit_state == 1`.
+    pub jit_thunk: Cell<Option<CompiledThunk>>,
 }
 
 /// An upvalue captures a variable from an enclosing scope.
@@ -250,8 +351,10 @@ impl fmt::Display for Value {
             Value::StructDef(sd) => write!(f, "struct {}", sd.name),
             Value::StructInstance(si) => {
                 let fields = si.fields.borrow();
-                let items: Vec<String> =
-                    fields.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
+                let items: Vec<String> = fields
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .collect();
                 write!(f, "{} {{ {} }}", si.struct_name, items.join(", "))
             }
             Value::Byte(n) => write!(f, "{}", n),
@@ -273,8 +376,7 @@ impl fmt::Display for Value {
                 write!(f, "{{{}}}", items.join(", "))
             }
             Value::Set(elements) => {
-                let items: Vec<String> =
-                    elements.borrow().iter().map(|e| e.to_string()).collect();
+                let items: Vec<String> = elements.borrow().iter().map(|e| e.to_string()).collect();
                 write!(f, "set({})", items.join(", "))
             }
             Value::Module(m) => write!(f, "module <{}>", m.name),
@@ -317,7 +419,12 @@ impl fmt::Debug for Value {
             Value::Closure(c) => write!(f, "Closure({:?})", c.function.name),
             Value::StructDef(sd) => write!(f, "StructDef({})", sd.name),
             Value::StructInstance(si) => {
-                write!(f, "StructInstance({}, {:?})", si.struct_name, si.fields.borrow())
+                write!(
+                    f,
+                    "StructInstance({}, {:?})",
+                    si.struct_name,
+                    si.fields.borrow()
+                )
             }
             Value::Byte(n) => write!(f, "Byte({})", n),
             Value::Uint(n) => write!(f, "Uint({})", n),
@@ -363,10 +470,9 @@ impl PartialEq for Value {
                 let b = b.borrow();
                 a.len() == b.len() && a.iter().all(|item| b.iter().any(|bitem| item == bitem))
             }
-            (
-                Value::ErrorValue { msg: a, tag: at },
-                Value::ErrorValue { msg: b, tag: bt },
-            ) => a == b && at == bt,
+            (Value::ErrorValue { msg: a, tag: at }, Value::ErrorValue { msg: b, tag: bt }) => {
+                a == b && at == bt
+            }
             (Value::Wrapped(a), Value::Wrapped(b)) => a == b,
             (Value::StructInstance(a), Value::StructInstance(b)) => {
                 a.struct_name == b.struct_name && *a.fields.borrow() == *b.fields.borrow()

@@ -3,6 +3,24 @@ name = "oxigen-core"
 version = "0.1.2"
 edition = "2024"
 
+[features]
+default = []
+# Enables the baseline JIT compiler (Cranelift-backed). Off by default —
+# keeps cranelift's heavy dep tree out of plain builds.
+jit = [
+    "dep:cranelift-jit",
+    "dep:cranelift-module",
+    "dep:cranelift-codegen",
+    "dep:cranelift-frontend",
+    "dep:cranelift-native",
+]
+
 [dependencies]
 toml = "1.1.2"
 ureq = "3"
+
+cranelift-jit       = { version = "0.115", optional = true }
+cranelift-module    = { version = "0.115", optional = true }
+cranelift-codegen   = { version = "0.115", optional = true }
+cranelift-frontend  = { version = "0.115", optional = true }
+cranelift-native    = { version = "0.115", optional = true }

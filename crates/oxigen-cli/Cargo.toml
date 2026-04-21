@@ -7,6 +7,11 @@ edition = "2024"
 name = "oxigen"
 path = "src/main.rs"
 
+[features]
+default = []
+# Enables the baseline JIT in oxigen-core and surfaces the `--jit` flag.
+jit = ["oxigen-core/jit"]
+
 [dependencies]
 oxigen-core = { path = "../../core" }
 rustyline = "15"

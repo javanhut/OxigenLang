@@ -40,12 +40,24 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("__upper".to_string(), Value::Builtin(builtin_upper));
     globals.insert("__lower".to_string(), Value::Builtin(builtin_lower));
     globals.insert("__replace".to_string(), Value::Builtin(builtin_replace));
-    globals.insert("__starts_with".to_string(), Value::Builtin(builtin_starts_with));
+    globals.insert(
+        "__starts_with".to_string(),
+        Value::Builtin(builtin_starts_with),
+    );
     globals.insert("__ends_with".to_string(), Value::Builtin(builtin_ends_with));
-    globals.insert("__contains_str".to_string(), Value::Builtin(builtin_contains_str));
+    globals.insert(
+        "__contains_str".to_string(),
+        Value::Builtin(builtin_contains_str),
+    );
     globals.insert("__strip".to_string(), Value::Builtin(builtin_strip));
-    globals.insert("__strip_left".to_string(), Value::Builtin(builtin_strip_left));
-    globals.insert("__strip_right".to_string(), Value::Builtin(builtin_strip_right));
+    globals.insert(
+        "__strip_left".to_string(),
+        Value::Builtin(builtin_strip_left),
+    );
+    globals.insert(
+        "__strip_right".to_string(),
+        Value::Builtin(builtin_strip_right),
+    );
     globals.insert("__sort".to_string(), Value::Builtin(builtin_sort));
 
     // Math builtins
@@ -60,9 +72,18 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
 
     // File I/O
     globals.insert("__read_file".to_string(), Value::Builtin(builtin_read_file));
-    globals.insert("__write_file".to_string(), Value::Builtin(builtin_write_file));
-    globals.insert("__append_file".to_string(), Value::Builtin(builtin_append_file));
-    globals.insert("__file_exists".to_string(), Value::Builtin(builtin_file_exists));
+    globals.insert(
+        "__write_file".to_string(),
+        Value::Builtin(builtin_write_file),
+    );
+    globals.insert(
+        "__append_file".to_string(),
+        Value::Builtin(builtin_append_file),
+    );
+    globals.insert(
+        "__file_exists".to_string(),
+        Value::Builtin(builtin_file_exists),
+    );
 
     // OS builtins
     globals.insert("__exec".to_string(), Value::Builtin(builtin_exec));
@@ -85,31 +106,67 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
 
     // Time builtins
     globals.insert("__time_now".to_string(), Value::Builtin(builtin_time_now));
-    globals.insert("__time_now_ms".to_string(), Value::Builtin(builtin_time_now_ms));
-    globals.insert("__time_sleep".to_string(), Value::Builtin(builtin_time_sleep));
-    globals.insert("__time_monotonic".to_string(), Value::Builtin(builtin_time_monotonic));
+    globals.insert(
+        "__time_now_ms".to_string(),
+        Value::Builtin(builtin_time_now_ms),
+    );
+    globals.insert(
+        "__time_sleep".to_string(),
+        Value::Builtin(builtin_time_sleep),
+    );
+    globals.insert(
+        "__time_monotonic".to_string(),
+        Value::Builtin(builtin_time_monotonic),
+    );
 
     // Random builtins
     globals.insert("__rand_seed".to_string(), Value::Builtin(builtin_rand_seed));
     globals.insert("__rand_int".to_string(), Value::Builtin(builtin_rand_int));
-    globals.insert("__rand_float".to_string(), Value::Builtin(builtin_rand_float));
+    globals.insert(
+        "__rand_float".to_string(),
+        Value::Builtin(builtin_rand_float),
+    );
 
     // Path builtins
     globals.insert("__path_join".to_string(), Value::Builtin(builtin_path_join));
     globals.insert("__path_ext".to_string(), Value::Builtin(builtin_path_ext));
-    globals.insert("__path_filename".to_string(), Value::Builtin(builtin_path_filename));
-    globals.insert("__path_parent".to_string(), Value::Builtin(builtin_path_parent));
+    globals.insert(
+        "__path_filename".to_string(),
+        Value::Builtin(builtin_path_filename),
+    );
+    globals.insert(
+        "__path_parent".to_string(),
+        Value::Builtin(builtin_path_parent),
+    );
     globals.insert("__path_stem".to_string(), Value::Builtin(builtin_path_stem));
-    globals.insert("__path_is_absolute".to_string(), Value::Builtin(builtin_path_is_absolute));
+    globals.insert(
+        "__path_is_absolute".to_string(),
+        Value::Builtin(builtin_path_is_absolute),
+    );
 
     // JSON / TOML
-    globals.insert("__json_parse".to_string(), Value::Builtin(builtin_json_parse));
-    globals.insert("__json_stringify".to_string(), Value::Builtin(builtin_json_stringify));
-    globals.insert("__toml_parse".to_string(), Value::Builtin(builtin_toml_parse));
-    globals.insert("__toml_stringify".to_string(), Value::Builtin(builtin_toml_stringify));
+    globals.insert(
+        "__json_parse".to_string(),
+        Value::Builtin(builtin_json_parse),
+    );
+    globals.insert(
+        "__json_stringify".to_string(),
+        Value::Builtin(builtin_json_stringify),
+    );
+    globals.insert(
+        "__toml_parse".to_string(),
+        Value::Builtin(builtin_toml_parse),
+    );
+    globals.insert(
+        "__toml_stringify".to_string(),
+        Value::Builtin(builtin_toml_stringify),
+    );
 
     // Network
-    globals.insert("__http_request".to_string(), Value::Builtin(builtin_http_request));
+    globals.insert(
+        "__http_request".to_string(),
+        Value::Builtin(builtin_http_request),
+    );
 }
 
 // ── Core builtins ──────────────────────────────────────────────────────
@@ -540,9 +597,7 @@ fn builtin_starts_with(args: Vec<Value>) -> Value {
         return Value::Error("__starts_with() takes 2 arguments".into());
     }
     match (&args[0], &args[1]) {
-        (Value::String(s), Value::String(prefix)) => {
-            Value::Boolean(s.starts_with(prefix.as_ref()))
-        }
+        (Value::String(s), Value::String(prefix)) => Value::Boolean(s.starts_with(prefix.as_ref())),
         _ => Value::Error("__starts_with() requires string arguments".into()),
     }
 }
@@ -552,9 +607,7 @@ fn builtin_ends_with(args: Vec<Value>) -> Value {
         return Value::Error("__ends_with() takes 2 arguments".into());
     }
     match (&args[0], &args[1]) {
-        (Value::String(s), Value::String(suffix)) => {
-            Value::Boolean(s.ends_with(suffix.as_ref()))
-        }
+        (Value::String(s), Value::String(suffix)) => Value::Boolean(s.ends_with(suffix.as_ref())),
         _ => Value::Error("__ends_with() requires string arguments".into()),
     }
 }
@@ -618,13 +671,13 @@ fn builtin_sort(args: Vec<Value>) -> Value {
     match &args[0] {
         Value::Array(arr) => {
             let mut sorted = arr.borrow().clone();
-            sorted.sort_by(|a, b| {
-                match (a, b) {
-                    (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
-                    (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-                    (Value::String(x), Value::String(y)) => x.cmp(y),
-                    _ => std::cmp::Ordering::Equal,
+            sorted.sort_by(|a, b| match (a, b) {
+                (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
+                (Value::Float(x), Value::Float(y)) => {
+                    x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
                 }
+                (Value::String(x), Value::String(y)) => x.cmp(y),
+                _ => std::cmp::Ordering::Equal,
             });
             Value::Array(Rc::new(RefCell::new(sorted)))
         }
@@ -635,7 +688,9 @@ fn builtin_sort(args: Vec<Value>) -> Value {
 // ── Math builtins ──────────────────────────────────────────────────────
 
 fn builtin_sqrt(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__sqrt() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__sqrt() takes 1 argument".into());
+    }
     match &args[0] {
         Value::Float(f) => Value::Float(f.sqrt()),
         Value::Integer(n) => Value::Float((*n as f64).sqrt()),
@@ -644,7 +699,9 @@ fn builtin_sqrt(args: Vec<Value>) -> Value {
 }
 
 fn builtin_floor(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__floor() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__floor() takes 1 argument".into());
+    }
     match &args[0] {
         Value::Float(f) => Value::Integer(f.floor() as i64),
         Value::Integer(n) => Value::Integer(*n),
@@ -653,7 +710,9 @@ fn builtin_floor(args: Vec<Value>) -> Value {
 }
 
 fn builtin_ceil(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__ceil() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__ceil() takes 1 argument".into());
+    }
     match &args[0] {
         Value::Float(f) => Value::Integer(f.ceil() as i64),
         Value::Integer(n) => Value::Integer(*n),
@@ -662,7 +721,9 @@ fn builtin_ceil(args: Vec<Value>) -> Value {
 }
 
 fn builtin_round(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__round() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__round() takes 1 argument".into());
+    }
     match &args[0] {
         Value::Float(f) => Value::Integer(f.round() as i64),
         Value::Integer(n) => Value::Integer(*n),
@@ -696,23 +757,33 @@ fn builtin_read_line(_args: Vec<Value>) -> Value {
 // ── File I/O ───────────────────────────────────────────────────────────
 
 fn builtin_read_file(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__read_file() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__read_file() takes 1 argument".into());
+    }
     match &args[0] {
         Value::String(path) => match std::fs::read_to_string(path.as_ref()) {
             Ok(contents) => Value::String(contents.into()),
-            Err(e) => Value::ErrorValue { msg: format!("{}", e).into(), tag: Some("IO".into()) },
+            Err(e) => Value::ErrorValue {
+                msg: format!("{}", e).into(),
+                tag: Some("IO".into()),
+            },
         },
         _ => Value::Error("__read_file() requires a string path".into()),
     }
 }
 
 fn builtin_write_file(args: Vec<Value>) -> Value {
-    if args.len() != 2 { return Value::Error("__write_file() takes 2 arguments".into()); }
+    if args.len() != 2 {
+        return Value::Error("__write_file() takes 2 arguments".into());
+    }
     match (&args[0], &args[1]) {
         (Value::String(path), Value::String(content)) => {
             match std::fs::write(path.as_ref(), content.as_ref()) {
                 Ok(_) => Value::None,
-                Err(e) => Value::ErrorValue { msg: format!("{}", e).into(), tag: Some("IO".into()) },
+                Err(e) => Value::ErrorValue {
+                    msg: format!("{}", e).into(),
+                    tag: Some("IO".into()),
+                },
             }
         }
         _ => Value::Error("__write_file() requires (string, string)".into()),
@@ -720,16 +791,28 @@ fn builtin_write_file(args: Vec<Value>) -> Value {
 }
 
 fn builtin_append_file(args: Vec<Value>) -> Value {
-    if args.len() != 2 { return Value::Error("__append_file() takes 2 arguments".into()); }
+    if args.len() != 2 {
+        return Value::Error("__append_file() takes 2 arguments".into());
+    }
     match (&args[0], &args[1]) {
         (Value::String(path), Value::String(content)) => {
             use std::io::Write;
-            match std::fs::OpenOptions::new().append(true).create(true).open(path.as_ref()) {
+            match std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(path.as_ref())
+            {
                 Ok(mut f) => match f.write_all(content.as_bytes()) {
                     Ok(_) => Value::None,
-                    Err(e) => Value::ErrorValue { msg: format!("{}", e).into(), tag: Some("IO".into()) },
+                    Err(e) => Value::ErrorValue {
+                        msg: format!("{}", e).into(),
+                        tag: Some("IO".into()),
+                    },
                 },
-                Err(e) => Value::ErrorValue { msg: format!("{}", e).into(), tag: Some("IO".into()) },
+                Err(e) => Value::ErrorValue {
+                    msg: format!("{}", e).into(),
+                    tag: Some("IO".into()),
+                },
             }
         }
         _ => Value::Error("__append_file() requires (string, string)".into()),
@@ -737,7 +820,9 @@ fn builtin_append_file(args: Vec<Value>) -> Value {
 }
 
 fn builtin_file_exists(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__file_exists() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__file_exists() takes 1 argument".into());
+    }
     match &args[0] {
         Value::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).exists()),
         _ => Value::Error("__file_exists() requires a string".into()),
@@ -747,7 +832,9 @@ fn builtin_file_exists(args: Vec<Value>) -> Value {
 // ── OS builtins ────────────────────────────────────────────────────────
 
 fn builtin_exec(args: Vec<Value>) -> Value {
-    if args.is_empty() { return Value::Error("__exec() takes at least 1 argument".into()); }
+    if args.is_empty() {
+        return Value::Error("__exec() takes at least 1 argument".into());
+    }
     let cmd = match &args[0] {
         Value::String(s) => s.to_string(),
         _ => return Value::Error("__exec() requires a string command".into()),
@@ -759,10 +846,22 @@ fn builtin_exec(args: Vec<Value>) -> Value {
         format!("{} {}", cmd, extra_args.join(" "))
     };
 
-    let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
-    let flag = if cfg!(target_os = "windows") { "/C" } else { "-c" };
+    let shell = if cfg!(target_os = "windows") {
+        "cmd"
+    } else {
+        "sh"
+    };
+    let flag = if cfg!(target_os = "windows") {
+        "/C"
+    } else {
+        "-c"
+    };
 
-    match std::process::Command::new(shell).arg(flag).arg(&full_cmd).output() {
+    match std::process::Command::new(shell)
+        .arg(flag)
+        .arg(&full_cmd)
+        .output()
+    {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -787,7 +886,9 @@ fn builtin_os_arch(_args: Vec<Value>) -> Value {
 }
 
 fn builtin_env_get(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__env_get() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__env_get() takes 1 argument".into());
+    }
     match &args[0] {
         Value::String(name) => match std::env::var(name.as_ref()) {
             Ok(val) => Value::String(val.into()),
@@ -798,11 +899,15 @@ fn builtin_env_get(args: Vec<Value>) -> Value {
 }
 
 fn builtin_env_set(args: Vec<Value>) -> Value {
-    if args.len() != 2 { return Value::Error("__env_set() takes 2 arguments".into()); }
+    if args.len() != 2 {
+        return Value::Error("__env_set() takes 2 arguments".into());
+    }
     match (&args[0], &args[1]) {
         (Value::String(name), Value::String(val)) => {
             // SAFETY: We don't access env vars concurrently from other threads.
-            unsafe { std::env::set_var(name.as_ref(), val.as_ref()); }
+            unsafe {
+                std::env::set_var(name.as_ref(), val.as_ref());
+            }
             Value::None
         }
         _ => Value::Error("__env_set() requires (string, string)".into()),
@@ -824,14 +929,14 @@ fn builtin_cwd(_args: Vec<Value>) -> Value {
 }
 
 fn builtin_chdir(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__chdir() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__chdir() takes 1 argument".into());
+    }
     match &args[0] {
-        Value::String(path) => {
-            match std::env::set_current_dir(path.as_ref()) {
-                Ok(_) => Value::None,
-                Err(e) => Value::Error(format!("chdir error: {}", e).into()),
-            }
-        }
+        Value::String(path) => match std::env::set_current_dir(path.as_ref()) {
+            Ok(_) => Value::None,
+            Err(e) => Value::Error(format!("chdir error: {}", e).into()),
+        },
         _ => Value::Error("__chdir() requires a string".into()),
     }
 }
@@ -853,7 +958,9 @@ fn builtin_pid(_args: Vec<Value>) -> Value {
 }
 
 fn builtin_list_dir(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__list_dir() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__list_dir() takes 1 argument".into());
+    }
     match &args[0] {
         Value::String(path) => match std::fs::read_dir(path.as_ref()) {
             Ok(entries) => {
@@ -863,14 +970,19 @@ fn builtin_list_dir(args: Vec<Value>) -> Value {
                     .collect();
                 Value::Array(Rc::new(RefCell::new(items)))
             }
-            Err(e) => Value::ErrorValue { msg: format!("{}", e).into(), tag: Some("IO".into()) },
+            Err(e) => Value::ErrorValue {
+                msg: format!("{}", e).into(),
+                tag: Some("IO".into()),
+            },
         },
         _ => Value::Error("__list_dir() requires a string".into()),
     }
 }
 
 fn builtin_walk_dir(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__walk_dir() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__walk_dir() takes 1 argument".into());
+    }
     match &args[0] {
         Value::String(path) => {
             let mut items = Vec::new();
@@ -893,40 +1005,57 @@ fn builtin_walk_dir(args: Vec<Value>) -> Value {
 }
 
 fn builtin_mkdir(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__mkdir() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__mkdir() takes 1 argument".into());
+    }
     match &args[0] {
         Value::String(path) => match std::fs::create_dir_all(path.as_ref()) {
             Ok(_) => Value::None,
-            Err(e) => Value::ErrorValue { msg: format!("{}", e).into(), tag: Some("IO".into()) },
+            Err(e) => Value::ErrorValue {
+                msg: format!("{}", e).into(),
+                tag: Some("IO".into()),
+            },
         },
         _ => Value::Error("__mkdir() requires a string".into()),
     }
 }
 
 fn builtin_rmdir(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__rmdir() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__rmdir() takes 1 argument".into());
+    }
     match &args[0] {
         Value::String(path) => match std::fs::remove_dir_all(path.as_ref()) {
             Ok(_) => Value::None,
-            Err(e) => Value::ErrorValue { msg: format!("{}", e).into(), tag: Some("IO".into()) },
+            Err(e) => Value::ErrorValue {
+                msg: format!("{}", e).into(),
+                tag: Some("IO".into()),
+            },
         },
         _ => Value::Error("__rmdir() requires a string".into()),
     }
 }
 
 fn builtin_remove_file(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__remove() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__remove() takes 1 argument".into());
+    }
     match &args[0] {
         Value::String(path) => match std::fs::remove_file(path.as_ref()) {
             Ok(_) => Value::None,
-            Err(e) => Value::ErrorValue { msg: format!("{}", e).into(), tag: Some("IO".into()) },
+            Err(e) => Value::ErrorValue {
+                msg: format!("{}", e).into(),
+                tag: Some("IO".into()),
+            },
         },
         _ => Value::Error("__remove() requires a string".into()),
     }
 }
 
 fn builtin_is_dir(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__is_dir() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__is_dir() takes 1 argument".into());
+    }
     match &args[0] {
         Value::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).is_dir()),
         _ => Value::Error("__is_dir() requires a string".into()),
@@ -934,7 +1063,9 @@ fn builtin_is_dir(args: Vec<Value>) -> Value {
 }
 
 fn builtin_is_file(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__is_file() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__is_file() takes 1 argument".into());
+    }
     match &args[0] {
         Value::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).is_file()),
         _ => Value::Error("__is_file() requires a string".into()),
@@ -960,7 +1091,9 @@ fn builtin_time_now_ms(_args: Vec<Value>) -> Value {
 }
 
 fn builtin_time_sleep(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__time_sleep() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__time_sleep() takes 1 argument".into());
+    }
     match &args[0] {
         Value::Integer(ms) => {
             std::thread::sleep(std::time::Duration::from_millis(*ms as u64));
@@ -1011,7 +1144,9 @@ fn next_rand() -> u64 {
 }
 
 fn builtin_rand_seed(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__rand_seed() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__rand_seed() takes 1 argument".into());
+    }
     match &args[0] {
         Value::Integer(n) => {
             let seed = if *n == 0 { 1u64 } else { *n as u64 };
@@ -1023,11 +1158,15 @@ fn builtin_rand_seed(args: Vec<Value>) -> Value {
 }
 
 fn builtin_rand_int(args: Vec<Value>) -> Value {
-    if args.len() != 2 { return Value::Error("__rand_int() takes 2 arguments".into()); }
+    if args.len() != 2 {
+        return Value::Error("__rand_int() takes 2 arguments".into());
+    }
     match (&args[0], &args[1]) {
         (Value::Integer(min), Value::Integer(max)) => {
             let range = max - min;
-            if range <= 0 { return Value::Integer(*min); }
+            if range <= 0 {
+                return Value::Integer(*min);
+            }
             let r = next_rand();
             Value::Integer(min + (r as i64).unsigned_abs() as i64 % range)
         }
@@ -1043,7 +1182,9 @@ fn builtin_rand_float(_args: Vec<Value>) -> Value {
 // ── Path builtins ──────────────────────────────────────────────────────
 
 fn builtin_path_join(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__path_join() takes 1 argument (array)".into()); }
+    if args.len() != 1 {
+        return Value::Error("__path_join() takes 1 argument (array)".into());
+    }
     match &args[0] {
         Value::Array(parts) => {
             let borrowed = parts.borrow();
@@ -1058,7 +1199,9 @@ fn builtin_path_join(args: Vec<Value>) -> Value {
 }
 
 fn builtin_path_ext(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__path_ext() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__path_ext() takes 1 argument".into());
+    }
     match &args[0] {
         Value::String(path) => {
             let p = std::path::Path::new(path.as_ref());
@@ -1072,7 +1215,9 @@ fn builtin_path_ext(args: Vec<Value>) -> Value {
 }
 
 fn builtin_path_filename(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__path_filename() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__path_filename() takes 1 argument".into());
+    }
     match &args[0] {
         Value::String(path) => {
             let p = std::path::Path::new(path.as_ref());
@@ -1086,7 +1231,9 @@ fn builtin_path_filename(args: Vec<Value>) -> Value {
 }
 
 fn builtin_path_parent(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__path_parent() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__path_parent() takes 1 argument".into());
+    }
     match &args[0] {
         Value::String(path) => {
             let p = std::path::Path::new(path.as_ref());
@@ -1100,7 +1247,9 @@ fn builtin_path_parent(args: Vec<Value>) -> Value {
 }
 
 fn builtin_path_stem(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__path_stem() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__path_stem() takes 1 argument".into());
+    }
     match &args[0] {
         Value::String(path) => {
             let p = std::path::Path::new(path.as_ref());
@@ -1114,7 +1263,9 @@ fn builtin_path_stem(args: Vec<Value>) -> Value {
 }
 
 fn builtin_path_is_absolute(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__path_is_absolute() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__path_is_absolute() takes 1 argument".into());
+    }
     match &args[0] {
         Value::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).is_absolute()),
         _ => Value::Error("__path_is_absolute() requires a string".into()),
@@ -1124,7 +1275,9 @@ fn builtin_path_is_absolute(args: Vec<Value>) -> Value {
 // ── JSON builtins ──────────────────────────────────────────────────────
 
 fn builtin_json_parse(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__json_parse() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__json_parse() takes 1 argument".into());
+    }
     match &args[0] {
         Value::String(s) => {
             let chars: Vec<char> = s.chars().collect();
@@ -1208,24 +1361,40 @@ fn json_parse_string(chars: &[char], pos: &mut usize) -> Result<Value, String> {
 fn json_parse_number(chars: &[char], pos: &mut usize) -> Result<Value, String> {
     let start = *pos;
     let mut is_float = false;
-    if chars[*pos] == '-' { *pos += 1; }
-    while *pos < chars.len() && chars[*pos].is_ascii_digit() { *pos += 1; }
+    if chars[*pos] == '-' {
+        *pos += 1;
+    }
+    while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+        *pos += 1;
+    }
     if *pos < chars.len() && chars[*pos] == '.' {
         is_float = true;
         *pos += 1;
-        while *pos < chars.len() && chars[*pos].is_ascii_digit() { *pos += 1; }
+        while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+            *pos += 1;
+        }
     }
     if *pos < chars.len() && (chars[*pos] == 'e' || chars[*pos] == 'E') {
         is_float = true;
         *pos += 1;
-        if *pos < chars.len() && (chars[*pos] == '+' || chars[*pos] == '-') { *pos += 1; }
-        while *pos < chars.len() && chars[*pos].is_ascii_digit() { *pos += 1; }
+        if *pos < chars.len() && (chars[*pos] == '+' || chars[*pos] == '-') {
+            *pos += 1;
+        }
+        while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+            *pos += 1;
+        }
     }
     let num_str: String = chars[start..*pos].iter().collect();
     if is_float {
-        num_str.parse::<f64>().map(Value::Float).map_err(|e| format!("invalid number: {}", e))
+        num_str
+            .parse::<f64>()
+            .map(Value::Float)
+            .map_err(|e| format!("invalid number: {}", e))
     } else {
-        num_str.parse::<i64>().map(Value::Integer).map_err(|e| format!("invalid number: {}", e))
+        num_str
+            .parse::<i64>()
+            .map(Value::Integer)
+            .map_err(|e| format!("invalid number: {}", e))
     }
 }
 
@@ -1261,9 +1430,16 @@ fn json_parse_array(chars: &[char], pos: &mut usize) -> Result<Value, String> {
     loop {
         elements.push(json_parse_value(chars, pos)?);
         json_skip_ws(chars, pos);
-        if *pos >= chars.len() { return Err("unterminated array".to_string()); }
-        if chars[*pos] == ']' { *pos += 1; break; }
-        if chars[*pos] != ',' { return Err(format!("expected ',' or ']' at {}", pos)); }
+        if *pos >= chars.len() {
+            return Err("unterminated array".to_string());
+        }
+        if chars[*pos] == ']' {
+            *pos += 1;
+            break;
+        }
+        if chars[*pos] != ',' {
+            return Err(format!("expected ',' or ']' at {}", pos));
+        }
         *pos += 1;
     }
     Ok(Value::Array(Rc::new(RefCell::new(elements))))
@@ -1288,16 +1464,25 @@ fn json_parse_object(chars: &[char], pos: &mut usize) -> Result<Value, String> {
         let value = json_parse_value(chars, pos)?;
         entries.push((key, value));
         json_skip_ws(chars, pos);
-        if *pos >= chars.len() { return Err("unterminated object".to_string()); }
-        if chars[*pos] == '}' { *pos += 1; break; }
-        if chars[*pos] != ',' { return Err(format!("expected ',' or '}}' at {}", pos)); }
+        if *pos >= chars.len() {
+            return Err("unterminated object".to_string());
+        }
+        if chars[*pos] == '}' {
+            *pos += 1;
+            break;
+        }
+        if chars[*pos] != ',' {
+            return Err(format!("expected ',' or '}}' at {}", pos));
+        }
         *pos += 1;
     }
     Ok(Value::Map(Rc::new(RefCell::new(entries))))
 }
 
 fn builtin_json_stringify(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__json_stringify() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__json_stringify() takes 1 argument".into());
+    }
     match value_to_json(&args[0]) {
         Ok(s) => Value::String(s.into()),
         Err(e) => Value::Error(format!("json stringify error: {}", e).into()),
@@ -1310,7 +1495,11 @@ fn value_to_json(val: &Value) -> Result<String, String> {
         Value::Boolean(b) => Ok(if *b { "true" } else { "false" }.to_string()),
         Value::Integer(n) => Ok(n.to_string()),
         Value::Float(f) => {
-            if f.is_nan() || f.is_infinite() { Ok("null".to_string()) } else { Ok(f.to_string()) }
+            if f.is_nan() || f.is_infinite() {
+                Ok("null".to_string())
+            } else {
+                Ok(f.to_string())
+            }
         }
         Value::String(s) => {
             let mut out = String::from('"');
@@ -1359,14 +1548,14 @@ fn value_to_json(val: &Value) -> Result<String, String> {
 // ── TOML builtins ──────────────────────────────────────────────────────
 
 fn builtin_toml_parse(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__toml_parse() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__toml_parse() takes 1 argument".into());
+    }
     match &args[0] {
-        Value::String(s) => {
-            match toml::from_str::<toml::Value>(s.as_ref()) {
-                Ok(value) => toml_value_to_value(value),
-                Err(e) => Value::Error(format!("toml parse error: {}", e).into()),
-            }
-        }
+        Value::String(s) => match toml::from_str::<toml::Value>(s.as_ref()) {
+            Ok(value) => toml_value_to_value(value),
+            Err(e) => Value::Error(format!("toml parse error: {}", e).into()),
+        },
         _ => Value::Error("__toml_parse() requires a string".into()),
     }
 }
@@ -1393,7 +1582,9 @@ fn toml_value_to_value(tv: toml::Value) -> Value {
 }
 
 fn builtin_toml_stringify(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__toml_stringify() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error("__toml_stringify() takes 1 argument".into());
+    }
     match value_to_toml(&args[0]) {
         Ok(tv) => match toml::to_string_pretty(&tv) {
             Ok(s) => Value::String(s.into()),
@@ -1448,39 +1639,78 @@ fn value_to_toml(val: &Value) -> Result<toml::Value, String> {
 
 fn builtin_http_request(args: Vec<Value>) -> Value {
     if args.len() < 2 || args.len() > 4 {
-        return Value::Error("__http_request: expected 2-4 arguments (method, url, headers?, body?)".into());
+        return Value::Error(
+            "__http_request: expected 2-4 arguments (method, url, headers?, body?)".into(),
+        );
     }
     let method = match &args[0] {
         Value::String(s) => s.to_uppercase(),
-        _ => return Value::Error(format!("__http_request: method must be STRING, got {}", args[0].type_name()).into()),
+        _ => {
+            return Value::Error(
+                format!(
+                    "__http_request: method must be STRING, got {}",
+                    args[0].type_name()
+                )
+                .into(),
+            );
+        }
     };
     let url = match &args[1] {
         Value::String(s) => s.to_string(),
-        _ => return Value::Error(format!("__http_request: url must be STRING, got {}", args[1].type_name()).into()),
+        _ => {
+            return Value::Error(
+                format!(
+                    "__http_request: url must be STRING, got {}",
+                    args[1].type_name()
+                )
+                .into(),
+            );
+        }
     };
 
     let headers: Vec<(String, String)> = if args.len() >= 3 {
         if let Value::Map(m) = &args[2] {
-            m.borrow().iter().filter_map(|(k, v)| {
-                if let (Value::String(key), Value::String(val)) = (k, v) {
-                    Some((key.to_string(), val.to_string()))
-                } else { None }
-            }).collect()
-        } else { Vec::new() }
-    } else { Vec::new() };
+            m.borrow()
+                .iter()
+                .filter_map(|(k, v)| {
+                    if let (Value::String(key), Value::String(val)) = (k, v) {
+                        Some((key.to_string(), val.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
 
     let body: Option<String> = if args.len() >= 4 {
         match &args[3] {
             Value::String(s) => Some(s.to_string()),
             Value::None => None,
-            _ => return Value::Error(format!("__http_request: body must be STRING, got {}", args[3].type_name()).into()),
+            _ => {
+                return Value::Error(
+                    format!(
+                        "__http_request: body must be STRING, got {}",
+                        args[3].type_name()
+                    )
+                    .into(),
+                );
+            }
         }
-    } else { None };
+    } else {
+        None
+    };
 
     macro_rules! apply_headers {
         ($req:expr) => {{
             let mut r = $req;
-            for (k, v) in &headers { r = r.header(k.as_str(), v.as_str()); }
+            for (k, v) in &headers {
+                r = r.header(k.as_str(), v.as_str());
+            }
             r
         }};
     }
@@ -1493,7 +1723,10 @@ fn builtin_http_request(args: Vec<Value>) -> Value {
                     let (_, mut resp_body) = resp.into_parts();
                     let body_str = resp_body.read_to_string().unwrap_or_default();
                     let entries: Vec<(Value, Value)> = vec![
-                        (Value::String("status".into()), Value::Integer(status as i64)),
+                        (
+                            Value::String("status".into()),
+                            Value::Integer(status as i64),
+                        ),
                         (Value::String("body".into()), Value::String(body_str.into())),
                     ];
                     Value::Map(Rc::new(RefCell::new(entries)))
