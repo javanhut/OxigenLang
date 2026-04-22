@@ -3,3 +3,5 @@
 .claude
 oxigen-lsp
 Cargo.lock
+__pycache__/
+*.pyc

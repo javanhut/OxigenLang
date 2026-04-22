@@ -99,6 +99,37 @@ binary stays pure interpreter. Full architecture, supported opcodes,
 safety invariants, and benchmark methodology are in
 [docs/JIT_ARCHITECTURE.md](docs/JIT_ARCHITECTURE.md).
 
+### Benchmark Against Python
+
+Run the benchmark harness from the repo root:
+
+```bash
+python3 scripts/bench.py
+```
+
+That uses `target/release/oxigen` if it already exists, otherwise it
+builds it, then runs every paired `example/bench_*.oxi` /
+`example/bench_*.py` benchmark and writes both JSON and Markdown reports
+to `benchmark_reports/`. The report stores raw samples, median/mean/
+stdev/min/max per benchmark, and suite-level geometric-mean speedups vs
+Python so you can track JIT performance over time. To run a single
+benchmark:
+
+```bash
+python3 scripts/bench.py bench_loop
+python3 scripts/bench.py example/bench_fib.oxi
+```
+
+Useful flags:
+
+```bash
+python3 scripts/bench.py --rebuild
+python3 scripts/bench.py --oxigen-only
+python3 scripts/bench.py --plain-build
+python3 scripts/bench.py --runs 10 --warmups 3
+python3 scripts/bench.py --report-name nightly --report-dir reports/benchmarks
+```
+
 ## Editor Support
 
 OxigenLang ships with a language server (LSP) and Neovim integration. The LSP is written in Go and provides diagnostics, completion, hover, document symbols, and formatting.
