@@ -221,6 +221,95 @@ pub unsafe extern "C" fn jit_local_add_array_mod_index(
     0
 }
 
+pub unsafe extern "C" fn jit_struct_field_add_const(
+    vm: *mut VM,
+    self_slot: u32,
+    field_idx: u32,
+    addend: i64,
+) -> u32 {
+    let vm = unsafe { &mut *vm };
+    let base = vm.current_slot_offset();
+    let self_val = vm.stack_slot(base + self_slot as usize).clone();
+
+    if let Value::StructInstance(inst) = &self_val {
+        let field_name = vm.current_constant(field_idx as u16);
+        if let Value::String(fname) = &field_name {
+            if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+                let mut fields = inst.fields.borrow_mut();
+                if let Value::Integer(current) = fields[idx] {
+                    fields[idx] = Value::Integer(current.wrapping_add(addend));
+                    return 0;
+                }
+            }
+        }
+    }
+
+    match vm.handle_get_field_from_value(self_val.clone(), field_idx as u16) {
+        Ok(current) => match vm.binary_add(current, Value::Integer(addend)) {
+            Ok(sum) => match vm.handle_set_field_on_value(self_val, field_idx as u16, sum) {
+                Ok(()) => 0,
+                Err(err) => {
+                    vm.jit.stash_error(err);
+                    1
+                }
+            },
+            Err(err) => {
+                vm.jit.stash_error(err);
+                1
+            }
+        },
+        Err(err) => {
+            vm.jit.stash_error(err);
+            1
+        }
+    }
+}
+
+pub unsafe extern "C" fn jit_struct_field_add_local(
+    vm: *mut VM,
+    self_slot: u32,
+    field_idx: u32,
+    rhs_slot: u32,
+) -> u32 {
+    let vm = unsafe { &mut *vm };
+    let base = vm.current_slot_offset();
+    let self_val = vm.stack_slot(base + self_slot as usize).clone();
+    let rhs_val = vm.stack_slot(base + rhs_slot as usize).clone();
+
+    if let (Value::StructInstance(inst), Value::Integer(rhs)) = (&self_val, &rhs_val) {
+        let field_name = vm.current_constant(field_idx as u16);
+        if let Value::String(fname) = &field_name {
+            if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+                let mut fields = inst.fields.borrow_mut();
+                if let Value::Integer(current) = fields[idx] {
+                    fields[idx] = Value::Integer(current.wrapping_add(*rhs));
+                    return 0;
+                }
+            }
+        }
+    }
+
+    match vm.handle_get_field_from_value(self_val.clone(), field_idx as u16) {
+        Ok(current) => match vm.binary_add(current, rhs_val) {
+            Ok(sum) => match vm.handle_set_field_on_value(self_val, field_idx as u16, sum) {
+                Ok(()) => 0,
+                Err(err) => {
+                    vm.jit.stash_error(err);
+                    1
+                }
+            },
+            Err(err) => {
+                vm.jit.stash_error(err);
+                1
+            }
+        },
+        Err(err) => {
+            vm.jit.stash_error(err);
+            1
+        }
+    }
+}
+
 // ── Locals ─────────────────────────────────────────────────────────────
 
 /// Return the current frame's `slot_offset` for the JIT's inline
@@ -512,6 +601,107 @@ pub unsafe extern "C" fn jit_op_set_field(vm: *mut VM, field_idx: u32) -> u32 {
     }
 }
 
+pub unsafe extern "C" fn jit_op_get_field_ic_miss(
+    vm: *mut VM,
+    field_idx: u32,
+    cache_ptr: *mut super::engine::FieldCacheEntry,
+) -> u32 {
+    let vm = unsafe { &mut *vm };
+    let cache = unsafe { &mut *cache_ptr };
+    let object = vm.peek(0).clone();
+    let field_name = vm.current_constant(field_idx as u16);
+    let status = match vm.handle_get_field(field_idx as u16) {
+        Ok(()) => 0,
+        Err(e) => {
+            vm.jit.stash_error(e);
+            1
+        }
+    };
+    if status != 0 {
+        return status;
+    }
+
+    cache.kind = super::engine::FieldCacheKind::Invalid;
+    cache.struct_def_raw = std::ptr::null();
+    cache.closure_raw = std::ptr::null();
+    cache.thunk_raw = std::ptr::null();
+    cache.struct_def = None;
+    cache.closure = None;
+
+    let Value::String(fname) = field_name else {
+        return 0;
+    };
+    if let Value::StructInstance(inst) = object {
+        let def_raw: *const crate::vm::value::ObjStructDef = unsafe {
+            *(&inst.def as *const Rc<crate::vm::value::ObjStructDef>
+                as *const *const crate::vm::value::ObjStructDef)
+        };
+        cache.struct_def_raw = def_raw;
+        cache.struct_def = Some(Rc::clone(&inst.def));
+        if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+            cache.field_index = idx as u32;
+            cache.kind = super::engine::FieldCacheKind::InstanceField;
+        } else if let Ok(Value::Closure(closure)) = vm.find_struct_method(&inst.struct_name, &fname)
+        {
+            let closure_raw: *const crate::vm::value::ObjClosure = unsafe {
+                *(&closure as *const Rc<crate::vm::value::ObjClosure>
+                    as *const *const crate::vm::value::ObjClosure)
+            };
+            cache.kind = super::engine::FieldCacheKind::DefMethod;
+            cache.closure_raw = closure_raw;
+            cache.thunk_raw = closure
+                .jit_thunk
+                .get()
+                .map(|thunk| thunk as *const ())
+                .unwrap_or(std::ptr::null());
+            cache.closure = Some(closure);
+        }
+    }
+    0
+}
+
+pub unsafe extern "C" fn jit_op_set_field_ic_miss(
+    vm: *mut VM,
+    field_idx: u32,
+    cache_ptr: *mut super::engine::FieldCacheEntry,
+) -> u32 {
+    let vm = unsafe { &mut *vm };
+    let cache = unsafe { &mut *cache_ptr };
+    let object = vm.stack_at(vm.stack_len() - 2).clone();
+    let field_name = vm.current_constant(field_idx as u16);
+    let status = match vm.handle_set_field(field_idx as u16) {
+        Ok(()) => 0,
+        Err(e) => {
+            vm.jit.stash_error(e);
+            1
+        }
+    };
+    if status != 0 {
+        return status;
+    }
+
+    cache.kind = super::engine::FieldCacheKind::Invalid;
+    cache.struct_def_raw = std::ptr::null();
+    cache.struct_def = None;
+
+    let Value::String(fname) = field_name else {
+        return 0;
+    };
+    if let Value::StructInstance(inst) = object {
+        if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+            let def_raw: *const crate::vm::value::ObjStructDef = unsafe {
+                *(&inst.def as *const Rc<crate::vm::value::ObjStructDef>
+                    as *const *const crate::vm::value::ObjStructDef)
+            };
+            cache.struct_def_raw = def_raw;
+            cache.field_index = idx as u32;
+            cache.kind = super::engine::FieldCacheKind::InstanceField;
+            cache.struct_def = Some(Rc::clone(&inst.def));
+        }
+    }
+    0
+}
+
 pub unsafe extern "C" fn jit_op_define_method(
     vm: *mut VM,
     struct_name_idx: u32,
@@ -599,6 +789,21 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
     // Only take the IC path when the method lives on the def.
     match vm.find_struct_method(&struct_name, &mname) {
         Ok(Value::Closure(closure)) => {
+            let Some(thunk) = closure.jit_thunk.get() else {
+                return unsafe { jit_op_method_call(vm as *mut VM, method_idx, arg_count) };
+            };
+            let def_raw: *const crate::vm::value::ObjStructDef = unsafe {
+                *(&struct_def as *const Rc<crate::vm::value::ObjStructDef>
+                    as *const *const crate::vm::value::ObjStructDef)
+            };
+            let closure_raw: *const crate::vm::value::ObjClosure = unsafe {
+                *(&closure as *const Rc<crate::vm::value::ObjClosure>
+                    as *const *const crate::vm::value::ObjClosure)
+            };
+            cache.struct_def_raw = def_raw;
+            cache.closure_raw = closure_raw;
+            cache.thunk_raw = thunk as *const ();
+            cache.arity = closure.function.arity;
             cache.struct_def = Some(Rc::clone(&struct_def));
             cache.closure = Some(Rc::clone(&closure));
             let before_depth = vm.frames_len();
@@ -832,7 +1037,9 @@ pub unsafe extern "C" fn jit_op_call_miss(
 pub unsafe extern "C" fn jit_op_return(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
     let result = vm.pop();
-    let frame = vm.frames_pop().expect("jit_op_return called with no frame");
+    let frame = vm
+        .jit_frame_pop_raw()
+        .expect("jit_op_return called with no jit frame");
     vm.close_upvalues(frame.slot_offset);
     vm.stack_truncate(frame.slot_offset);
     vm.push(result);

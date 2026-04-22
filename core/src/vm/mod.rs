@@ -49,6 +49,34 @@ pub(crate) struct CallFrameHandle {
     pub(crate) slot_offset: usize,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct JitFrame {
+    pub(crate) closure_raw: *const ObjClosure,
+    pub(crate) slot_offset: usize,
+    pub(crate) module_globals: *const HashMap<String, Value>,
+    pub(crate) line: u32,
+}
+
+#[allow(dead_code)]
+impl JitFrame {
+    pub(crate) const OFFSET_CLOSURE_RAW: i32 = 0;
+    pub(crate) const OFFSET_SLOT_OFFSET: i32 = 8;
+    pub(crate) const OFFSET_MODULE_GLOBALS: i32 = 16;
+    pub(crate) const OFFSET_LINE: i32 = 24;
+}
+
+#[repr(C)]
+pub(crate) struct JitFrameView {
+    pub ptr: *mut JitFrame,
+    pub len: usize,
+}
+
+impl JitFrameView {
+    pub const OFFSET_PTR: i32 = 0;
+    pub const OFFSET_LEN: i32 = 8;
+}
+
 /// Runtime error with source information.
 #[derive(Debug)]
 pub struct VMError {
@@ -89,8 +117,11 @@ pub struct VM {
     /// for now we use `std::mem::offset_of!(VM, stack_view)` to pick it
     /// up from wherever the compiler lands it.
     pub(crate) stack_view: StackView,
+    pub(crate) jit_frame_view: JitFrameView,
 
     stack: Vec<Value>,
+    #[allow(dead_code)]
+    jit_frames: Vec<JitFrame>,
     frames: Vec<CallFrame>,
     globals: HashMap<String, Value>,
     open_upvalues: Vec<Rc<RefCell<Upvalue>>>,
@@ -131,14 +162,21 @@ impl VM {
         // every push. Worst-case memory is `STACK_MAX * sizeof(Value)`,
         // which is a handful of MB at the default `STACK_MAX = 262144`.
         let mut stack: Vec<Value> = Vec::with_capacity(STACK_MAX);
+        let mut jit_frames: Vec<JitFrame> = Vec::with_capacity(FRAMES_MAX);
         let stack_view = StackView {
             ptr: stack.as_mut_ptr(),
+            len: 0,
+        };
+        let jit_frame_view = JitFrameView {
+            ptr: jit_frames.as_mut_ptr(),
             len: 0,
         };
 
         VM {
             stack_view,
+            jit_frame_view,
             stack,
+            jit_frames,
             frames: Vec::with_capacity(64),
             globals,
             open_upvalues: Vec::new(),
@@ -161,6 +199,11 @@ impl VM {
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub const fn stack_view_offset() -> usize {
         std::mem::offset_of!(VM, stack_view)
+    }
+
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub const fn jit_frame_view_offset() -> usize {
+        std::mem::offset_of!(VM, jit_frame_view)
     }
 
     pub fn set_source(&mut self, source: &str) {
@@ -244,10 +287,8 @@ impl VM {
 
     pub(crate) fn handle_get_global(&mut self, name_idx: u16) -> Result<(), VMError> {
         let name = self.name_constant(name_idx)?;
-        let frame = self.frames.last().unwrap();
-        let found = frame
-            .module_globals
-            .as_ref()
+        let found = self
+            .active_module_globals()
             .and_then(|mg| mg.get(name.as_ref()))
             .cloned()
             .or_else(|| self.globals.get(name.as_ref()).cloned());
@@ -311,7 +352,7 @@ impl VM {
     }
 
     pub(crate) fn handle_get_upvalue(&mut self, idx: u16) -> Result<(), VMError> {
-        let upvalue = Rc::clone(&self.frames.last().unwrap().closure.upvalues[idx as usize]);
+        let upvalue = Rc::clone(&self.active_closure().upvalues[idx as usize]);
         let val = match &*upvalue.borrow() {
             Upvalue::Open(slot) => self.stack[*slot].clone(),
             Upvalue::Closed(val) => val.clone(),
@@ -322,7 +363,7 @@ impl VM {
 
     pub(crate) fn handle_set_upvalue(&mut self, idx: u16) -> Result<(), VMError> {
         let val = self.peek(0).clone();
-        let upvalue = Rc::clone(&self.frames.last().unwrap().closure.upvalues[idx as usize]);
+        let upvalue = Rc::clone(&self.active_closure().upvalues[idx as usize]);
         match &mut *upvalue.borrow_mut() {
             Upvalue::Open(slot) => {
                 self.stack[*slot] = val;
@@ -445,8 +486,18 @@ impl VM {
     }
 
     pub(crate) fn handle_get_field(&mut self, field_idx: u16) -> Result<(), VMError> {
-        let field_name = self.current_constant(field_idx);
         let object = self.pop();
+        let value = self.handle_get_field_from_value(object, field_idx)?;
+        self.push(value);
+        Ok(())
+    }
+
+    pub(crate) fn handle_get_field_from_value(
+        &mut self,
+        object: Value,
+        field_idx: u16,
+    ) -> Result<Value, VMError> {
+        let field_name = self.current_constant(field_idx);
         let Value::String(fname) = &field_name else {
             return Err(self.runtime_error("invalid field name"));
         };
@@ -456,9 +507,7 @@ impl VM {
                 // Field lookup via the instance's cached layout — direct
                 // Vec index, no HashMap lookup in the hot path.
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
-                    let val = inst.fields.borrow()[idx].clone();
-                    self.push(val);
-                    return Ok(());
+                    return Ok(inst.fields.borrow()[idx].clone());
                 }
                 // Fall through: it might be a method on the struct def.
                 let method_val =
@@ -469,8 +518,7 @@ impl VM {
                         None
                     };
                 if let Some(method) = method_val {
-                    self.push(method);
-                    Ok(())
+                    Ok(method)
                 } else {
                     Err(self.runtime_error_hint(
                         &format!("field '{}' not found on {}", fname, inst.struct_name),
@@ -479,27 +527,18 @@ impl VM {
                 }
             }
             Value::Module(m) => match m.globals.get(fname.as_ref()) {
-                Some(val) => {
-                    self.push(val.clone());
-                    Ok(())
-                }
+                Some(val) => Ok(val.clone()),
                 None => Err(self.runtime_error_hint(
                     &format!("module '{}' has no member '{}'", m.name, fname),
                     "check the module's public API for available members",
                 )),
             },
             Value::ErrorValue { msg, tag } => match fname.as_ref() {
-                "msg" => {
-                    self.push(Value::String(Rc::clone(msg)));
-                    Ok(())
-                }
-                "tag" => {
-                    match tag {
-                        Some(t) => self.push(Value::String(Rc::clone(t))),
-                        None => self.push(Value::None),
-                    }
-                    Ok(())
-                }
+                "msg" => Ok(Value::String(Rc::clone(msg))),
+                "tag" => Ok(match tag {
+                    Some(t) => Value::String(Rc::clone(t)),
+                    None => Value::None,
+                }),
                 _ => Err(self.runtime_error(&format!("ErrorValue has no field '{}'", fname))),
             },
             Value::Map(entries) => {
@@ -512,9 +551,7 @@ impl VM {
                         break;
                     }
                 }
-                drop(entries);
-                self.push(found.unwrap_or(Value::None));
-                Ok(())
+                Ok(found.unwrap_or(Value::None))
             }
             Value::EnumDef(def) => {
                 let variant = def
@@ -524,7 +561,7 @@ impl VM {
                 match variant {
                     Some(v) => match &v.kind {
                         crate::vm::value::VmEnumVariantKind::Unit(disc) => {
-                            self.push(Value::EnumInstance(Rc::new(
+                            Ok(Value::EnumInstance(Rc::new(
                                 crate::vm::value::ObjEnumInstance {
                                     enum_name: def.name.clone(),
                                     variant_name: v.name.clone(),
@@ -532,8 +569,7 @@ impl VM {
                                         disc.clone(),
                                     ),
                                 },
-                            )));
-                            Ok(())
+                            )))
                         }
                         crate::vm::value::VmEnumVariantKind::Tuple(_) => {
                             Err(self.runtime_error_hint(
@@ -563,19 +599,10 @@ impl VM {
             Value::EnumInstance(inst) => {
                 let name = fname.as_ref();
                 match name {
-                    "name" => {
-                        self.push(Value::String(inst.variant_name.as_str().into()));
-                        Ok(())
-                    }
+                    "name" => Ok(Value::String(inst.variant_name.as_str().into())),
                     "value" => match &inst.payload {
-                        crate::vm::value::VmEnumPayload::Unit(Some(v)) => {
-                            self.push(v.clone());
-                            Ok(())
-                        }
-                        crate::vm::value::VmEnumPayload::Unit(None) => {
-                            self.push(Value::None);
-                            Ok(())
-                        }
+                        crate::vm::value::VmEnumPayload::Unit(Some(v)) => Ok(v.clone()),
+                        crate::vm::value::VmEnumPayload::Unit(None) => Ok(Value::None),
                         _ => Err(self
                             .runtime_error(".value is only defined on unit variants")),
                     },
@@ -599,10 +626,7 @@ impl VM {
                                 })
                             });
                             match idx_opt.and_then(|i| items.get(i).cloned()) {
-                                Some(v) => {
-                                    self.push(v);
-                                    Ok(())
-                                }
+                                Some(v) => Ok(v),
                                 None => Err(self.runtime_error(&format!(
                                     "tuple variant {}.{} has no field '{}'",
                                     inst.enum_name, inst.variant_name, other
@@ -611,10 +635,7 @@ impl VM {
                         }
                         crate::vm::value::VmEnumPayload::Struct(fields) => {
                             match fields.iter().find(|(k, _)| k == other) {
-                                Some((_, v)) => {
-                                    self.push(v.clone());
-                                    Ok(())
-                                }
+                                Some((_, v)) => Ok(v.clone()),
                                 None => Err(self.runtime_error(&format!(
                                     "struct variant {}.{} has no field '{}'",
                                     inst.enum_name, inst.variant_name, other
@@ -638,9 +659,18 @@ impl VM {
     }
 
     pub(crate) fn handle_set_field(&mut self, field_idx: u16) -> Result<(), VMError> {
-        let field_name = self.current_constant(field_idx);
         let value = self.pop();
         let object = self.pop();
+        self.handle_set_field_on_value(object, field_idx, value)
+    }
+
+    pub(crate) fn handle_set_field_on_value(
+        &mut self,
+        object: Value,
+        field_idx: u16,
+        value: Value,
+    ) -> Result<(), VMError> {
+        let field_name = self.current_constant(field_idx);
         let Value::String(fname) = &field_name else {
             return Err(self.runtime_error("invalid field name"));
         };
@@ -732,11 +762,11 @@ impl VM {
         // Snapshot what we need from the current frame so we can call
         // mutable methods below without conflicting borrows.
         let (chunk_rc, parent_upvalues, slot_offset) = {
-            let frame = self.frames.last().unwrap();
+            let closure = self.active_closure();
             (
-                Rc::clone(&frame.closure.function),
-                frame.closure.upvalues.clone(),
-                frame.slot_offset,
+                Rc::clone(&closure.function),
+                closure.upvalues.clone(),
+                self.current_slot_offset(),
             )
         };
         let code = &chunk_rc.chunk.code;
@@ -809,14 +839,83 @@ impl VM {
 
     #[allow(dead_code)]
     pub(crate) fn current_slot_offset(&self) -> usize {
-        self.frames.last().map(|f| f.slot_offset).unwrap_or(0)
+        self.jit_frame_top()
+            .map(|f| f.slot_offset)
+            .or_else(|| self.frames.last().map(|f| f.slot_offset))
+            .unwrap_or(0)
     }
 
     /// Clone the constant at `idx` from the current frame's chunk. Used by
     /// the JIT runtime's `jit_push_constant` helper.
     pub(crate) fn current_constant(&self, idx: u16) -> Value {
+        if let Some(frame) = self.jit_frame_top() {
+            let closure = unsafe { &*frame.closure_raw };
+            return closure.function.chunk.constants[idx as usize].clone();
+        }
         let frame = self.frames.last().unwrap();
         frame.closure.function.chunk.constants[idx as usize].clone()
+    }
+
+    #[allow(dead_code)]
+    #[inline(always)]
+    pub(crate) fn jit_frame_push_raw(
+        &mut self,
+        closure_raw: *const ObjClosure,
+        slot_offset: usize,
+        module_globals: *const HashMap<String, Value>,
+        line: u32,
+    ) {
+        let len = self.jit_frame_view.len;
+        debug_assert!(len < FRAMES_MAX);
+        unsafe {
+            self.jit_frame_view.ptr.add(len).write(JitFrame {
+                closure_raw,
+                slot_offset,
+                module_globals,
+                line,
+            });
+        }
+        self.jit_frame_view.len = len + 1;
+    }
+
+    #[allow(dead_code)]
+    #[inline(always)]
+    pub(crate) fn jit_frame_pop_raw(&mut self) -> Option<JitFrame> {
+        let len = self.jit_frame_view.len;
+        if len == 0 {
+            return None;
+        }
+        let new_len = len - 1;
+        self.jit_frame_view.len = new_len;
+        Some(unsafe { self.jit_frame_view.ptr.add(new_len).read() })
+    }
+
+    #[allow(dead_code)]
+    #[inline(always)]
+    pub(crate) fn jit_frame_top(&self) -> Option<&JitFrame> {
+        let len = self.jit_frame_view.len;
+        if len == 0 {
+            None
+        } else {
+            Some(unsafe { &*self.jit_frame_view.ptr.add(len - 1) })
+        }
+    }
+
+    #[allow(dead_code)]
+    #[inline(always)]
+    pub(crate) fn jit_frame_len(&self) -> usize {
+        self.jit_frame_view.len
+    }
+
+    #[allow(dead_code)]
+    #[inline(always)]
+    pub(crate) fn set_jit_frame_line(&mut self, line: u32) {
+        let len = self.jit_frame_view.len;
+        if len != 0 {
+            unsafe {
+                (*self.jit_frame_view.ptr.add(len - 1)).line = line;
+            }
+        }
     }
 
     /// Pop the topmost call frame. Returns `None` if there is none.
@@ -890,6 +989,9 @@ impl VM {
     }
 
     fn current_line(&self) -> u32 {
+        if let Some(frame) = self.jit_frame_top() {
+            return frame.line;
+        }
         let frame = self.frames.last().unwrap();
         let ip = if frame.ip > 0 { frame.ip - 1 } else { 0 };
         if ip < frame.closure.function.chunk.lines.len() {
@@ -897,6 +999,34 @@ impl VM {
         } else {
             0
         }
+    }
+
+    #[inline(always)]
+    fn active_closure(&self) -> &ObjClosure {
+        if let Some(frame) = self.jit_frame_top() {
+            unsafe { &*frame.closure_raw }
+        } else {
+            &self.frames.last().unwrap().closure
+        }
+    }
+
+    #[inline(always)]
+    #[allow(dead_code)]
+    pub(crate) fn active_compiled_closure(&self) -> Option<&ObjClosure> {
+        self.jit_frame_top()
+            .map(|frame| unsafe { &*frame.closure_raw })
+    }
+
+    #[inline(always)]
+    fn active_module_globals(&self) -> Option<&HashMap<String, Value>> {
+        if let Some(frame) = self.jit_frame_top() {
+            if !frame.module_globals.is_null() {
+                return Some(unsafe { &*frame.module_globals });
+            }
+        }
+        self.frames
+            .last()
+            .and_then(|f| f.module_globals.as_deref())
     }
 
     fn format_error(&self, message: &str, hint: Option<&str>) -> String {
@@ -2442,7 +2572,7 @@ impl VM {
         closure: &Rc<ObjClosure>,
     ) -> Option<Result<(), VMError>> {
         let thunk = closure.jit_thunk.get()?;
-        if self.frames.len() >= FRAMES_MAX {
+        if self.frames.len().saturating_add(self.jit_frame_len()) >= FRAMES_MAX {
             return Some(Err(self.runtime_error_hint(
                 "stack overflow",
                 "check for infinite recursion or deeply nested calls",
@@ -2452,24 +2582,43 @@ impl VM {
         let slot_offset = self.stack.len() - expected - 1;
         let stop_depth = self.frames.len();
         let inherited_mg = self
-            .frames
-            .last()
-            .and_then(|f| f.module_globals.clone());
-        self.frames.push(CallFrame {
-            closure: Rc::clone(closure),
-            ip: 0,
+            .active_module_globals()
+            .map(|mg| mg as *const HashMap<String, Value>)
+            .unwrap_or(std::ptr::null());
+        let entry_line = closure
+            .function
+            .chunk
+            .lines
+            .first()
+            .copied()
+            .unwrap_or(0);
+        self.jit_frame_push_raw(
+            Rc::as_ptr(closure),
             slot_offset,
-            module_globals: inherited_mg,
-        });
+            inherited_mg,
+            entry_line,
+        );
         let vm_ptr = self as *mut VM;
         let exit = unsafe { self.jit.invoke_thunk(vm_ptr, thunk, stop_depth) };
         Some(match exit {
             crate::jit::JitExit::Returned => Ok(()),
             crate::jit::JitExit::Bailout => {
-                if let Some(f) = self.frames.last() {
-                    f.closure.jit_thunk.set(None);
-                    f.closure.jit_state.set(2);
-                }
+                let jit_frame = self
+                    .jit_frame_pop_raw()
+                    .expect("compiled bailout without active jit frame");
+                closure.jit_thunk.set(None);
+                closure.jit_state.set(2);
+                let inherited_mg = if jit_frame.module_globals.is_null() {
+                    None
+                } else {
+                    Some(unsafe { Rc::new((*jit_frame.module_globals).clone()) })
+                };
+                self.frames.push(CallFrame {
+                    closure: Rc::clone(closure),
+                    ip: 0,
+                    slot_offset: jit_frame.slot_offset,
+                    module_globals: inherited_mg,
+                });
                 Ok(())
             }
             crate::jit::JitExit::RuntimeError(err) => Err(err),
@@ -2538,7 +2687,7 @@ impl VM {
             }
         }
 
-        if self.frames.len() >= FRAMES_MAX {
+        if self.frames.len().saturating_add(self.jit_frame_len()) >= FRAMES_MAX {
             return Err(self.runtime_error_hint(
                 "stack overflow",
                 "check for infinite recursion or deeply nested calls",
@@ -2549,19 +2698,14 @@ impl VM {
 
         // Inherit module globals from the current frame if not explicitly provided,
         // so nested calls within a module function retain module scope access.
-        let inherited_mg =
-            module_globals.or_else(|| self.frames.last().and_then(|f| f.module_globals.clone()));
+        let inherited_mg = module_globals.or_else(|| {
+            self.active_module_globals()
+                .map(|mg| Rc::new(mg.clone()))
+        });
 
         // Remember the pre-call depth so the JIT helper (if we enter it)
         // can drive `execute_until` for exactly this one activation.
         let stop_depth = self.frames.len();
-
-        self.frames.push(CallFrame {
-            closure: Rc::clone(&closure),
-            ip: 0,
-            slot_offset,
-            module_globals: inherited_mg,
-        });
 
         // Ask the JIT: is this function compiled (or can it be)? If so,
         // invoke it; it will drive `execute_until(stop_depth)` for this one
@@ -2588,16 +2732,42 @@ impl VM {
         };
 
         if let Some(thunk) = thunk {
+            let entry_line = closure
+                .function
+                .chunk
+                .lines
+                .first()
+                .copied()
+                .unwrap_or(0);
+            let mg_ptr = inherited_mg
+                .as_ref()
+                .map(|mg| Rc::as_ptr(mg))
+                .unwrap_or(std::ptr::null());
+            self.jit_frame_push_raw(Rc::as_ptr(&closure), slot_offset, mg_ptr, entry_line);
             let vm_ptr = self as *mut VM;
             let exit = unsafe { self.jit.invoke_thunk(vm_ptr, thunk, stop_depth) };
             match exit {
                 crate::jit::JitExit::Returned => {}
                 crate::jit::JitExit::Bailout => {
+                    let _ = self.jit_frame_pop_raw();
                     closure.jit_thunk.set(None);
                     closure.jit_state.set(2);
+                    self.frames.push(CallFrame {
+                        closure: Rc::clone(&closure),
+                        ip: 0,
+                        slot_offset,
+                        module_globals: inherited_mg.clone(),
+                    });
                 }
                 crate::jit::JitExit::RuntimeError(err) => return Err(err),
             }
+        } else {
+            self.frames.push(CallFrame {
+                closure: Rc::clone(&closure),
+                ip: 0,
+                slot_offset,
+                module_globals: inherited_mg.clone(),
+            });
         }
 
         Ok(())

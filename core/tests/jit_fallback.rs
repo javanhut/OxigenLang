@@ -18,6 +18,29 @@ fn run(source: &str, jit_threshold: Option<u32>) -> (String, usize, usize) {
     run_with_thresholds(source, jit_threshold, None)
 }
 
+fn run_result(source: &str, jit_threshold: Option<u32>) -> Result<String, String> {
+    let lexer = Lexer::new(source);
+    let mut parser = Parser::new(lexer, source);
+    let program = parser.parse_program();
+    assert!(
+        parser.errors().is_empty(),
+        "parser errors:\n{}",
+        parser.format_errors()
+    );
+
+    let function = Compiler::new()
+        .compile(&program)
+        .expect("compile should succeed");
+
+    let mut vm = VM::new();
+    if let Some(t) = jit_threshold {
+        vm.jit.set_threshold(t);
+    }
+    vm.run(function)
+        .map(|v| format!("{}", v))
+        .map_err(|e| e.message)
+}
+
 fn run_with_thresholds(
     source: &str,
     jit_threshold: Option<u32>,
@@ -184,6 +207,53 @@ fib(10)
 }
 
 #[test]
+fn fallback_matches_interpreter_recursive_globals_other_than_self() {
+    let source = r#"
+step := 3
+
+fun sumdown(n) {
+    option { n < 1 -> 0, step + sumdown(n - 1) }
+}
+
+sumdown(5)
+"#;
+
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+
+    assert_eq!(baseline, jitted);
+    assert_eq!(jitted, "15");
+    assert!(j_ok >= 1, "sumdown should compile; got {} ok", j_ok);
+}
+
+#[test]
+fn fallback_matches_interpreter_compiled_recursion_with_interpreted_helper() {
+    let source = r#"
+fun helper(x) {
+    (x,)
+}
+
+fun walk(n) {
+    option { n < 1 -> 0, helper(walk(n - 1) + 1)[0] }
+}
+
+walk(6)
+"#;
+
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, j_failed) = run(source, Some(1));
+
+    assert_eq!(baseline, jitted);
+    assert_eq!(jitted, "6");
+    assert!(
+        j_ok >= 1,
+        "walk should compile even though helper stays interpreted; got {} ok, {} failed",
+        j_ok,
+        j_failed
+    );
+}
+
+#[test]
 fn fallback_matches_interpreter_closure_with_upvalue() {
     // Verifies Closure + GetUpvalue. `make_adder` returns a closure that
     // captures `n` as an upvalue; the inner closure reads it via
@@ -205,6 +275,40 @@ add5(10)
         "make_adder and the inner closure should both compile; got {} ok",
         j_ok
     );
+}
+
+#[test]
+fn fallback_matches_interpreter_div_mod_and_eq() {
+    let source = r#"
+fun collatzish(n) {
+    option {
+        n % 2 == 0 -> n / 2,
+        n * 3 + 1
+    }
+}
+collatzish(10) + collatzish(9)
+"#;
+
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+
+    assert_eq!(baseline, jitted);
+    assert!(j_ok >= 1, "expected collatzish to compile");
+}
+
+#[test]
+fn fallback_matches_interpreter_divide_by_zero_error() {
+    let source = r#"
+fun boom(n) {
+    n / 0
+}
+boom(10)
+"#;
+
+    let baseline = run_result(source, None).expect_err("baseline should error");
+    let jitted = run_result(source, Some(1)).expect_err("jitted run should error");
+
+    assert_eq!(baseline, jitted);
 }
 
 #[test]
@@ -262,6 +366,36 @@ p.sum_xy()
 
     assert_eq!(baseline, jitted);
     assert!(j_ok >= 1, "expected some compile; got {}", j_ok);
+}
+
+#[test]
+fn fallback_matches_interpreter_struct_method_mutation_shapes() {
+    let source = r#"
+struct Counter {
+    val <int>
+}
+
+Counter contains {
+    fun inc() { self.val = self.val + 1 }
+    fun add(amount) { self.val = self.val + amount }
+}
+
+fun run() {
+    c <Counter> := Counter(0)
+    c.inc()
+    c.add(4)
+    c.val
+}
+
+run()
+"#;
+
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+
+    assert_eq!(baseline, jitted);
+    assert_eq!(jitted, "5");
+    assert!(j_ok >= 2, "expected method bodies to compile; got {}", j_ok);
 }
 
 #[test]

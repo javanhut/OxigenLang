@@ -22,16 +22,24 @@ pub const VALUE_TAG_FLOAT: u8 = 1;
 /// `Rc<ObjClosure>` pointer for identity comparison. Keep in sync with
 /// the variant order in `Value`.
 pub const VALUE_TAG_CLOSURE: u8 = 12;
+pub const VALUE_TAG_STRUCT_INSTANCE: u8 = 15;
 
 /// Byte offset of the i64 payload inside a `Value::Integer(i64)`. With
 /// `#[repr(u8)]` the discriminant occupies byte 0, and the payload is
 /// aligned to the variant's natural alignment (8 for i64 / Rc). Used by
 /// the JIT fast path.
 pub const VALUE_INT_PAYLOAD_OFFSET: usize = 8;
+/// Current `Rc<T>` payload offset from the raw `RcBox<T>` pointer stored in
+/// `Value` payloads: two usize refcounts before `T`.
+pub const RC_VALUE_OFFSET: usize = 16;
+pub const REF_CELL_VALUE_OFFSET: usize = 8;
 
 /// `size_of::<Value>()` — pinned by `#[repr(u8)]`. Const-evaluated at
 /// build time.
 pub const VALUE_SIZE: usize = core::mem::size_of::<Value>();
+
+pub const STRUCT_INSTANCE_DEF_OFFSET: usize = core::mem::offset_of!(ObjStructInstance, def);
+pub const STRUCT_INSTANCE_FIELDS_OFFSET: usize = core::mem::offset_of!(ObjStructInstance, fields);
 
 #[cfg(test)]
 mod layout_tests {

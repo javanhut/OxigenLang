@@ -22,10 +22,11 @@ use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use crate::compiler::opcode::{Chunk, OpCode};
 use crate::vm::VM;
 use crate::vm::VMError;
-use crate::vm::StackView;
+use crate::vm::{JitFrame, JitFrameView, StackView};
 use crate::vm::value::{
-    Function, VALUE_INT_PAYLOAD_OFFSET, VALUE_SIZE, VALUE_TAG_CLOSURE, VALUE_TAG_FLOAT,
-    VALUE_TAG_INTEGER,
+    Function, RC_VALUE_OFFSET, REF_CELL_VALUE_OFFSET, STRUCT_INSTANCE_DEF_OFFSET,
+    STRUCT_INSTANCE_FIELDS_OFFSET, VALUE_INT_PAYLOAD_OFFSET, VALUE_SIZE, VALUE_TAG_CLOSURE,
+    VALUE_TAG_FLOAT, VALUE_TAG_INTEGER, VALUE_TAG_STRUCT_INSTANCE,
 };
 
 /// Byte offset of the `stack_view.ptr` field from the base of `VM`.
@@ -39,6 +40,18 @@ fn vm_stack_view_ptr_offset() -> i32 {
 #[inline(always)]
 fn vm_stack_view_len_offset() -> i32 {
     (VM::stack_view_offset() + StackView::OFFSET_LEN as usize) as i32
+}
+
+#[allow(dead_code)]
+#[inline(always)]
+fn vm_jit_frame_view_ptr_offset() -> i32 {
+    (VM::jit_frame_view_offset() + JitFrameView::OFFSET_PTR as usize) as i32
+}
+
+#[allow(dead_code)]
+#[inline(always)]
+fn vm_jit_frame_view_len_offset() -> i32 {
+    (VM::jit_frame_view_offset() + JitFrameView::OFFSET_LEN as usize) as i32
 }
 
 use super::CompiledThunk;
@@ -79,6 +92,9 @@ pub(super) struct JitInner {
     /// Per-call-site inline caches for `MethodCall`. Each compiled
     /// MethodCall op gets its own `Box<MethodCacheEntry>`.
     method_caches: Vec<Box<MethodCacheEntry>>,
+
+    /// Per-field-op inline caches for `GetField`/`SetField`.
+    field_caches: Vec<Box<FieldCacheEntry>>,
 }
 
 /// Per-call-site GetGlobal cache. `version` tracks the VM's
@@ -126,8 +142,46 @@ impl CallCacheEntry {
 /// that a hit skips `find_struct_method`'s two HashMap lookups entirely.
 #[repr(C)]
 pub(crate) struct MethodCacheEntry {
+    pub struct_def_raw: *const crate::vm::value::ObjStructDef,
+    pub closure_raw: *const crate::vm::value::ObjClosure,
+    pub thunk_raw: *const (),
+    pub arity: u8,
+    _pad: [u8; 7],
     pub struct_def: Option<std::rc::Rc<crate::vm::value::ObjStructDef>>,
     pub closure: Option<std::rc::Rc<crate::vm::value::ObjClosure>>,
+}
+
+impl MethodCacheEntry {
+    pub(crate) const OFFSET_STRUCT_DEF_RAW: i32 = 0;
+    pub(crate) const OFFSET_CLOSURE_RAW: i32 = 8;
+    pub(crate) const OFFSET_THUNK_RAW: i32 = 16;
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy)]
+pub(crate) enum FieldCacheKind {
+    Invalid = 0,
+    InstanceField = 1,
+    DefMethod = 2,
+}
+
+#[repr(C)]
+pub(crate) struct FieldCacheEntry {
+    pub struct_def_raw: *const crate::vm::value::ObjStructDef,
+    pub field_index: u32,
+    pub kind: FieldCacheKind,
+    _pad: [u8; 3],
+    pub closure_raw: *const crate::vm::value::ObjClosure,
+    pub thunk_raw: *const (),
+    pub struct_def: Option<std::rc::Rc<crate::vm::value::ObjStructDef>>,
+    pub closure: Option<std::rc::Rc<crate::vm::value::ObjClosure>>,
+}
+
+impl FieldCacheEntry {
+    pub(crate) const OFFSET_STRUCT_DEF_RAW: i32 = 0;
+    pub(crate) const OFFSET_FIELD_INDEX: i32 = 8;
+    pub(crate) const OFFSET_KIND: i32 = 12;
+    pub(crate) const OFFSET_CLOSURE_RAW: i32 = 16;
 }
 
 enum Entry {
@@ -160,6 +214,8 @@ struct HelperIds {
     index_fast_array_int: FuncId, // (vm) -> u32
     type_wrap: FuncId,            // (vm, u32) -> u32
     local_add_array_mod_index: FuncId, // (vm, u32, u32, u32, i64, u32) -> u32
+    struct_field_add_const: FuncId, // (vm, u32, u32, i64) -> u32
+    struct_field_add_local: FuncId, // (vm, u32, u32, u32) -> u32
 
     // Locals
     get_local: FuncId, // (vm, u32)
@@ -214,8 +270,8 @@ struct HelperIds {
     // Struct ops
     op_struct_def: FuncId,     // (vm, u32)
     op_struct_literal: FuncId, // (vm, u32, u32) -> u32
-    op_get_field: FuncId,      // (vm, u32) -> u32
-    op_set_field: FuncId,      // (vm, u32) -> u32
+    op_get_field_ic_miss: FuncId, // (vm, u32, *mut FieldCacheEntry) -> u32
+    op_set_field_ic_miss: FuncId, // (vm, u32, *mut FieldCacheEntry) -> u32
     op_define_method: FuncId,  // (vm, u32, u32) -> u32
     op_method_call: FuncId,    // (vm, u32, u32) -> u32
     op_method_call_ic: FuncId, // (vm, u32, u32, *mut MethodCacheEntry) -> u32
@@ -244,6 +300,8 @@ struct HelperRefs {
     index_fast_array_int: FuncRef,
     type_wrap: FuncRef,
     local_add_array_mod_index: FuncRef,
+    struct_field_add_const: FuncRef,
+    struct_field_add_local: FuncRef,
     get_local: FuncRef,
     set_local: FuncRef,
     add: FuncRef,
@@ -264,6 +322,7 @@ struct HelperRefs {
     op_return: FuncRef,
     #[allow(dead_code)]
     op_call: FuncRef,
+    #[allow(dead_code)]
     op_call_hit: FuncRef,
     op_call_miss: FuncRef,
     #[allow(dead_code)]
@@ -278,8 +337,8 @@ struct HelperRefs {
     op_closure: FuncRef,
     op_struct_def: FuncRef,
     op_struct_literal: FuncRef,
-    op_get_field: FuncRef,
-    op_set_field: FuncRef,
+    op_get_field_ic_miss: FuncRef,
+    op_set_field_ic_miss: FuncRef,
     op_define_method: FuncRef,
     #[allow(dead_code)]
     op_method_call: FuncRef,
@@ -295,6 +354,7 @@ struct HelperRefs {
     stack_pop_one: FuncRef,
     stack_pop_n: FuncRef,
     replace_top2_with_bool: FuncRef,
+    #[allow(dead_code)]
     current_slot_offset: FuncRef,
 }
 
@@ -330,6 +390,7 @@ impl JitInner {
             global_caches: Vec::new(),
             call_caches: Vec::new(),
             method_caches: Vec::new(),
+            field_caches: Vec::new(),
         }
     }
 
@@ -362,10 +423,30 @@ impl JitInner {
     /// Allocate a fresh inline-cache slot for a MethodCall site.
     pub(crate) fn alloc_method_cache(&mut self) -> *mut MethodCacheEntry {
         self.method_caches.push(Box::new(MethodCacheEntry {
+            struct_def_raw: std::ptr::null(),
+            closure_raw: std::ptr::null(),
+            thunk_raw: std::ptr::null(),
+            arity: 0,
+            _pad: [0; 7],
             struct_def: None,
             closure: None,
         }));
         let b = self.method_caches.last_mut().unwrap();
+        b.as_mut() as *mut _
+    }
+
+    pub(crate) fn alloc_field_cache(&mut self) -> *mut FieldCacheEntry {
+        self.field_caches.push(Box::new(FieldCacheEntry {
+            struct_def_raw: std::ptr::null(),
+            field_index: 0,
+            kind: FieldCacheKind::Invalid,
+            _pad: [0; 3],
+            closure_raw: std::ptr::null(),
+            thunk_raw: std::ptr::null(),
+            struct_def: None,
+            closure: None,
+        }));
+        let b = self.field_caches.last_mut().unwrap();
         b.as_mut() as *mut _
     }
 
@@ -472,7 +553,8 @@ impl JitInner {
         // bytecode so the emit pass can hand them out sequentially
         // without needing to re-borrow `self` from inside the builder
         // scope. Boxes give us stable heap addresses to bake into IR.
-        let (get_global_count, call_count, method_call_count) = count_ic_sites(chunk);
+        let (get_global_count, call_count, method_call_count, field_op_count) =
+            count_ic_sites(chunk);
         let mut global_cache_ptrs: Vec<*mut GlobalCacheEntry> =
             Vec::with_capacity(get_global_count);
         for _ in 0..get_global_count {
@@ -486,6 +568,10 @@ impl JitInner {
             Vec::with_capacity(method_call_count);
         for _ in 0..method_call_count {
             method_cache_ptrs.push(self.alloc_method_cache());
+        }
+        let mut field_cache_ptrs: Vec<*mut FieldCacheEntry> = Vec::with_capacity(field_op_count);
+        for _ in 0..field_op_count {
+            field_cache_ptrs.push(self.alloc_field_cache());
         }
 
         // Thunk signature: fn(*mut VM) -> i32
@@ -524,12 +610,17 @@ impl JitInner {
             builder.switch_to_block(entry_block);
             let vm_val = builder.block_params(entry_block)[0];
 
-            // Cache the frame's slot_offset in an SSA value so GetLocal /
-            // SetLocal fast paths don't re-read `vm.frames.last()` on
-            // every use. slot_offset is fixed for the lifetime of this
-            // thunk activation.
-            let slot_offset_call = builder.ins().call(refs.current_slot_offset, &[vm_val]);
-            let slot_offset_val = builder.inst_results(slot_offset_call)[0];
+            let thunk_sig = {
+                let mut sig = self.module.make_signature();
+                sig.params.push(AbiParam::new(ptr_ty));
+                sig.returns.push(AbiParam::new(types::I32));
+                builder.import_signature(sig)
+            };
+
+            // Cache the frame's slot_offset in SSA by reading the active
+            // JIT frame directly. The slot offset is immutable for the
+            // lifetime of this activation.
+            let slot_offset_val = emit_load_top_jit_frame_slot_offset(&mut builder, vm_val);
 
             let mut current_block = entry_block;
             let mut terminated = false;
@@ -541,6 +632,7 @@ impl JitInner {
             let mut call_ic_ix: usize = 0;
             // Same, but for MethodCall opcodes.
             let mut method_ic_ix: usize = 0;
+            let mut field_ic_ix: usize = 0;
 
             while ip < code.len() {
                 // If this ip starts a new block, switch to it (and glue
@@ -557,6 +649,8 @@ impl JitInner {
                 }
 
                 let op = OpCode::from_byte(code[ip]).ok_or(())?;
+                let line = chunk.lines.get(ip).copied().unwrap_or(0);
+                emit_store_current_line(&mut builder, vm_val, line);
                 match op {
                     OpCode::Constant => {
                         let idx = read_u16(code, ip + 1);
@@ -621,6 +715,33 @@ impl JitInner {
                     }
                     OpCode::GetLocal => {
                         if let Some(m) =
+                            match_struct_field_add_update(code, chunk, ip, &blocks)
+                        {
+                            let self_slot =
+                                builder.ins().iconst(types::I32, m.self_slot as i64);
+                            let field_idx =
+                                builder.ins().iconst(types::I32, m.field_idx as i64);
+                            let call = match m.shape {
+                                StructFieldAddShape::Const { addend } => {
+                                    let addend_val = builder.ins().iconst(types::I64, addend);
+                                    builder.ins().call(
+                                        refs.struct_field_add_const,
+                                        &[vm_val, self_slot, field_idx, addend_val],
+                                    )
+                                }
+                                StructFieldAddShape::Local { rhs_slot } => {
+                                    let rhs_slot_val =
+                                        builder.ins().iconst(types::I32, rhs_slot as i64);
+                                    builder.ins().call(
+                                        refs.struct_field_add_local,
+                                        &[vm_val, self_slot, field_idx, rhs_slot_val],
+                                    )
+                                }
+                            };
+                            let status = builder.inst_results(call)[0];
+                            emit_early_exit_on_err(&mut builder, status);
+                            ip += m.len;
+                        } else if let Some(m) =
                             match_local_array_mod_index_add_update(code, chunk, ip, &blocks)
                         {
                             let dst = builder.ins().iconst(types::I32, m.dst_slot as i64);
@@ -716,11 +837,11 @@ impl JitInner {
                         ip += 1;
                     }
                     OpCode::Divide => {
-                        emit_fallible(&mut builder, refs.div, vm_val);
+                        emit_int_fast_divmod(&mut builder, &refs, vm_val, false, refs.div);
                         ip += 1;
                     }
                     OpCode::Modulo => {
-                        emit_fallible(&mut builder, refs.modu, vm_val);
+                        emit_int_fast_divmod(&mut builder, &refs, vm_val, true, refs.modu);
                         ip += 1;
                     }
                     OpCode::Less | OpCode::LessEqual | OpCode::Greater | OpCode::GreaterEqual => {
@@ -790,11 +911,11 @@ impl JitInner {
 
                     // Infallible
                     OpCode::Equal => {
-                        builder.ins().call(refs.eq, &[vm_val]);
+                        emit_int_fast_eq(&mut builder, &refs, vm_val, true);
                         ip += 1;
                     }
                     OpCode::NotEqual => {
-                        builder.ins().call(refs.ne, &[vm_val]);
+                        emit_int_fast_eq(&mut builder, &refs, vm_val, false);
                         ip += 1;
                     }
                     OpCode::Not => {
@@ -958,7 +1079,6 @@ impl JitInner {
                     }
 
                     OpCode::Call => {
-                        // u8 operand: arg_count
                         let arg_count = code[ip + 1];
                         let cache_ptr = call_cache_ptrs[call_ic_ix];
                         call_ic_ix += 1;
@@ -970,8 +1090,8 @@ impl JitInner {
                         // 3. Check its tag byte equals `VALUE_TAG_CLOSURE`.
                         // 4. Load its Rc pointer (offset 8) and compare to
                         //    `cache.closure_raw`.
-                        // 5. On match → call `jit_op_call_hit` (tight
-                        //    frame push + thunk invoke). On miss → call
+                        // 5. On match → push a JIT frame and indirect-call
+                        //    the cached thunk. On miss → call
                         //    `jit_op_call_miss` (full fallback + populate
                         //    cache).
                         use cranelift_codegen::ir::MemFlags;
@@ -1034,13 +1154,89 @@ impl JitInner {
 
                         // Hit — cached closure matches.
                         builder.switch_to_block(hit_block);
-                        let hit_call = builder
-                            .ins()
-                            .call(refs.op_call_hit, &[vm_val, cache_val]);
+                        let jit_frames_ptr = builder.ins().load(
+                            ptr_ty,
+                            flags,
+                            vm_val,
+                            vm_jit_frame_view_ptr_offset(),
+                        );
+                        let jit_frames_len = builder.ins().load(
+                            types::I64,
+                            flags,
+                            vm_val,
+                            vm_jit_frame_view_len_offset(),
+                        );
+                        let frame_size =
+                            builder.ins().iconst(types::I64, std::mem::size_of::<JitFrame>() as i64);
+                        let frame_off = builder.ins().imul(jit_frames_len, frame_size);
+                        let new_frame_ptr = builder.ins().iadd(jit_frames_ptr, frame_off);
+                        let caller_frame_ptr = emit_load_top_jit_frame_ptr(&mut builder, vm_val);
+                        let module_globals = builder.ins().load(
+                            ptr_ty,
+                            flags,
+                            caller_frame_ptr,
+                            JitFrame::OFFSET_MODULE_GLOBALS,
+                        );
+                        let thunk_raw = builder.ins().load(
+                            ptr_ty,
+                            flags,
+                            cache_val,
+                            CallCacheEntry::OFFSET_THUNK_RAW,
+                        );
+                        let line_val = builder.ins().iconst(types::I32, line as i64);
+                        builder.ins().store(
+                            flags,
+                            curr_rc,
+                            new_frame_ptr,
+                            JitFrame::OFFSET_CLOSURE_RAW,
+                        );
+                        builder.ins().store(
+                            flags,
+                            callee_slot,
+                            new_frame_ptr,
+                            JitFrame::OFFSET_SLOT_OFFSET,
+                        );
+                        builder.ins().store(
+                            flags,
+                            module_globals,
+                            new_frame_ptr,
+                            JitFrame::OFFSET_MODULE_GLOBALS,
+                        );
+                        builder.ins().store(
+                            flags,
+                            line_val,
+                            new_frame_ptr,
+                            JitFrame::OFFSET_LINE,
+                        );
+                        let one64 = builder.ins().iconst(types::I64, 1);
+                        let new_len = builder.ins().iadd(jit_frames_len, one64);
+                        builder.ins().store(
+                            flags,
+                            new_len,
+                            vm_val,
+                            vm_jit_frame_view_len_offset(),
+                        );
+                        let hit_call =
+                            builder.ins().call_indirect(thunk_sig, thunk_raw, &[vm_val]);
                         let hit_status = builder.inst_results(hit_call)[0];
-                        builder
-                            .ins()
-                            .brif(hit_status, err_block, &[hit_status], ok_block, &[]);
+                        let restore_err_block = builder.create_block();
+                        builder.append_block_param(restore_err_block, types::I32);
+                        builder.ins().brif(
+                            hit_status,
+                            restore_err_block,
+                            &[hit_status],
+                            ok_block,
+                            &[],
+                        );
+                        builder.switch_to_block(restore_err_block);
+                        let err_status = builder.block_params(restore_err_block)[0];
+                        builder.ins().store(
+                            flags,
+                            jit_frames_len,
+                            vm_val,
+                            vm_jit_frame_view_len_offset(),
+                        );
+                        builder.ins().jump(err_block, &[err_status]);
 
                         // Miss — fallback + populate cache.
                         builder.switch_to_block(miss_block);
@@ -1089,18 +1285,249 @@ impl JitInner {
                     }
                     OpCode::GetField => {
                         let idx = read_u16(code, ip + 1);
+                        use cranelift_codegen::ir::MemFlags;
+                        use cranelift_codegen::ir::condcodes::IntCC;
                         let idx_val = builder.ins().iconst(types::I32, idx as i64);
-                        let call = builder.ins().call(refs.op_get_field, &[vm_val, idx_val]);
+                        let cache_ptr = field_cache_ptrs[field_ic_ix];
+                        field_ic_ix += 1;
+                        let cache_val = builder.ins().iconst(ptr_ty, cache_ptr as i64);
+                        let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
+                        let stack_len = emit_load_stack_len(&mut builder, vm_val);
+                        let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+                        let one = builder.ins().iconst(types::I64, 1);
+                        let top_slot = builder.ins().isub(stack_len, one);
+                        let top_off = builder.ins().imul(top_slot, value_size);
+                        let top_ptr = builder.ins().iadd(stack_ptr, top_off);
+                        let flags = MemFlags::trusted();
+                        let check_def_block = builder.create_block();
+                        let instance_field_block = builder.create_block();
+                        let def_method_block = builder.create_block();
+                        let write_method_block = builder.create_block();
+                        let miss_block = builder.create_block();
+                        let ok_block = builder.create_block();
+                        let err_block = builder.create_block();
+                        builder.append_block_param(err_block, types::I32);
+
+                        let tag = builder.ins().load(types::I8, flags, top_ptr, 0);
+                        let struct_tag =
+                            builder.ins().iconst(types::I8, VALUE_TAG_STRUCT_INSTANCE as i64);
+                        let is_struct =
+                            builder.ins().icmp(IntCC::Equal, tag, struct_tag);
+                        builder
+                            .ins()
+                            .brif(is_struct, check_def_block, &[], miss_block, &[]);
+                        builder.switch_to_block(check_def_block);
+                        let receiver_raw = builder.ins().load(
+                            ptr_ty,
+                            flags,
+                            top_ptr,
+                            VALUE_INT_PAYLOAD_OFFSET as i32,
+                        );
+                        let inst_ptr = builder.ins().iadd_imm(receiver_raw, RC_VALUE_OFFSET as i64);
+                        let inst_def_raw = builder.ins().load(
+                            ptr_ty,
+                            flags,
+                            inst_ptr,
+                            STRUCT_INSTANCE_DEF_OFFSET as i32,
+                        );
+                        let cached_def_raw = builder.ins().load(
+                            ptr_ty,
+                            flags,
+                            cache_val,
+                            FieldCacheEntry::OFFSET_STRUCT_DEF_RAW,
+                        );
+                        let def_matches =
+                            builder.ins().icmp(IntCC::Equal, inst_def_raw, cached_def_raw);
+                        let kind = builder.ins().load(
+                            types::I8,
+                            flags,
+                            cache_val,
+                            FieldCacheEntry::OFFSET_KIND,
+                        );
+                        let kind_instance = builder
+                            .ins()
+                            .iconst(types::I8, FieldCacheKind::InstanceField as i64);
+                        let kind_method = builder
+                            .ins()
+                            .iconst(types::I8, FieldCacheKind::DefMethod as i64);
+                        let kind_is_instance =
+                            builder.ins().icmp(IntCC::Equal, kind, kind_instance);
+                        let kind_is_method =
+                            builder.ins().icmp(IntCC::Equal, kind, kind_method);
+                        let kind_block = builder.create_block();
+                        builder
+                            .ins()
+                            .brif(def_matches, kind_block, &[], miss_block, &[]);
+                        builder.switch_to_block(kind_block);
+                        builder.ins().brif(
+                            kind_is_instance,
+                            instance_field_block,
+                            &[],
+                            def_method_block,
+                            &[],
+                        );
+
+                        builder.switch_to_block(instance_field_block);
+                        let field_index = builder.ins().load(
+                            types::I32,
+                            flags,
+                            cache_val,
+                            FieldCacheEntry::OFFSET_FIELD_INDEX,
+                        );
+                        let fields_ptr = builder
+                            .ins()
+                            .iadd_imm(inst_ptr, STRUCT_INSTANCE_FIELDS_OFFSET as i64);
+                        let vec_ptr = builder
+                            .ins()
+                            .load(ptr_ty, flags, fields_ptr, REF_CELL_VALUE_OFFSET as i32);
+                        let field_index64 = builder.ins().uextend(types::I64, field_index);
+                        let field_off = builder.ins().imul(field_index64, value_size);
+                        let field_ptr = builder.ins().iadd(vec_ptr, field_off);
+                        emit_copy_value(&mut builder, field_ptr, top_ptr);
+                        builder.ins().jump(ok_block, &[]);
+
+                        builder.switch_to_block(def_method_block);
+                        builder.ins().brif(
+                            kind_is_method,
+                            write_method_block,
+                            &[],
+                            miss_block,
+                            &[],
+                        );
+                        builder.switch_to_block(write_method_block);
+                        let closure_raw = builder.ins().load(
+                            ptr_ty,
+                            flags,
+                            cache_val,
+                            FieldCacheEntry::OFFSET_CLOSURE_RAW,
+                        );
+                        emit_write_closure_value(&mut builder, top_ptr, closure_raw);
+                        builder.ins().jump(ok_block, &[]);
+
+                        builder.switch_to_block(miss_block);
+                        let call = builder
+                            .ins()
+                            .call(refs.op_get_field_ic_miss, &[vm_val, idx_val, cache_val]);
                         let status = builder.inst_results(call)[0];
-                        emit_early_exit_on_err(&mut builder, status);
+                        builder
+                            .ins()
+                            .brif(status, err_block, &[status], ok_block, &[]);
+
+                        builder.switch_to_block(err_block);
+                        let err_status = builder.block_params(err_block)[0];
+                        builder.ins().return_(&[err_status]);
+                        builder.switch_to_block(ok_block);
                         ip += 3;
                     }
                     OpCode::SetField => {
                         let idx = read_u16(code, ip + 1);
+                        use cranelift_codegen::ir::MemFlags;
+                        use cranelift_codegen::ir::condcodes::IntCC;
                         let idx_val = builder.ins().iconst(types::I32, idx as i64);
-                        let call = builder.ins().call(refs.op_set_field, &[vm_val, idx_val]);
+                        let cache_ptr = field_cache_ptrs[field_ic_ix];
+                        field_ic_ix += 1;
+                        let cache_val = builder.ins().iconst(ptr_ty, cache_ptr as i64);
+                        let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
+                        let stack_len = emit_load_stack_len(&mut builder, vm_val);
+                        let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+                        let one = builder.ins().iconst(types::I64, 1);
+                        let two64 = builder.ins().iconst(types::I64, 2);
+                        let obj_slot = builder.ins().isub(stack_len, two64);
+                        let value_slot = builder.ins().isub(stack_len, one);
+                        let obj_off = builder.ins().imul(obj_slot, value_size);
+                        let value_off = builder.ins().imul(value_slot, value_size);
+                        let obj_ptr = builder.ins().iadd(stack_ptr, obj_off);
+                        let value_ptr = builder.ins().iadd(stack_ptr, value_off);
+                        let flags = MemFlags::trusted();
+                        let check_def_block = builder.create_block();
+                        let hit_block = builder.create_block();
+                        let miss_block = builder.create_block();
+                        let ok_block = builder.create_block();
+                        let err_block = builder.create_block();
+                        builder.append_block_param(err_block, types::I32);
+                        let tag = builder.ins().load(types::I8, flags, obj_ptr, 0);
+                        let struct_tag =
+                            builder.ins().iconst(types::I8, VALUE_TAG_STRUCT_INSTANCE as i64);
+                        let is_struct =
+                            builder.ins().icmp(IntCC::Equal, tag, struct_tag);
+                        builder
+                            .ins()
+                            .brif(is_struct, check_def_block, &[], miss_block, &[]);
+                        builder.switch_to_block(check_def_block);
+                        let obj_raw = builder.ins().load(
+                            ptr_ty,
+                            flags,
+                            obj_ptr,
+                            VALUE_INT_PAYLOAD_OFFSET as i32,
+                        );
+                        let inst_ptr = builder.ins().iadd_imm(obj_raw, RC_VALUE_OFFSET as i64);
+                        let inst_def_raw = builder.ins().load(
+                            ptr_ty,
+                            flags,
+                            inst_ptr,
+                            STRUCT_INSTANCE_DEF_OFFSET as i32,
+                        );
+                        let cached_def_raw = builder.ins().load(
+                            ptr_ty,
+                            flags,
+                            cache_val,
+                            FieldCacheEntry::OFFSET_STRUCT_DEF_RAW,
+                        );
+                        let def_matches =
+                            builder.ins().icmp(IntCC::Equal, inst_def_raw, cached_def_raw);
+                        let kind = builder.ins().load(
+                            types::I8,
+                            flags,
+                            cache_val,
+                            FieldCacheEntry::OFFSET_KIND,
+                        );
+                        let kind_instance = builder
+                            .ins()
+                            .iconst(types::I8, FieldCacheKind::InstanceField as i64);
+                        let kind_matches =
+                            builder.ins().icmp(IntCC::Equal, kind, kind_instance);
+                        let kind_block = builder.create_block();
+                        builder
+                            .ins()
+                            .brif(def_matches, kind_block, &[], miss_block, &[]);
+                        builder.switch_to_block(kind_block);
+                        builder
+                            .ins()
+                            .brif(kind_matches, hit_block, &[], miss_block, &[]);
+                        builder.switch_to_block(hit_block);
+                        let field_index = builder.ins().load(
+                            types::I32,
+                            flags,
+                            cache_val,
+                            FieldCacheEntry::OFFSET_FIELD_INDEX,
+                        );
+                        let fields_ptr = builder
+                            .ins()
+                            .iadd_imm(inst_ptr, STRUCT_INSTANCE_FIELDS_OFFSET as i64);
+                        let vec_ptr = builder
+                            .ins()
+                            .load(ptr_ty, flags, fields_ptr, REF_CELL_VALUE_OFFSET as i32);
+                        let field_index64 = builder.ins().uextend(types::I64, field_index);
+                        let field_off = builder.ins().imul(field_index64, value_size);
+                        let field_ptr = builder.ins().iadd(vec_ptr, field_off);
+                        emit_copy_value(&mut builder, value_ptr, field_ptr);
+                        let two = builder.ins().iconst(types::I32, 2);
+                        builder.ins().call(refs.stack_pop_n, &[vm_val, two]);
+                        builder.ins().jump(ok_block, &[]);
+
+                        builder.switch_to_block(miss_block);
+                        let call = builder
+                            .ins()
+                            .call(refs.op_set_field_ic_miss, &[vm_val, idx_val, cache_val]);
                         let status = builder.inst_results(call)[0];
-                        emit_early_exit_on_err(&mut builder, status);
+                        builder
+                            .ins()
+                            .brif(status, err_block, &[status], ok_block, &[]);
+
+                        builder.switch_to_block(err_block);
+                        let err_status = builder.block_params(err_block)[0];
+                        builder.ins().return_(&[err_status]);
+                        builder.switch_to_block(ok_block);
                         ip += 3;
                     }
                     OpCode::DefineMethod => {
@@ -1120,15 +1547,195 @@ impl JitInner {
                         let arg_count = code[ip + 3];
                         let cache_ptr = method_cache_ptrs[method_ic_ix];
                         method_ic_ix += 1;
-                        let mi_val = builder.ins().iconst(types::I32, method_idx as i64);
-                        let ac_val = builder.ins().iconst(types::I32, arg_count as i64);
-                        let cache_val = builder.ins().iconst(ptr_ty, cache_ptr as i64);
-                        let call = builder.ins().call(
-                            refs.op_method_call_ic,
-                            &[vm_val, mi_val, ac_val, cache_val],
-                        );
-                        let status = builder.inst_results(call)[0];
-                        emit_early_exit_on_err(&mut builder, status);
+
+                        if arg_count <= 1 {
+                            use cranelift_codegen::ir::MemFlags;
+                            use cranelift_codegen::ir::condcodes::IntCC;
+
+                            let mi_val = builder.ins().iconst(types::I32, method_idx as i64);
+                            let ac_val = builder.ins().iconst(types::I32, arg_count as i64);
+                            let cache_val = builder.ins().iconst(ptr_ty, cache_ptr as i64);
+                            let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
+                            let stack_len = emit_load_stack_len(&mut builder, vm_val);
+                            let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+                            let offset_from_top =
+                                builder.ins().iconst(types::I64, (arg_count as i64 + 1) as i64);
+                            let receiver_slot = builder.ins().isub(stack_len, offset_from_top);
+                            let receiver_off = builder.ins().imul(receiver_slot, value_size);
+                            let receiver_ptr = builder.ins().iadd(stack_ptr, receiver_off);
+                            let flags = MemFlags::trusted();
+
+                            let check_def_block = builder.create_block();
+                            let hit_block = builder.create_block();
+                            let miss_block = builder.create_block();
+                            let ok_block = builder.create_block();
+                            let err_block = builder.create_block();
+                            builder.append_block_param(err_block, types::I32);
+
+                            let tag = builder.ins().load(types::I8, flags, receiver_ptr, 0);
+                            let struct_tag =
+                                builder.ins().iconst(types::I8, VALUE_TAG_STRUCT_INSTANCE as i64);
+                            let is_struct =
+                                builder.ins().icmp(IntCC::Equal, tag, struct_tag);
+                            builder
+                                .ins()
+                                .brif(is_struct, check_def_block, &[], miss_block, &[]);
+
+                            builder.switch_to_block(check_def_block);
+                            let receiver_raw = builder.ins().load(
+                                ptr_ty,
+                                flags,
+                                receiver_ptr,
+                                VALUE_INT_PAYLOAD_OFFSET as i32,
+                            );
+                            let inst_ptr = builder.ins().iadd_imm(receiver_raw, RC_VALUE_OFFSET as i64);
+                            let inst_def_raw = builder.ins().load(
+                                ptr_ty,
+                                flags,
+                                inst_ptr,
+                                STRUCT_INSTANCE_DEF_OFFSET as i32,
+                            );
+                            let cached_def_raw = builder.ins().load(
+                                ptr_ty,
+                                flags,
+                                cache_val,
+                                MethodCacheEntry::OFFSET_STRUCT_DEF_RAW,
+                            );
+                            let def_matches =
+                                builder.ins().icmp(IntCC::Equal, inst_def_raw, cached_def_raw);
+                            builder
+                                .ins()
+                                .brif(def_matches, hit_block, &[], miss_block, &[]);
+
+                            builder.switch_to_block(hit_block);
+                            let closure_raw = builder.ins().load(
+                                ptr_ty,
+                                flags,
+                                cache_val,
+                                MethodCacheEntry::OFFSET_CLOSURE_RAW,
+                            );
+                            let thunk_raw = builder.ins().load(
+                                ptr_ty,
+                                flags,
+                                cache_val,
+                                MethodCacheEntry::OFFSET_THUNK_RAW,
+                            );
+                            let line_val = builder.ins().iconst(types::I32, line as i64);
+
+                            if arg_count == 0 {
+                                let dst_ptr = builder.ins().iadd(receiver_ptr, value_size);
+                                emit_copy_value(&mut builder, receiver_ptr, dst_ptr);
+                            } else {
+                                let arg_ptr = builder.ins().iadd(receiver_ptr, value_size);
+                                let dst_arg_ptr = builder.ins().iadd(arg_ptr, value_size);
+                                emit_copy_value(&mut builder, arg_ptr, dst_arg_ptr);
+                                emit_copy_value(&mut builder, receiver_ptr, arg_ptr);
+                            }
+                            emit_write_closure_value(&mut builder, receiver_ptr, closure_raw);
+                            let new_stack_len = builder.ins().iadd_imm(stack_len, 1);
+                            builder.ins().store(
+                                flags,
+                                new_stack_len,
+                                vm_val,
+                                vm_stack_view_len_offset(),
+                            );
+
+                            let jit_frames_ptr = builder.ins().load(
+                                ptr_ty,
+                                flags,
+                                vm_val,
+                                vm_jit_frame_view_ptr_offset(),
+                            );
+                            let jit_frames_len = builder.ins().load(
+                                types::I64,
+                                flags,
+                                vm_val,
+                                vm_jit_frame_view_len_offset(),
+                            );
+                            let frame_size =
+                                builder.ins().iconst(types::I64, std::mem::size_of::<JitFrame>() as i64);
+                            let frame_off = builder.ins().imul(jit_frames_len, frame_size);
+                            let new_frame_ptr = builder.ins().iadd(jit_frames_ptr, frame_off);
+                            let caller_frame_ptr = emit_load_top_jit_frame_ptr(&mut builder, vm_val);
+                            let module_globals = builder.ins().load(
+                                ptr_ty,
+                                flags,
+                                caller_frame_ptr,
+                                JitFrame::OFFSET_MODULE_GLOBALS,
+                            );
+                            builder.ins().store(
+                                flags,
+                                closure_raw,
+                                new_frame_ptr,
+                                JitFrame::OFFSET_CLOSURE_RAW,
+                            );
+                            builder.ins().store(
+                                flags,
+                                receiver_slot,
+                                new_frame_ptr,
+                                JitFrame::OFFSET_SLOT_OFFSET,
+                            );
+                            builder.ins().store(
+                                flags,
+                                module_globals,
+                                new_frame_ptr,
+                                JitFrame::OFFSET_MODULE_GLOBALS,
+                            );
+                            builder.ins().store(
+                                flags,
+                                line_val,
+                                new_frame_ptr,
+                                JitFrame::OFFSET_LINE,
+                            );
+                            let new_jit_len = builder.ins().iadd_imm(jit_frames_len, 1);
+                            builder.ins().store(
+                                flags,
+                                new_jit_len,
+                                vm_val,
+                                vm_jit_frame_view_len_offset(),
+                            );
+                            let hit_call =
+                                builder.ins().call_indirect(thunk_sig, thunk_raw, &[vm_val]);
+                            let hit_status = builder.inst_results(hit_call)[0];
+                            let restore_err_block = builder.create_block();
+                            builder.append_block_param(restore_err_block, types::I32);
+                            builder.ins().brif(
+                                hit_status,
+                                restore_err_block,
+                                &[hit_status],
+                                ok_block,
+                                &[],
+                            );
+                            builder.switch_to_block(restore_err_block);
+                            let err_status = builder.block_params(restore_err_block)[0];
+                            builder.ins().jump(err_block, &[err_status]);
+
+                            builder.switch_to_block(miss_block);
+                            let call = builder.ins().call(
+                                refs.op_method_call_ic,
+                                &[vm_val, mi_val, ac_val, cache_val],
+                            );
+                            let status = builder.inst_results(call)[0];
+                            builder
+                                .ins()
+                                .brif(status, err_block, &[status], ok_block, &[]);
+
+                            builder.switch_to_block(err_block);
+                            let err_status = builder.block_params(err_block)[0];
+                            builder.ins().return_(&[err_status]);
+
+                            builder.switch_to_block(ok_block);
+                        } else {
+                            let mi_val = builder.ins().iconst(types::I32, method_idx as i64);
+                            let ac_val = builder.ins().iconst(types::I32, arg_count as i64);
+                            let cache_val = builder.ins().iconst(ptr_ty, cache_ptr as i64);
+                            let call = builder.ins().call(
+                                refs.op_method_call_ic,
+                                &[vm_val, mi_val, ac_val, cache_val],
+                            );
+                            let status = builder.inst_results(call)[0];
+                            emit_early_exit_on_err(&mut builder, status);
+                        }
                         ip += 4;
                     }
 
@@ -1201,6 +1808,14 @@ fn register_helpers(builder: &mut JITBuilder) {
         "jit_local_add_array_mod_index",
         runtime::jit_local_add_array_mod_index
     );
+    reg!(
+        "jit_struct_field_add_const",
+        runtime::jit_struct_field_add_const
+    );
+    reg!(
+        "jit_struct_field_add_local",
+        runtime::jit_struct_field_add_local
+    );
     reg!("jit_get_local", runtime::jit_get_local);
     reg!("jit_set_local", runtime::jit_set_local);
     reg!("jit_op_add", runtime::jit_op_add);
@@ -1234,6 +1849,8 @@ fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_op_struct_literal", runtime::jit_op_struct_literal);
     reg!("jit_op_get_field", runtime::jit_op_get_field);
     reg!("jit_op_set_field", runtime::jit_op_set_field);
+    reg!("jit_op_get_field_ic_miss", runtime::jit_op_get_field_ic_miss);
+    reg!("jit_op_set_field_ic_miss", runtime::jit_op_set_field_ic_miss);
     reg!("jit_op_define_method", runtime::jit_op_define_method);
     reg!("jit_op_method_call", runtime::jit_op_method_call);
     reg!("jit_op_method_call_ic", runtime::jit_op_method_call_ic);
@@ -1291,6 +1908,23 @@ fn declare_helpers(module: &mut JITModule) -> HelperIds {
     sig_vm_3u32_to_u32.params.push(AbiParam::new(types::I32));
     sig_vm_3u32_to_u32.params.push(AbiParam::new(types::I32));
     sig_vm_3u32_to_u32.returns.push(AbiParam::new(types::I32));
+
+    let mut sig_vm_u32_u32_i64_to_u32 = module.make_signature();
+    sig_vm_u32_u32_i64_to_u32
+        .params
+        .push(AbiParam::new(ptr_ty));
+    sig_vm_u32_u32_i64_to_u32
+        .params
+        .push(AbiParam::new(types::I32));
+    sig_vm_u32_u32_i64_to_u32
+        .params
+        .push(AbiParam::new(types::I32));
+    sig_vm_u32_u32_i64_to_u32
+        .params
+        .push(AbiParam::new(types::I64));
+    sig_vm_u32_u32_i64_to_u32
+        .returns
+        .push(AbiParam::new(types::I32));
 
     // Signature for jit_op_method_call_ic: fn(*mut VM, u32, u32, *mut ptr) -> u32
     let mut sig_vm_u32_u32_ptr_to_u32 = module.make_signature();
@@ -1388,6 +2022,12 @@ fn declare_helpers(module: &mut JITModule) -> HelperIds {
             "jit_local_add_array_mod_index",
             &sig_vm_3u32_i64_u32_to_u32,
         ),
+        struct_field_add_const: decl(
+            module,
+            "jit_struct_field_add_const",
+            &sig_vm_u32_u32_i64_to_u32,
+        ),
+        struct_field_add_local: decl(module, "jit_struct_field_add_local", &sig_vm_3u32_to_u32),
         get_local: decl(module, "jit_get_local", &sig_vm_u32),
         set_local: decl(module, "jit_set_local", &sig_vm_u32),
         add: decl(module, "jit_op_add", &sig_vm_to_u32),
@@ -1420,8 +2060,8 @@ fn declare_helpers(module: &mut JITModule) -> HelperIds {
         op_closure: decl(module, "jit_op_closure", &sig_vm_u32_u32_to_u32),
         op_struct_def: decl(module, "jit_op_struct_def", &sig_vm_u32),
         op_struct_literal: decl(module, "jit_op_struct_literal", &sig_vm_u32_u32_to_u32),
-        op_get_field: decl(module, "jit_op_get_field", sig_vm_u32_fallible),
-        op_set_field: decl(module, "jit_op_set_field", sig_vm_u32_fallible),
+        op_get_field_ic_miss: decl(module, "jit_op_get_field_ic_miss", &sig_vm_u32_ptr_to_u32),
+        op_set_field_ic_miss: decl(module, "jit_op_set_field_ic_miss", &sig_vm_u32_ptr_to_u32),
         op_define_method: decl(module, "jit_op_define_method", &sig_vm_u32_u32_to_u32),
         op_method_call: decl(module, "jit_op_method_call", &sig_vm_u32_u32_to_u32),
         op_method_call_ic: decl(
@@ -1457,6 +2097,8 @@ fn declare_helper_refs(
         index_fast_array_int: r(ids.index_fast_array_int),
         type_wrap: r(ids.type_wrap),
         local_add_array_mod_index: r(ids.local_add_array_mod_index),
+        struct_field_add_const: r(ids.struct_field_add_const),
+        struct_field_add_local: r(ids.struct_field_add_local),
         get_local: r(ids.get_local),
         set_local: r(ids.set_local),
         add: r(ids.add),
@@ -1489,8 +2131,8 @@ fn declare_helper_refs(
         op_closure: r(ids.op_closure),
         op_struct_def: r(ids.op_struct_def),
         op_struct_literal: r(ids.op_struct_literal),
-        op_get_field: r(ids.op_get_field),
-        op_set_field: r(ids.op_set_field),
+        op_get_field_ic_miss: r(ids.op_get_field_ic_miss),
+        op_set_field_ic_miss: r(ids.op_set_field_ic_miss),
         op_define_method: r(ids.op_define_method),
         op_method_call: r(ids.op_method_call),
         op_method_call_ic: r(ids.op_method_call_ic),
@@ -1542,11 +2184,12 @@ fn read_u16(code: &[u8], offset: usize) -> u16 {
 /// validated every opcode is in the allow-list, so we can assume
 /// fixed-length instructions here — except `Closure`, which is
 /// variable-length and needs the constants pool to resolve its length.
-fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usize) {
+fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usize, usize) {
     let code = &chunk.code;
     let mut get_globals = 0usize;
     let mut calls = 0usize;
     let mut method_calls = 0usize;
+    let mut field_ops = 0usize;
     let mut ip = 0;
     while ip < code.len() {
         let Some(op) = OpCode::from_byte(code[ip]) else {
@@ -1556,6 +2199,7 @@ fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usiz
             OpCode::GetGlobal => get_globals += 1,
             OpCode::Call => calls += 1,
             OpCode::MethodCall => method_calls += 1,
+            OpCode::GetField | OpCode::SetField => field_ops += 1,
             _ => {}
         }
         ip += match op {
@@ -1623,7 +2267,7 @@ fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usiz
             _ => break,
         };
     }
-    (get_globals, calls, method_calls)
+    (get_globals, calls, method_calls, field_ops)
 }
 
 struct LocalConstArithUpdate {
@@ -1648,6 +2292,18 @@ struct LocalArithUpdate {
     rhs_slot: u16,
     op: IntArithOp,
     pop_after: bool,
+    len: usize,
+}
+
+enum StructFieldAddShape {
+    Const { addend: i64 },
+    Local { rhs_slot: u16 },
+}
+
+struct StructFieldAddPeephole {
+    self_slot: u16,
+    field_idx: u16,
+    shape: StructFieldAddShape,
     len: usize,
 }
 
@@ -1703,6 +2359,74 @@ fn match_local_arith_update(
         op,
         pop_after,
         len,
+    })
+}
+
+fn match_struct_field_add_update(
+    code: &[u8],
+    chunk: &Chunk,
+    ip: usize,
+    blocks: &HashMap<usize, Block>,
+) -> Option<StructFieldAddPeephole> {
+    if ip + 16 > code.len() {
+        return None;
+    }
+
+    let self_slot = read_u16(code, ip + 1);
+    let self2_ip = ip + 3;
+    let get_field_ip = ip + 6;
+    let rhs_ip = ip + 9;
+    let add_ip = ip + 12;
+    let set_field_ip = ip + 13;
+
+    if blocks.contains_key(&self2_ip)
+        || blocks.contains_key(&get_field_ip)
+        || blocks.contains_key(&rhs_ip)
+        || blocks.contains_key(&add_ip)
+        || blocks.contains_key(&set_field_ip)
+    {
+        return None;
+    }
+
+    if OpCode::from_byte(code[ip]) != Some(OpCode::GetLocal)
+        || OpCode::from_byte(code[self2_ip]) != Some(OpCode::GetLocal)
+        || OpCode::from_byte(code[get_field_ip]) != Some(OpCode::GetField)
+        || OpCode::from_byte(code[add_ip]) != Some(OpCode::Add)
+        || OpCode::from_byte(code[set_field_ip]) != Some(OpCode::SetField)
+    {
+        return None;
+    }
+
+    let self_slot_2 = read_u16(code, self2_ip + 1);
+    if self_slot != self_slot_2 {
+        return None;
+    }
+
+    let field_idx = read_u16(code, get_field_ip + 1);
+    if field_idx != read_u16(code, set_field_ip + 1) {
+        return None;
+    }
+
+    let shape = match OpCode::from_byte(code[rhs_ip]) {
+        Some(OpCode::Constant) => {
+            let const_idx = read_u16(code, rhs_ip + 1);
+            let addend = match chunk.constants.get(const_idx as usize) {
+                Some(crate::vm::value::Value::Integer(n)) => *n,
+                _ => return None,
+            };
+            StructFieldAddShape::Const { addend }
+        }
+        Some(OpCode::GetLocal) => StructFieldAddShape::Local {
+            rhs_slot: read_u16(code, rhs_ip + 1),
+        },
+        _ => return None,
+    };
+
+    Some(StructFieldAddPeephole {
+        self_slot,
+        field_idx,
+        shape,
+        len: 16,
     })
 }
 
@@ -1968,6 +2692,92 @@ fn emit_load_stack_len(
         .load(types::I64, MemFlags::trusted(), vm_val, vm_stack_view_len_offset())
 }
 
+#[allow(dead_code)]
+#[inline]
+fn emit_load_top_jit_frame_ptr(
+    builder: &mut FunctionBuilder<'_>,
+    vm_val: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::MemFlags;
+
+    let base = builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), vm_val, vm_jit_frame_view_ptr_offset());
+    let len = builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), vm_val, vm_jit_frame_view_len_offset());
+    let one = builder.ins().iconst(types::I64, 1);
+    let frame_size = builder.ins().iconst(types::I64, std::mem::size_of::<JitFrame>() as i64);
+    let top_ix = builder.ins().isub(len, one);
+    let top_off = builder.ins().imul(top_ix, frame_size);
+    builder.ins().iadd(base, top_off)
+}
+
+#[inline]
+fn emit_load_top_jit_frame_slot_offset(
+    builder: &mut FunctionBuilder<'_>,
+    vm_val: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::MemFlags;
+
+    let frame_ptr = emit_load_top_jit_frame_ptr(builder, vm_val);
+    builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), frame_ptr, JitFrame::OFFSET_SLOT_OFFSET)
+}
+
+#[inline]
+fn emit_copy_value(
+    builder: &mut FunctionBuilder<'_>,
+    src_ptr: cranelift_codegen::ir::Value,
+    dst_ptr: cranelift_codegen::ir::Value,
+) {
+    use cranelift_codegen::ir::MemFlags;
+
+    let flags = MemFlags::trusted();
+    for off in (0..VALUE_SIZE).step_by(8) {
+        let word = builder
+            .ins()
+            .load(types::I64, flags, src_ptr, off as i32);
+        builder.ins().store(flags, word, dst_ptr, off as i32);
+    }
+}
+
+#[inline]
+fn emit_write_closure_value(
+    builder: &mut FunctionBuilder<'_>,
+    dst_ptr: cranelift_codegen::ir::Value,
+    closure_raw: cranelift_codegen::ir::Value,
+) {
+    use cranelift_codegen::ir::MemFlags;
+
+    let flags = MemFlags::trusted();
+    let closure_tag = builder.ins().iconst(types::I8, VALUE_TAG_CLOSURE as i64);
+    builder.ins().store(flags, closure_tag, dst_ptr, 0);
+    builder.ins().store(
+        flags,
+        closure_raw,
+        dst_ptr,
+        VALUE_INT_PAYLOAD_OFFSET as i32,
+    );
+}
+
+#[allow(dead_code)]
+#[inline]
+fn emit_store_current_line(
+    builder: &mut FunctionBuilder<'_>,
+    vm_val: cranelift_codegen::ir::Value,
+    line: u32,
+) {
+    use cranelift_codegen::ir::MemFlags;
+
+    let frame_ptr = emit_load_top_jit_frame_ptr(builder, vm_val);
+    let line_val = builder.ins().iconst(types::I32, line as i64);
+    builder
+        .ins()
+        .store(MemFlags::trusted(), line_val, frame_ptr, JitFrame::OFFSET_LINE);
+}
+
 // ── Inline int fast path ───────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
@@ -2075,6 +2885,98 @@ fn emit_int_fast_arith(
     // Suppress the unused-warning on ptr_ty — it's the pointer type we
     // expect from `stack_as_mut_ptr` and `iadd` would verify consistency.
     let _ = ptr_ty;
+}
+
+fn emit_int_fast_divmod(
+    builder: &mut FunctionBuilder<'_>,
+    refs: &HelperRefs,
+    vm_val: cranelift_codegen::ir::Value,
+    is_modulo: bool,
+    slow_helper: FuncRef,
+) {
+    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::condcodes::IntCC;
+
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
+    let stack_len = emit_load_stack_len(builder, vm_val);
+    let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+    let one = builder.ins().iconst(types::I64, 1);
+    let two = builder.ins().iconst(types::I64, 2);
+    let len_minus_1 = builder.ins().isub(stack_len, one);
+    let len_minus_2 = builder.ins().isub(stack_len, two);
+    let off_b = builder.ins().imul(len_minus_1, value_size);
+    let off_a = builder.ins().imul(len_minus_2, value_size);
+    let val_b_ptr = builder.ins().iadd(stack_ptr, off_b);
+    let val_a_ptr = builder.ins().iadd(stack_ptr, off_a);
+
+    let flags = MemFlags::trusted();
+    let tag_b = builder.ins().load(types::I8, flags, val_b_ptr, 0);
+    let tag_a = builder.ins().load(types::I8, flags, val_a_ptr, 0);
+    let int_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
+    let a_is_int = builder.ins().icmp(IntCC::Equal, tag_a, int_tag);
+    let b_is_int = builder.ins().icmp(IntCC::Equal, tag_b, int_tag);
+    let both_int = builder.ins().band(a_is_int, b_is_int);
+
+    let fast_block = builder.create_block();
+    let slow_block = builder.create_block();
+    let continue_block = builder.create_block();
+    builder
+        .ins()
+        .brif(both_int, fast_block, &[], slow_block, &[]);
+
+    builder.switch_to_block(fast_block);
+    let lhs = builder.ins().load(
+        types::I64,
+        flags,
+        val_a_ptr,
+        VALUE_INT_PAYLOAD_OFFSET as i32,
+    );
+    let rhs = builder.ins().load(
+        types::I64,
+        flags,
+        val_b_ptr,
+        VALUE_INT_PAYLOAD_OFFSET as i32,
+    );
+    let rhs_nonzero = builder
+        .ins()
+        .icmp_imm(IntCC::NotEqual, rhs, 0);
+    let nonzero_block = builder.create_block();
+    let fast_math_block = builder.create_block();
+    builder
+        .ins()
+        .brif(rhs_nonzero, nonzero_block, &[], slow_block, &[]);
+
+    builder.switch_to_block(nonzero_block);
+    let lhs_min = builder.ins().icmp_imm(IntCC::Equal, lhs, i64::MIN);
+    let rhs_neg1 = builder.ins().icmp_imm(IntCC::Equal, rhs, -1);
+    let overflow = builder.ins().band(lhs_min, rhs_neg1);
+    builder
+        .ins()
+        .brif(overflow, slow_block, &[], fast_math_block, &[]);
+
+    builder.switch_to_block(fast_math_block);
+    let result = if is_modulo {
+        builder.ins().srem(lhs, rhs)
+    } else {
+        builder.ins().sdiv(lhs, rhs)
+    };
+    builder
+        .ins()
+        .store(flags, result, val_a_ptr, VALUE_INT_PAYLOAD_OFFSET as i32);
+    builder.ins().call(refs.stack_pop_one, &[vm_val]);
+    builder.ins().jump(continue_block, &[]);
+
+    builder.switch_to_block(slow_block);
+    let call = builder.ins().call(slow_helper, &[vm_val]);
+    let status = builder.inst_results(call)[0];
+    let err_block = builder.create_block();
+    builder
+        .ins()
+        .brif(status, err_block, &[], continue_block, &[]);
+    builder.switch_to_block(err_block);
+    builder.ins().return_(&[status]);
+
+    builder.switch_to_block(continue_block);
 }
 
 /// Peephole fast path for `GetLocal(slot); Constant(int); Arith;
@@ -2369,6 +3271,76 @@ fn emit_int_fast_cmp(
         .brif(status, err_block, &[], continue_block, &[]);
     builder.switch_to_block(err_block);
     builder.ins().return_(&[status]);
+
+    builder.switch_to_block(continue_block);
+}
+
+fn emit_int_fast_eq(
+    builder: &mut FunctionBuilder<'_>,
+    refs: &HelperRefs,
+    vm_val: cranelift_codegen::ir::Value,
+    is_equal: bool,
+) {
+    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::condcodes::IntCC;
+
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
+    let stack_len = emit_load_stack_len(builder, vm_val);
+
+    let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+    let one = builder.ins().iconst(types::I64, 1);
+    let two = builder.ins().iconst(types::I64, 2);
+    let len_minus_1 = builder.ins().isub(stack_len, one);
+    let len_minus_2 = builder.ins().isub(stack_len, two);
+    let off_b = builder.ins().imul(len_minus_1, value_size);
+    let off_a = builder.ins().imul(len_minus_2, value_size);
+    let val_b_ptr = builder.ins().iadd(stack_ptr, off_b);
+    let val_a_ptr = builder.ins().iadd(stack_ptr, off_a);
+
+    let flags = MemFlags::trusted();
+    let tag_b = builder.ins().load(types::I8, flags, val_b_ptr, 0);
+    let tag_a = builder.ins().load(types::I8, flags, val_a_ptr, 0);
+    let int_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
+    let a_is_int = builder.ins().icmp(IntCC::Equal, tag_a, int_tag);
+    let b_is_int = builder.ins().icmp(IntCC::Equal, tag_b, int_tag);
+    let both_int = builder.ins().band(a_is_int, b_is_int);
+
+    let fast_block = builder.create_block();
+    let slow_block = builder.create_block();
+    let continue_block = builder.create_block();
+    builder
+        .ins()
+        .brif(both_int, fast_block, &[], slow_block, &[]);
+
+    builder.switch_to_block(fast_block);
+    let payload_a = builder.ins().load(
+        types::I64,
+        flags,
+        val_a_ptr,
+        VALUE_INT_PAYLOAD_OFFSET as i32,
+    );
+    let payload_b = builder.ins().load(
+        types::I64,
+        flags,
+        val_b_ptr,
+        VALUE_INT_PAYLOAD_OFFSET as i32,
+    );
+    let cc = if is_equal {
+        IntCC::Equal
+    } else {
+        IntCC::NotEqual
+    };
+    let cmp = builder.ins().icmp(cc, payload_a, payload_b);
+    let cmp_u32 = builder.ins().uextend(types::I32, cmp);
+    builder
+        .ins()
+        .call(refs.replace_top2_with_bool, &[vm_val, cmp_u32]);
+    builder.ins().jump(continue_block, &[]);
+
+    builder.switch_to_block(slow_block);
+    let helper = if is_equal { refs.eq } else { refs.ne };
+    builder.ins().call(helper, &[vm_val]);
+    builder.ins().jump(continue_block, &[]);
 
     builder.switch_to_block(continue_block);
 }
