@@ -63,7 +63,33 @@ impl std::fmt::Display for VMError {
 }
 
 /// The OxigenLang virtual machine.
+/// Cached view of `stack`'s `(ptr, len)` readable directly from
+/// Cranelift IR without FFI. `ptr` is written once in `VM::new()`
+/// (the stack is pre-allocated to `STACK_MAX` so pushes never
+/// reallocate) and `len` is synced by every stack mutator.
+///
+/// Layout is pinned by `#[repr(C)]` so the JIT can bake the offsets
+/// as constants. Keep the field order in sync with the `OFFSET_*`
+/// constants below and with `VM::stack_view`.
+#[repr(C)]
+pub struct StackView {
+    pub ptr: *mut Value,
+    pub len: usize,
+}
+
+impl StackView {
+    pub const OFFSET_PTR: i32 = 0;
+    pub const OFFSET_LEN: i32 = 8;
+}
+
 pub struct VM {
+    /// Cached view of `stack`'s raw parts for the JIT. Read via direct
+    /// memory loads at a pinned offset from `&mut VM`. Placed first so
+    /// we can stabilize its offset with `#[repr(C)]` later if we want;
+    /// for now we use `std::mem::offset_of!(VM, stack_view)` to pick it
+    /// up from wherever the compiler lands it.
+    pub(crate) stack_view: StackView,
+
     stack: Vec<Value>,
     frames: Vec<CallFrame>,
     globals: HashMap<String, Value>,
@@ -99,8 +125,20 @@ impl VM {
         let mut globals = HashMap::new();
         builtins::register_builtins(&mut globals);
 
+        // Pre-allocate the full stack so `push` never reallocates. This
+        // lets the JIT cache a raw pointer to the stack buffer and use it
+        // as a stable constant for the VM's lifetime — no re-sync on
+        // every push. Worst-case memory is `STACK_MAX * sizeof(Value)`,
+        // which is a handful of MB at the default `STACK_MAX = 262144`.
+        let mut stack: Vec<Value> = Vec::with_capacity(STACK_MAX);
+        let stack_view = StackView {
+            ptr: stack.as_mut_ptr(),
+            len: 0,
+        };
+
         VM {
-            stack: Vec::with_capacity(256),
+            stack_view,
+            stack,
             frames: Vec::with_capacity(64),
             globals,
             open_upvalues: Vec::new(),
@@ -116,6 +154,13 @@ impl VM {
             globals_version: 0,
             jit: JitEngine::new(),
         }
+    }
+
+    /// Runtime-computed offset of `stack_view` within `VM`. The JIT uses
+    /// this to bake the pointer into emitted IR as a constant.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub const fn stack_view_offset() -> usize {
+        std::mem::offset_of!(VM, stack_view)
     }
 
     pub fn set_source(&mut self, source: &str) {
@@ -172,7 +217,7 @@ impl VM {
 
         // Push the closure itself onto the stack (slot 0) — this is the
         // callee slot that `call_closure` expects.
-        self.stack.push(Value::Closure(Rc::clone(&closure)));
+        self.push(Value::Closure(Rc::clone(&closure)));
 
         // Route the top-level through `call_closure` so it participates in
         // JIT tiering just like any other call. `call_closure` pushes the
@@ -304,20 +349,99 @@ impl VM {
         let Value::String(struct_name) = name else {
             return Err(self.runtime_error("expected struct name"));
         };
+        let struct_name_str = struct_name.to_string();
         let field_count = field_count as usize;
-        let mut fields = HashMap::new();
         let start = self.stack.len() - field_count * 2;
-        let flat: Vec<Value> = self.stack.drain(start..).collect();
+        let flat: Vec<Value> = self.stack_drain_from(start);
+
+        let def = self
+            .get_struct_def(&struct_name_str)
+            .ok_or_else(|| self.runtime_error(&format!(
+                "struct '{}' is not defined in this scope",
+                struct_name_str
+            )))?;
+        let layout = self.resolve_field_layout(&struct_name_str)?;
+        let mut field_vec: Vec<Value> =
+            layout.slots.iter().map(|_| Value::None).collect();
+
         for pair in flat.chunks(2) {
             if let Value::String(fname) = &pair[0] {
-                fields.insert(fname.to_string(), pair[1].clone());
+                if let Some(&idx) = layout.indices.get(fname.as_ref()) {
+                    field_vec[idx] = pair[1].clone();
+                } else {
+                    return Err(self.runtime_error_hint(
+                        &format!("field '{}' not declared on {}", fname, struct_name_str),
+                        "check the struct definition for available fields",
+                    ));
+                }
             }
         }
+
+        // Zero-init any slots that weren't provided in the literal.
+        for (i, slot) in layout.slots.iter().enumerate() {
+            if matches!(field_vec[i], Value::None) {
+                field_vec[i] = Self::zero_value_for_type(&slot.1);
+            }
+        }
+
         self.push(Value::StructInstance(Rc::new(ObjStructInstance {
-            struct_name: struct_name.to_string(),
-            fields: RefCell::new(fields),
+            struct_name: struct_name_str,
+            fields: RefCell::new(field_vec),
+            layout,
+            def,
         })));
         Ok(())
+    }
+
+    /// Resolve a struct def's flattened field layout (parent fields first,
+    /// then own). Computed lazily on first call and cached in the def's
+    /// `OnceCell`, so subsequent calls are a single pointer load.
+    pub(crate) fn resolve_field_layout(
+        &self,
+        struct_name: &str,
+    ) -> Result<Rc<crate::vm::value::FieldLayout>, VMError> {
+        let Some(Value::StructDef(def)) = self.globals.get(struct_name) else {
+            return Err(self.runtime_error(&format!(
+                "struct '{}' is not defined in this scope",
+                struct_name
+            )));
+        };
+        if let Some(layout) = def.layout.get() {
+            return Ok(Rc::clone(layout));
+        }
+
+        // Walk the inheritance chain, collecting fields parent-first.
+        let mut chain: Vec<Rc<crate::vm::value::ObjStructDef>> = Vec::new();
+        let mut cur = Some(Rc::clone(def));
+        while let Some(d) = cur {
+            cur = match &d.parent {
+                Some(p) => match self.globals.get(p) {
+                    Some(Value::StructDef(parent_def)) => Some(Rc::clone(parent_def)),
+                    _ => None,
+                },
+                None => None,
+            };
+            chain.push(d);
+        }
+        // chain is [child, ..., root]; reverse for root-first order.
+        chain.reverse();
+
+        let mut slots: Vec<(String, String, bool)> = Vec::new();
+        let mut indices: HashMap<String, usize> = HashMap::new();
+        for d in &chain {
+            for f in &d.fields {
+                if !indices.contains_key(&f.0) {
+                    indices.insert(f.0.clone(), slots.len());
+                    slots.push(f.clone());
+                }
+            }
+        }
+
+        let layout = Rc::new(crate::vm::value::FieldLayout { slots, indices });
+        // OnceCell may race if two threads reach here; VM is single-threaded
+        // but be defensive and return whichever is set.
+        let _ = def.layout.set(Rc::clone(&layout));
+        Ok(def.layout.get().cloned().unwrap_or(layout))
     }
 
     pub(crate) fn handle_get_field(&mut self, field_idx: u16) -> Result<(), VMError> {
@@ -329,14 +453,14 @@ impl VM {
 
         match &object {
             Value::StructInstance(inst) => {
-                let field_val = {
-                    let fields = inst.fields.borrow();
-                    fields.get(fname.as_ref()).cloned()
-                };
-                if let Some(val) = field_val {
+                // Field lookup via the instance's cached layout — direct
+                // Vec index, no HashMap lookup in the hot path.
+                if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+                    let val = inst.fields.borrow()[idx].clone();
                     self.push(val);
                     return Ok(());
                 }
+                // Fall through: it might be a method on the struct def.
                 let method_val =
                     if let Some(Value::StructDef(def)) = self.globals.get(&inst.struct_name) {
                         let methods = def.methods.borrow();
@@ -522,8 +646,15 @@ impl VM {
         };
         match &object {
             Value::StructInstance(inst) => {
-                inst.fields.borrow_mut().insert(fname.to_string(), value);
-                Ok(())
+                if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+                    inst.fields.borrow_mut()[idx] = value;
+                    Ok(())
+                } else {
+                    Err(self.runtime_error_hint(
+                        &format!("field '{}' not declared on {}", fname, inst.struct_name),
+                        "check the struct definition for available fields",
+                    ))
+                }
             }
             Value::Map(entries) => {
                 let mut entries = entries.borrow_mut();
@@ -559,7 +690,7 @@ impl VM {
         };
         let method_count = method_count as usize;
         let start = self.stack.len() - method_count * 2;
-        let flat: Vec<Value> = self.stack.drain(start..).collect();
+        let flat: Vec<Value> = self.stack_drain_from(start);
         if let Some(Value::StructDef(def)) = self.globals.get(name_str.as_ref()) {
             let mut methods = def.methods.borrow_mut();
             for pair in flat.chunks(2) {
@@ -641,15 +772,22 @@ impl VM {
 
     // ── Stack Operations ───────────────────────────────────────────────
 
+    #[inline(always)]
     pub(crate) fn push(&mut self, value: Value) {
         if self.stack.len() >= STACK_MAX {
             panic!("stack overflow: exceeded {} slots", STACK_MAX);
         }
         self.stack.push(value);
+        // Keep the JIT-visible `stack_view.len` in sync. `ptr` is stable
+        // because the stack was pre-allocated to STACK_MAX in `new()`.
+        self.stack_view.len = self.stack.len();
     }
 
+    #[inline(always)]
     pub(crate) fn pop(&mut self) -> Value {
-        self.stack.pop().expect("stack underflow")
+        let v = self.stack.pop().expect("stack underflow");
+        self.stack_view.len = self.stack.len();
+        v
     }
 
     pub(crate) fn peek(&self, distance: usize) -> &Value {
@@ -691,8 +829,33 @@ impl VM {
     }
 
     #[allow(dead_code)]
+    #[inline(always)]
     pub(crate) fn stack_truncate(&mut self, len: usize) {
         self.stack.truncate(len);
+        self.stack_view.len = self.stack.len();
+    }
+
+    /// Drain `start..` from the stack, syncing `stack_view.len`.
+    #[inline(always)]
+    pub(crate) fn stack_drain_from(&mut self, start: usize) -> Vec<Value> {
+        let out: Vec<Value> = self.stack.drain(start..).collect();
+        self.stack_view.len = self.stack.len();
+        out
+    }
+
+    /// Insert `value` at `idx`, syncing `stack_view.len`. O(stack_len − idx).
+    #[inline(always)]
+    pub(crate) fn stack_insert(&mut self, idx: usize, value: Value) {
+        self.stack.insert(idx, value);
+        self.stack_view.len = self.stack.len();
+    }
+
+    /// Overwrite an existing slot in-place (no length change, no sync).
+    /// Use for call-method rearranging that doesn't grow the stack.
+    #[inline(always)]
+    #[allow(dead_code)]
+    pub(crate) fn stack_overwrite(&mut self, idx: usize, value: Value) {
+        self.stack[idx] = value;
     }
 
     #[allow(dead_code)]
@@ -710,12 +873,20 @@ impl VM {
         self.stack.len()
     }
 
+    #[allow(dead_code)]
+    #[inline(always)]
+    pub(crate) fn stack_at(&self, idx: usize) -> &Value {
+        &self.stack[idx]
+    }
+
     /// Shrink the stack by `n` elements, dropping the values. Used by the
     /// JIT's inline int fast path to commit a binop result.
     #[allow(dead_code)]
+    #[inline(always)]
     pub(crate) fn stack_shrink(&mut self, n: usize) {
         let new_len = self.stack.len().saturating_sub(n);
         self.stack.truncate(new_len);
+        self.stack_view.len = self.stack.len();
     }
 
     fn current_line(&self) -> u32 {
@@ -1086,7 +1257,7 @@ impl VM {
                     self.close_upvalues(frame.slot_offset);
 
                     // Pop the function's stack slots
-                    self.stack.truncate(frame.slot_offset);
+                    self.stack_truncate(frame.slot_offset);
 
                     // Leave the return value on the stack for the caller.
                     // The top-level `run()` pops it after `execute_until`
@@ -1103,19 +1274,19 @@ impl VM {
                 OpCode::BuildArray => {
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count;
-                    let elements: Vec<Value> = self.stack.drain(start..).collect();
+                    let elements: Vec<Value> = self.stack_drain_from(start);
                     self.push(Value::Array(Rc::new(RefCell::new(elements))));
                 }
                 OpCode::BuildTuple => {
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count;
-                    let elements: Vec<Value> = self.stack.drain(start..).collect();
+                    let elements: Vec<Value> = self.stack_drain_from(start);
                     self.push(Value::Tuple(Rc::new(elements)));
                 }
                 OpCode::BuildMap => {
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count * 2;
-                    let flat: Vec<Value> = self.stack.drain(start..).collect();
+                    let flat: Vec<Value> = self.stack_drain_from(start);
                     let mut entries = Vec::with_capacity(count);
                     for pair in flat.chunks(2) {
                         entries.push((pair[0].clone(), pair[1].clone()));
@@ -1125,7 +1296,7 @@ impl VM {
                 OpCode::BuildSet => {
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count;
-                    let elements: Vec<Value> = self.stack.drain(start..).collect();
+                    let elements: Vec<Value> = self.stack_drain_from(start);
                     // Deduplicate
                     let mut items = Vec::new();
                     for elem in elements {
@@ -1304,7 +1475,7 @@ impl VM {
                 OpCode::StringInterp => {
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count;
-                    let parts: Vec<Value> = self.stack.drain(start..).collect();
+                    let parts: Vec<Value> = self.stack_drain_from(start);
                     let mut result = String::new();
                     for part in &parts {
                         result.push_str(&format!("{}", part));
@@ -1968,7 +2139,7 @@ impl VM {
             Value::Closure(closure) => self.call_closure(closure, arg_count, named_args, None),
             Value::Builtin(func) => {
                 let start = self.stack.len() - arg_count;
-                let args: Vec<Value> = self.stack.drain(start..).collect();
+                let args: Vec<Value> = self.stack_drain_from(start);
                 self.pop(); // pop the builtin itself
 
                 if !named_args.is_empty() {
@@ -1990,21 +2161,25 @@ impl VM {
             Value::StructDef(def) => {
                 // Struct constructor call (positional args)
                 let start = self.stack.len() - arg_count;
-                let args: Vec<Value> = self.stack.drain(start..).collect();
+                let args: Vec<Value> = self.stack_drain_from(start);
                 self.pop(); // pop the struct def
 
-                let mut fields = HashMap::new();
-                for (i, (field_name, field_type, _)) in def.fields.iter().enumerate() {
+                let def_name = def.name.clone();
+                let layout = self.resolve_field_layout(&def_name)?;
+                let mut field_vec: Vec<Value> = Vec::with_capacity(layout.slots.len());
+                for (i, slot) in layout.slots.iter().enumerate() {
                     let val = args
                         .get(i)
                         .cloned()
-                        .unwrap_or_else(|| Self::zero_value_for_type(field_type));
-                    fields.insert(field_name.clone(), val);
+                        .unwrap_or_else(|| Self::zero_value_for_type(&slot.1));
+                    field_vec.push(val);
                 }
 
                 self.push(Value::StructInstance(Rc::new(ObjStructInstance {
-                    struct_name: def.name.clone(),
-                    fields: RefCell::new(fields),
+                    struct_name: def_name,
+                    fields: RefCell::new(field_vec),
+                    layout,
+                    def,
                 })));
                 Ok(())
             }
@@ -2020,14 +2195,41 @@ impl VM {
     /// can fall back to the generic `call_value` path for builtins,
     /// constructors, and future callable forms.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    #[inline(always)]
     pub(crate) fn call_closure_from_stack(&mut self, arg_count: usize) -> Result<bool, VMError> {
         let callee_idx = self.stack.len() - 1 - arg_count;
         let Value::Closure(closure) = &self.stack[callee_idx] else {
             return Ok(false);
         };
         let closure = Rc::clone(closure);
+        // Inline fast path: JIT-compiled callee with exact arity.
+        // This is every recursive/hot-loop call, and we want it to fold
+        // straight into `jit_op_call` without a Rust function call.
+        if closure.jit_state.get() == 1 && closure.function.arity as usize == arg_count {
+            if let Some(result) = self.call_closure_fast_path(&closure) {
+                return result.map(|_| true);
+            }
+        }
         self.call_closure(closure, arg_count, &[], None)?;
         Ok(true)
+    }
+
+    /// Dispatch a struct method with a pre-resolved closure. Rearranges
+    /// the stack so `self` is the first arg, then calls the closure.
+    /// Stack on entry: `[..., instance, arg1, ..., argN]`.
+    /// Stack on exit (after the callee returns): `[..., result]`.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn call_struct_method_with_closure(
+        &mut self,
+        closure: Rc<ObjClosure>,
+        arg_count: usize,
+    ) -> Result<(), VMError> {
+        let instance_idx = self.stack.len() - 1 - arg_count;
+        let instance = self.stack[instance_idx].clone();
+        self.stack[instance_idx] = Value::Closure(Rc::clone(&closure));
+        self.stack_insert(instance_idx + 1, instance);
+        self.call_closure(closure, arg_count + 1, &[], None)
     }
 
     /// Call a method on an object. Stack: [instance, arg1, ..., argN]
@@ -2043,7 +2245,11 @@ impl VM {
         match &instance {
             Value::StructInstance(inst) => {
                 // Check instance fields first (for callable fields)
-                let field_val = inst.fields.borrow().get(method_name).cloned();
+                let field_val = if let Some(&idx) = inst.layout.indices.get(method_name) {
+                    Some(inst.fields.borrow()[idx].clone())
+                } else {
+                    None
+                };
                 if let Some(Value::Closure(closure)) = field_val {
                     // Callable field — treat as regular call
                     self.stack[instance_idx] = Value::Closure(Rc::clone(&closure));
@@ -2059,7 +2265,7 @@ impl VM {
                     // The instance becomes the `self` argument.
                     self.stack[instance_idx] = Value::Closure(Rc::clone(&closure));
                     // Insert instance as first arg (self) right after the closure
-                    self.stack.insert(instance_idx + 1, instance);
+                    self.stack_insert(instance_idx + 1, instance);
                     return self.call_closure(closure, arg_count + 1, named_args, None);
                 }
 
@@ -2079,13 +2285,13 @@ impl VM {
                 if let Some(builtin) = self.globals.get(&builtin_name).cloned() {
                     // Rearrange: [instance, arg1, ...] → [builtin, instance, arg1, ...]
                     self.stack[instance_idx] = builtin;
-                    self.stack.insert(instance_idx + 1, instance);
+                    self.stack_insert(instance_idx + 1, instance);
                     return self.call_value(arg_count + 1, named_args);
                 }
                 // Try without __ prefix
                 if let Some(builtin) = self.globals.get(method_name).cloned() {
                     self.stack[instance_idx] = builtin;
-                    self.stack.insert(instance_idx + 1, instance);
+                    self.stack_insert(instance_idx + 1, instance);
                     return self.call_value(arg_count + 1, named_args);
                 }
                 Err(self.runtime_error_hint(
@@ -2183,8 +2389,26 @@ impl VM {
         }
     }
 
+    /// Resolve a struct def by name (from globals).
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn get_struct_def(
+        &self,
+        name: &str,
+    ) -> Option<Rc<crate::vm::value::ObjStructDef>> {
+        match self.globals.get(name) {
+            Some(Value::StructDef(def)) => Some(Rc::clone(def)),
+            _ => None,
+        }
+    }
+
     /// Look up a method on a struct def, following the inheritance chain.
-    fn find_struct_method(&self, struct_name: &str, method_name: &str) -> Result<Value, VMError> {
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub(crate) fn find_struct_method(
+        &self,
+        struct_name: &str,
+        method_name: &str,
+    ) -> Result<Value, VMError> {
         let mut current = struct_name.to_string();
         loop {
             if let Some(Value::StructDef(def)) = self.globals.get(&current) {
@@ -2204,6 +2428,54 @@ impl VM {
         }
     }
 
+    /// Ultra-tight call path for JIT-compiled closures with exact arity,
+    /// no named args, and no module globals. Marked `inline(always)` so the
+    /// body folds into `call_closure_from_stack` (the JIT call helper's
+    /// direct caller), cutting a Rust function call off the hot path.
+    ///
+    /// Returns `Ok(true)` on success, `Ok(false)` if the fast path can't
+    /// handle this call (falls through to the slow path).
+    #[inline(always)]
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub(crate) fn call_closure_fast_path(
+        &mut self,
+        closure: &Rc<ObjClosure>,
+    ) -> Option<Result<(), VMError>> {
+        let thunk = closure.jit_thunk.get()?;
+        if self.frames.len() >= FRAMES_MAX {
+            return Some(Err(self.runtime_error_hint(
+                "stack overflow",
+                "check for infinite recursion or deeply nested calls",
+            )));
+        }
+        let expected = closure.function.arity as usize;
+        let slot_offset = self.stack.len() - expected - 1;
+        let stop_depth = self.frames.len();
+        let inherited_mg = self
+            .frames
+            .last()
+            .and_then(|f| f.module_globals.clone());
+        self.frames.push(CallFrame {
+            closure: Rc::clone(closure),
+            ip: 0,
+            slot_offset,
+            module_globals: inherited_mg,
+        });
+        let vm_ptr = self as *mut VM;
+        let exit = unsafe { self.jit.invoke_thunk(vm_ptr, thunk, stop_depth) };
+        Some(match exit {
+            crate::jit::JitExit::Returned => Ok(()),
+            crate::jit::JitExit::Bailout => {
+                if let Some(f) = self.frames.last() {
+                    f.closure.jit_thunk.set(None);
+                    f.closure.jit_state.set(2);
+                }
+                Ok(())
+            }
+            crate::jit::JitExit::RuntimeError(err) => Err(err),
+        })
+    }
+
     fn call_closure(
         &mut self,
         closure: Rc<ObjClosure>,
@@ -2212,13 +2484,29 @@ impl VM {
         module_globals: Option<Rc<HashMap<String, Value>>>,
     ) -> Result<(), VMError> {
         let expected = closure.function.arity as usize;
+        let state = closure.jit_state.get();
 
-        // Bump the JIT's hot-function counter. Actual JIT invocation is
-        // attempted after the frame is pushed (see below) so the JIT helper
-        // can drive `execute_until` for its own frame.
-        closure
-            .call_count
-            .set(closure.call_count.get().saturating_add(1));
+        // Hot-path: JIT-compiled + exact arity + no named args + no explicit
+        // module globals. Every recursive/hot-loop call hits this, so it must
+        // be lean — we skip the call_count bump (already tiered up), the
+        // named-args block, and the arity-fill loop.
+        if state == 1
+            && named_args.is_empty()
+            && arg_count == expected
+            && module_globals.is_none()
+        {
+            if let Some(result) = self.call_closure_fast_path(&closure) {
+                return result;
+            }
+        }
+
+        // Slow path: only bump the hot-function counter when we haven't
+        // already tiered up. Once state == 1 the counter is never consulted.
+        if state != 1 {
+            closure
+                .call_count
+                .set(closure.call_count.get().saturating_add(1));
+        }
 
         // Handle named arguments: fill in any missing positional args
         if !named_args.is_empty() {

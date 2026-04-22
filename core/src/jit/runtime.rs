@@ -527,6 +527,106 @@ pub unsafe extern "C" fn jit_op_define_method(
     }
 }
 
+/// MethodCall with a per-call-site inline cache. On hit (current
+/// instance's struct def matches the cached def), we skip
+/// `find_struct_method`'s two HashMap lookups and dispatch directly to
+/// the cached method closure. On miss we resolve the method, populate
+/// the cache, and dispatch.
+///
+/// The cache is safe across def/method mutation because we compare the
+/// struct def `Rc` identity (not just name). If a def is redefined, it
+/// gets a fresh allocation and the IC misses.
+#[inline(always)]
+pub unsafe extern "C" fn jit_op_method_call_ic(
+    vm: *mut VM,
+    method_idx: u32,
+    arg_count: u32,
+    cache_ptr: *mut super::engine::MethodCacheEntry,
+) -> u32 {
+    let vm = unsafe { &mut *vm };
+    let cache = unsafe { &mut *cache_ptr };
+    let ac = arg_count as usize;
+
+    let instance_idx = vm.stack_len() - 1 - ac;
+
+    // Fast-path peek at the instance + def. The `def` lives on the
+    // instance directly so there's no globals lookup on hit.
+    let (struct_def, struct_name_owned) = match vm.stack_at(instance_idx) {
+        Value::StructInstance(inst) => (Rc::clone(&inst.def), None::<String>),
+        _ => {
+            return unsafe { jit_op_method_call(vm as *mut VM, method_idx, arg_count) };
+        }
+    };
+
+    // Cache hit: cached def matches current def.
+    if let (Some(cached_def), Some(cached_closure)) =
+        (cache.struct_def.as_ref(), cache.closure.as_ref())
+    {
+        if Rc::ptr_eq(cached_def, &struct_def) {
+            let closure = Rc::clone(cached_closure);
+            let before_depth = vm.frames_len();
+            return match vm.call_struct_method_with_closure(closure, ac) {
+                Ok(()) => {
+                    if vm.frames_len() > before_depth {
+                        match vm.execute_until(before_depth) {
+                            Ok(()) => 0,
+                            Err(e) => {
+                                vm.jit.stash_error(e);
+                                1
+                            }
+                        }
+                    } else {
+                        0
+                    }
+                }
+                Err(e) => {
+                    vm.jit.stash_error(e);
+                    1
+                }
+            };
+        }
+    }
+
+    // Miss: resolve method, populate cache, dispatch.
+    let method_name_val = vm.current_constant(method_idx as u16);
+    let Value::String(mname_rc) = method_name_val else {
+        return unsafe { jit_op_method_call(vm as *mut VM, method_idx, arg_count) };
+    };
+    let mname: String = mname_rc.to_string();
+    let struct_name = struct_name_owned.unwrap_or_else(|| struct_def.name.clone());
+
+    // Preserve existing semantic: callable instance field shadows method.
+    // Only take the IC path when the method lives on the def.
+    match vm.find_struct_method(&struct_name, &mname) {
+        Ok(Value::Closure(closure)) => {
+            cache.struct_def = Some(Rc::clone(&struct_def));
+            cache.closure = Some(Rc::clone(&closure));
+            let before_depth = vm.frames_len();
+            match vm.call_struct_method_with_closure(closure, ac) {
+                Ok(()) => {
+                    if vm.frames_len() > before_depth {
+                        match vm.execute_until(before_depth) {
+                            Ok(()) => 0,
+                            Err(e) => {
+                                vm.jit.stash_error(e);
+                                1
+                            }
+                        }
+                    } else {
+                        0
+                    }
+                }
+                Err(e) => {
+                    vm.jit.stash_error(e);
+                    1
+                }
+            }
+        }
+        // Not a closure, not found, or error: defer to generic path.
+        _ => unsafe { jit_op_method_call(vm as *mut VM, method_idx, arg_count) },
+    }
+}
+
 /// MethodCall — like `call_value`, if a user frame was pushed we must
 /// drive the interpreter until it returns.
 pub unsafe extern "C" fn jit_op_method_call(vm: *mut VM, method_idx: u32, arg_count: u32) -> u32 {
@@ -563,6 +663,7 @@ pub unsafe extern "C" fn jit_op_method_call(vm: *mut VM, method_idx: u32, arg_co
 /// is on top of the stack (consuming the callee + args).
 ///
 /// Returns 0 on success, 1 on runtime error.
+#[inline(always)]
 pub unsafe extern "C" fn jit_op_call(vm: *mut VM, arg_count: u32) -> u32 {
     let vm = unsafe { &mut *vm };
     let before_depth = vm.frames_len();
@@ -596,6 +697,131 @@ pub unsafe extern "C" fn jit_op_call(vm: *mut VM, arg_count: u32) -> u32 {
             1
         }
     }
+}
+
+/// Hit path of the inline-IR Call guard. Pre-conditions (verified by
+/// the caller's IR): the callee on stack is a Closure whose Rc pointer
+/// equals `cache.closure_raw`, which in turn means `cache._keeper` is
+/// populated and `cache.thunk_raw` is a valid `CompiledThunk` pointer.
+///
+/// We skip almost all of `call_closure`'s bookkeeping: no arity check
+/// (cache guarantees it), no named args, no call_count bump, no type
+/// checks. Just push a frame and invoke the cached thunk.
+#[inline(always)]
+pub unsafe extern "C" fn jit_op_call_hit(
+    vm: *mut VM,
+    cache_ptr: *mut super::engine::CallCacheEntry,
+) -> u32 {
+    let vm = unsafe { &mut *vm };
+    let cache = unsafe { &mut *cache_ptr };
+
+    // The keeper is guaranteed populated by the IR guard (closure_raw
+    // non-null implies _keeper Some). Clone the Rc for the new frame.
+    let Some(cached_rc) = cache._keeper.as_ref().map(Rc::clone) else {
+        // Defensive fallback — shouldn't be reachable if IR guard holds.
+        return unsafe { jit_op_call(vm as *mut VM, cache.arity as u32) };
+    };
+
+    let before_depth = vm.frames_len();
+    match vm.call_closure_fast_path(&cached_rc) {
+        Some(Ok(())) => {
+            if vm.frames_len() > before_depth {
+                match vm.execute_until(before_depth) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        vm.jit.stash_error(e);
+                        1
+                    }
+                }
+            } else {
+                0
+            }
+        }
+        Some(Err(e)) => {
+            vm.jit.stash_error(e);
+            1
+        }
+        None => {
+            // Thunk disappeared (deopt'd) — invalidate cache and retry
+            // through the generic path.
+            cache.closure_raw = std::ptr::null();
+            cache.thunk_raw = std::ptr::null();
+            cache._keeper = None;
+            unsafe { jit_op_call(vm as *mut VM, cache.arity as u32) }
+        }
+    }
+}
+
+/// Miss path of the inline-IR Call guard. Runs the generic `jit_op_call`
+/// flow, then — on success and if the callee is a JIT-compiled closure —
+/// populates the cache so subsequent calls hit the IR fast path.
+#[inline(always)]
+pub unsafe extern "C" fn jit_op_call_miss(
+    vm: *mut VM,
+    arg_count: u32,
+    cache_ptr: *mut super::engine::CallCacheEntry,
+) -> u32 {
+    let vm = unsafe { &mut *vm };
+    let cache = unsafe { &mut *cache_ptr };
+    let ac = arg_count as usize;
+
+    let before_depth = vm.frames_len();
+    let callee_idx = vm.stack_len() - 1 - ac;
+    let callee_candidate = if let Value::Closure(c) = vm.stack_at(callee_idx) {
+        Some(Rc::clone(c))
+    } else {
+        None
+    };
+
+    let call_result = match vm.call_closure_from_stack(ac) {
+        Ok(true) => Ok(()),
+        Ok(false) => vm.call_value(ac, &[]),
+        Err(e) => Err(e),
+    };
+
+    let status = match call_result {
+        Ok(()) => {
+            if vm.frames_len() > before_depth {
+                match vm.execute_until(before_depth) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        vm.jit.stash_error(e);
+                        1
+                    }
+                }
+            } else {
+                0
+            }
+        }
+        Err(e) => {
+            vm.jit.stash_error(e);
+            1
+        }
+    };
+
+    // Populate cache on success when the callee is a JIT-compiled closure.
+    if status == 0 {
+        if let Some(c) = callee_candidate {
+            if c.jit_state.get() == 1 && c.function.arity as usize == ac {
+                if let Some(thunk) = c.jit_thunk.get() {
+                    // Store the *raw Rc bit pattern* (the `NonNull<RcBox<T>>`
+                    // pointer) so it matches what `Value::Closure`'s 8-byte
+                    // payload holds. `Rc::as_ptr` points to T inside the
+                    // RcBox (offset 16 past) — wrong for this compare.
+                    let rc_raw: *const crate::vm::value::ObjClosure = unsafe {
+                        *(&c as *const Rc<crate::vm::value::ObjClosure>
+                            as *const *const crate::vm::value::ObjClosure)
+                    };
+                    cache.closure_raw = rc_raw;
+                    cache.thunk_raw = thunk as *const ();
+                    cache.arity = c.function.arity;
+                    cache._keeper = Some(c);
+                }
+            }
+        }
+    }
+
+    status
 }
 
 // ── Return — mirrors the interpreter's `Return` opcode handler ────────

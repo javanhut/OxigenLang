@@ -17,6 +17,12 @@ pub const VALUE_TAG_INTEGER: u8 = 0;
 /// path to skip the generic clone-and-push helper for float locals.
 pub const VALUE_TAG_FLOAT: u8 = 1;
 
+/// Numeric tag of `Value::Closure`. Used by the JIT's inline Call guard
+/// to verify the callee on the stack is a Closure before loading its
+/// `Rc<ObjClosure>` pointer for identity comparison. Keep in sync with
+/// the variant order in `Value`.
+pub const VALUE_TAG_CLOSURE: u8 = 12;
+
 /// Byte offset of the i64 payload inside a `Value::Integer(i64)`. With
 /// `#[repr(u8)]` the discriminant occupies byte 0, and the payload is
 /// aligned to the variant's natural alignment (8 for i64 / Rc). Used by
@@ -66,6 +72,45 @@ mod layout_tests {
                 .read_unaligned()
         };
         assert_eq!(f64::from_bits(payload), 3.141592653589793);
+    }
+
+    /// The JIT's inline Call guard reads the tag byte at offset 0 and
+    /// the raw `Rc<ObjClosure>` bit pattern at offset 8 of a
+    /// `Value::Closure`. The bit pattern is the `NonNull<RcBox<T>>` the
+    /// `Rc` wraps (NOT `Rc::as_ptr`, which returns a pointer to T inside
+    /// the box, offset past the refcount header). The cache populate
+    /// code must use the same bit pattern so identity compare works.
+    #[test]
+    fn value_closure_layout_is_pinned() {
+        use std::cell::Cell;
+        let func = Rc::new(Function::new(None, 0));
+        let obj = Rc::new(ObjClosure {
+            function: func,
+            upvalues: Vec::new(),
+            call_count: Cell::new(0),
+            loop_count: Cell::new(0),
+            jit_state: Cell::new(0),
+            jit_thunk: Cell::new(None),
+        });
+        // Read the Rc's raw bit pattern the same way the JIT does.
+        let expected_raw: usize = unsafe {
+            *(&obj as *const Rc<ObjClosure> as *const usize)
+        };
+        let v = Value::Closure(Rc::clone(&obj));
+        let ptr = &v as *const Value as *const u8;
+        let tag = unsafe { *ptr };
+        assert_eq!(tag, VALUE_TAG_CLOSURE, "Closure tag should be 12");
+        let rc_ptr = unsafe {
+            ptr.add(VALUE_INT_PAYLOAD_OFFSET)
+                .cast::<usize>()
+                .read_unaligned()
+        };
+        assert_eq!(
+            rc_ptr, expected_raw,
+            "Value::Closure payload at offset 8 must equal the raw Rc bit pattern"
+        );
+        drop(v);
+        drop(obj);
     }
 }
 
@@ -204,16 +249,38 @@ pub enum Upvalue {
 #[derive(Debug)]
 pub struct ObjStructDef {
     pub name: String,
-    pub fields: Vec<(String, String, bool)>, // (name, type, hidden)
+    pub fields: Vec<(String, String, bool)>, // (name, type, hidden) — own fields only
     pub methods: RefCell<HashMap<String, Value>>,
     pub parent: Option<String>,
+    /// Cached flattened field layout — built on first instance creation by
+    /// walking the inheritance chain. The Vec preserves insertion order
+    /// (parent fields first, then own) and the HashMap maps name → index.
+    /// OnceCell: each struct def resolves its layout exactly once.
+    pub layout: std::cell::OnceCell<std::rc::Rc<FieldLayout>>,
 }
 
-/// A struct instance at runtime.
+/// Flattened field layout for a struct (including inherited fields).
+/// `slots` owns the name+type+hidden tuples in canonical order; `indices`
+/// maps field names to slot indices for O(1) name → offset resolution.
+#[derive(Debug)]
+pub struct FieldLayout {
+    pub slots: Vec<(String, String, bool)>,
+    pub indices: HashMap<String, usize>,
+}
+
+/// A struct instance at runtime. Fields are stored in a `Vec<Value>`
+/// indexed by the struct def's `FieldLayout`, so field access is a direct
+/// offset after the layout is resolved — no HashMap lookup per access.
 #[derive(Debug)]
 pub struct ObjStructInstance {
     pub struct_name: String,
-    pub fields: RefCell<HashMap<String, Value>>,
+    pub fields: RefCell<Vec<Value>>,
+    /// Reference to the resolved layout so field indices stay correct.
+    pub layout: std::rc::Rc<FieldLayout>,
+    /// Direct reference to the struct def so method-call ICs don't need
+    /// to look up `globals[struct_name]` on every dispatch. Stored as an
+    /// `Rc` so identity compares match the def's stable allocation.
+    pub def: std::rc::Rc<ObjStructDef>,
 }
 
 #[derive(Debug, Clone)]
@@ -351,9 +418,12 @@ impl fmt::Display for Value {
             Value::StructDef(sd) => write!(f, "struct {}", sd.name),
             Value::StructInstance(si) => {
                 let fields = si.fields.borrow();
-                let items: Vec<String> = fields
+                let items: Vec<String> = si
+                    .layout
+                    .slots
                     .iter()
-                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .enumerate()
+                    .map(|(i, slot)| format!("{}: {}", slot.0, fields[i]))
                     .collect();
                 write!(f, "{} {{ {} }}", si.struct_name, items.join(", "))
             }

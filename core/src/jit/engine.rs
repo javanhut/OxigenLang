@@ -22,9 +22,24 @@ use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use crate::compiler::opcode::{Chunk, OpCode};
 use crate::vm::VM;
 use crate::vm::VMError;
+use crate::vm::StackView;
 use crate::vm::value::{
-    Function, VALUE_INT_PAYLOAD_OFFSET, VALUE_SIZE, VALUE_TAG_FLOAT, VALUE_TAG_INTEGER,
+    Function, VALUE_INT_PAYLOAD_OFFSET, VALUE_SIZE, VALUE_TAG_CLOSURE, VALUE_TAG_FLOAT,
+    VALUE_TAG_INTEGER,
 };
+
+/// Byte offset of the `stack_view.ptr` field from the base of `VM`.
+/// Computed once and baked into emitted IR as a constant.
+#[inline(always)]
+fn vm_stack_view_ptr_offset() -> i32 {
+    (VM::stack_view_offset() + StackView::OFFSET_PTR as usize) as i32
+}
+
+/// Byte offset of the `stack_view.len` field from the base of `VM`.
+#[inline(always)]
+fn vm_stack_view_len_offset() -> i32 {
+    (VM::stack_view_offset() + StackView::OFFSET_LEN as usize) as i32
+}
 
 use super::CompiledThunk;
 use super::runtime;
@@ -55,6 +70,15 @@ pub(super) struct JitInner {
     /// reallocates, so those baked pointers remain valid for the JIT's
     /// lifetime.
     global_caches: Vec<Box<GlobalCacheEntry>>,
+
+    /// Per-call-site inline caches for `Call`. Same pattern as
+    /// `global_caches`: each compiled Call op gets its own
+    /// `Box<CallCacheEntry>`, and the raw pointer is baked into IR.
+    call_caches: Vec<Box<CallCacheEntry>>,
+
+    /// Per-call-site inline caches for `MethodCall`. Each compiled
+    /// MethodCall op gets its own `Box<MethodCacheEntry>`.
+    method_caches: Vec<Box<MethodCacheEntry>>,
 }
 
 /// Per-call-site GetGlobal cache. `version` tracks the VM's
@@ -65,6 +89,45 @@ pub(super) struct JitInner {
 pub(crate) struct GlobalCacheEntry {
     pub version: u64,
     pub value: crate::vm::value::Value,
+}
+
+/// Per-call-site Call cache — readable from Cranelift IR.
+///
+/// Layout (pinned by `#[repr(C)]`):
+/// - offset 0: `closure_raw` — raw `*const ObjClosure` for identity
+///   compare. `null` means the cache is empty.
+/// - offset 8: `thunk` — raw function pointer for the cached thunk.
+///   Valid iff `closure_raw != null`.
+/// - offset 16: `arity` — the callee's arity; used to compute the
+///   stack slot_offset without reading the closure.
+/// - after that: `_keeper` keeps the `Rc` alive so the raw pointer
+///   stays valid (Rc would be freed without this). Rust-only; never
+///   read from IR.
+#[repr(C)]
+pub(crate) struct CallCacheEntry {
+    pub closure_raw: *const crate::vm::value::ObjClosure,
+    pub thunk_raw: *const (),
+    pub arity: u8,
+    _pad: [u8; 7],
+    pub _keeper: Option<std::rc::Rc<crate::vm::value::ObjClosure>>,
+}
+
+impl CallCacheEntry {
+    pub(crate) const OFFSET_CLOSURE_RAW: i32 = 0;
+    /// Reserved for a future pass that loads the thunk directly in IR
+    /// and emits an indirect call, skipping the `jit_op_call_hit`
+    /// helper's FFI crossing entirely. Not yet wired.
+    #[allow(dead_code)]
+    pub(crate) const OFFSET_THUNK_RAW: i32 = 8;
+}
+
+/// Per-MethodCall-site cache. Stores the struct def pointer (identity-
+/// compared, held alive by the `Rc`) and the resolved method closure so
+/// that a hit skips `find_struct_method`'s two HashMap lookups entirely.
+#[repr(C)]
+pub(crate) struct MethodCacheEntry {
+    pub struct_def: Option<std::rc::Rc<crate::vm::value::ObjStructDef>>,
+    pub closure: Option<std::rc::Rc<crate::vm::value::ObjClosure>>,
 }
 
 enum Entry {
@@ -129,7 +192,9 @@ struct HelperIds {
     op_return: FuncId, // (vm)
 
     // Call (fallible, takes arg_count)
-    op_call: FuncId, // (vm, u32) -> u32
+    op_call: FuncId,    // (vm, u32) -> u32
+    op_call_hit: FuncId,  // (vm, *mut CallCacheEntry) -> u32
+    op_call_miss: FuncId, // (vm, u32, *mut CallCacheEntry) -> u32
 
     // Globals
     get_global: FuncId,          // (vm, u32) -> u32
@@ -153,6 +218,7 @@ struct HelperIds {
     op_set_field: FuncId,      // (vm, u32) -> u32
     op_define_method: FuncId,  // (vm, u32, u32) -> u32
     op_method_call: FuncId,    // (vm, u32, u32) -> u32
+    op_method_call_ic: FuncId, // (vm, u32, u32, *mut MethodCacheEntry) -> u32
 
     // Inline int fast-path support
     stack_as_mut_ptr: FuncId,       // (vm) -> *mut Value (pointer-sized)
@@ -196,7 +262,10 @@ struct HelperRefs {
     peek_truthy: FuncRef,
     pop_truthy: FuncRef,
     op_return: FuncRef,
+    #[allow(dead_code)]
     op_call: FuncRef,
+    op_call_hit: FuncRef,
+    op_call_miss: FuncRef,
     #[allow(dead_code)]
     get_global: FuncRef,
     get_global_ic: FuncRef,
@@ -212,8 +281,16 @@ struct HelperRefs {
     op_get_field: FuncRef,
     op_set_field: FuncRef,
     op_define_method: FuncRef,
+    #[allow(dead_code)]
     op_method_call: FuncRef,
+    op_method_call_ic: FuncRef,
+    // `stack_as_mut_ptr` and `stack_len` are still registered as runtime
+    // helpers for backwards compatibility, but the hot JIT paths now
+    // read `vm.stack_view.{ptr, len}` directly via `emit_load_stack_*`
+    // — no FFI crossing.
+    #[allow(dead_code)]
     stack_as_mut_ptr: FuncRef,
+    #[allow(dead_code)]
     stack_len: FuncRef,
     stack_pop_one: FuncRef,
     stack_pop_n: FuncRef,
@@ -251,6 +328,8 @@ impl JitInner {
             pending_error: None,
             next_id: 0,
             global_caches: Vec::new(),
+            call_caches: Vec::new(),
+            method_caches: Vec::new(),
         }
     }
 
@@ -263,6 +342,30 @@ impl JitInner {
             value: crate::vm::value::Value::None,
         }));
         let b = self.global_caches.last_mut().unwrap();
+        b.as_mut() as *mut _
+    }
+
+    /// Allocate a fresh inline-cache slot for a Call site. Returns a raw
+    /// pointer with stable address for the JitInner's lifetime.
+    pub(crate) fn alloc_call_cache(&mut self) -> *mut CallCacheEntry {
+        self.call_caches.push(Box::new(CallCacheEntry {
+            closure_raw: std::ptr::null(),
+            thunk_raw: std::ptr::null(),
+            arity: 0,
+            _pad: [0; 7],
+            _keeper: None,
+        }));
+        let b = self.call_caches.last_mut().unwrap();
+        b.as_mut() as *mut _
+    }
+
+    /// Allocate a fresh inline-cache slot for a MethodCall site.
+    pub(crate) fn alloc_method_cache(&mut self) -> *mut MethodCacheEntry {
+        self.method_caches.push(Box::new(MethodCacheEntry {
+            struct_def: None,
+            closure: None,
+        }));
+        let b = self.method_caches.last_mut().unwrap();
         b.as_mut() as *mut _
     }
 
@@ -333,6 +436,7 @@ impl JitInner {
         unsafe { self.invoke_thunk(vm, thunk, stop_depth) }
     }
 
+    #[inline(always)]
     pub unsafe fn invoke_thunk(
         &mut self,
         vm: *mut VM,
@@ -368,11 +472,20 @@ impl JitInner {
         // bytecode so the emit pass can hand them out sequentially
         // without needing to re-borrow `self` from inside the builder
         // scope. Boxes give us stable heap addresses to bake into IR.
-        let get_global_count = count_get_globals(chunk);
+        let (get_global_count, call_count, method_call_count) = count_ic_sites(chunk);
         let mut global_cache_ptrs: Vec<*mut GlobalCacheEntry> =
             Vec::with_capacity(get_global_count);
         for _ in 0..get_global_count {
             global_cache_ptrs.push(self.alloc_global_cache());
+        }
+        let mut call_cache_ptrs: Vec<*mut CallCacheEntry> = Vec::with_capacity(call_count);
+        for _ in 0..call_count {
+            call_cache_ptrs.push(self.alloc_call_cache());
+        }
+        let mut method_cache_ptrs: Vec<*mut MethodCacheEntry> =
+            Vec::with_capacity(method_call_count);
+        for _ in 0..method_call_count {
+            method_cache_ptrs.push(self.alloc_method_cache());
         }
 
         // Thunk signature: fn(*mut VM) -> i32
@@ -424,6 +537,10 @@ impl JitInner {
             // Counter for handing out the pre-allocated inline-cache
             // slots as we emit GetGlobal opcodes.
             let mut ic_ix: usize = 0;
+            // Same, but for Call opcodes.
+            let mut call_ic_ix: usize = 0;
+            // Same, but for MethodCall opcodes.
+            let mut method_ic_ix: usize = 0;
 
             while ip < code.len() {
                 // If this ip starts a new block, switch to it (and glue
@@ -843,15 +960,110 @@ impl JitInner {
                     OpCode::Call => {
                         // u8 operand: arg_count
                         let arg_count = code[ip + 1];
-                        let ac_val = builder.ins().iconst(types::I32, arg_count as i64);
-                        let call = builder.ins().call(refs.op_call, &[vm_val, ac_val]);
-                        let status = builder.inst_results(call)[0];
-                        // Non-zero status = runtime error, exit early.
-                        let err_block = builder.create_block();
+                        let cache_ptr = call_cache_ptrs[call_ic_ix];
+                        call_ic_ix += 1;
+
+                        // Inline IR guard backed by `vm.stack_view`:
+                        // 1. Load stack base ptr + current len via direct
+                        //    memory reads (no FFI).
+                        // 2. Locate the callee Value at stack[len-1-ac].
+                        // 3. Check its tag byte equals `VALUE_TAG_CLOSURE`.
+                        // 4. Load its Rc pointer (offset 8) and compare to
+                        //    `cache.closure_raw`.
+                        // 5. On match → call `jit_op_call_hit` (tight
+                        //    frame push + thunk invoke). On miss → call
+                        //    `jit_op_call_miss` (full fallback + populate
+                        //    cache).
+                        use cranelift_codegen::ir::MemFlags;
+                        use cranelift_codegen::ir::condcodes::IntCC;
+
+                        let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
+                        let stack_len = emit_load_stack_len(&mut builder, vm_val);
+
+                        let value_size =
+                            builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+                        let offset_from_top =
+                            builder.ins().iconst(types::I64, (arg_count as i64 + 1) as i64);
+                        let callee_slot = builder.ins().isub(stack_len, offset_from_top);
+                        let callee_off = builder.ins().imul(callee_slot, value_size);
+                        let callee_ptr = builder.ins().iadd(stack_ptr, callee_off);
+
+                        let flags = MemFlags::trusted();
+                        let tag = builder.ins().load(types::I8, flags, callee_ptr, 0);
+                        let closure_tag =
+                            builder.ins().iconst(types::I8, VALUE_TAG_CLOSURE as i64);
+                        let is_closure =
+                            builder.ins().icmp(IntCC::Equal, tag, closure_tag);
+                        // Used in both successor paths — define in entry.
+                        let cache_val = builder.ins().iconst(ptr_ty, cache_ptr as i64);
+
+                        let check_rc_block = builder.create_block();
+                        let hit_block = builder.create_block();
+                        let miss_block = builder.create_block();
                         let ok_block = builder.create_block();
-                        builder.ins().brif(status, err_block, &[], ok_block, &[]);
+                        let err_block = builder.create_block();
+                        builder.append_block_param(err_block, types::I32);
+
+                        builder.ins().brif(
+                            is_closure,
+                            check_rc_block,
+                            &[],
+                            miss_block,
+                            &[],
+                        );
+
+                        // Tag matched → compare Rc pointer with cache.
+                        builder.switch_to_block(check_rc_block);
+                        let curr_rc = builder.ins().load(
+                            ptr_ty,
+                            flags,
+                            callee_ptr,
+                            VALUE_INT_PAYLOAD_OFFSET as i32,
+                        );
+                        let cached_rc = builder.ins().load(
+                            ptr_ty,
+                            flags,
+                            cache_val,
+                            CallCacheEntry::OFFSET_CLOSURE_RAW,
+                        );
+                        let rc_matches =
+                            builder.ins().icmp(IntCC::Equal, curr_rc, cached_rc);
+                        builder
+                            .ins()
+                            .brif(rc_matches, hit_block, &[], miss_block, &[]);
+
+                        // Hit — cached closure matches.
+                        builder.switch_to_block(hit_block);
+                        let hit_call = builder
+                            .ins()
+                            .call(refs.op_call_hit, &[vm_val, cache_val]);
+                        let hit_status = builder.inst_results(hit_call)[0];
+                        builder
+                            .ins()
+                            .brif(hit_status, err_block, &[hit_status], ok_block, &[]);
+
+                        // Miss — fallback + populate cache.
+                        builder.switch_to_block(miss_block);
+                        let ac_val =
+                            builder.ins().iconst(types::I32, arg_count as i64);
+                        let miss_call = builder.ins().call(
+                            refs.op_call_miss,
+                            &[vm_val, ac_val, cache_val],
+                        );
+                        let miss_status = builder.inst_results(miss_call)[0];
+                        builder.ins().brif(
+                            miss_status,
+                            err_block,
+                            &[miss_status],
+                            ok_block,
+                            &[],
+                        );
+
+                        // Error exit.
                         builder.switch_to_block(err_block);
-                        builder.ins().return_(&[status]);
+                        let err_status = builder.block_params(err_block)[0];
+                        builder.ins().return_(&[err_status]);
+
                         builder.switch_to_block(ok_block);
                         ip += 2;
                     }
@@ -906,11 +1118,15 @@ impl JitInner {
                     OpCode::MethodCall => {
                         let method_idx = read_u16(code, ip + 1);
                         let arg_count = code[ip + 3];
+                        let cache_ptr = method_cache_ptrs[method_ic_ix];
+                        method_ic_ix += 1;
                         let mi_val = builder.ins().iconst(types::I32, method_idx as i64);
                         let ac_val = builder.ins().iconst(types::I32, arg_count as i64);
-                        let call = builder
-                            .ins()
-                            .call(refs.op_method_call, &[vm_val, mi_val, ac_val]);
+                        let cache_val = builder.ins().iconst(ptr_ty, cache_ptr as i64);
+                        let call = builder.ins().call(
+                            refs.op_method_call_ic,
+                            &[vm_val, mi_val, ac_val, cache_val],
+                        );
                         let status = builder.inst_results(call)[0];
                         emit_early_exit_on_err(&mut builder, status);
                         ip += 4;
@@ -943,7 +1159,11 @@ impl JitInner {
 
         self.module
             .define_function(thunk_id, &mut self.ctx)
-            .map_err(|_| ())?;
+            .map_err(|e| {
+                if std::env::var("OXIGEN_JIT_DEBUG").is_ok() {
+                    eprintln!("[jit] define_function failed: {:?}", e);
+                }
+            })?;
         self.module.clear_context(&mut self.ctx);
         self.module.finalize_definitions().map_err(|_| ())?;
 
@@ -1000,6 +1220,8 @@ fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_pop_truthy", runtime::jit_pop_truthy);
     reg!("jit_op_return", runtime::jit_op_return);
     reg!("jit_op_call", runtime::jit_op_call);
+    reg!("jit_op_call_hit", runtime::jit_op_call_hit);
+    reg!("jit_op_call_miss", runtime::jit_op_call_miss);
     reg!("jit_get_global", runtime::jit_get_global);
     reg!("jit_set_global", runtime::jit_set_global);
     reg!("jit_define_global", runtime::jit_define_global);
@@ -1014,6 +1236,7 @@ fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_op_set_field", runtime::jit_op_set_field);
     reg!("jit_op_define_method", runtime::jit_op_define_method);
     reg!("jit_op_method_call", runtime::jit_op_method_call);
+    reg!("jit_op_method_call_ic", runtime::jit_op_method_call_ic);
     reg!("jit_stack_as_mut_ptr", runtime::jit_stack_as_mut_ptr);
     reg!("jit_stack_len", runtime::jit_stack_len);
     reg!("jit_stack_pop_one", runtime::jit_stack_pop_one);
@@ -1069,6 +1292,16 @@ fn declare_helpers(module: &mut JITModule) -> HelperIds {
     sig_vm_3u32_to_u32.params.push(AbiParam::new(types::I32));
     sig_vm_3u32_to_u32.returns.push(AbiParam::new(types::I32));
 
+    // Signature for jit_op_method_call_ic: fn(*mut VM, u32, u32, *mut ptr) -> u32
+    let mut sig_vm_u32_u32_ptr_to_u32 = module.make_signature();
+    sig_vm_u32_u32_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
+    sig_vm_u32_u32_ptr_to_u32.params.push(AbiParam::new(types::I32));
+    sig_vm_u32_u32_ptr_to_u32.params.push(AbiParam::new(types::I32));
+    sig_vm_u32_u32_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
+    sig_vm_u32_u32_ptr_to_u32
+        .returns
+        .push(AbiParam::new(types::I32));
+
     // Signature for jit_local_add_array_mod_index:
     // fn(*mut VM, u32, u32, u32, i64, u32) -> u32
     let mut sig_vm_3u32_i64_u32_to_u32 = module.make_signature();
@@ -1109,6 +1342,21 @@ fn declare_helpers(module: &mut JITModule) -> HelperIds {
     sig_vm_to_i64.returns.push(AbiParam::new(types::I64));
 
     // Signature: fn(*mut VM, *mut GlobalCacheEntry, u32) -> u32
+    // Signature for jit_op_call_hit: fn(*mut VM, *mut ptr) -> u32
+    let mut sig_vm_ptr_to_u32 = module.make_signature();
+    sig_vm_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
+    sig_vm_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
+    sig_vm_ptr_to_u32.returns.push(AbiParam::new(types::I32));
+
+    // Signature for jit_op_call_miss: fn(*mut VM, u32, *mut ptr) -> u32
+    let mut sig_vm_u32_ptr_to_u32 = module.make_signature();
+    sig_vm_u32_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
+    sig_vm_u32_ptr_to_u32.params.push(AbiParam::new(types::I32));
+    sig_vm_u32_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
+    sig_vm_u32_ptr_to_u32
+        .returns
+        .push(AbiParam::new(types::I32));
+
     let mut sig_vm_ptr_u32_to_u32 = module.make_signature();
     sig_vm_ptr_u32_to_u32.params.push(AbiParam::new(ptr_ty));
     sig_vm_ptr_u32_to_u32.params.push(AbiParam::new(ptr_ty));
@@ -1159,6 +1407,8 @@ fn declare_helpers(module: &mut JITModule) -> HelperIds {
         pop_truthy: decl(module, "jit_pop_truthy", &sig_vm_to_u32),
         op_return: decl(module, "jit_op_return", &sig_vm_only),
         op_call: decl(module, "jit_op_call", &sig_vm_u32_to_u32),
+        op_call_hit: decl(module, "jit_op_call_hit", &sig_vm_ptr_to_u32),
+        op_call_miss: decl(module, "jit_op_call_miss", &sig_vm_u32_ptr_to_u32),
         get_global: decl(module, "jit_get_global", sig_vm_u32_fallible),
         get_global_ic: decl(module, "jit_get_global_ic", &sig_vm_ptr_u32_to_u32),
         set_global: decl(module, "jit_set_global", sig_vm_u32_fallible),
@@ -1174,6 +1424,11 @@ fn declare_helpers(module: &mut JITModule) -> HelperIds {
         op_set_field: decl(module, "jit_op_set_field", sig_vm_u32_fallible),
         op_define_method: decl(module, "jit_op_define_method", &sig_vm_u32_u32_to_u32),
         op_method_call: decl(module, "jit_op_method_call", &sig_vm_u32_u32_to_u32),
+        op_method_call_ic: decl(
+            module,
+            "jit_op_method_call_ic",
+            &sig_vm_u32_u32_ptr_to_u32,
+        ),
         stack_as_mut_ptr: decl(module, "jit_stack_as_mut_ptr", &sig_vm_to_ptr),
         stack_len: decl(module, "jit_stack_len", &sig_vm_to_i64),
         stack_pop_one: decl(module, "jit_stack_pop_one", &sig_vm_only),
@@ -1221,6 +1476,8 @@ fn declare_helper_refs(
         pop_truthy: r(ids.pop_truthy),
         op_return: r(ids.op_return),
         op_call: r(ids.op_call),
+        op_call_hit: r(ids.op_call_hit),
+        op_call_miss: r(ids.op_call_miss),
         get_global: r(ids.get_global),
         get_global_ic: r(ids.get_global_ic),
         set_global: r(ids.set_global),
@@ -1236,6 +1493,7 @@ fn declare_helper_refs(
         op_set_field: r(ids.op_set_field),
         op_define_method: r(ids.op_define_method),
         op_method_call: r(ids.op_method_call),
+        op_method_call_ic: r(ids.op_method_call_ic),
         stack_as_mut_ptr: r(ids.stack_as_mut_ptr),
         stack_len: r(ids.stack_len),
         stack_pop_one: r(ids.stack_pop_one),
@@ -1284,16 +1542,21 @@ fn read_u16(code: &[u8], offset: usize) -> u16 {
 /// validated every opcode is in the allow-list, so we can assume
 /// fixed-length instructions here — except `Closure`, which is
 /// variable-length and needs the constants pool to resolve its length.
-fn count_get_globals(chunk: &crate::compiler::opcode::Chunk) -> usize {
+fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usize) {
     let code = &chunk.code;
-    let mut n = 0;
+    let mut get_globals = 0usize;
+    let mut calls = 0usize;
+    let mut method_calls = 0usize;
     let mut ip = 0;
     while ip < code.len() {
         let Some(op) = OpCode::from_byte(code[ip]) else {
             break;
         };
-        if matches!(op, OpCode::GetGlobal) {
-            n += 1;
+        match op {
+            OpCode::GetGlobal => get_globals += 1,
+            OpCode::Call => calls += 1,
+            OpCode::MethodCall => method_calls += 1,
+            _ => {}
         }
         ip += match op {
             // 1-byte opcodes
@@ -1360,7 +1623,7 @@ fn count_get_globals(chunk: &crate::compiler::opcode::Chunk) -> usize {
             _ => break,
         };
     }
-    n
+    (get_globals, calls, method_calls)
 }
 
 struct LocalConstArithUpdate {
@@ -1669,6 +1932,42 @@ fn match_local_const_arith_update(
     })
 }
 
+// ── Inline stack-view reads (no FFI) ──────────────────────────────────
+//
+// We target 64-bit ABI exclusively; pointers are I64 and `usize` is I64.
+// The JIT's fast paths used to call `jit_stack_as_mut_ptr` / `jit_stack_len`
+// as FFI helpers just to read two words of VM state — each FFI crossing
+// is ~3-5ns. Since the stack is pre-allocated to `STACK_MAX` in
+// `VM::new()`, its backing pointer is stable for the VM's lifetime, and
+// `stack_view.len` is synced after every mutation via the VM's
+// `push`/`pop`/`stack_truncate`/`stack_drain_from`/`stack_insert`
+// methods. Reading `stack_view.{ptr, len}` directly is therefore always
+// safe and much faster.
+
+/// Emit IR that loads `vm.stack_view.ptr` at its pinned offset.
+#[inline]
+fn emit_load_stack_ptr(
+    builder: &mut FunctionBuilder<'_>,
+    vm_val: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::MemFlags;
+    builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), vm_val, vm_stack_view_ptr_offset())
+}
+
+/// Emit IR that loads `vm.stack_view.len` at its pinned offset.
+#[inline]
+fn emit_load_stack_len(
+    builder: &mut FunctionBuilder<'_>,
+    vm_val: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::MemFlags;
+    builder
+        .ins()
+        .load(types::I64, MemFlags::trusted(), vm_val, vm_stack_view_len_offset())
+}
+
 // ── Inline int fast path ───────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
@@ -1693,10 +1992,8 @@ fn emit_int_fast_arith(
 ) {
     use cranelift_codegen::ir::MemFlags;
 
-    let ptr_call = builder.ins().call(refs.stack_as_mut_ptr, &[vm_val]);
-    let stack_ptr = builder.inst_results(ptr_call)[0];
-    let len_call = builder.ins().call(refs.stack_len, &[vm_val]);
-    let stack_len = builder.inst_results(len_call)[0];
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
+    let stack_len = emit_load_stack_len(builder, vm_val);
 
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
     let one = builder.ins().iconst(types::I64, 1);
@@ -1798,8 +2095,7 @@ fn emit_inline_local_const_arith_update(
     use cranelift_codegen::ir::MemFlags;
     use cranelift_codegen::ir::condcodes::IntCC;
 
-    let ptr_call = builder.ins().call(refs.stack_as_mut_ptr, &[vm_val]);
-    let stack_ptr = builder.inst_results(ptr_call)[0];
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
 
     let slot_const = builder.ins().iconst(types::I64, slot as i64);
     let abs_slot = builder.ins().iadd(slot_offset_val, slot_const);
@@ -1887,8 +2183,7 @@ fn emit_inline_local_scaled_arith_update(
     use cranelift_codegen::ir::MemFlags;
     use cranelift_codegen::ir::condcodes::IntCC;
 
-    let ptr_call = builder.ins().call(refs.stack_as_mut_ptr, &[vm_val]);
-    let stack_ptr = builder.inst_results(ptr_call)[0];
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
 
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
     let dst_slot_const = builder.ins().iconst(types::I64, dst_slot as i64);
@@ -2005,10 +2300,8 @@ fn emit_int_fast_cmp(
 ) {
     use cranelift_codegen::ir::MemFlags;
 
-    let ptr_call = builder.ins().call(refs.stack_as_mut_ptr, &[vm_val]);
-    let stack_ptr = builder.inst_results(ptr_call)[0];
-    let len_call = builder.ins().call(refs.stack_len, &[vm_val]);
-    let stack_len = builder.inst_results(len_call)[0];
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
+    let stack_len = emit_load_stack_len(builder, vm_val);
 
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
     let one = builder.ins().iconst(types::I64, 1);
@@ -2107,10 +2400,8 @@ fn emit_fused_int_cmp_branch(
         OpCode::JumpIfFalse | OpCode::JumpIfTrue | OpCode::PopJumpIfFalse
     ));
 
-    let ptr_call = builder.ins().call(refs.stack_as_mut_ptr, &[vm_val]);
-    let stack_ptr = builder.inst_results(ptr_call)[0];
-    let len_call = builder.ins().call(refs.stack_len, &[vm_val]);
-    let stack_len = builder.inst_results(len_call)[0];
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
+    let stack_len = emit_load_stack_len(builder, vm_val);
 
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
     let one = builder.ins().iconst(types::I64, 1);
@@ -2246,8 +2537,7 @@ fn emit_inline_get_local(
     use cranelift_codegen::ir::MemFlags;
     use cranelift_codegen::ir::condcodes::IntCC;
 
-    let ptr_call = builder.ins().call(refs.stack_as_mut_ptr, &[vm_val]);
-    let stack_ptr = builder.inst_results(ptr_call)[0];
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
 
     let slot_const = builder.ins().iconst(types::I64, slot as i64);
     let abs_slot = builder.ins().iadd(slot_offset_val, slot_const);
@@ -2322,10 +2612,8 @@ fn emit_inline_set_local(
     use cranelift_codegen::ir::MemFlags;
     use cranelift_codegen::ir::condcodes::IntCC;
 
-    let ptr_call = builder.ins().call(refs.stack_as_mut_ptr, &[vm_val]);
-    let stack_ptr = builder.inst_results(ptr_call)[0];
-    let len_call = builder.ins().call(refs.stack_len, &[vm_val]);
-    let stack_len = builder.inst_results(len_call)[0];
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
+    let stack_len = emit_load_stack_len(builder, vm_val);
 
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
     let one = builder.ins().iconst(types::I64, 1);

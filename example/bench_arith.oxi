@@ -1,0 +1,11 @@
+// Integer-heavy arithmetic — hits the JIT's inline i64 fast path for
+// Add/Sub/Mul. Uses binary recursion (not linear tail-style) so depth
+// stays well under FRAMES_MAX while still doing a lot of math.
+fun work(n) {
+    option {
+        n < 2 -> n,
+        work(n - 1) + work(n - 2) * 3 - n
+    }
+}
+
+work(28)

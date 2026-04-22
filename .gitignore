@@ -1,4 +1,5 @@
 /target
 .codex
+.claude
 oxigen-lsp
 Cargo.lock

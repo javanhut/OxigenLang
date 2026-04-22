@@ -1,0 +1,25 @@
+// Collatz step-count over 1..limit. Exercises mod, int division, branching,
+// function calls — all JIT-eligible.
+fun collatz_steps(n <int>) {
+    steps <int> := 0
+    repeat when n > 1 {
+        option {
+            n % 2 == 0 -> { n = n / 2 },
+            { n = n * 3 + 1 }
+        }
+        steps = steps + 1
+    }
+    steps
+}
+
+fun run(limit <int>) {
+    total <int> := 0
+    n <int> := 1
+    repeat when n <= limit {
+        total = total + collatz_steps(n)
+        n = n + 1
+    }
+    total
+}
+
+run(50000)
