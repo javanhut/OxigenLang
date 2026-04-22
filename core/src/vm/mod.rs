@@ -1004,6 +1004,29 @@ impl VM {
         self.stack_view.len = self.stack.len();
     }
 
+    /// Commit a raw-IR stack rearrangement: tell the backing `Vec<Value>`
+    /// that its logical length is now `new_len`, matching the writes the
+    /// JIT emitted through `stack_view.ptr`. Only for use by
+    /// `jit_stack_commit_len`.
+    ///
+    /// # Safety
+    /// - `new_len <= STACK_MAX` (the capacity `VM::new` pre-allocates).
+    /// - Every slot in `[old_len, new_len)` must hold initialized,
+    ///   bit-valid `Value` data, INCLUDING correctly-adjusted `Rc` strong
+    ///   counts for heap-allocated variants. The JIT's MethodCall hit
+    ///   path ensures this by emitting `strong += 1` before stamping a
+    ///   fresh `Value::Closure` and by treating receiver/arg moves as
+    ///   ownership transfers (no double-count).
+    #[allow(dead_code)]
+    #[inline(always)]
+    pub(crate) unsafe fn stack_set_len_raw(&mut self, new_len: usize) {
+        debug_assert!(new_len <= self.stack.capacity());
+        unsafe {
+            self.stack.set_len(new_len);
+        }
+        self.stack_view.len = new_len;
+    }
+
     fn current_line(&self) -> u32 {
         if self.jit_executing.get() {
             if let Some(frame) = self.jit_frame_top() {

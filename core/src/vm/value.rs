@@ -120,6 +120,43 @@ mod layout_tests {
         drop(v);
         drop(obj);
     }
+
+    /// The JIT's inline MethodCall fast path relies on `Rc<T>` being
+    /// `NonNull<RcBox<T>>` with `strong: Cell<usize>` at RcBox offset 0.
+    /// If a future Rust reorders `RcBox` or changes the `Cell<usize>`
+    /// layout, the JIT's inline refcount bump would corrupt the wrong
+    /// field and cause silent memory corruption. Catch that at
+    /// `cargo test` time rather than at user segfault time.
+    #[test]
+    fn rc_strong_count_lives_at_rcbox_offset_zero() {
+        use std::cell::Cell;
+        let func = Rc::new(Function::new(None, 0));
+        let obj = Rc::new(ObjClosure {
+            function: func,
+            upvalues: Vec::new(),
+            call_count: Cell::new(0),
+            loop_count: Cell::new(0),
+            jit_state: Cell::new(0),
+            jit_thunk: Cell::new(None),
+        });
+        // Read the RcBox pointer the same way the JIT does: raw bit
+        // pattern of the `Rc`, which is `NonNull<RcBox<T>>`.
+        let rcbox_ptr: *const usize =
+            unsafe { *(&obj as *const Rc<ObjClosure> as *const *const usize) };
+        let before = unsafe { *rcbox_ptr };
+        assert!(before >= 1, "strong count should reflect the live Rc");
+        let extra = Rc::clone(&obj);
+        let after = unsafe { *rcbox_ptr };
+        assert_eq!(
+            after,
+            before + 1,
+            "Rc::clone must bump the usize at RcBox+0 — if this fails, \
+             the JIT MethodCall inline refcount bump is unsound."
+        );
+        drop(extra);
+        let restored = unsafe { *rcbox_ptr };
+        assert_eq!(restored, before, "drop must restore the strong count");
+    }
 }
 
 /// Runtime value for the OxigenLang VM.

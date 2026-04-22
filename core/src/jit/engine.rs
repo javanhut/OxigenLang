@@ -281,6 +281,7 @@ struct HelperIds {
     stack_len: FuncId,              // (vm) -> i64
     stack_pop_one: FuncId,          // (vm)
     stack_pop_n: FuncId,            // (vm, u32)
+    stack_commit_len: FuncId,       // (vm, u64)
     replace_top2_with_bool: FuncId, // (vm, u32)
     current_slot_offset: FuncId,    // (vm) -> i64
 }
@@ -353,6 +354,7 @@ struct HelperRefs {
     stack_len: FuncRef,
     stack_pop_one: FuncRef,
     stack_pop_n: FuncRef,
+    stack_commit_len: FuncRef,
     replace_top2_with_bool: FuncRef,
     #[allow(dead_code)]
     current_slot_offset: FuncRef,
@@ -1400,30 +1402,25 @@ impl JitInner {
                         let cache_ptr = method_cache_ptrs[method_ic_ix];
                         method_ic_ix += 1;
 
-                        // NOTE: the inline IR fast path below (enabled
-                        // when `arg_count <= 1`) is *disabled* because
-                        // it was use-after-free under Rust's Rc model.
-                        // The IR would:
-                        //   (1) `emit_copy_value` the receiver (or arg)
-                        //       to its new slot, and
-                        //   (2) `emit_write_closure_value` the method
-                        //       closure at the receiver slot,
-                        // both as raw memcpy-style stores that did NOT
-                        // increment the underlying `Rc` strong counts.
-                        // When the callee's `Return` later triggered
-                        // `stack_truncate`, Rust dropped those synthetic
-                        // `Value`s, each decrementing an Rc that was
-                        // never incremented — driving the struct
-                        // instance's and the method closure's strong
-                        // counts below zero, freeing their `RcBox`es,
-                        // and yielding a use-after-free on the next
-                        // method call through the same cache site.
-                        // The `jit_op_method_call_ic` helper below
-                        // handles refcounts via Rust's `Rc::clone` and
-                        // is safe. Re-enabling the IR path requires
-                        // emitting `strong_count += 1` stores at the
-                        // RcBox before each memcpy — future work.
-                        if false && arg_count <= 1 {
+                        // Inline IR fast path for method calls with ≤1
+                        // explicit arg (i.e. getter- and single-arg
+                        // setter-style methods — the vast majority of
+                        // hot struct_method work). Correctness hinges
+                        // on three things handled below:
+                        //   1. The synthesized `Value::Closure` is a new
+                        //      live Rc reference — we bump the method
+                        //      closure's `RcBox` strong count before
+                        //      `emit_write_closure_value` stamps it.
+                        //      The `emit_copy_value` calls are moves
+                        //      (source slots are overwritten), so no
+                        //      bump is needed for the receiver/arg.
+                        //   2. After raw stores past `Vec::len`, we call
+                        //      `jit_stack_commit_len` to sync the
+                        //      `Vec<Value>` backing store's length so
+                        //      bounds-checked helpers see the new slots.
+                        //   3. On error, `restore_err_block` rolls back
+                        //      the JitFrame we pushed (pre-call len).
+                        if arg_count <= 1 {
                             use cranelift_codegen::ir::MemFlags;
                             use cranelift_codegen::ir::condcodes::IntCC;
 
@@ -1497,6 +1494,33 @@ impl JitInner {
                                 cache_val,
                                 MethodCacheEntry::OFFSET_CLOSURE_RAW,
                             );
+                            // Bump Rc<ObjClosure> strong count. The
+                            // `emit_write_closure_value` below stamps a
+                            // new live `Value::Closure` whose payload is
+                            // this same `RcBox` pointer. When stack
+                            // teardown (normal Return or error path)
+                            // eventually drops that Value, the Drop impl
+                            // will decrement `strong`. We increment here
+                            // so the pair balances — otherwise the count
+                            // underflows, the RcBox gets freed while the
+                            // cache's `_keeper: Rc<ObjClosure>` still
+                            // points at it, and the next call through
+                            // this cache site reads freed memory.
+                            //
+                            // `Rc` is `!Send`/`!Sync` and the VM is
+                            // single-threaded, so a non-atomic load/add/
+                            // store is equivalent to what `Rc::clone`
+                            // itself does. `Cell<usize>` is
+                            // repr-transparent over `usize`, and `RcBox`
+                            // layout is `{ strong@0, weak@8, value@16
+                            // (= RC_VALUE_OFFSET) }` — so `strong` is at
+                            // RcBox offset 0. This invariant is pinned
+                            // by `rc_strong_count_lives_at_rcbox_offset_zero`
+                            // in `core/src/vm/value.rs`.
+                            let strong =
+                                builder.ins().load(types::I64, flags, closure_raw_box, 0);
+                            let strong_inc = builder.ins().iadd_imm(strong, 1);
+                            builder.ins().store(flags, strong_inc, closure_raw_box, 0);
                             let closure_raw_t = builder
                                 .ins()
                                 .iadd_imm(closure_raw_box, RC_VALUE_OFFSET as i64);
@@ -1523,12 +1547,16 @@ impl JitInner {
                             // normal `Value::Closure`.
                             emit_write_closure_value(&mut builder, receiver_ptr, closure_raw_box);
                             let new_stack_len = builder.ins().iadd_imm(stack_len, 1);
-                            builder.ins().store(
-                                flags,
-                                new_stack_len,
-                                vm_val,
-                                vm_stack_view_len_offset(),
-                            );
+                            // Commit the logical stack length to the
+                            // backing `Vec<Value>` so bounds-checked
+                            // helpers (e.g. `jit_get_local`'s slow path
+                            // using `self.stack[idx]`) see the new slots.
+                            // A direct store to `stack_view.len` alone
+                            // desyncs `Vec::len` and causes OOB panics
+                            // on the next non-inline local access.
+                            builder
+                                .ins()
+                                .call(refs.stack_commit_len, &[vm_val, new_stack_len]);
 
                             let jit_frames_ptr = builder.ins().load(
                                 ptr_ty,
@@ -1600,6 +1628,23 @@ impl JitInner {
                             );
                             builder.switch_to_block(restore_err_block);
                             let err_status = builder.block_params(restore_err_block)[0];
+                            // Roll back the JitFrame we pushed so the
+                            // outer thunk's `jit_frame_top()` is correct
+                            // on error propagation. Mirrors the Call IR
+                            // guard's restore_err_block handling.
+                            // `stack_view.len` / `Vec::len` are
+                            // deliberately NOT rolled back — the
+                            // synthetic `Value::Closure` and moved-
+                            // receiver Values are bit-valid; they will
+                            // Drop correctly during outer teardown and
+                            // the strong-count bump above balances the
+                            // Drop of the synthetic `Value::Closure`.
+                            builder.ins().store(
+                                flags,
+                                jit_frames_len,
+                                vm_val,
+                                vm_jit_frame_view_len_offset(),
+                            );
                             builder.ins().jump(err_block, &[err_status]);
 
                             builder.switch_to_block(miss_block);
@@ -1750,6 +1795,7 @@ fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_stack_len", runtime::jit_stack_len);
     reg!("jit_stack_pop_one", runtime::jit_stack_pop_one);
     reg!("jit_stack_pop_n", runtime::jit_stack_pop_n);
+    reg!("jit_stack_commit_len", runtime::jit_stack_commit_len);
     reg!(
         "jit_replace_top2_with_bool",
         runtime::jit_replace_top2_with_bool
@@ -1965,6 +2011,7 @@ fn declare_helpers(module: &mut JITModule) -> HelperIds {
         stack_len: decl(module, "jit_stack_len", &sig_vm_to_i64),
         stack_pop_one: decl(module, "jit_stack_pop_one", &sig_vm_only),
         stack_pop_n: decl(module, "jit_stack_pop_n", &sig_vm_u32),
+        stack_commit_len: decl(module, "jit_stack_commit_len", &sig_vm_i64),
         replace_top2_with_bool: decl(module, "jit_replace_top2_with_bool", &sig_vm_u32),
         current_slot_offset: decl(module, "jit_current_slot_offset", &sig_vm_to_i64),
     }
@@ -2032,6 +2079,7 @@ fn declare_helper_refs(
         stack_len: r(ids.stack_len),
         stack_pop_one: r(ids.stack_pop_one),
         stack_pop_n: r(ids.stack_pop_n),
+        stack_commit_len: r(ids.stack_commit_len),
         replace_top2_with_bool: r(ids.replace_top2_with_bool),
         current_slot_offset: r(ids.current_slot_offset),
     }

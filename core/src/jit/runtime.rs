@@ -1076,6 +1076,25 @@ pub unsafe extern "C" fn jit_stack_pop_n(vm: *mut VM, n: u32) {
     vm.stack_shrink(n as usize);
 }
 
+/// Commit a raw-IR stack rearrangement to the `Vec<Value>` backing store.
+///
+/// The inline MethodCall IR fast path writes `Value` bit-patterns at
+/// memory addresses beyond `self.stack.len()` (but within the
+/// `STACK_MAX` capacity pre-allocated in `VM::new()`) via raw stores.
+/// This helper tells the `Vec` that its logical length grew so that
+/// any subsequent helper using `self.stack[idx]` (bounds-checked via
+/// `Vec::len`) sees the new slots — and so that `stack_truncate` /
+/// drop-on-VM-drop run `Drop` on them to balance the refcount bumps
+/// the IR emitted.
+///
+/// Safety is delegated to `VM::stack_set_len_raw`; see that method's
+/// doc comment for the invariants the caller must uphold.
+#[inline(always)]
+pub unsafe extern "C" fn jit_stack_commit_len(vm: *mut VM, new_len: u64) {
+    let vm = unsafe { &mut *vm };
+    unsafe { vm.stack_set_len_raw(new_len as usize) };
+}
+
 /// Commit the inline int fast path for comparison opcodes: pop the top
 /// two Values and push a `Value::Boolean(result != 0)`. Drop handling
 /// is done in Rust so refcount semantics stay correct even for the

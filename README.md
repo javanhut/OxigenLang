@@ -74,6 +74,27 @@ cargo run -p oxigen -- fmt file.oxi # format a file
 cargo run -p oxigen -- check file.oxi # parse and report errors as JSON
 ```
 
+### Optional JIT (experimental)
+
+OxigenLang ships with a baseline Cranelift-backed JIT that's off by
+default. It already beats CPython 3.14 on tight numeric loops, nested
+loops, and closure hot paths, and it's kept experimental until it wins
+across *every* bench in the suite (recursion and method dispatch are
+still behind). Build it in with the `jit` feature and opt in at run
+time with `--jit`:
+
+```bash
+cargo build --release --features jit -p oxigen
+./target/release/oxigen --jit path/to/script.oxi   # eager (threshold=1)
+./target/release/oxigen       path/to/script.oxi   # default tiering
+./target/release/oxigen --no-jit path/to/script.oxi # interpreter only
+```
+
+Without `--features jit` the `--jit` flag is silently ignored and the
+binary stays pure interpreter. Full architecture, supported opcodes,
+safety invariants, and benchmark methodology are in
+[docs/JIT_ARCHITECTURE.md](docs/JIT_ARCHITECTURE.md).
+
 ## Editor Support
 
 OxigenLang ships with a language server (LSP) and Neovim integration. The LSP is written in Go and provides diagnostics, completion, hover, document symbols, and formatting.
@@ -215,6 +236,7 @@ For detailed information, see the [docs](docs/) directory:
 | [Imports and Modules](docs/imports.md) | The `introduce` keyword and module system |
 | [Built-in Functions](docs/builtins.md) | Complete reference for all built-ins |
 | [Standard Library](docs/stdlib.md) | Full reference for all 11 stdlib modules |
+| [JIT Architecture](docs/JIT_ARCHITECTURE.md) | **Experimental** — baseline Cranelift JIT: how to build it in, runtime flags, supported opcodes, safety invariants, benchmark status vs CPython |
 
 ## License
 

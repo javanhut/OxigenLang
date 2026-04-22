@@ -782,3 +782,77 @@ loop_sum(20)
         "top-level and local-to-local sum loop should compile (ok={j_ok}, failed={j_failed})"
     );
 }
+
+// ── MethodCall IC hit path refcount regression tests ─────────────────────
+//
+// These two tests pin down the inline MethodCall IR fast path's
+// refcount + Vec::len semantics. The disabled-then-re-enabled code
+// (see `core/src/jit/engine.rs` OpCode::MethodCall with arg_count <= 1)
+// must (a) bump the method closure's Rc strong count before stamping a
+// synthetic Value::Closure on the stack, and (b) sync Vec::len via
+// `jit_stack_commit_len` so bounds-checked helpers see the new slots.
+// Without either, a tight method-call loop crashes within a few
+// iterations (Rc free while cache still holds the pointer; or OOB
+// panic on `self.stack[idx]`). 5000 iterations is more than enough to
+// surface either bug if reintroduced.
+
+#[test]
+fn method_call_ic_hit_path_getter_loop_is_refcount_safe() {
+    // arg_count == 0 getter — exercises the `if arg_count == 0` branch:
+    // one emit_copy_value (move receiver) + emit_write_closure_value.
+    let source = r#"
+struct C { val <int> }
+C contains { fun get() { self.val } }
+fun run(n <int>) {
+    c <C> := C(42)
+    total <int> := 0
+    i <int> := 0
+    repeat when i < n {
+        total = total + c.get()
+        i = i + 1
+    }
+    total
+}
+run(5000)
+"#;
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, j_failed) = run_with_thresholds(source, Some(1), Some(1));
+
+    assert_eq!(baseline, jitted);
+    assert!(
+        j_ok >= 2,
+        "run + get should both JIT (ok={j_ok}, failed={j_failed})"
+    );
+}
+
+#[test]
+fn method_call_ic_hit_path_setter_loop_is_refcount_safe() {
+    // arg_count == 1 setter — exercises the `else` branch of the
+    // inline IR: two emit_copy_value calls (move arg, then move
+    // receiver over arg's old slot) + emit_write_closure_value.
+    let source = r#"
+struct C { val <int> }
+C contains {
+    fun add(v <int>) { self.val = self.val + v }
+    fun get() { self.val }
+}
+fun run(n <int>) {
+    c <C> := C(0)
+    i <int> := 0
+    repeat when i < n {
+        c.add(i)
+        i = i + 1
+    }
+    c.get()
+}
+run(5000)
+"#;
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, j_failed) = run_with_thresholds(source, Some(1), Some(1));
+
+    assert_eq!(baseline, jitted);
+    assert!(
+        j_ok >= 2,
+        "run + add + get should JIT (ok={j_ok}, failed={j_failed})"
+    );
+}

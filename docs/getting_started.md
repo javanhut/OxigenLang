@@ -18,6 +18,22 @@ Check the installed version:
 oxigen --version
 ```
 
+### Optional: enable the experimental JIT
+
+OxigenLang has a Cranelift-backed baseline JIT that's off by default.
+Enable it at build time with the `jit` feature:
+
+```bash
+cargo build --release --features jit -p oxigen
+```
+
+Then opt in at run time with `--jit` (eager) or rely on the default
+tiering threshold. Pass `--no-jit` to force the pure interpreter.
+Without `--features jit` the flag is silently ignored and the binary
+stays interpreter-only. See
+[JIT Architecture](JIT_ARCHITECTURE.md) for details, supported
+opcodes, safety notes, and benchmark methodology.
+
 ## Your First Program
 
 Save the following code in a file named `hello.oxi`:
@@ -91,6 +107,8 @@ The REPL maintains state across lines — variables, functions, structs, and pat
 |----------------|-------------|
 | `oxigen file.oxi [args...]` | Execute a script (uses the bytecode VM by default) |
 | `oxigen file.oxi --tree-walk` | Execute using the tree-walking interpreter (fallback) |
+| `oxigen file.oxi --jit` | Experimental: tier up to the baseline JIT on first call. Only available in builds produced with `--features jit`; ignored otherwise. `OXIGEN_JIT=1` is an equivalent env toggle. |
+| `oxigen file.oxi --no-jit` | Force the pure interpreter even in a JIT-enabled build. |
 | `oxigen` | Start the interactive REPL |
 | `oxigen fmt file.oxi [...]` | Format one or more `.oxi` files in-place |
 | `oxigen check file.oxi` | Parse a file and output diagnostics as JSON |
