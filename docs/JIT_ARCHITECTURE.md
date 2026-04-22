@@ -57,11 +57,12 @@ dependency tree. To enable:
 cargo build --release --features jit -p oxigen
 cargo run --release --features jit -p oxigen -- path/to/script.oxi --jit
 
+# Makefile install
+make build-with-jit
+sudo make install-with-jit
+
 # Test with the JIT
 cargo test --release --features jit
-
-# From the installer (future — not yet wired)
-# ./scripts/install.sh --with-jit
 ```
 
 The feature lives on two crates. `oxigen-core` owns the JIT module

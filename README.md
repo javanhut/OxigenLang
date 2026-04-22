@@ -56,7 +56,9 @@ Removes the oxigen binary and stdlib from `/usr/local/`.
 
 ```bash
 sudo make install                # installs to /usr/local/
+sudo make install-with-jit       # installs a JIT-enabled build to /usr/local/
 sudo make install PREFIX=/opt    # custom prefix
+sudo make install-with-jit PREFIX=/opt
 sudo make uninstall              # removes it
 ```
 
@@ -85,6 +87,8 @@ time with `--jit`:
 
 ```bash
 cargo build --release --features jit -p oxigen
+make build-with-jit
+sudo make install-with-jit
 ./target/release/oxigen --jit path/to/script.oxi   # eager (threshold=1)
 ./target/release/oxigen       path/to/script.oxi   # default tiering
 ./target/release/oxigen --no-jit path/to/script.oxi # interpreter only

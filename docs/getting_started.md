@@ -12,6 +12,12 @@ cargo build --release -p oxigen
 
 The compiled binary will be at `target/release/oxigen` (or you can run directly with `cargo run -p oxigen -- ...`).
 
+To install it system-wide with the Makefile:
+
+```bash
+sudo make install
+```
+
 Check the installed version:
 
 ```bash
@@ -25,6 +31,12 @@ Enable it at build time with the `jit` feature:
 
 ```bash
 cargo build --release --features jit -p oxigen
+```
+
+Or install a JIT-enabled binary directly:
+
+```bash
+sudo make install-with-jit
 ```
 
 Then opt in at run time with `--jit` (eager) or rely on the default
