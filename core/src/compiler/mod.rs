@@ -1236,8 +1236,18 @@ impl Compiler {
                     }
                     let method_const =
                         self.make_constant(Value::String(field.value.as_str().into()), line);
-                    self.emit_op_u16(OpCode::MethodCall, method_const, line);
-                    self.emit_byte(args.len() as u8, line);
+                    if named_args.is_empty() {
+                        self.emit_op_u16(OpCode::MethodCall, method_const, line);
+                        self.emit_byte(args.len() as u8, line);
+                    } else {
+                        for (name, val_expr) in named_args {
+                            self.emit_constant(Value::String(name.as_str().into()), line);
+                            self.compile_expression(val_expr);
+                        }
+                        self.emit_op_u16(OpCode::MethodCallNamed, method_const, line);
+                        self.emit_byte(args.len() as u8, line);
+                        self.emit_byte(named_args.len() as u8, line);
+                    }
                     return;
                 }
 

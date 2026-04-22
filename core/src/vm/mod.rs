@@ -1126,7 +1126,32 @@ impl VM {
                         .clone();
 
                     if let Value::String(mname) = method_name {
-                        self.call_method(&mname, arg_count)?;
+                        self.call_method(&mname, arg_count, &[])?;
+                    } else {
+                        return Err(self.runtime_error("invalid method name"));
+                    }
+                }
+
+                OpCode::MethodCallNamed => {
+                    let method_idx = self.frames[frame_idx].read_u16();
+                    let arg_count = self.frames[frame_idx].read_byte() as usize;
+                    let named_count = self.frames[frame_idx].read_byte() as usize;
+                    let method_name = self.frames[frame_idx]
+                        .read_constant(method_idx)
+                        .clone();
+
+                    let mut named_args = Vec::with_capacity(named_count);
+                    for _ in 0..named_count {
+                        let val = self.pop();
+                        let name = self.pop();
+                        if let Value::String(name_str) = name {
+                            named_args.push((name_str.to_string(), val));
+                        }
+                    }
+                    named_args.reverse();
+
+                    if let Value::String(mname) = method_name {
+                        self.call_method(&mname, arg_count, &named_args)?;
                     } else {
                         return Err(self.runtime_error("invalid method name"));
                     }
@@ -1424,6 +1449,12 @@ impl VM {
                 let args: Vec<Value> = self.stack.drain(start..).collect();
                 self.pop(); // pop the builtin itself
 
+                if !named_args.is_empty() {
+                    return Err(self.runtime_error(
+                        "named arguments are not supported for built-in functions",
+                    ));
+                }
+
                 let result = func(args);
                 if let Value::Error(ref msg) = result {
                     return Err(VMError {
@@ -1462,7 +1493,12 @@ impl VM {
     }
 
     /// Call a method on an object. Stack: [instance, arg1, ..., argN]
-    fn call_method(&mut self, method_name: &str, arg_count: usize) -> Result<(), VMError> {
+    fn call_method(
+        &mut self,
+        method_name: &str,
+        arg_count: usize,
+        named_args: &[(String, Value)],
+    ) -> Result<(), VMError> {
         let instance_idx = self.stack.len() - 1 - arg_count;
         let instance = self.stack[instance_idx].clone();
 
@@ -1473,7 +1509,7 @@ impl VM {
                 if let Some(Value::Closure(closure)) = field_val {
                     // Callable field — treat as regular call
                     self.stack[instance_idx] = Value::Closure(Rc::clone(&closure));
-                    return self.call_closure(closure, arg_count, &[], None);
+                    return self.call_closure(closure, arg_count, named_args, None);
                 }
 
                 // Look up method on struct def (with inheritance)
@@ -1486,7 +1522,7 @@ impl VM {
                     self.stack[instance_idx] = Value::Closure(Rc::clone(&closure));
                     // Insert instance as first arg (self) right after the closure
                     self.stack.insert(instance_idx + 1, instance);
-                    return self.call_closure(closure, arg_count + 1, &[], None);
+                    return self.call_closure(closure, arg_count + 1, named_args, None);
                 }
 
                 Err(self.runtime_error_hint(
@@ -1502,13 +1538,13 @@ impl VM {
                     // Rearrange: [instance, arg1, ...] → [builtin, instance, arg1, ...]
                     self.stack[instance_idx] = builtin;
                     self.stack.insert(instance_idx + 1, instance);
-                    return self.call_value(arg_count + 1, &[]);
+                    return self.call_value(arg_count + 1, named_args);
                 }
                 // Try without __ prefix
                 if let Some(builtin) = self.globals.get(method_name).cloned() {
                     self.stack[instance_idx] = builtin;
                     self.stack.insert(instance_idx + 1, instance);
-                    return self.call_value(arg_count + 1, &[]);
+                    return self.call_value(arg_count + 1, named_args);
                 }
                 Err(self.runtime_error_hint(
                     &format!("method '{}' not found on {}", method_name, instance.type_name()),
@@ -1525,11 +1561,11 @@ impl VM {
                         return self.call_closure(
                             closure,
                             arg_count,
-                            &[],
+                            named_args,
                             Some(Rc::clone(&m.globals)),
                         );
                     }
-                    return self.call_value(arg_count, &[]);
+                    return self.call_value(arg_count, named_args);
                 }
                 Err(self.runtime_error_hint(
                     &format!("module '{}' has no function '{}'", m.name, method_name),
@@ -2246,6 +2282,98 @@ impl VM {
                     )))
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::Compiler;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+    use std::path::PathBuf;
+
+    fn test_vm(input: &str) -> Result<Value, VMError> {
+        let lexer = Lexer::new(input);
+        let mut parser = Parser::new(lexer, input);
+        let program = parser.parse_program();
+
+        if !parser.errors().is_empty() {
+            panic!("Parser errors:\n{}", parser.format_errors());
+        }
+
+        let compiler = Compiler::new();
+        let function = compiler.compile(&program).unwrap_or_else(|errors| {
+            let messages: Vec<String> = errors.iter().map(|err| err.to_string()).collect();
+            panic!("Compile errors: {}", messages.join("; "));
+        });
+
+        let mut vm = VM::new();
+        vm.set_source(input);
+        vm.set_file(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/vm_inline.oxi"));
+        vm.run(function)
+    }
+
+    #[test]
+    fn test_vm_module_dot_call_preserves_named_args() {
+        let stdlib_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("core crate should live under repo root")
+            .join("stdlib");
+        let input = format!(
+            r#"
+                introduce os
+                os.is_dir(path="{}")
+            "#,
+            stdlib_dir.display()
+        );
+
+        match test_vm(&input) {
+            Ok(Value::Boolean(result)) => assert!(result),
+            Ok(other) => panic!("expected Ok(Boolean(true)), got {}", other.type_name()),
+            Err(err) => panic!("expected Ok(Boolean(true)), got error: {}", err.message),
+        }
+    }
+
+    #[test]
+    fn test_vm_struct_method_accepts_named_args() {
+        let input = r#"
+            struct Counter {
+                count <int>
+            }
+            Counter contains {
+                fun add(delta) { self.count + delta }
+            }
+            c := Counter(1)
+            c.add(delta=4)
+        "#;
+
+        match test_vm(input) {
+            Ok(Value::Integer(result)) => assert_eq!(result, 5),
+            Ok(other) => panic!("expected Ok(Integer(5)), got {}", other.type_name()),
+            Err(err) => panic!("expected Ok(Integer(5)), got error: {}", err.message),
+        }
+    }
+
+    #[test]
+    fn test_vm_builtin_method_named_args_fail_clearly() {
+        let input = r#"
+            text := "hello"
+            text.upper(value="ignored")
+        "#;
+
+        match test_vm(input) {
+            Err(err) => assert!(
+                err.message
+                    .contains("named arguments are not supported for built-in functions"),
+                "unexpected error: {}",
+                err.message
+            ),
+            Ok(other) => panic!(
+                "expected builtin named-arg error, got {}",
+                other.type_name()
+            ),
         }
     }
 }

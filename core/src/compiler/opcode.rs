@@ -180,6 +180,10 @@ pub enum OpCode {
     /// Operands: u16 method_name constant, u8 arg_count.
     /// Stack: [instance, arg1, ..., argN] -> [result].
     MethodCall,
+    /// Call a method with named arguments.
+    /// Operands: u16 method_name constant, u8 positional_count, u8 named_count.
+    /// Named args on stack as: [name_constant_string, value] pairs.
+    MethodCallNamed,
     /// Check if a variable is mutable. Operand: u16 name constant.
     /// Push bool result. For locals, resolved at compile time.
     IsMut,
