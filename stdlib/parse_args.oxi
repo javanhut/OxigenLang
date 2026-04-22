@@ -1,0 +1,121 @@
+introduce os
+introduce strings
+
+
+struct Parser {
+  args <array>
+  args_map <map>
+}
+
+pattern double_dash(s) when strings.contains_str(s, "--")
+pattern single_dash(s) when strings.contains_str(s, "-")
+
+fun normalize_array(arr <array>){
+  length_arr <int> := len(arr)
+  new_arr <array>
+  ptr <int>
+
+  repeat unless ptr >= length_arr {
+    current_arg := arr[ptr]
+
+    option {
+      strings.contains_str(current_arg, "=") -> {
+        new_arr = push(new_arr, current_arg)
+      },
+
+      {
+        peek_ptr <int> := ptr + 1
+        option {
+          peek_ptr >= length_arr -> {
+            new_arr = push(new_arr, current_arg)
+          },
+          strings.starts_with(arr[peek_ptr], "-") -> {
+            new_arr = push(new_arr, current_arg)
+          },
+          {
+            new_arr = push(new_arr, current_arg + "=" + arr[peek_ptr])
+            ptr++ 
+          }
+        }
+      }
+    }
+    ptr++
+  }
+  new_arr
+}
+
+fun k_v_pair(s <str>){
+  key, value := strings.split(s,"=")
+  (key,value)
+}
+
+Parser contains {
+  fun parse_args() {
+    current_args := os.args() 
+    option {
+      len(current_args) == 0 -> {
+        <fail>("Length of args = 0. Expected at least 1.")
+      }
+    }
+    normalized_arr := normalize_array(current_args)
+    self.args = normalized_arr
+    None
+  }
+  
+  fun define_flag(verbose_name <str>, alias? <str>) {
+    verbose_name_err <Error> = <Error<too_short>>("Verbose name is too short: expected at least string longer than 1 char")
+    alias_name_err <Error> = <Error<too_long>>("Alias name is too long: expected a string no longer than 1 char")
+    alias_short_name_err <Error> = <Error<too_short>>("Alias name is empty: expected a string to be exactly 1 char.")
+    option {
+      len(verbose_name) == 0 -> {
+        <fail>(verbose_name_err)
+      },
+      alias != None and (len(alias) > 1 or len(alias) == 0) -> {
+        <log<Alias_Debug>>("Length of alias: {len(alias)}")
+        <fail>(alias_name_err) unless len(alias) == 0 then <fail>(alias_short_name_err)
+      }
+    }
+    self.args_map[verbose_name] = ""
+    self.args_map[alias] = "" unless alias == None
+  }
+
+  fun process_args(){
+    each arg in self.args {
+      k, v := k_v_pair(arg)
+      choose k {
+        double_dash -> {
+          normalized_key := strings.strip(k, "--")
+          option {
+            has(self.args_map, normalized_key) -> {
+              self.args_map[normalized_key] = v
+            },
+            <log>("Key: {k} is undefined. Skipping." )
+          }
+        },
+        single_dash -> {
+          normalized_key := strings.strip(k, "-")
+          option {
+            has(self.args_map, normalized_key) -> {
+              self.args_map[normalized_key] = v
+            },
+            <log>("Key: {k} is undefined. Skipping." )
+          }
+        }
+      }
+    }
+  }
+
+  fun handle_args() {
+    self.parse_args()
+    self.process_args()
+  }
+}
+
+
+main {
+  parser <Parser>
+  parser.define_flag(verbose_name="name", alias="n")
+  parser.handle_args()
+  name, short_name := parser.args_map["name"], parser.args_map["n"]
+  println("Welcome {name}")
+}
