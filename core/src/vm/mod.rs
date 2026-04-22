@@ -119,6 +119,17 @@ pub struct VM {
     pub(crate) stack_view: StackView,
     pub(crate) jit_frame_view: JitFrameView,
 
+    /// True when a JIT thunk is the innermost executing frame (i.e. we
+    /// are inside `invoke_thunk(...) → thunk(vm)`, NOT inside a nested
+    /// `execute_until`). Used by `current_constant` / `active_closure`
+    /// / `current_slot_offset` / `current_line` / `active_module_globals`
+    /// to decide whether the "active" frame lives in `jit_frame_view`
+    /// (JIT running) or `frames` (interpreter running). Without this,
+    /// an interpreter call that runs while a JIT frame is paused above
+    /// it reads constants from the JIT's chunk instead of the
+    /// interpreter's — corrupting `Closure`, `GetGlobal`, etc.
+    pub(crate) jit_executing: std::cell::Cell<bool>,
+
     stack: Vec<Value>,
     #[allow(dead_code)]
     jit_frames: Vec<JitFrame>,
@@ -175,6 +186,7 @@ impl VM {
         VM {
             stack_view,
             jit_frame_view,
+            jit_executing: std::cell::Cell::new(false),
             stack,
             jit_frames,
             frames: Vec::with_capacity(64),
@@ -839,18 +851,22 @@ impl VM {
 
     #[allow(dead_code)]
     pub(crate) fn current_slot_offset(&self) -> usize {
-        self.jit_frame_top()
-            .map(|f| f.slot_offset)
-            .or_else(|| self.frames.last().map(|f| f.slot_offset))
-            .unwrap_or(0)
+        if self.jit_executing.get() {
+            if let Some(f) = self.jit_frame_top() {
+                return f.slot_offset;
+            }
+        }
+        self.frames.last().map(|f| f.slot_offset).unwrap_or(0)
     }
 
     /// Clone the constant at `idx` from the current frame's chunk. Used by
     /// the JIT runtime's `jit_push_constant` helper.
     pub(crate) fn current_constant(&self, idx: u16) -> Value {
-        if let Some(frame) = self.jit_frame_top() {
-            let closure = unsafe { &*frame.closure_raw };
-            return closure.function.chunk.constants[idx as usize].clone();
+        if self.jit_executing.get() {
+            if let Some(frame) = self.jit_frame_top() {
+                let closure = unsafe { &*frame.closure_raw };
+                return closure.function.chunk.constants[idx as usize].clone();
+            }
         }
         let frame = self.frames.last().unwrap();
         frame.closure.function.chunk.constants[idx as usize].clone()
@@ -989,8 +1005,10 @@ impl VM {
     }
 
     fn current_line(&self) -> u32 {
-        if let Some(frame) = self.jit_frame_top() {
-            return frame.line;
+        if self.jit_executing.get() {
+            if let Some(frame) = self.jit_frame_top() {
+                return frame.line;
+            }
         }
         let frame = self.frames.last().unwrap();
         let ip = if frame.ip > 0 { frame.ip - 1 } else { 0 };
@@ -1003,11 +1021,12 @@ impl VM {
 
     #[inline(always)]
     fn active_closure(&self) -> &ObjClosure {
-        if let Some(frame) = self.jit_frame_top() {
-            unsafe { &*frame.closure_raw }
-        } else {
-            &self.frames.last().unwrap().closure
+        if self.jit_executing.get() {
+            if let Some(frame) = self.jit_frame_top() {
+                return unsafe { &*frame.closure_raw };
+            }
         }
+        &self.frames.last().unwrap().closure
     }
 
     #[inline(always)]
@@ -1019,9 +1038,11 @@ impl VM {
 
     #[inline(always)]
     fn active_module_globals(&self) -> Option<&HashMap<String, Value>> {
-        if let Some(frame) = self.jit_frame_top() {
-            if !frame.module_globals.is_null() {
-                return Some(unsafe { &*frame.module_globals });
+        if self.jit_executing.get() {
+            if let Some(frame) = self.jit_frame_top() {
+                if !frame.module_globals.is_null() {
+                    return Some(unsafe { &*frame.module_globals });
+                }
             }
         }
         self.frames
@@ -1087,6 +1108,20 @@ impl VM {
         if self.frames.len() <= stop_depth {
             return Ok(());
         }
+        // While we are driving CallFrames with the interpreter, the
+        // active frame lives in `frames`, not `jit_frame_view`. Flip
+        // the mode flag so `current_constant` / `active_closure` /
+        // `current_line` / `active_module_globals` read the right
+        // frame. Save + restore in case we are called from within a
+        // JIT thunk (nested interpreter → JIT → interpreter → ...).
+        let prev_jit_exec = self.jit_executing.replace(false);
+        let result = self.execute_until_inner(stop_depth);
+        self.jit_executing.set(prev_jit_exec);
+        result
+    }
+
+    #[inline(always)]
+    fn execute_until_inner(&mut self, stop_depth: usize) -> Result<(), VMError> {
         loop {
             let frame_idx = self.frames.len() - 1;
 

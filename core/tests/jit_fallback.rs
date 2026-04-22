@@ -399,6 +399,65 @@ run()
 }
 
 #[test]
+fn fallback_matches_interpreter_struct_fields_holding_struct_instances() {
+    let source = r#"
+struct Node {
+    data <generic>
+    next <Node> || <None>
+}
+
+struct LinkedList {
+    head <Node> || <None>
+}
+
+LinkedList contains {
+    fun add(data <generic>) {
+        new_node <Node> := Node { data: data, next: None }
+        option {
+            self.head == None -> self.head = new_node,
+            self.append_node(new_node)
+        }
+    }
+
+    fun append_node(new_node <Node>) {
+        current <Node> || <None> := self.head
+        repeat unless current.next == None {
+            current = current.next
+        }
+        current.next = new_node
+    }
+
+    fun values() {
+        current <Node> || <None> := self.head
+        acc := 0
+        repeat unless current == None {
+            acc = acc + current.data
+            current = current.next
+        }
+        acc
+    }
+}
+
+fun run() {
+    ll <LinkedList> := LinkedList(None)
+    ll.add(10)
+    ll.add(20)
+    ll.add(30)
+    ll.values()
+}
+
+run()
+"#;
+
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+
+    assert_eq!(baseline, jitted);
+    assert_eq!(jitted, "60");
+    assert!(j_ok >= 2, "expected linked-list methods to compile; got {}", j_ok);
+}
+
+#[test]
 fn fallback_matches_interpreter_mixed_numeric_add() {
     // Integer+Float takes the slow path in the JIT (tag check fails on
     // the right operand). Make sure the slow-path fallback still

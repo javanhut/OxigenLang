@@ -324,6 +324,15 @@ impl JitEngine {
     }
 
     #[cfg(feature = "jit")]
+    #[allow(dead_code)]
+    pub(crate) fn has_pending_error(&self) -> bool {
+        self.inner
+            .as_ref()
+            .map(|i| i.has_pending_error())
+            .unwrap_or(false)
+    }
+
+    #[cfg(feature = "jit")]
     pub(crate) fn stash_error(&mut self, err: VMError) {
         if let Some(inner) = self.inner.as_mut() {
             inner.stash_error(err);

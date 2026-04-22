@@ -24,9 +24,8 @@ use crate::vm::VM;
 use crate::vm::VMError;
 use crate::vm::{JitFrame, JitFrameView, StackView};
 use crate::vm::value::{
-    Function, RC_VALUE_OFFSET, REF_CELL_VALUE_OFFSET, STRUCT_INSTANCE_DEF_OFFSET,
-    STRUCT_INSTANCE_FIELDS_OFFSET, VALUE_INT_PAYLOAD_OFFSET, VALUE_SIZE, VALUE_TAG_CLOSURE,
-    VALUE_TAG_FLOAT, VALUE_TAG_INTEGER, VALUE_TAG_STRUCT_INSTANCE,
+    Function, RC_VALUE_OFFSET, STRUCT_INSTANCE_DEF_OFFSET, VALUE_INT_PAYLOAD_OFFSET, VALUE_SIZE,
+    VALUE_TAG_CLOSURE, VALUE_TAG_FLOAT, VALUE_TAG_INTEGER, VALUE_TAG_STRUCT_INSTANCE,
 };
 
 /// Byte offset of the `stack_view.ptr` field from the base of `VM`.
@@ -177,6 +176,7 @@ pub(crate) struct FieldCacheEntry {
     pub closure: Option<std::rc::Rc<crate::vm::value::ObjClosure>>,
 }
 
+#[allow(dead_code)]
 impl FieldCacheEntry {
     pub(crate) const OFFSET_STRUCT_DEF_RAW: i32 = 0;
     pub(crate) const OFFSET_FIELD_INDEX: i32 = 8;
@@ -458,6 +458,11 @@ impl JitInner {
         self.pending_error = Some(err);
     }
 
+    #[allow(dead_code)]
+    pub fn has_pending_error(&self) -> bool {
+        self.pending_error.is_some()
+    }
+
     pub fn compiled_ok_count(&self) -> usize {
         self.compiled
             .values()
@@ -517,23 +522,58 @@ impl JitInner {
         unsafe { self.invoke_thunk(vm, thunk, stop_depth) }
     }
 
-    #[inline(always)]
+    #[inline(never)]
     pub unsafe fn invoke_thunk(
         &mut self,
         vm: *mut VM,
         thunk: CompiledThunk,
         stop_depth: usize,
     ) -> InvokeOutcome {
-        self.current_stop_depth = stop_depth;
-        self.pending_error = None;
+        // CRITICAL ALIASING NOTE: the `thunk(vm)` call is opaque
+        // `extern "C"` code that re-enters the VM through the raw `vm`
+        // pointer. Inside, JIT-emitted helpers call
+        // `vm.jit.stash_error(err)`, which reaches back to this very
+        // `JitInner` through `vm.jit.inner.as_mut()`. LLVM can't see
+        // that `vm.jit.inner` and `&mut self` point at the same
+        // allocation, so it assumes `thunk(vm)` cannot modify
+        // `self.pending_error` and caches the pre-call `None`. The
+        // post-call read then returns that stale `None`, and the real
+        // error gets replaced with
+        // "JIT runtime error with no stashed detail".
+        //
+        // Fix: access `pending_error` through a raw pointer and use
+        // volatile reads/writes across the opaque call boundary, so
+        // the compiler cannot speculate the value past the thunk.
+        let self_ptr: *mut JitInner = self as *mut JitInner;
+        let pending_ptr = unsafe { &raw mut (*self_ptr).pending_error };
+        let stop_depth_ptr = unsafe { &raw mut (*self_ptr).current_stop_depth };
+
+        unsafe {
+            stop_depth_ptr.write_volatile(stop_depth);
+            pending_ptr.write_volatile(None);
+        }
+
+        // Flip VM into "JIT executing" mode so `current_constant`,
+        // `active_closure`, etc. read from `jit_frame_view` (the thunk's
+        // frame) instead of `frames` (a paused interpreter frame from
+        // an outer `execute_until`, if any). Save + restore to handle
+        // nested invoke_thunk calls correctly.
+        let vm_ref = unsafe { &*vm };
+        let prev_jit_exec = vm_ref.jit_executing.replace(true);
 
         let status = unsafe { thunk(vm) };
 
-        self.current_stop_depth = 0;
+        vm_ref.jit_executing.set(prev_jit_exec);
+        unsafe {
+            stop_depth_ptr.write_volatile(0);
+        }
         match status {
             0 => InvokeOutcome::Returned,
             1 => {
-                let err = self.pending_error.take().unwrap_or_else(|| VMError {
+                // Volatile read to force LLVM to reload the stashed Option.
+                let err_opt: Option<VMError> = unsafe { pending_ptr.read_volatile() };
+                unsafe { pending_ptr.write_volatile(None) };
+                let err = err_opt.unwrap_or_else(|| VMError {
                     message: "JIT runtime error with no stashed detail".to_string(),
                     line: 0,
                 });
@@ -1184,9 +1224,22 @@ impl JitInner {
                             CallCacheEntry::OFFSET_THUNK_RAW,
                         );
                         let line_val = builder.ins().iconst(types::I32, line as i64);
+                        // `curr_rc` is the raw `NonNull<RcBox<T>>` pointer
+                        // loaded from a `Value::Closure` payload; adjust by
+                        // `RC_VALUE_OFFSET` so `JitFrame.closure_raw`
+                        // points to the `ObjClosure` itself — matching what
+                        // `Rc::as_ptr(&closure)` returns on the Rust-side
+                        // push in `call_closure_fast_path`. Without this,
+                        // `active_closure()`'s `&*closure_raw` would
+                        // dereference into the RcBox refcount header and
+                        // produce garbage fields (→ segfault on upvalue
+                        // / field / constant access inside the callee).
+                        let closure_t_ptr = builder
+                            .ins()
+                            .iadd_imm(curr_rc, RC_VALUE_OFFSET as i64);
                         builder.ins().store(
                             flags,
-                            curr_rc,
+                            closure_t_ptr,
                             new_frame_ptr,
                             JitFrame::OFFSET_CLOSURE_RAW,
                         );
@@ -1285,126 +1338,13 @@ impl JitInner {
                     }
                     OpCode::GetField => {
                         let idx = read_u16(code, ip + 1);
-                        use cranelift_codegen::ir::MemFlags;
-                        use cranelift_codegen::ir::condcodes::IntCC;
                         let idx_val = builder.ins().iconst(types::I32, idx as i64);
                         let cache_ptr = field_cache_ptrs[field_ic_ix];
                         field_ic_ix += 1;
                         let cache_val = builder.ins().iconst(ptr_ty, cache_ptr as i64);
-                        let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
-                        let stack_len = emit_load_stack_len(&mut builder, vm_val);
-                        let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
-                        let one = builder.ins().iconst(types::I64, 1);
-                        let top_slot = builder.ins().isub(stack_len, one);
-                        let top_off = builder.ins().imul(top_slot, value_size);
-                        let top_ptr = builder.ins().iadd(stack_ptr, top_off);
-                        let flags = MemFlags::trusted();
-                        let check_def_block = builder.create_block();
-                        let instance_field_block = builder.create_block();
-                        let def_method_block = builder.create_block();
-                        let write_method_block = builder.create_block();
-                        let miss_block = builder.create_block();
                         let ok_block = builder.create_block();
                         let err_block = builder.create_block();
                         builder.append_block_param(err_block, types::I32);
-
-                        let tag = builder.ins().load(types::I8, flags, top_ptr, 0);
-                        let struct_tag =
-                            builder.ins().iconst(types::I8, VALUE_TAG_STRUCT_INSTANCE as i64);
-                        let is_struct =
-                            builder.ins().icmp(IntCC::Equal, tag, struct_tag);
-                        builder
-                            .ins()
-                            .brif(is_struct, check_def_block, &[], miss_block, &[]);
-                        builder.switch_to_block(check_def_block);
-                        let receiver_raw = builder.ins().load(
-                            ptr_ty,
-                            flags,
-                            top_ptr,
-                            VALUE_INT_PAYLOAD_OFFSET as i32,
-                        );
-                        let inst_ptr = builder.ins().iadd_imm(receiver_raw, RC_VALUE_OFFSET as i64);
-                        let inst_def_raw = builder.ins().load(
-                            ptr_ty,
-                            flags,
-                            inst_ptr,
-                            STRUCT_INSTANCE_DEF_OFFSET as i32,
-                        );
-                        let cached_def_raw = builder.ins().load(
-                            ptr_ty,
-                            flags,
-                            cache_val,
-                            FieldCacheEntry::OFFSET_STRUCT_DEF_RAW,
-                        );
-                        let def_matches =
-                            builder.ins().icmp(IntCC::Equal, inst_def_raw, cached_def_raw);
-                        let kind = builder.ins().load(
-                            types::I8,
-                            flags,
-                            cache_val,
-                            FieldCacheEntry::OFFSET_KIND,
-                        );
-                        let kind_instance = builder
-                            .ins()
-                            .iconst(types::I8, FieldCacheKind::InstanceField as i64);
-                        let kind_method = builder
-                            .ins()
-                            .iconst(types::I8, FieldCacheKind::DefMethod as i64);
-                        let kind_is_instance =
-                            builder.ins().icmp(IntCC::Equal, kind, kind_instance);
-                        let kind_is_method =
-                            builder.ins().icmp(IntCC::Equal, kind, kind_method);
-                        let kind_block = builder.create_block();
-                        builder
-                            .ins()
-                            .brif(def_matches, kind_block, &[], miss_block, &[]);
-                        builder.switch_to_block(kind_block);
-                        builder.ins().brif(
-                            kind_is_instance,
-                            instance_field_block,
-                            &[],
-                            def_method_block,
-                            &[],
-                        );
-
-                        builder.switch_to_block(instance_field_block);
-                        let field_index = builder.ins().load(
-                            types::I32,
-                            flags,
-                            cache_val,
-                            FieldCacheEntry::OFFSET_FIELD_INDEX,
-                        );
-                        let fields_ptr = builder
-                            .ins()
-                            .iadd_imm(inst_ptr, STRUCT_INSTANCE_FIELDS_OFFSET as i64);
-                        let vec_ptr = builder
-                            .ins()
-                            .load(ptr_ty, flags, fields_ptr, REF_CELL_VALUE_OFFSET as i32);
-                        let field_index64 = builder.ins().uextend(types::I64, field_index);
-                        let field_off = builder.ins().imul(field_index64, value_size);
-                        let field_ptr = builder.ins().iadd(vec_ptr, field_off);
-                        emit_copy_value(&mut builder, field_ptr, top_ptr);
-                        builder.ins().jump(ok_block, &[]);
-
-                        builder.switch_to_block(def_method_block);
-                        builder.ins().brif(
-                            kind_is_method,
-                            write_method_block,
-                            &[],
-                            miss_block,
-                            &[],
-                        );
-                        builder.switch_to_block(write_method_block);
-                        let closure_raw = builder.ins().load(
-                            ptr_ty,
-                            flags,
-                            cache_val,
-                            FieldCacheEntry::OFFSET_CLOSURE_RAW,
-                        );
-                        emit_write_closure_value(&mut builder, top_ptr, closure_raw);
-                        builder.ins().jump(ok_block, &[]);
-
-                        builder.switch_to_block(miss_block);
                         let call = builder
                             .ins()
                             .call(refs.op_get_field_ic_miss, &[vm_val, idx_val, cache_val]);
@@ -1421,101 +1361,13 @@ impl JitInner {
                     }
                     OpCode::SetField => {
                         let idx = read_u16(code, ip + 1);
-                        use cranelift_codegen::ir::MemFlags;
-                        use cranelift_codegen::ir::condcodes::IntCC;
                         let idx_val = builder.ins().iconst(types::I32, idx as i64);
                         let cache_ptr = field_cache_ptrs[field_ic_ix];
                         field_ic_ix += 1;
                         let cache_val = builder.ins().iconst(ptr_ty, cache_ptr as i64);
-                        let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
-                        let stack_len = emit_load_stack_len(&mut builder, vm_val);
-                        let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
-                        let one = builder.ins().iconst(types::I64, 1);
-                        let two64 = builder.ins().iconst(types::I64, 2);
-                        let obj_slot = builder.ins().isub(stack_len, two64);
-                        let value_slot = builder.ins().isub(stack_len, one);
-                        let obj_off = builder.ins().imul(obj_slot, value_size);
-                        let value_off = builder.ins().imul(value_slot, value_size);
-                        let obj_ptr = builder.ins().iadd(stack_ptr, obj_off);
-                        let value_ptr = builder.ins().iadd(stack_ptr, value_off);
-                        let flags = MemFlags::trusted();
-                        let check_def_block = builder.create_block();
-                        let hit_block = builder.create_block();
-                        let miss_block = builder.create_block();
                         let ok_block = builder.create_block();
                         let err_block = builder.create_block();
                         builder.append_block_param(err_block, types::I32);
-                        let tag = builder.ins().load(types::I8, flags, obj_ptr, 0);
-                        let struct_tag =
-                            builder.ins().iconst(types::I8, VALUE_TAG_STRUCT_INSTANCE as i64);
-                        let is_struct =
-                            builder.ins().icmp(IntCC::Equal, tag, struct_tag);
-                        builder
-                            .ins()
-                            .brif(is_struct, check_def_block, &[], miss_block, &[]);
-                        builder.switch_to_block(check_def_block);
-                        let obj_raw = builder.ins().load(
-                            ptr_ty,
-                            flags,
-                            obj_ptr,
-                            VALUE_INT_PAYLOAD_OFFSET as i32,
-                        );
-                        let inst_ptr = builder.ins().iadd_imm(obj_raw, RC_VALUE_OFFSET as i64);
-                        let inst_def_raw = builder.ins().load(
-                            ptr_ty,
-                            flags,
-                            inst_ptr,
-                            STRUCT_INSTANCE_DEF_OFFSET as i32,
-                        );
-                        let cached_def_raw = builder.ins().load(
-                            ptr_ty,
-                            flags,
-                            cache_val,
-                            FieldCacheEntry::OFFSET_STRUCT_DEF_RAW,
-                        );
-                        let def_matches =
-                            builder.ins().icmp(IntCC::Equal, inst_def_raw, cached_def_raw);
-                        let kind = builder.ins().load(
-                            types::I8,
-                            flags,
-                            cache_val,
-                            FieldCacheEntry::OFFSET_KIND,
-                        );
-                        let kind_instance = builder
-                            .ins()
-                            .iconst(types::I8, FieldCacheKind::InstanceField as i64);
-                        let kind_matches =
-                            builder.ins().icmp(IntCC::Equal, kind, kind_instance);
-                        let kind_block = builder.create_block();
-                        builder
-                            .ins()
-                            .brif(def_matches, kind_block, &[], miss_block, &[]);
-                        builder.switch_to_block(kind_block);
-                        builder
-                            .ins()
-                            .brif(kind_matches, hit_block, &[], miss_block, &[]);
-                        builder.switch_to_block(hit_block);
-                        let field_index = builder.ins().load(
-                            types::I32,
-                            flags,
-                            cache_val,
-                            FieldCacheEntry::OFFSET_FIELD_INDEX,
-                        );
-                        let fields_ptr = builder
-                            .ins()
-                            .iadd_imm(inst_ptr, STRUCT_INSTANCE_FIELDS_OFFSET as i64);
-                        let vec_ptr = builder
-                            .ins()
-                            .load(ptr_ty, flags, fields_ptr, REF_CELL_VALUE_OFFSET as i32);
-                        let field_index64 = builder.ins().uextend(types::I64, field_index);
-                        let field_off = builder.ins().imul(field_index64, value_size);
-                        let field_ptr = builder.ins().iadd(vec_ptr, field_off);
-                        emit_copy_value(&mut builder, value_ptr, field_ptr);
-                        let two = builder.ins().iconst(types::I32, 2);
-                        builder.ins().call(refs.stack_pop_n, &[vm_val, two]);
-                        builder.ins().jump(ok_block, &[]);
-
-                        builder.switch_to_block(miss_block);
                         let call = builder
                             .ins()
                             .call(refs.op_set_field_ic_miss, &[vm_val, idx_val, cache_val]);
@@ -1548,7 +1400,30 @@ impl JitInner {
                         let cache_ptr = method_cache_ptrs[method_ic_ix];
                         method_ic_ix += 1;
 
-                        if arg_count <= 1 {
+                        // NOTE: the inline IR fast path below (enabled
+                        // when `arg_count <= 1`) is *disabled* because
+                        // it was use-after-free under Rust's Rc model.
+                        // The IR would:
+                        //   (1) `emit_copy_value` the receiver (or arg)
+                        //       to its new slot, and
+                        //   (2) `emit_write_closure_value` the method
+                        //       closure at the receiver slot,
+                        // both as raw memcpy-style stores that did NOT
+                        // increment the underlying `Rc` strong counts.
+                        // When the callee's `Return` later triggered
+                        // `stack_truncate`, Rust dropped those synthetic
+                        // `Value`s, each decrementing an Rc that was
+                        // never incremented — driving the struct
+                        // instance's and the method closure's strong
+                        // counts below zero, freeing their `RcBox`es,
+                        // and yielding a use-after-free on the next
+                        // method call through the same cache site.
+                        // The `jit_op_method_call_ic` helper below
+                        // handles refcounts via Rust's `Rc::clone` and
+                        // is safe. Re-enabling the IR path requires
+                        // emitting `strong_count += 1` stores at the
+                        // RcBox before each memcpy — future work.
+                        if false && arg_count <= 1 {
                             use cranelift_codegen::ir::MemFlags;
                             use cranelift_codegen::ir::condcodes::IntCC;
 
@@ -1608,12 +1483,23 @@ impl JitInner {
                                 .brif(def_matches, hit_block, &[], miss_block, &[]);
 
                             builder.switch_to_block(hit_block);
-                            let closure_raw = builder.ins().load(
+                            // `closure_raw_box` is the raw `NonNull<RcBox<T>>`
+                            // bit pattern (same layout as the payload of
+                            // a `Value::Closure`). `closure_raw_t` is the
+                            // `*const ObjClosure` for direct-field access
+                            // (matches `Rc::as_ptr` / `active_closure()`).
+                            // We need BOTH: the RcBox pointer for writing
+                            // to the stack as a live `Value::Closure`, and
+                            // the T pointer for `JitFrame.closure_raw`.
+                            let closure_raw_box = builder.ins().load(
                                 ptr_ty,
                                 flags,
                                 cache_val,
                                 MethodCacheEntry::OFFSET_CLOSURE_RAW,
                             );
+                            let closure_raw_t = builder
+                                .ins()
+                                .iadd_imm(closure_raw_box, RC_VALUE_OFFSET as i64);
                             let thunk_raw = builder.ins().load(
                                 ptr_ty,
                                 flags,
@@ -1631,7 +1517,11 @@ impl JitInner {
                                 emit_copy_value(&mut builder, arg_ptr, dst_arg_ptr);
                                 emit_copy_value(&mut builder, receiver_ptr, arg_ptr);
                             }
-                            emit_write_closure_value(&mut builder, receiver_ptr, closure_raw);
+                            // Write a fresh `Value::Closure` at the
+                            // receiver slot. The payload is the raw
+                            // RcBox pointer — same as what pops out of a
+                            // normal `Value::Closure`.
+                            emit_write_closure_value(&mut builder, receiver_ptr, closure_raw_box);
                             let new_stack_len = builder.ins().iadd_imm(stack_len, 1);
                             builder.ins().store(
                                 flags,
@@ -1663,9 +1553,11 @@ impl JitInner {
                                 caller_frame_ptr,
                                 JitFrame::OFFSET_MODULE_GLOBALS,
                             );
+                            // The JIT frame stores a *const ObjClosure* —
+                            // i.e., the T pointer, not the RcBox pointer.
                             builder.ins().store(
                                 flags,
-                                closure_raw,
+                                closure_raw_t,
                                 new_frame_ptr,
                                 JitFrame::OFFSET_CLOSURE_RAW,
                             );
