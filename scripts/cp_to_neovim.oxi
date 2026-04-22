@@ -23,8 +23,10 @@ fun check_installation(package <str>) {
 }
 
 fun check_and_install_configs() {
-    home_path := os.env_get("HOME") guard _err -> ""
+    home_path := os.env_get("HOME") <guard>("")
+    <log>("Home path: {home_path}")
     path <str> := home_path + "/.config/nvim" unless home_path == "" then "~/.config/nvim"
+    <log>("Path: {path}")
     dir_exist <bool> := os.is_dir(path=path)
     option {
         dir_exist -> {
