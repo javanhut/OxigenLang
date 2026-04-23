@@ -1,0 +1,18 @@
+enum Stoplight {
+    Red: 0
+    Yellow: 1
+    Green: 2
+}
+
+pattern is_red(x) when x == Stoplight.Red
+
+pattern is_yellow(x) when x == Stoplight.Yellow
+
+pattern is_green(x) when x == Stoplight.Green
+each color in [Stoplight.Red, Stoplight.Yellow, Stoplight.Green] {
+    choose color {
+        is_red -> println("STOP")
+        is_yellow -> println("slow down")
+        is_green -> println("go")
+    }
+}

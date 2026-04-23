@@ -127,6 +127,19 @@ pub enum OpCode {
     /// Stack has method name-closure pairs.
     DefineMethod,
 
+    // --- Enums ---
+    /// Define an enum. Operand: u16 constant index (ObjEnumDef value).
+    EnumDef,
+    /// Construct a unit enum variant. Operand: u16 variant name constant.
+    /// Stack has the EnumDef value.
+    MakeEnumVariantUnit,
+    /// Construct a tuple enum variant. Operands: u16 variant name constant, u8 arg count.
+    /// Stack: [EnumDef, arg1, ..., argN] -> [EnumInstance].
+    MakeEnumVariantTuple,
+    /// Construct a struct enum variant. Operands: u16 variant name constant, u8 field count.
+    /// Stack: [EnumDef, name1, val1, ..., nameN, valN] -> [EnumInstance].
+    MakeEnumVariantStruct,
+
     // --- Pattern Matching ---
     /// Define a pattern. Operand: u16 constant index (pattern info).
     DefinePattern,

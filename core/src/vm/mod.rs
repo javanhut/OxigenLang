@@ -774,10 +774,124 @@ impl VM {
                                     }
                                 }
                             }
+                            Value::Map(entries) => {
+                                let entries = entries.borrow();
+                                let key = Value::String(Rc::clone(fname));
+                                let mut found = None;
+                                for (k, v) in entries.iter() {
+                                    if *k == key {
+                                        found = Some(v.clone());
+                                        break;
+                                    }
+                                }
+                                drop(entries);
+                                self.push(found.unwrap_or(Value::None));
+                            }
+                            Value::EnumDef(def) => {
+                                let name = Rc::clone(fname);
+                                let variant = def.variants.iter().find(|v| v.name.as_str() == name.as_ref());
+                                match variant {
+                                    Some(v) => match &v.kind {
+                                        crate::vm::value::VmEnumVariantKind::Unit(disc) => {
+                                            self.push(Value::EnumInstance(Rc::new(
+                                                crate::vm::value::ObjEnumInstance {
+                                                    enum_name: def.name.clone(),
+                                                    variant_name: v.name.clone(),
+                                                    payload: crate::vm::value::VmEnumPayload::Unit(disc.clone()),
+                                                },
+                                            )));
+                                        }
+                                        crate::vm::value::VmEnumVariantKind::Tuple(_) => {
+                                            return Err(self.runtime_error_hint(
+                                                &format!("variant '{}' of enum {} requires arguments", v.name, def.name),
+                                                "use EnumName.Variant(args) to construct tuple variants",
+                                            ));
+                                        }
+                                        crate::vm::value::VmEnumVariantKind::Struct(_) => {
+                                            return Err(self.runtime_error_hint(
+                                                &format!("variant '{}' of enum {} requires struct fields", v.name, def.name),
+                                                "use EnumName.Variant { field: value } for struct variants",
+                                            ));
+                                        }
+                                    },
+                                    None => {
+                                        return Err(self.runtime_error(&format!(
+                                            "enum {} has no variant '{}'",
+                                            def.name, name
+                                        )));
+                                    }
+                                }
+                            }
+                            Value::EnumInstance(inst) => {
+                                let name = fname.as_ref();
+                                match name {
+                                    "name" => self.push(Value::String(inst.variant_name.as_str().into())),
+                                    "value" => match &inst.payload {
+                                        crate::vm::value::VmEnumPayload::Unit(Some(v)) => {
+                                            self.push(v.clone());
+                                        }
+                                        crate::vm::value::VmEnumPayload::Unit(None) => {
+                                            self.push(Value::None);
+                                        }
+                                        _ => {
+                                            return Err(self.runtime_error(
+                                                ".value is only defined on unit variants",
+                                            ));
+                                        }
+                                    },
+                                    other => match &inst.payload {
+                                        crate::vm::value::VmEnumPayload::Tuple(items) => {
+                                            let idx_opt = other.parse::<usize>().ok().or_else(|| {
+                                                self.globals.get(&inst.enum_name).and_then(|gv| {
+                                                    if let Value::EnumDef(def) = gv {
+                                                        def.variants
+                                                            .iter()
+                                                            .find(|v| v.name == inst.variant_name)
+                                                            .and_then(|v| match &v.kind {
+                                                                crate::vm::value::VmEnumVariantKind::Tuple(names) => {
+                                                                    names.iter().position(|n| n == other)
+                                                                }
+                                                                _ => None,
+                                                            })
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                            });
+                                            match idx_opt.and_then(|i| items.get(i).cloned()) {
+                                                Some(v) => self.push(v),
+                                                None => {
+                                                    return Err(self.runtime_error(&format!(
+                                                        "tuple variant {}.{} has no field '{}'",
+                                                        inst.enum_name, inst.variant_name, other
+                                                    )));
+                                                }
+                                            }
+                                        }
+                                        crate::vm::value::VmEnumPayload::Struct(fields) => {
+                                            match fields.iter().find(|(k, _)| k == other) {
+                                                Some((_, v)) => self.push(v.clone()),
+                                                None => {
+                                                    return Err(self.runtime_error(&format!(
+                                                        "struct variant {}.{} has no field '{}'",
+                                                        inst.enum_name, inst.variant_name, other
+                                                    )));
+                                                }
+                                            }
+                                        }
+                                        crate::vm::value::VmEnumPayload::Unit(_) => {
+                                            return Err(self.runtime_error(&format!(
+                                                "unit variant {}.{} has no field '{}'",
+                                                inst.enum_name, inst.variant_name, other
+                                            )));
+                                        }
+                                    },
+                                }
+                            }
                             _ => {
                                 return Err(self.runtime_error_hint(
                                     &format!("cannot access field '{}' on {}", fname, object.type_name()),
-                                    "field access is only supported on struct instances, modules, and error values",
+                                    "field access is supported on structs, enums, modules, maps, and error values",
                                 ));
                             }
                         }
@@ -797,10 +911,25 @@ impl VM {
                                     .borrow_mut()
                                     .insert(fname.to_string(), value);
                             }
+                            Value::Map(entries) => {
+                                let mut entries = entries.borrow_mut();
+                                let key = Value::String(Rc::clone(fname));
+                                let mut found = false;
+                                for (k, v) in entries.iter_mut() {
+                                    if *k == key {
+                                        *v = value.clone();
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if !found {
+                                    entries.push((key, value.clone()));
+                                }
+                            }
                             _ => {
                                 return Err(self.runtime_error_hint(
                                     &format!("cannot set field on {}", object.type_name()),
-                                    "field assignment is only supported on struct instances",
+                                    "field assignment is supported on struct instances and maps",
                                 ));
                             }
                         }
@@ -1216,6 +1345,178 @@ impl VM {
                         self.push(Value::Boolean(true));
                     }
                 }
+
+                OpCode::EnumDef => {
+                    // EnumDefs flow through the constant pool / DefineGlobal; this
+                    // opcode is reserved for future use (explicit runtime registration).
+                    let _idx = self.frames[frame_idx].read_u16();
+                }
+
+                OpCode::MakeEnumVariantUnit => {
+                    // Reserved — unit variants are constructed through GetField on
+                    // an EnumDef receiver. This opcode exists so compilers can emit
+                    // a direct unit construction in the future.
+                    let variant_idx = self.frames[frame_idx].read_u16();
+                    let variant_name = self.frames[frame_idx].read_constant(variant_idx).clone();
+                    let enum_val = self.pop();
+                    if let (Value::EnumDef(def), Value::String(vname)) = (&enum_val, &variant_name) {
+                        let variant = def.variants.iter().find(|v| v.name.as_str() == vname.as_ref());
+                        match variant {
+                            Some(v) => {
+                                if let crate::vm::value::VmEnumVariantKind::Unit(disc) = &v.kind {
+                                    self.push(Value::EnumInstance(Rc::new(
+                                        crate::vm::value::ObjEnumInstance {
+                                            enum_name: def.name.clone(),
+                                            variant_name: v.name.clone(),
+                                            payload: crate::vm::value::VmEnumPayload::Unit(
+                                                disc.clone(),
+                                            ),
+                                        },
+                                    )));
+                                } else {
+                                    return Err(self.runtime_error(&format!(
+                                        "variant {}.{} is not a unit variant",
+                                        def.name, v.name
+                                    )));
+                                }
+                            }
+                            None => {
+                                return Err(self.runtime_error(&format!(
+                                    "enum {} has no variant '{}'",
+                                    def.name, vname
+                                )));
+                            }
+                        }
+                    } else {
+                        return Err(self.runtime_error(
+                            "MakeEnumVariantUnit requires an EnumDef on the stack",
+                        ));
+                    }
+                }
+
+                OpCode::MakeEnumVariantTuple => {
+                    let variant_idx = self.frames[frame_idx].read_u16();
+                    let arg_count = self.frames[frame_idx].read_byte() as usize;
+                    let variant_name = self.frames[frame_idx].read_constant(variant_idx).clone();
+                    let start = self.stack.len() - arg_count;
+                    let args: Vec<Value> = self.stack.drain(start..).collect();
+                    let enum_val = self.pop();
+                    let vname = if let Value::String(s) = &variant_name {
+                        Rc::clone(s)
+                    } else {
+                        return Err(self.runtime_error("expected variant name string"));
+                    };
+                    if let Value::EnumDef(def) = &enum_val {
+                        let variant = def.variants.iter().find(|v| v.name.as_str() == vname.as_ref());
+                        match variant {
+                            Some(v) => {
+                                if let crate::vm::value::VmEnumVariantKind::Tuple(expected) = &v.kind {
+                                    if expected.len() != args.len() {
+                                        return Err(self.runtime_error(&format!(
+                                            "tuple variant {}.{} expects {} arguments, got {}",
+                                            def.name,
+                                            v.name,
+                                            expected.len(),
+                                            args.len()
+                                        )));
+                                    }
+                                    self.push(Value::EnumInstance(Rc::new(
+                                        crate::vm::value::ObjEnumInstance {
+                                            enum_name: def.name.clone(),
+                                            variant_name: v.name.clone(),
+                                            payload: crate::vm::value::VmEnumPayload::Tuple(args),
+                                        },
+                                    )));
+                                } else {
+                                    return Err(self.runtime_error(&format!(
+                                        "variant {}.{} is not a tuple variant",
+                                        def.name, v.name
+                                    )));
+                                }
+                            }
+                            None => {
+                                return Err(self.runtime_error(&format!(
+                                    "enum {} has no variant '{}'",
+                                    def.name, vname
+                                )));
+                            }
+                        }
+                    } else {
+                        return Err(self.runtime_error(
+                            "MakeEnumVariantTuple requires an EnumDef on the stack",
+                        ));
+                    }
+                }
+
+                OpCode::MakeEnumVariantStruct => {
+                    let variant_idx = self.frames[frame_idx].read_u16();
+                    let field_count = self.frames[frame_idx].read_byte() as usize;
+                    let variant_name = self.frames[frame_idx].read_constant(variant_idx).clone();
+                    let start = self.stack.len() - field_count * 2;
+                    let flat: Vec<Value> = self.stack.drain(start..).collect();
+                    let mut fields: Vec<(String, Value)> = Vec::new();
+                    for pair in flat.chunks(2) {
+                        if let Value::String(fname) = &pair[0] {
+                            fields.push((fname.to_string(), pair[1].clone()));
+                        }
+                    }
+                    let enum_val = self.pop();
+                    let vname = if let Value::String(s) = &variant_name {
+                        Rc::clone(s)
+                    } else {
+                        return Err(self.runtime_error("expected variant name string"));
+                    };
+                    if let Value::EnumDef(def) = &enum_val {
+                        let variant = def.variants.iter().find(|v| v.name.as_str() == vname.as_ref());
+                        match variant {
+                            Some(v) => {
+                                if let crate::vm::value::VmEnumVariantKind::Struct(expected) = &v.kind {
+                                    if expected.len() != fields.len() {
+                                        return Err(self.runtime_error(&format!(
+                                            "struct variant {}.{} expects {} fields, got {}",
+                                            def.name,
+                                            v.name,
+                                            expected.len(),
+                                            fields.len()
+                                        )));
+                                    }
+                                    for (fname, _) in &fields {
+                                        if !expected.contains(fname) {
+                                            return Err(self.runtime_error(&format!(
+                                                "struct variant {}.{} has no field '{}'",
+                                                def.name, v.name, fname
+                                            )));
+                                        }
+                                    }
+                                    self.push(Value::EnumInstance(Rc::new(
+                                        crate::vm::value::ObjEnumInstance {
+                                            enum_name: def.name.clone(),
+                                            variant_name: v.name.clone(),
+                                            payload: crate::vm::value::VmEnumPayload::Struct(
+                                                fields,
+                                            ),
+                                        },
+                                    )));
+                                } else {
+                                    return Err(self.runtime_error(&format!(
+                                        "variant {}.{} is not a struct variant",
+                                        def.name, v.name
+                                    )));
+                                }
+                            }
+                            None => {
+                                return Err(self.runtime_error(&format!(
+                                    "enum {} has no variant '{}'",
+                                    def.name, vname
+                                )));
+                            }
+                        }
+                    } else {
+                        return Err(self.runtime_error(
+                            "MakeEnumVariantStruct requires an EnumDef on the stack",
+                        ));
+                    }
+                }
             }
         }
     }
@@ -1571,6 +1872,60 @@ impl VM {
                     &format!("module '{}' has no function '{}'", m.name, method_name),
                     "check the module's public API for available functions",
                 ))
+            }
+            Value::EnumDef(def) => {
+                // Tuple-variant construction: `EnumName.Variant(args)`.
+                let variant = def
+                    .variants
+                    .iter()
+                    .find(|v| v.name == method_name)
+                    .cloned();
+                match variant {
+                    Some(v) => match v.kind {
+                        crate::vm::value::VmEnumVariantKind::Tuple(expected) => {
+                            if expected.len() != arg_count {
+                                return Err(self.runtime_error(&format!(
+                                    "tuple variant {}.{} expects {} arguments, got {}",
+                                    def.name,
+                                    v.name,
+                                    expected.len(),
+                                    arg_count
+                                )));
+                            }
+                            let start = self.stack.len() - arg_count;
+                            let args: Vec<Value> = self.stack.drain(start..).collect();
+                            self.pop(); // receiver (EnumDef)
+                            self.push(Value::EnumInstance(Rc::new(
+                                crate::vm::value::ObjEnumInstance {
+                                    enum_name: def.name.clone(),
+                                    variant_name: v.name.clone(),
+                                    payload: crate::vm::value::VmEnumPayload::Tuple(args),
+                                },
+                            )));
+                            Ok(())
+                        }
+                        crate::vm::value::VmEnumVariantKind::Unit(_) => Err(self.runtime_error_hint(
+                            &format!(
+                                "unit variant {}.{} cannot be called",
+                                def.name, v.name
+                            ),
+                            "access unit variants without parentheses",
+                        )),
+                        crate::vm::value::VmEnumVariantKind::Struct(_) => {
+                            Err(self.runtime_error_hint(
+                                &format!(
+                                    "struct variant {}.{} must be constructed with braces",
+                                    def.name, v.name
+                                ),
+                                "use EnumName.Variant { field: value }",
+                            ))
+                        }
+                    },
+                    None => Err(self.runtime_error(&format!(
+                        "enum {} has no variant '{}'",
+                        def.name, method_name
+                    ))),
+                }
             }
             _ => Err(self.runtime_error_hint(
                 &format!("cannot call method '{}' on {}", method_name, instance.type_name()),
@@ -2270,6 +2625,13 @@ impl VM {
                 ))),
             },
             "VALUE" => Ok(Value::Wrapped(Rc::new(value.clone()))),
+            "ENUM" => match value {
+                Value::EnumInstance(_) | Value::EnumDef(_) => Ok(value.clone()),
+                _ => Err(self.runtime_error(&format!(
+                    "cannot convert {} to ENUM",
+                    value.type_name()
+                ))),
+            },
             _ => {
                 // Struct type or unknown — check if value matches
                 if value.effective_type_name() == target {

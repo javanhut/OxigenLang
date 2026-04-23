@@ -2,10 +2,10 @@ pub mod builtins;
 
 use crate::ast::{
     Expression, Identifier, ModulePath, Program, Statement, StringInterpPart, TypeAnnotation,
-    TypedParam,
+    TypedParam, VariantKind,
 };
 use crate::lexer::Lexer;
-use crate::object::Object;
+use crate::object::{EnumPayload, EnumVariantDef, EnumVariantKind, Object};
 use crate::object::environment::{Environment, PatternRegistry};
 use crate::parser::Parser;
 use crate::token::Span;
@@ -19,6 +19,7 @@ pub struct Evaluator {
     builtins: HashMap<String, Rc<Object>>,
     patterns: PatternRegistry,
     struct_defs: HashMap<String, Rc<Object>>,
+    enum_defs: HashMap<String, Rc<Object>>,
     current_file: Option<PathBuf>,
     stdlib_path: PathBuf,
     module_cache: HashMap<PathBuf, Rc<Object>>,
@@ -151,6 +152,7 @@ impl Evaluator {
             builtins,
             patterns: PatternRegistry::new(),
             struct_defs: HashMap::new(),
+            enum_defs: HashMap::new(),
             current_file: None,
             stdlib_path: Self::find_stdlib_path(),
             module_cache: HashMap::new(),
@@ -168,6 +170,7 @@ impl Evaluator {
             builtins,
             patterns: PatternRegistry::new(),
             struct_defs: HashMap::new(),
+            enum_defs: HashMap::new(),
             current_file: Some(file_path),
             stdlib_path: Self::find_stdlib_path(),
             module_cache: HashMap::new(),
@@ -527,12 +530,27 @@ impl Evaluator {
                 Object::Set(_) => Ok(Rc::clone(obj)),
                 _ => Err(format!("cannot convert {} to SET", obj.type_name())),
             },
+            "ENUM" => match obj.as_ref() {
+                Object::EnumInstance { .. } | Object::EnumDef { .. } => Ok(Rc::clone(obj)),
+                _ => Err(format!("cannot convert {} to ENUM", obj.type_name())),
+            },
             _ => {
                 // Struct type: only identity conversion (value must already be that struct)
                 if let Some(stn) = obj.struct_type_name() {
                     if stn == target {
                         return Ok(Rc::clone(obj));
                     }
+                }
+                // Enum type: identity conversion on the enum name (works for both
+                // `x <Stoplight> := Stoplight.Red` and `y <Stoplight> := Stoplight`).
+                match obj.as_ref() {
+                    Object::EnumInstance { enum_name, .. } if enum_name == target => {
+                        return Ok(Rc::clone(obj));
+                    }
+                    Object::EnumDef { name, .. } if name == target => {
+                        return Ok(Rc::clone(obj));
+                    }
+                    _ => {}
                 }
                 Err(format!(
                     "cannot convert {} to {}",
@@ -877,6 +895,88 @@ impl Evaluator {
                     .set(name.value.clone(), Rc::clone(&struct_obj));
                 struct_obj
             }
+            Statement::EnumDef {
+                token,
+                name,
+                variants,
+            } => {
+                let mut resolved: Vec<EnumVariantDef> = Vec::new();
+                let mut next_auto: i64 = 0;
+                let mut seen_discriminants: Vec<i64> = Vec::new();
+                let mut seen_names: Vec<String> = Vec::new();
+                for variant in variants {
+                    if seen_names.iter().any(|n| n == &variant.name.value) {
+                        return self.runtime_error(
+                            token.span,
+                            &format!(
+                                "duplicate variant '{}' in enum {}",
+                                variant.name.value, name.value
+                            ),
+                            None,
+                        );
+                    }
+                    seen_names.push(variant.name.value.clone());
+                    let kind = match &variant.kind {
+                        VariantKind::Unit(None) => {
+                            let disc = next_auto;
+                            if seen_discriminants.contains(&disc) {
+                                return self.runtime_error(
+                                    token.span,
+                                    &format!(
+                                        "duplicate discriminant {} in enum {}",
+                                        disc, name.value
+                                    ),
+                                    Some("assign an explicit value to disambiguate"),
+                                );
+                            }
+                            seen_discriminants.push(disc);
+                            next_auto = disc + 1;
+                            EnumVariantKind::Unit(Some(Rc::new(Object::Integer(disc))))
+                        }
+                        VariantKind::Unit(Some(expr)) => {
+                            let val = self.eval_expression(expr, Rc::clone(&env));
+                            if val.is_error() {
+                                return val;
+                            }
+                            if let Object::Integer(i) = val.as_ref() {
+                                if seen_discriminants.contains(i) {
+                                    return self.runtime_error(
+                                        token.span,
+                                        &format!(
+                                            "duplicate discriminant {} in enum {}",
+                                            i, name.value
+                                        ),
+                                        None,
+                                    );
+                                }
+                                seen_discriminants.push(*i);
+                                next_auto = i + 1;
+                            }
+                            EnumVariantKind::Unit(Some(val))
+                        }
+                        VariantKind::Tuple(params) => EnumVariantKind::Tuple(
+                            params.iter().map(|(id, _)| id.value.clone()).collect(),
+                        ),
+                        VariantKind::Struct(fields) => EnumVariantKind::Struct(
+                            fields.iter().map(|f| f.name.value.clone()).collect(),
+                        ),
+                    };
+                    resolved.push(EnumVariantDef {
+                        name: variant.name.value.clone(),
+                        kind,
+                    });
+                }
+
+                let enum_obj = Rc::new(Object::EnumDef {
+                    name: name.value.clone(),
+                    variants: resolved,
+                });
+                self.enum_defs
+                    .insert(name.value.clone(), Rc::clone(&enum_obj));
+                env.borrow_mut()
+                    .set(name.value.clone(), Rc::clone(&enum_obj));
+                enum_obj
+            }
             Statement::ContainsDef {
                 token,
                 struct_name,
@@ -1025,10 +1125,38 @@ impl Evaluator {
                         }
                         val
                     }
+                    Object::Map(entries) => {
+                        let val = self.eval_expression(value, Rc::clone(&env));
+                        if val.is_error() {
+                            return val;
+                        }
+                        let var_name = match object {
+                            Expression::Ident(ident) => ident.value.clone(),
+                            _ => {
+                                return self.runtime_error(
+                                    token.span,
+                                    "dot assignment on a map requires a variable on the left side",
+                                    Some("use like: m.key = value"),
+                                );
+                            }
+                        };
+                        let mut new_entries = entries.clone();
+                        let key = Rc::new(Object::String(field.value.clone()));
+                        if let Some(entry) = new_entries.iter_mut().find(|(k, _)| *k == key) {
+                            entry.1 = val.clone();
+                        } else {
+                            new_entries.push((key, val.clone()));
+                        }
+                        let new_obj = Rc::new(Object::Map(new_entries));
+                        if env.borrow_mut().update(&var_name, new_obj).is_none() {
+                            env.borrow_mut().set(var_name, Rc::new(Object::None));
+                        }
+                        val
+                    }
                     _ => self.runtime_error(
                         token.span,
                         &format!("cannot assign field on non-struct: {}", obj.type_name()),
-                        Some("dot assignment is only supported on struct instances"),
+                        Some("dot assignment is only supported on struct instances and maps"),
                     ),
                 }
             }
@@ -1571,6 +1699,55 @@ impl Evaluator {
                     }
                 }
 
+                // Tuple-variant construction: `EnumName.Variant(args...)`.
+                // Dispatched pre-eval so the DotAccess handler's tuple-variant error
+                // doesn't fire.
+                if let Expression::DotAccess { left, field, .. } = function.as_ref() {
+                    if let Expression::Ident(ident) = left.as_ref() {
+                        if let Some(enum_obj) = self.enum_defs.get(&ident.value).cloned() {
+                            if let Object::EnumDef {
+                                name: enum_name,
+                                variants,
+                            } = enum_obj.as_ref()
+                            {
+                                if let Some(variant) =
+                                    variants.iter().find(|v| v.name == field.value)
+                                {
+                                    if let EnumVariantKind::Tuple(expected) = &variant.kind {
+                                        if args.len() != expected.len() {
+                                            return self.runtime_error(
+                                                call_token.span,
+                                                &format!(
+                                                    "tuple variant {}.{} expects {} arguments, got {}",
+                                                    enum_name,
+                                                    field.value,
+                                                    expected.len(),
+                                                    args.len()
+                                                ),
+                                                None,
+                                            );
+                                        }
+                                        let mut resolved: Vec<Rc<Object>> = Vec::new();
+                                        for arg in args {
+                                            let val =
+                                                self.eval_expression(arg, Rc::clone(&env));
+                                            if val.is_error() {
+                                                return val;
+                                            }
+                                            resolved.push(val);
+                                        }
+                                        return Rc::new(Object::EnumInstance {
+                                            enum_name: enum_name.clone(),
+                                            variant_name: field.value.clone(),
+                                            payload: EnumPayload::Tuple(resolved),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let func = self.eval_expression(function, Rc::clone(&env));
                 if func.is_error() {
                     return func;
@@ -1794,6 +1971,121 @@ impl Evaluator {
                         "value" => Rc::clone(val),
                         _ => Self::error_object(format!("value has no field '{}'", field.value)),
                     },
+                    Object::EnumDef { name, variants } => {
+                        let variant = variants.iter().find(|v| v.name == field.value);
+                        match variant {
+                            Some(v) => match &v.kind {
+                                EnumVariantKind::Unit(disc) => Rc::new(Object::EnumInstance {
+                                    enum_name: name.clone(),
+                                    variant_name: v.name.clone(),
+                                    payload: EnumPayload::Unit(disc.clone()),
+                                }),
+                                EnumVariantKind::Tuple(_) => self.runtime_error(
+                                    field.token.span,
+                                    &format!(
+                                        "variant '{}' of enum {} requires arguments",
+                                        v.name, name
+                                    ),
+                                    Some("use EnumName.Variant(args) to construct tuple variants"),
+                                ),
+                                EnumVariantKind::Struct(_) => self.runtime_error(
+                                    field.token.span,
+                                    &format!(
+                                        "variant '{}' of enum {} requires struct fields",
+                                        v.name, name
+                                    ),
+                                    Some("use EnumName.Variant { field: value } to construct struct variants"),
+                                ),
+                            },
+                            None => self.runtime_error(
+                                field.token.span,
+                                &format!("enum {} has no variant '{}'", name, field.value),
+                                None,
+                            ),
+                        }
+                    }
+                    Object::EnumInstance {
+                        enum_name,
+                        variant_name,
+                        payload,
+                    } => match field.value.as_str() {
+                        "name" => Rc::new(Object::String(variant_name.clone())),
+                        "value" => match payload {
+                            EnumPayload::Unit(Some(v)) => Rc::clone(v),
+                            EnumPayload::Unit(None) => Rc::new(Object::None),
+                            _ => self.runtime_error(
+                                field.token.span,
+                                ".value is only defined for unit variants",
+                                None,
+                            ),
+                        },
+                        other => match payload {
+                            EnumPayload::Tuple(items) => {
+                                let idx_opt = if let Ok(idx) = other.parse::<usize>() {
+                                    Some(idx)
+                                } else {
+                                    // Named field on tuple variant: look up index
+                                    // in the enum definition.
+                                    self.enum_defs.get(enum_name).and_then(|def| {
+                                        if let Object::EnumDef { variants, .. } = def.as_ref() {
+                                            variants
+                                                .iter()
+                                                .find(|v| &v.name == variant_name)
+                                                .and_then(|v| match &v.kind {
+                                                    EnumVariantKind::Tuple(names) => names
+                                                        .iter()
+                                                        .position(|n| n == other),
+                                                    _ => None,
+                                                })
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                };
+                                match idx_opt.and_then(|i| items.get(i)) {
+                                    Some(v) => Rc::clone(v),
+                                    None => self.runtime_error(
+                                        field.token.span,
+                                        &format!(
+                                            "tuple variant {}.{} has no field '{}'",
+                                            enum_name, variant_name, other
+                                        ),
+                                        None,
+                                    ),
+                                }
+                            }
+                            EnumPayload::Struct(fields) => {
+                                match fields.iter().find(|(k, _)| k == other) {
+                                    Some((_, v)) => Rc::clone(v),
+                                    None => self.runtime_error(
+                                        field.token.span,
+                                        &format!(
+                                            "struct variant {}.{} has no field '{}'",
+                                            enum_name, variant_name, other
+                                        ),
+                                        None,
+                                    ),
+                                }
+                            }
+                            EnumPayload::Unit(_) => self.runtime_error(
+                                field.token.span,
+                                &format!(
+                                    "unit variant {}.{} has no field '{}'",
+                                    enum_name, variant_name, other
+                                ),
+                                Some("use .name or .value on unit variants"),
+                            ),
+                        },
+                    },
+                    Object::Map(entries) => {
+                        let key = Rc::new(Object::String(field.value.clone()));
+                        for (k, v) in entries {
+                            if k == &key {
+                                return Rc::clone(v);
+                            }
+                        }
+                        Rc::new(Object::None)
+                    }
                     _ => self.runtime_error(
                         dot_token.span,
                         &format!(
@@ -1802,7 +2094,7 @@ impl Evaluator {
                             obj.type_name()
                         ),
                         Some(
-                            "dot access is only supported on structs, modules, errors, and values",
+                            "dot access is only supported on structs, enums, modules, maps, errors, and values",
                         ),
                     ),
                 }
@@ -1900,6 +2192,136 @@ impl Evaluator {
                     return Rc::clone(&elems[0]);
                 }
                 Rc::new(Object::Tuple(elems))
+            }
+
+            Expression::EnumVariantConstruct {
+                token,
+                enum_name,
+                variant_name,
+                kind,
+            } => {
+                let enum_obj = match self.enum_defs.get(enum_name).cloned() {
+                    Some(e) => e,
+                    None => {
+                        return self.runtime_error(
+                            token.span,
+                            &format!("enum '{}' is not defined", enum_name),
+                            None,
+                        );
+                    }
+                };
+                let variants = if let Object::EnumDef { variants, .. } = enum_obj.as_ref() {
+                    variants.clone()
+                } else {
+                    return self.runtime_error(
+                        token.span,
+                        &format!("'{}' is not an enum", enum_name),
+                        None,
+                    );
+                };
+                let variant = match variants.iter().find(|v| &v.name == variant_name) {
+                    Some(v) => v,
+                    None => {
+                        return self.runtime_error(
+                            token.span,
+                            &format!(
+                                "enum {} has no variant '{}'",
+                                enum_name, variant_name
+                            ),
+                            None,
+                        );
+                    }
+                };
+                match (kind, &variant.kind) {
+                    (
+                        crate::ast::EnumConstructKind::Struct(fields_given),
+                        EnumVariantKind::Struct(expected_fields),
+                    ) => {
+                        if fields_given.len() != expected_fields.len() {
+                            return self.runtime_error(
+                                token.span,
+                                &format!(
+                                    "struct variant {}.{} expects {} fields, got {}",
+                                    enum_name,
+                                    variant_name,
+                                    expected_fields.len(),
+                                    fields_given.len()
+                                ),
+                                None,
+                            );
+                        }
+                        let mut resolved: Vec<(String, Rc<Object>)> = Vec::new();
+                        for (fname, fexpr) in fields_given {
+                            if !expected_fields.contains(fname) {
+                                return self.runtime_error(
+                                    token.span,
+                                    &format!(
+                                        "struct variant {}.{} has no field '{}'",
+                                        enum_name, variant_name, fname
+                                    ),
+                                    None,
+                                );
+                            }
+                            let val = self.eval_expression(fexpr, Rc::clone(&env));
+                            if val.is_error() {
+                                return val;
+                            }
+                            resolved.push((fname.clone(), val));
+                        }
+                        Rc::new(Object::EnumInstance {
+                            enum_name: enum_name.clone(),
+                            variant_name: variant_name.clone(),
+                            payload: EnumPayload::Struct(resolved),
+                        })
+                    }
+                    (crate::ast::EnumConstructKind::Struct(_), _) => self.runtime_error(
+                        token.span,
+                        &format!(
+                            "variant {}.{} is not a struct variant",
+                            enum_name, variant_name
+                        ),
+                        None,
+                    ),
+                    (
+                        crate::ast::EnumConstructKind::Tuple(args_given),
+                        EnumVariantKind::Tuple(expected),
+                    ) => {
+                        if args_given.len() != expected.len() {
+                            return self.runtime_error(
+                                token.span,
+                                &format!(
+                                    "tuple variant {}.{} expects {} arguments, got {}",
+                                    enum_name,
+                                    variant_name,
+                                    expected.len(),
+                                    args_given.len()
+                                ),
+                                None,
+                            );
+                        }
+                        let mut resolved: Vec<Rc<Object>> = Vec::new();
+                        for arg in args_given {
+                            let val = self.eval_expression(arg, Rc::clone(&env));
+                            if val.is_error() {
+                                return val;
+                            }
+                            resolved.push(val);
+                        }
+                        Rc::new(Object::EnumInstance {
+                            enum_name: enum_name.clone(),
+                            variant_name: variant_name.clone(),
+                            payload: EnumPayload::Tuple(resolved),
+                        })
+                    }
+                    (crate::ast::EnumConstructKind::Tuple(_), _) => self.runtime_error(
+                        token.span,
+                        &format!(
+                            "variant {}.{} is not a tuple variant",
+                            enum_name, variant_name
+                        ),
+                        None,
+                    ),
+                }
             }
 
             Expression::MapLiteral { entries, .. } => {

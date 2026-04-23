@@ -37,6 +37,10 @@ pub enum Value {
     StructDef(Rc<ObjStructDef>),
     StructInstance(Rc<ObjStructInstance>),
 
+    // Enums
+    EnumDef(Rc<ObjEnumDef>),
+    EnumInstance(Rc<ObjEnumInstance>),
+
     // Module
     Module(Rc<ObjModule>),
 
@@ -111,6 +115,39 @@ pub struct ObjStructInstance {
     pub fields: RefCell<HashMap<String, Value>>,
 }
 
+#[derive(Debug, Clone)]
+pub enum VmEnumVariantKind {
+    Unit(Option<Value>),
+    Tuple(Vec<String>),
+    Struct(Vec<String>),
+}
+
+#[derive(Debug, Clone)]
+pub struct VmEnumVariantDef {
+    pub name: String,
+    pub kind: VmEnumVariantKind,
+}
+
+#[derive(Debug)]
+pub struct ObjEnumDef {
+    pub name: String,
+    pub variants: Vec<VmEnumVariantDef>,
+}
+
+#[derive(Debug, Clone)]
+pub enum VmEnumPayload {
+    Unit(Option<Value>),
+    Tuple(Vec<Value>),
+    Struct(Vec<(String, Value)>),
+}
+
+#[derive(Debug)]
+pub struct ObjEnumInstance {
+    pub enum_name: String,
+    pub variant_name: String,
+    pub payload: VmEnumPayload,
+}
+
 /// A loaded module.
 #[derive(Debug)]
 pub struct ObjModule {
@@ -140,6 +177,8 @@ impl Value {
             Value::Tuple(t) => !t.is_empty(),
             Value::Map(m) => !m.borrow().is_empty(),
             Value::Set(s) => !s.borrow().is_empty(),
+            Value::EnumDef(_) => true,
+            Value::EnumInstance(_) => true,
             _ => true,
         }
     }
@@ -170,6 +209,8 @@ impl Value {
             Value::ErrorValue { .. } => "ERROR",
             Value::Wrapped(_) => "VALUE",
             Value::Error(_) => "ERROR",
+            Value::EnumDef(_) => "ENUM_DEF",
+            Value::EnumInstance(_) => "ENUM",
         }
     }
 
@@ -181,6 +222,8 @@ impl Value {
                 None => "ERROR".to_string(),
             },
             Value::Wrapped(_) => "VALUE".to_string(),
+            Value::EnumDef(d) => d.name.clone(),
+            Value::EnumInstance(i) => i.enum_name.clone(),
             other => other.type_name().to_string(),
         }
     }
@@ -243,6 +286,21 @@ impl fmt::Display for Value {
             },
             Value::Wrapped(val) => write!(f, "Value({})", val),
             Value::Error(msg) => write!(f, "Error: {}", msg),
+            Value::EnumDef(d) => write!(f, "enum {}", d.name),
+            Value::EnumInstance(i) => match &i.payload {
+                VmEnumPayload::Unit(_) => write!(f, "{}.{}", i.enum_name, i.variant_name),
+                VmEnumPayload::Tuple(items) => {
+                    let s: Vec<String> = items.iter().map(|v| v.to_string()).collect();
+                    write!(f, "{}.{}({})", i.enum_name, i.variant_name, s.join(", "))
+                }
+                VmEnumPayload::Struct(fields) => {
+                    let s: Vec<String> = fields
+                        .iter()
+                        .map(|(k, v)| format!("{}: {}", k, v))
+                        .collect();
+                    write!(f, "{}.{} {{ {} }}", i.enum_name, i.variant_name, s.join(", "))
+                }
+            },
         }
     }
 }
@@ -274,6 +332,14 @@ impl fmt::Debug for Value {
             }
             Value::Wrapped(v) => write!(f, "Wrapped({:?})", v),
             Value::Error(msg) => write!(f, "Error({:?})", msg),
+            Value::EnumDef(d) => write!(f, "EnumDef({})", d.name),
+            Value::EnumInstance(i) => {
+                write!(
+                    f,
+                    "EnumInstance({}, {}, {:?})",
+                    i.enum_name, i.variant_name, i.payload
+                )
+            }
         }
     }
 }
@@ -306,7 +372,31 @@ impl PartialEq for Value {
                 a.struct_name == b.struct_name && *a.fields.borrow() == *b.fields.borrow()
             }
             (Value::Module(a), Value::Module(b)) => a.name == b.name,
+            (Value::EnumDef(a), Value::EnumDef(b)) => a.name == b.name,
+            (Value::EnumInstance(a), Value::EnumInstance(b)) => {
+                a.enum_name == b.enum_name
+                    && a.variant_name == b.variant_name
+                    && payload_eq(&a.payload, &b.payload)
+            }
             _ => false,
         }
+    }
+}
+
+fn payload_eq(a: &VmEnumPayload, b: &VmEnumPayload) -> bool {
+    match (a, b) {
+        (VmEnumPayload::Unit(av), VmEnumPayload::Unit(bv)) => match (av, bv) {
+            (Some(x), Some(y)) => x == y,
+            (None, None) => true,
+            _ => false,
+        },
+        (VmEnumPayload::Tuple(x), VmEnumPayload::Tuple(y)) => x == y,
+        (VmEnumPayload::Struct(x), VmEnumPayload::Struct(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y.iter())
+                    .all(|((ak, av), (bk, bv))| ak == bk && av == bv)
+        }
+        _ => false,
     }
 }

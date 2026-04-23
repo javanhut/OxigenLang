@@ -109,6 +109,7 @@ Parser contains {
     self.parse_args()
     self.process_args()
   }
+
 }
 
 
@@ -116,6 +117,6 @@ main {
   parser <Parser>
   parser.define_flag(verbose_name="name", alias="n")
   parser.handle_args()
-  name, short_name := parser.args_map["name"], parser.args_map["n"]
+  name, short_name := parser.args_map.name, parser.args_map.n
   println("Welcome {name}")
 }

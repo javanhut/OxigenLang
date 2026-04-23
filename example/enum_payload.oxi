@@ -1,0 +1,16 @@
+enum Shape {
+    Circle(radius <float>)
+    Rectangle { w <float>, h <float> }
+    Unit
+}
+
+c := Shape.Circle(1.5)
+println(c)
+println(c.radius)
+println(c.0)
+r := Shape.Rectangle { w: 3.0, h: 4.0 }
+println(r)
+println(r.w, r.h)
+u := Shape.Unit
+println(u)
+println(u.name)

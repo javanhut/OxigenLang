@@ -19,6 +19,7 @@ pub enum TypeAnnotation {
     ValueType,
     Union(Vec<TypeAnnotation>),
     Struct(String),
+    EnumGeneric,
 }
 
 impl TypeAnnotation {
@@ -39,6 +40,7 @@ impl TypeAnnotation {
             "None" => Some(TypeAnnotation::NoneType),
             "Error" => Some(TypeAnnotation::ErrorType(None)),
             "Value" => Some(TypeAnnotation::ValueType),
+            "Enum" => Some(TypeAnnotation::EnumGeneric),
             _ => None,
         }
     }
@@ -76,6 +78,7 @@ impl TypeAnnotation {
                 .collect::<Vec<_>>()
                 .join(" || "),
             TypeAnnotation::Struct(name) => name.clone(),
+            TypeAnnotation::EnumGeneric => "ENUM".to_string(),
         }
     }
 }
@@ -146,6 +149,11 @@ pub enum Statement {
         parent: Option<Identifier>,
         fields: Vec<StructField>,
     },
+    EnumDef {
+        token: Token,
+        name: Identifier,
+        variants: Vec<EnumVariant>,
+    },
     ContainsDef {
         token: Token,
         struct_name: Identifier,
@@ -206,6 +214,25 @@ pub struct StructField {
     pub name: Identifier,
     pub type_ann: TypeAnnotation,
     pub hidden: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumVariant {
+    pub name: Identifier,
+    pub kind: VariantKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum VariantKind {
+    Unit(Option<Expression>),
+    Tuple(Vec<(Identifier, TypeAnnotation)>),
+    Struct(Vec<StructField>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnumConstructKind {
+    Tuple(Vec<Expression>),
+    Struct(Vec<(String, Expression)>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -296,6 +323,12 @@ pub enum Expression {
         token: Token,
         struct_name: String,
         field_values: Vec<(String, Expression)>,
+    },
+    EnumVariantConstruct {
+        token: Token,
+        enum_name: String,
+        variant_name: String,
+        kind: EnumConstructKind,
     },
     DotAccess {
         token: Token,

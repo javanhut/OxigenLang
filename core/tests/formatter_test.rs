@@ -184,3 +184,31 @@ fn test_format_top_level_sections() {
     let expected = "introduce os\nintroduce strings\n\nx := 1\ny := 2\n\nfun first() { x }\n\nfun second() { y }\n";
     assert_eq!(format_source(input), expected);
 }
+
+#[test]
+fn test_format_enum_unit_variants() {
+    let input = "enum Stoplight {\nRed: 0\nYellow: 1\nGreen: 2\n}";
+    let expected = "enum Stoplight {\n    Red: 0\n    Yellow: 1\n    Green: 2\n}\n";
+    assert_eq!(format_source(input), expected);
+}
+
+#[test]
+fn test_format_enum_auto_variants() {
+    let input = "enum Direction { North, East, South, West }";
+    let expected = "enum Direction {\n    North\n    East\n    South\n    West\n}\n";
+    assert_eq!(format_source(input), expected);
+}
+
+#[test]
+fn test_format_enum_payload_variants() {
+    let input = "enum Shape {\nCircle(radius <float>)\nRectangle { w <float>, h <float> }\nUnit\n}";
+    let expected = "enum Shape {\n    Circle(radius <float>)\n    Rectangle { w <float>, h <float> }\n    Unit\n}\n";
+    assert_eq!(format_source(input), expected);
+}
+
+#[test]
+fn test_format_enum_variant_construct_struct() {
+    let input = "s := Shape.Rectangle{w:3.0,h:4.0}";
+    let expected = "s := Shape.Rectangle { w: 3.0, h: 4.0 }\n";
+    assert_eq!(format_source(input), expected);
+}
