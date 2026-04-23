@@ -578,9 +578,9 @@ impl VM {
                     "check the module's public API for available members",
                 )),
             },
-            Value::ErrorValue { msg, tag } => match fname.as_ref() {
-                "msg" => Ok(Value::String(Rc::clone(msg))),
-                "tag" => Ok(match tag {
+            Value::ErrorValue(data) => match fname.as_ref() {
+                "msg" => Ok(Value::String(Rc::clone(&data.msg))),
+                "tag" => Ok(match &data.tag {
                     Some(t) => Value::String(Rc::clone(t)),
                     None => Value::None,
                 }),
@@ -1616,16 +1616,16 @@ impl VM {
                         } else {
                             format!("{}", tag).into()
                         };
-                        self.push(Value::ErrorValue {
+                        self.push(Value::ErrorValue(Rc::new(ErrorValueData {
                             msg: format!("{}", value).into(),
                             tag: Some(tag_str),
-                        });
+                        })));
                     } else {
                         let value = self.pop();
-                        self.push(Value::ErrorValue {
+                        self.push(Value::ErrorValue(Rc::new(ErrorValueData {
                             msg: format!("{}", value).into(),
                             tag: None,
-                        });
+                        })));
                     }
                 }
 
@@ -1642,7 +1642,7 @@ impl VM {
                     let binding_name = self.frames[frame_idx].read_constant(binding_idx).clone();
 
                     let value = self.peek(0).clone();
-                    if let Value::ErrorValue { .. } = &value {
+                    if let Value::ErrorValue(_) = &value {
                         // Error case: bind the error value, jump to fallback
                         if let Value::String(name) = binding_name {
                             self.globals.insert(name.to_string(), value);
@@ -1656,9 +1656,9 @@ impl VM {
                 OpCode::Fail => {
                     let value = self.pop();
                     match value {
-                        Value::ErrorValue { msg, .. } => {
+                        Value::ErrorValue(data) => {
                             return Err(VMError {
-                                message: msg.to_string(),
+                                message: data.msg.to_string(),
                                 line: self.current_line(),
                             });
                         }
@@ -3246,10 +3246,10 @@ impl VM {
                         }
                     });
                     let final_tag = tag.or(default_tag);
-                    return Ok(Value::ErrorValue {
+                    return Ok(Value::ErrorValue(Rc::new(ErrorValueData {
                         msg: msg.into(),
                         tag: final_tag.map(|t| t.into()),
-                    });
+                    })));
                 } else {
                     return Ok(Value::Wrapped(Rc::new(value)));
                 }
@@ -3273,10 +3273,10 @@ impl VM {
             "VALUE" => Ok(Value::Wrapped(Rc::new(value))),
             "ERROR" => {
                 if let Some((tag, msg)) = Self::error_info_from_value(&value) {
-                    Ok(Value::ErrorValue {
+                    Ok(Value::ErrorValue(Rc::new(ErrorValueData {
                         msg: msg.into(),
                         tag: tag.map(|t| t.into()),
-                    })
+                    })))
                 } else {
                     Err(self
                         .runtime_error(&format!("cannot convert {} to ERROR", value.type_name())))
@@ -3286,10 +3286,10 @@ impl VM {
                 let wanted_tag = &t[6..t.len() - 1];
                 if let Some((tag, msg)) = Self::error_info_from_value(&value) {
                     if tag.as_deref() == Some(wanted_tag) {
-                        Ok(Value::ErrorValue {
+                        Ok(Value::ErrorValue(Rc::new(ErrorValueData {
                             msg: msg.into(),
                             tag: Some(wanted_tag.into()),
-                        })
+                        })))
                     } else {
                         Err(self.runtime_error(&format!(
                             "cannot convert ERROR<{}> to ERROR<{}>",
@@ -3312,8 +3312,8 @@ impl VM {
     /// Extract error info from a value (tag, message).
     fn error_info_from_value(value: &Value) -> Option<(Option<String>, String)> {
         match value {
-            Value::ErrorValue { msg, tag } => {
-                Some((tag.as_ref().map(|t| t.to_string()), msg.to_string()))
+            Value::ErrorValue(data) => {
+                Some((data.tag.as_ref().map(|t| t.to_string()), data.msg.to_string()))
             }
             Value::Error(msg) => Some((None, msg.to_string())),
             _ => None,

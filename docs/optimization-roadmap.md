@@ -468,6 +468,8 @@ Record each task's outcome here. Keep terse.
 | Date | Task | Outcome | Notes |
 | --- | --- | --- | --- |
 | 2026-04-23 | Tier-2 Phase 4 (pre-roadmap) | ✅ landed | bench_struct_method 186 → 22 ms, 8.6× win. Merged as `cde4235` + `ca1ab10` + `86fdfd0` on `oxigen-jit`. |
+| 2026-04-23 | A1.0 NaN-box encoding module | ✅ landed | Foundation only — 8 B `NanValue` type + 16 tests, not yet wired in. Committed `e90032f` on `opt/a1-nanbox`. |
+| 2026-04-23 | A1.1a Box `ErrorValue` (40 → 24 B Value) | ✅ landed (intermediate) | Small net positive: fib −9%, closure −7%, arith −7% on controlled runs; bench_loop +4% regression (microarch, not code); struct_method unchanged. Geomean ~3% win. Not the full A1 gate, but a stepping stone toward the 16 B and 8 B targets — the 32 B `ErrorValue{msg,tag}` inline variant was the single biggest size driver. |
 
 ---
 

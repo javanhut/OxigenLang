@@ -1,4 +1,4 @@
-use crate::vm::value::Value;
+use crate::vm::value::{ErrorValueData, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -333,18 +333,18 @@ fn builtin_error(args: Vec<Value>) -> Value {
     match args.len() {
         1 => {
             let msg = format!("{}", args[0]);
-            Value::ErrorValue {
+            Value::ErrorValue(Rc::new(ErrorValueData {
                 msg: msg.into(),
                 tag: None,
-            }
+            }))
         }
         2 => {
             let msg = format!("{}", args[0]);
             let tag = format!("{}", args[1]);
-            Value::ErrorValue {
+            Value::ErrorValue(Rc::new(ErrorValueData {
                 msg: msg.into(),
                 tag: Some(tag.into()),
-            }
+            }))
         }
         _ => Value::Error("error() takes 1 or 2 arguments".into()),
     }
@@ -361,7 +361,7 @@ fn builtin_is_error(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error("is_error() takes exactly 1 argument".into());
     }
-    Value::Boolean(matches!(args[0], Value::ErrorValue { .. }))
+    Value::Boolean(matches!(args[0], Value::ErrorValue(_)))
 }
 
 fn builtin_keys(args: Vec<Value>) -> Value {
@@ -763,10 +763,10 @@ fn builtin_read_file(args: Vec<Value>) -> Value {
     match &args[0] {
         Value::String(path) => match std::fs::read_to_string(path.as_ref()) {
             Ok(contents) => Value::String(contents.into()),
-            Err(e) => Value::ErrorValue {
+            Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
                 msg: format!("{}", e).into(),
                 tag: Some("IO".into()),
-            },
+            })),
         },
         _ => Value::Error("__read_file() requires a string path".into()),
     }
@@ -780,10 +780,10 @@ fn builtin_write_file(args: Vec<Value>) -> Value {
         (Value::String(path), Value::String(content)) => {
             match std::fs::write(path.as_ref(), content.as_ref()) {
                 Ok(_) => Value::None,
-                Err(e) => Value::ErrorValue {
+                Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
                     msg: format!("{}", e).into(),
                     tag: Some("IO".into()),
-                },
+                })),
             }
         }
         _ => Value::Error("__write_file() requires (string, string)".into()),
@@ -804,15 +804,15 @@ fn builtin_append_file(args: Vec<Value>) -> Value {
             {
                 Ok(mut f) => match f.write_all(content.as_bytes()) {
                     Ok(_) => Value::None,
-                    Err(e) => Value::ErrorValue {
+                    Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
                         msg: format!("{}", e).into(),
                         tag: Some("IO".into()),
-                    },
+                    })),
                 },
-                Err(e) => Value::ErrorValue {
+                Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
                     msg: format!("{}", e).into(),
                     tag: Some("IO".into()),
-                },
+                })),
             }
         }
         _ => Value::Error("__append_file() requires (string, string)".into()),
@@ -970,10 +970,10 @@ fn builtin_list_dir(args: Vec<Value>) -> Value {
                     .collect();
                 Value::Array(Rc::new(RefCell::new(items)))
             }
-            Err(e) => Value::ErrorValue {
+            Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
                 msg: format!("{}", e).into(),
                 tag: Some("IO".into()),
-            },
+            })),
         },
         _ => Value::Error("__list_dir() requires a string".into()),
     }
@@ -1011,10 +1011,10 @@ fn builtin_mkdir(args: Vec<Value>) -> Value {
     match &args[0] {
         Value::String(path) => match std::fs::create_dir_all(path.as_ref()) {
             Ok(_) => Value::None,
-            Err(e) => Value::ErrorValue {
+            Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
                 msg: format!("{}", e).into(),
                 tag: Some("IO".into()),
-            },
+            })),
         },
         _ => Value::Error("__mkdir() requires a string".into()),
     }
@@ -1027,10 +1027,10 @@ fn builtin_rmdir(args: Vec<Value>) -> Value {
     match &args[0] {
         Value::String(path) => match std::fs::remove_dir_all(path.as_ref()) {
             Ok(_) => Value::None,
-            Err(e) => Value::ErrorValue {
+            Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
                 msg: format!("{}", e).into(),
                 tag: Some("IO".into()),
-            },
+            })),
         },
         _ => Value::Error("__rmdir() requires a string".into()),
     }
@@ -1043,10 +1043,10 @@ fn builtin_remove_file(args: Vec<Value>) -> Value {
     match &args[0] {
         Value::String(path) => match std::fs::remove_file(path.as_ref()) {
             Ok(_) => Value::None,
-            Err(e) => Value::ErrorValue {
+            Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
                 msg: format!("{}", e).into(),
                 tag: Some("IO".into()),
-            },
+            })),
         },
         _ => Value::Error("__remove() requires a string".into()),
     }

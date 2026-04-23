@@ -69,12 +69,16 @@ mod layout_tests {
     /// the stack-capacity memory footprint (STACK_MAX * VALUE_SIZE).
     /// Any move off 40 is a perf event worth rebenchmarking.
     ///
-    /// 40 is dictated by `ErrorValue { msg: Rc<str>, tag: Option<Rc<str>> }`
-    /// — two 16-byte fat pointers + discriminant padded to alignment.
+    /// 24 is dictated by `String(Rc<str>)` and `Error(Rc<str>)` — both
+    /// fat pointers at 16 B plus the discriminant + alignment padding.
+    /// (A1.1a of the optimization roadmap shrank this from 40 to 24 by
+    /// boxing the inline `ErrorValue { msg, tag }` variant. A1.1b drops
+    /// it further to 16 by converting the two remaining Rc<str> to
+    /// Rc<String>; eventual target is 8 via NaN-box, roadmap A1.2+.)
     #[test]
-    fn value_size_is_pinned_at_40() {
+    fn value_size_is_pinned_at_24() {
         assert_eq!(
-            VALUE_SIZE, 40,
+            VALUE_SIZE, 24,
             "VALUE_SIZE is baked into JIT inline stack ops. A change \
              here requires rebenching the bench suite and auditing \
              the emit_inline_* functions in engine.rs."
@@ -339,14 +343,22 @@ pub enum Value {
     Module(Rc<ObjModule>),
 
     // Error handling
-    ErrorValue {
-        msg: Rc<str>,
-        tag: Option<Rc<str>>,
-    },
+    /// Boxed to keep `Value` down to 24 bytes. The inline form would
+    /// carry two `Rc<str>` fat pointers (32 B) which dominated the enum
+    /// size. See `docs/optimization-roadmap.md` A1 for the broader plan.
+    ErrorValue(Rc<ErrorValueData>),
     /// Value(...) wrapper (success side of error handling)
     Wrapped(Rc<Value>),
     /// Terminal error — stops execution
     Error(Rc<str>),
+}
+
+/// Boxed payload of `Value::ErrorValue`. Kept off the enum so `Value`
+/// stays small; cloned by `Rc::clone` on every enum clone.
+#[derive(Debug, Clone)]
+pub struct ErrorValueData {
+    pub msg: Rc<str>,
+    pub tag: Option<Rc<str>>,
 }
 
 /// A compiled function (not yet a closure — no captured upvalues).
@@ -660,7 +672,7 @@ impl Value {
     pub fn effective_type_name(&self) -> String {
         match self {
             Value::StructInstance(inst) => inst.struct_name.clone(),
-            Value::ErrorValue { tag, .. } => match tag {
+            Value::ErrorValue(data) => match &data.tag {
                 Some(tag) => format!("ERROR<{}>", tag),
                 None => "ERROR".to_string(),
             },
@@ -727,9 +739,9 @@ impl fmt::Display for Value {
             Value::Module(m) => write!(f, "module <{}>", m.name),
             Value::Builtin(_) => write!(f, "builtin function"),
             Value::None => write!(f, "None"),
-            Value::ErrorValue { msg, tag } => match tag {
-                Some(tag) => write!(f, "Error {{ tag: {}, msg: {} }}", tag, msg),
-                None => write!(f, "Error {{ msg: {} }}", msg),
+            Value::ErrorValue(data) => match &data.tag {
+                Some(tag) => write!(f, "Error {{ tag: {}, msg: {} }}", tag, data.msg),
+                None => write!(f, "Error {{ msg: {} }}", data.msg),
             },
             Value::Wrapped(val) => write!(f, "Value({})", val),
             Value::Error(msg) => write!(f, "Error: {}", msg),
@@ -779,8 +791,8 @@ impl fmt::Debug for Value {
             Value::Module(m) => write!(f, "Module({})", m.name),
             Value::Builtin(_) => write!(f, "Builtin"),
             Value::None => write!(f, "None"),
-            Value::ErrorValue { msg, tag } => {
-                write!(f, "ErrorValue(tag={:?}, msg={:?})", tag, msg)
+            Value::ErrorValue(data) => {
+                write!(f, "ErrorValue(tag={:?}, msg={:?})", data.tag, data.msg)
             }
             Value::Wrapped(v) => write!(f, "Wrapped({:?})", v),
             Value::Error(msg) => write!(f, "Error({:?})", msg),
@@ -815,8 +827,8 @@ impl PartialEq for Value {
                 let b = b.borrow();
                 a.len() == b.len() && a.iter().all(|item| b.iter().any(|bitem| item == bitem))
             }
-            (Value::ErrorValue { msg: a, tag: at }, Value::ErrorValue { msg: b, tag: bt }) => {
-                a == b && at == bt
+            (Value::ErrorValue(a), Value::ErrorValue(b)) => {
+                a.msg == b.msg && a.tag == b.tag
             }
             (Value::Wrapped(a), Value::Wrapped(b)) => a == b,
             (Value::StructInstance(a), Value::StructInstance(b)) => {
