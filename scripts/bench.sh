@@ -27,6 +27,21 @@ BENCH_DIR="$REPO_ROOT/example"
 REPORT_DIR="$REPO_ROOT/benchmark_reports"
 OXIGEN_BIN="${OXIGEN_BIN:-$REPO_ROOT/target/release/oxigen}"
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python3)}"
+BUN_BIN="${BUN_BIN:-$(command -v bun 2>/dev/null || true)}"
+NODE_BIN="${NODE_BIN:-$(command -v node 2>/dev/null || true)}"
+
+# Node ≥ 22 runs .ts files with built-in type-stripping. Older versions
+# require --experimental-strip-types. Default to off; probe at runtime.
+NODE_TS_ARGS=()
+if [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]]; then
+    # Build a tiny .ts file in /tmp and see if node chokes without the flag.
+    _tmp_ts="$(mktemp --suffix=.ts)"
+    printf 'const x: number = 1; x;\n' > "$_tmp_ts"
+    if ! "$NODE_BIN" "$_tmp_ts" >/dev/null 2>&1; then
+        NODE_TS_ARGS=(--experimental-strip-types)
+    fi
+    rm -f "$_tmp_ts"
+fi
 
 # Optional CPU pinning (mirrors scripts/bench.py's OXIGEN_BENCH_CPU).
 TASKSET_PREFIX=()
@@ -54,6 +69,7 @@ discover_benchmarks() {
             local stem="$name"
             stem="${stem%.oxi}"
             stem="${stem%.py}"
+            stem="${stem%.ts}"
             local oxi_file="$BENCH_DIR/${stem##*/}.oxi"
             local py_file="$BENCH_DIR/${stem##*/}.py"
             [[ -f "$oxi_file" ]] || die "missing .oxi: $oxi_file"
@@ -71,47 +87,85 @@ discover_benchmarks() {
     fi
 }
 
-# Run one hyperfine invocation against four commands, emitting a JSON
-# results file. hyperfine handles warmups, timed runs, and stats.
+# True if a TypeScript peer exists for $1.
+has_ts_peer() {
+    local stem=$1
+    [[ -f "$BENCH_DIR/$stem.ts" ]]
+}
+
+has_bun_ts() {
+    local stem=$1
+    has_ts_peer "$stem" && [[ -n "$BUN_BIN" && -x "$BUN_BIN" ]]
+}
+
+has_node_ts() {
+    local stem=$1
+    has_ts_peer "$stem" && [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]]
+}
+
+# Run one hyperfine invocation against four or five commands, emitting
+# a JSON results file. hyperfine handles warmups, timed runs, and stats.
+# The `bun` (TypeScript) entry is included only when a .ts peer and a
+# bun runtime are both available.
 run_one_benchmark() {
     local stem=$1
     local oxi_file="$BENCH_DIR/$stem.oxi"
     local py_file="$BENCH_DIR/$stem.py"
+    local ts_file="$BENCH_DIR/$stem.ts"
     local out_json="$REPORT_DIR/${stem}.native.json"
 
     echo "=== $stem ==="
+    local cmds=(
+        -n "oxigen --no-jit" "${TASKSET_PREFIX[*]} $OXIGEN_BIN --no-jit $oxi_file"
+        -n "oxigen default"  "${TASKSET_PREFIX[*]} $OXIGEN_BIN $oxi_file"
+        -n "oxigen --jit"    "${TASKSET_PREFIX[*]} $OXIGEN_BIN --jit $oxi_file"
+        -n "python3"         "${TASKSET_PREFIX[*]} $PYTHON_BIN $py_file"
+    )
+    if has_bun_ts "$stem"; then
+        cmds+=(-n "bun (ts)"  "${TASKSET_PREFIX[*]} $BUN_BIN run $ts_file")
+    fi
+    if has_node_ts "$stem"; then
+        cmds+=(-n "node (ts)" "${TASKSET_PREFIX[*]} $NODE_BIN ${NODE_TS_ARGS[*]} $ts_file")
+    fi
     hyperfine \
         --warmup "$WARMUPS" \
         --runs "$RUNS" \
         --shell=none \
         --export-json "$out_json" \
         --style=basic \
-        -n "oxigen --no-jit" "${TASKSET_PREFIX[@]} $OXIGEN_BIN --no-jit $oxi_file" \
-        -n "oxigen default"  "${TASKSET_PREFIX[@]} $OXIGEN_BIN $oxi_file" \
-        -n "oxigen --jit"    "${TASKSET_PREFIX[@]} $OXIGEN_BIN --jit $oxi_file" \
-        -n "python3"         "${TASKSET_PREFIX[@]} $PYTHON_BIN $py_file"
+        "${cmds[@]}"
     echo
 }
 
-# Extract key metrics from hyperfine's JSON (median in ms) into a compact
-# line that we accumulate into the summary report.
+# Extract key metrics from hyperfine's JSON (median in ms) into a TSV
+# line. Columns: stem, no-jit, default, jit, python, bun, node,
+# jit-vs-python, jit-vs-bun, jit-vs-node. Missing TS runtimes show "-".
+# Command-name-based lookup so the "bun" and "node" columns are filled
+# regardless of which position each ran in.
 summarize_one() {
     local stem=$1
     local out_json="$REPORT_DIR/${stem}.native.json"
     jq -r --arg stem "$stem" '
-        .results
-        | map({name: .command, median_ms: (.median * 1000)})
-        | (.[0].median_ms) as $nojit
-        | (.[1].median_ms) as $default
-        | (.[2].median_ms) as $jit
-        | (.[3].median_ms) as $python
+        def fmt1: . * 10 | round / 10 | tostring;
+        def fmtx: . * 100 | round / 100 | tostring + "x";
+        def by_name($n): [.results[] | select(.command | startswith($n))][0];
+        (by_name("oxigen --no-jit").median * 1000) as $nojit
+        | (by_name("oxigen default").median * 1000)  as $default
+        | (by_name("oxigen --jit").median * 1000)    as $jit
+        | (by_name("python3").median * 1000)         as $python
+        | (by_name("bun (ts)")  | if . == null then null else (.median * 1000) end) as $bun
+        | (by_name("node (ts)") | if . == null then null else (.median * 1000) end) as $node
         | [
             $stem,
-            ($nojit   | . * 10 | round / 10 | tostring),
-            ($default | . * 10 | round / 10 | tostring),
-            ($jit     | . * 10 | round / 10 | tostring),
-            ($python  | . * 10 | round / 10 | tostring),
-            (($python / $jit) * 100 | round / 100 | tostring + "x")
+            ($nojit   | fmt1),
+            ($default | fmt1),
+            ($jit     | fmt1),
+            ($python  | fmt1),
+            (if $bun  == null then "-" else ($bun  | fmt1) end),
+            (if $node == null then "-" else ($node | fmt1) end),
+            (($python / $jit) | fmtx),
+            (if $bun  == null then "-" else (($bun  / $jit) | fmtx) end),
+            (if $node == null then "-" else (($node / $jit) | fmtx) end)
           ]
         | @tsv
     ' "$out_json"
@@ -156,6 +210,18 @@ latest_md="$REPORT_DIR/latest-native.md"
     echo "- Kernel:    \`$(uname -srm)\`"
     echo "- Oxigen:    \`$("$OXIGEN_BIN" --version 2>/dev/null | head -1 || echo unknown)\`"
     echo "- Python:    \`$("$PYTHON_BIN" --version 2>&1)\`"
+    if [[ -n "$BUN_BIN" && -x "$BUN_BIN" ]]; then
+        echo "- Bun:       \`$("$BUN_BIN" --version 2>&1 | head -1)\`"
+    fi
+    if [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]]; then
+        node_ts_note=""
+        if [[ ${#NODE_TS_ARGS[@]} -gt 0 ]]; then
+            node_ts_note=" (${NODE_TS_ARGS[*]})"
+        else
+            node_ts_note=" (built-in type-stripping)"
+        fi
+        echo "- Node:      \`$("$NODE_BIN" --version 2>&1 | head -1)\`${node_ts_note}"
+    fi
     echo "- Warmups:   \`$WARMUPS\`"
     echo "- Runs:      \`$RUNS\`"
     if git -C "$REPO_ROOT" rev-parse --short HEAD >/dev/null 2>&1; then
@@ -165,11 +231,11 @@ latest_md="$REPORT_DIR/latest-native.md"
     echo
     echo "## Medians (ms)"
     echo
-    echo "| benchmark | no-jit | default | jit | python | jit vs py |"
-    echo "| --- | ---: | ---: | ---: | ---: | ---: |"
+    echo "| benchmark | no-jit | default | jit | python | bun (ts) | node (ts) | jit vs py | jit vs bun | jit vs node |"
+    echo "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
     for stem in "${benchmarks[@]}"; do
         summarize_one "$stem" \
-            | awk -F'\t' '{printf "| %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6}'
+            | awk -F'\t' '{printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10}'
     done
     echo
     echo "Per-benchmark JSON (full samples + hyperfine stats) in \`$REPORT_DIR/\`."
