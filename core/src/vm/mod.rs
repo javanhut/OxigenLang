@@ -1,4 +1,5 @@
 pub mod builtins;
+pub mod nanvalue;
 pub mod value;
 
 use crate::compiler::opcode::OpCode;

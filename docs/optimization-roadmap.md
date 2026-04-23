@@ -55,7 +55,7 @@ Legend: ☐ not started · ◐ in progress · ✅ landed · ❌ attempted & aban
 | ID | Task | Status | Prereqs | Target gain | Scope |
 | --- | --- | --- | --- | --- | --- |
 | **Phase A — Representation (foundational)** | | | | | |
-| A1 | NaN-box Value | ☐ | — | 30–50% geomean | vm/value.rs, jit/engine.rs, all VM consumers |
+| A1 | NaN-box Value | ◐ | — | 30–50% geomean | vm/value.rs, jit/engine.rs, all VM consumers |
 | A2 | Small-integer tagging (SMI) | ☐ | A1 | 20–30% on int-heavy benches | vm/value.rs, jit arith paths |
 | A3 | Feedback vectors (record-only) | ☐ | — | 0% standalone — enables B3 | jit/engine.rs, jit/runtime.rs |
 | **Phase B — Unboxed & specialized execution** | | | | | |
