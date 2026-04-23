@@ -469,12 +469,12 @@ impl VM {
             }
         }
 
-        self.push(Value::StructInstance(Rc::new(ObjStructInstance {
-            struct_name: struct_name_str,
-            fields: RefCell::new(field_vec),
+        self.push(Value::StructInstance(Rc::new(ObjStructInstance::new(
+            struct_name_str,
+            field_vec,
             layout,
             def,
-        })));
+        ))));
         Ok(())
     }
 
@@ -551,7 +551,7 @@ impl VM {
                 // Field lookup via the instance's cached layout — direct
                 // Vec index, no HashMap lookup in the hot path.
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
-                    return Ok(inst.fields.borrow()[idx].clone());
+                    return Ok(inst.get_field(idx));
                 }
                 // Fall through: it might be a method on the struct def.
                 let method_val =
@@ -721,7 +721,7 @@ impl VM {
         match &object {
             Value::StructInstance(inst) => {
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
-                    inst.fields.borrow_mut()[idx] = value;
+                    inst.set_field(idx, value);
                     Ok(())
                 } else {
                     Err(self.runtime_error_hint(
@@ -2401,12 +2401,9 @@ impl VM {
                     field_vec.push(val);
                 }
 
-                self.push(Value::StructInstance(Rc::new(ObjStructInstance {
-                    struct_name: def_name,
-                    fields: RefCell::new(field_vec),
-                    layout,
-                    def,
-                })));
+                self.push(Value::StructInstance(Rc::new(ObjStructInstance::new(
+                    def_name, field_vec, layout, def,
+                ))));
                 Ok(())
             }
             _ => Err(self.runtime_error_hint(
@@ -2472,7 +2469,7 @@ impl VM {
             Value::StructInstance(inst) => {
                 // Check instance fields first (for callable fields)
                 let field_val = if let Some(&idx) = inst.layout.indices.get(method_name) {
-                    Some(inst.fields.borrow()[idx].clone())
+                    Some(inst.get_field(idx))
                 } else {
                     None
                 };

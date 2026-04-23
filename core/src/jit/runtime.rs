@@ -239,6 +239,7 @@ pub unsafe extern "C" fn jit_struct_field_add_const(
     self_slot: u32,
     field_idx: u32,
     addend: i64,
+    cache_ptr: *mut super::engine::FieldCacheEntry,
 ) -> u32 {
     let vm = unsafe { &mut *vm };
     vm.sync_stack_from_view();
@@ -249,10 +250,20 @@ pub unsafe extern "C" fn jit_struct_field_add_const(
         let field_name = vm.current_constant(field_idx as u16);
         if let Value::String(fname) = &field_name {
             if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
-                let mut fields = inst.fields.borrow_mut();
-                if let Value::Integer(current) = fields[idx] {
-                    fields[idx] = Value::Integer(current.wrapping_add(addend));
-                    return 0;
+                // SAFETY: single-threaded; nothing else borrows inst.fields.
+                // Integer→Integer update: no Drop needed on the old value,
+                // so patch the i64 payload in place.
+                unsafe {
+                    let slot = inst.fields.ptr.add(idx);
+                    if let Value::Integer(n) = &*slot {
+                        let new = n.wrapping_add(addend);
+                        let payload_ptr =
+                            (slot as *mut u8).add(crate::vm::value::VALUE_INT_PAYLOAD_OFFSET)
+                                as *mut i64;
+                        *payload_ptr = new;
+                        populate_field_cache(cache_ptr, inst, idx);
+                        return 0;
+                    }
                 }
             }
         }
@@ -279,11 +290,46 @@ pub unsafe extern "C" fn jit_struct_field_add_const(
     }
 }
 
+/// Populate the peephole's `FieldCacheEntry` with the struct-def identity
+/// and resolved layout index so the JIT's inline hit path can bypass the
+/// full helper on subsequent calls. Invoked from the Integer-fast-path
+/// branch of `jit_struct_field_add_const` / `_local`.
+#[inline]
+unsafe fn populate_field_cache(
+    cache_ptr: *mut super::engine::FieldCacheEntry,
+    inst: &std::rc::Rc<crate::vm::value::ObjStructInstance>,
+    field_index: usize,
+) {
+    if cache_ptr.is_null() {
+        return;
+    }
+    let cache = unsafe { &mut *cache_ptr };
+    // Only repopulate on a cold cache or on a shape change — avoids
+    // re-cloning the `Rc<ObjStructDef>` keeper every hot-path call.
+    let def_raw: *const crate::vm::value::ObjStructDef = unsafe {
+        *(&inst.def as *const std::rc::Rc<crate::vm::value::ObjStructDef>
+            as *const *const crate::vm::value::ObjStructDef)
+    };
+    if cache.struct_def_raw == def_raw
+        && matches!(cache.kind, super::engine::FieldCacheKind::InstanceField)
+    {
+        return;
+    }
+    cache.struct_def_raw = def_raw;
+    cache.field_index = field_index as u32;
+    cache.kind = super::engine::FieldCacheKind::InstanceField;
+    cache.closure_raw = std::ptr::null();
+    cache.thunk_raw = std::ptr::null();
+    cache.struct_def = Some(std::rc::Rc::clone(&inst.def));
+    cache.closure = None;
+}
+
 pub unsafe extern "C" fn jit_struct_field_add_local(
     vm: *mut VM,
     self_slot: u32,
     field_idx: u32,
     rhs_slot: u32,
+    cache_ptr: *mut super::engine::FieldCacheEntry,
 ) -> u32 {
     let vm = unsafe { &mut *vm };
     vm.sync_stack_from_view();
@@ -295,10 +341,18 @@ pub unsafe extern "C" fn jit_struct_field_add_local(
         let field_name = vm.current_constant(field_idx as u16);
         if let Value::String(fname) = &field_name {
             if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
-                let mut fields = inst.fields.borrow_mut();
-                if let Value::Integer(current) = fields[idx] {
-                    fields[idx] = Value::Integer(current.wrapping_add(*rhs));
-                    return 0;
+                // SAFETY: same as jit_struct_field_add_const.
+                unsafe {
+                    let slot = inst.fields.ptr.add(idx);
+                    if let Value::Integer(n) = &*slot {
+                        let new = n.wrapping_add(*rhs);
+                        let payload_ptr =
+                            (slot as *mut u8).add(crate::vm::value::VALUE_INT_PAYLOAD_OFFSET)
+                                as *mut i64;
+                        *payload_ptr = new;
+                        populate_field_cache(cache_ptr, inst, idx);
+                        return 0;
+                    }
                 }
             }
         }
@@ -845,6 +899,36 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
             cache.closure_raw = closure_raw;
             cache.thunk_raw = thunk as *const ();
             cache.arity = closure.function.arity;
+            // Inline-expansion detection: if the callee's bytecode is
+            // just `self.f = self.f + {const|arg}; return`, record the
+            // inline kind + resolved layout index so the MethodCall IR's
+            // hit path can skip the JitFrame push and emit the field-add
+            // operation directly at the caller.
+            cache.inline_kind = super::engine::MethodInlineKind::None;
+            cache.inline_field_index = 0;
+            cache.inline_addend = 0;
+            if arg_count <= 1 {
+                if let Some(info) = super::engine::detect_inline_method_info(&closure.function) {
+                    let expected_arity: u8 = match info.kind {
+                        super::engine::MethodInlineKind::FieldAddConst => 1,
+                        super::engine::MethodInlineKind::FieldAddLocal => 2,
+                        super::engine::MethodInlineKind::None => u8::MAX,
+                    };
+                    if closure.function.arity == expected_arity {
+                        // Resolve the field name to the instance's layout
+                        // index using the current receiver's FieldLayout.
+                        if let Value::StructInstance(inst) = vm.stack_at(instance_idx) {
+                            if let Some(&layout_idx) =
+                                inst.layout.indices.get(info.field_name.as_ref())
+                            {
+                                cache.inline_kind = info.kind;
+                                cache.inline_field_index = layout_idx as u32;
+                                cache.inline_addend = info.addend;
+                            }
+                        }
+                    }
+                }
+            }
             cache.struct_def = Some(Rc::clone(&struct_def));
             cache.closure = Some(Rc::clone(&closure));
             let before_depth = vm.frames_len();

@@ -24,8 +24,9 @@ use crate::vm::VM;
 use crate::vm::VMError;
 use crate::vm::{JitFrame, JitFrameView, StackView};
 use crate::vm::value::{
-    Function, RC_VALUE_OFFSET, STRUCT_INSTANCE_DEF_OFFSET, VALUE_INT_PAYLOAD_OFFSET, VALUE_SIZE,
-    VALUE_TAG_CLOSURE, VALUE_TAG_FLOAT, VALUE_TAG_INTEGER, VALUE_TAG_STRUCT_INSTANCE,
+    Function, RC_VALUE_OFFSET, STRUCT_INSTANCE_DEF_OFFSET, STRUCT_INSTANCE_FIELDS_PTR_OFFSET,
+    VALUE_INT_PAYLOAD_OFFSET, VALUE_SIZE, VALUE_TAG_CLOSURE, VALUE_TAG_FLOAT, VALUE_TAG_INTEGER,
+    VALUE_TAG_NONE, VALUE_TAG_STRUCT_INSTANCE,
 };
 
 /// Byte offset of the `stack_view.ptr` field from the base of `VM`.
@@ -136,16 +137,44 @@ impl CallCacheEntry {
     pub(crate) const OFFSET_THUNK_RAW: i32 = 8;
 }
 
+/// Kind tag for inline expansion of a struct-method body at its caller.
+/// Populated by `jit_op_method_call_ic` when the resolved callee's
+/// bytecode matches a whitelisted peephole shape. On subsequent hits the
+/// MethodCall IR reads `inline_kind` and emits the peephole operation
+/// directly instead of pushing a `JitFrame` and calling the thunk.
+///
+/// `#[repr(u8)]` so the JIT can read a single byte at the pinned offset.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum MethodInlineKind {
+    /// No inline expansion known; take the normal JitFrame + thunk path.
+    None = 0,
+    /// Body is `self.f = self.f + <const addend>; return` — arity must be 0.
+    FieldAddConst = 1,
+    /// Body is `self.f = self.f + <arg>; return` — arity must be 1.
+    FieldAddLocal = 2,
+}
+
 /// Per-MethodCall-site cache. Stores the struct def pointer (identity-
 /// compared, held alive by the `Rc`) and the resolved method closure so
 /// that a hit skips `find_struct_method`'s two HashMap lookups entirely.
+///
+/// Also carries optional inline-expansion info (`inline_kind` and
+/// friends). When set, the JIT's MethodCall hit path bypasses the
+/// JitFrame push + thunk dispatch entirely and emits the peephole
+/// operation (currently just the struct-field-add shape) inline at the
+/// caller. See `MethodInlineKind` above.
 #[repr(C)]
 pub(crate) struct MethodCacheEntry {
     pub struct_def_raw: *const crate::vm::value::ObjStructDef,
     pub closure_raw: *const crate::vm::value::ObjClosure,
     pub thunk_raw: *const (),
     pub arity: u8,
-    _pad: [u8; 7],
+    pub inline_kind: MethodInlineKind,
+    _pad: [u8; 6],
+    pub inline_field_index: u32,
+    _pad2: [u8; 4],
+    pub inline_addend: i64,
     pub struct_def: Option<std::rc::Rc<crate::vm::value::ObjStructDef>>,
     pub closure: Option<std::rc::Rc<crate::vm::value::ObjClosure>>,
 }
@@ -154,6 +183,9 @@ impl MethodCacheEntry {
     pub(crate) const OFFSET_STRUCT_DEF_RAW: i32 = 0;
     pub(crate) const OFFSET_CLOSURE_RAW: i32 = 8;
     pub(crate) const OFFSET_THUNK_RAW: i32 = 16;
+    pub(crate) const OFFSET_INLINE_KIND: i32 = 25;
+    pub(crate) const OFFSET_INLINE_FIELD_INDEX: i32 = 32;
+    pub(crate) const OFFSET_INLINE_ADDEND: i32 = 40;
 }
 
 #[repr(u8)]
@@ -434,7 +466,11 @@ impl JitInner {
             closure_raw: std::ptr::null(),
             thunk_raw: std::ptr::null(),
             arity: 0,
-            _pad: [0; 7],
+            inline_kind: MethodInlineKind::None,
+            _pad: [0; 6],
+            inline_field_index: 0,
+            _pad2: [0; 4],
+            inline_addend: 0,
             struct_def: None,
             closure: None,
         }));
@@ -764,29 +800,24 @@ impl JitInner {
                         if let Some(m) =
                             match_struct_field_add_update(code, chunk, ip, &blocks)
                         {
-                            let self_slot =
-                                builder.ins().iconst(types::I32, m.self_slot as i64);
-                            let field_idx =
-                                builder.ins().iconst(types::I32, m.field_idx as i64);
-                            let call = match m.shape {
-                                StructFieldAddShape::Const { addend } => {
-                                    let addend_val = builder.ins().iconst(types::I64, addend);
-                                    builder.ins().call(
-                                        refs.struct_field_add_const,
-                                        &[vm_val, self_slot, field_idx, addend_val],
-                                    )
-                                }
-                                StructFieldAddShape::Local { rhs_slot } => {
-                                    let rhs_slot_val =
-                                        builder.ins().iconst(types::I32, rhs_slot as i64);
-                                    builder.ins().call(
-                                        refs.struct_field_add_local,
-                                        &[vm_val, self_slot, field_idx, rhs_slot_val],
-                                    )
-                                }
-                            };
-                            let status = builder.inst_results(call)[0];
-                            emit_early_exit_on_err(&mut builder, status);
+                            // Use the IC slot that would have been consumed
+                            // by the peephole's GetField; advance past both
+                            // the GetField and SetField slots so subsequent
+                            // standalone field ops in this function pick up
+                            // their own caches.
+                            let cache_ptr = field_cache_ptrs[field_ic_ix];
+                            field_ic_ix += 2;
+                            emit_inline_struct_field_add(
+                                &mut builder,
+                                &refs,
+                                ptr_ty,
+                                vm_val,
+                                slot_offset_val,
+                                m.self_slot,
+                                m.field_idx,
+                                cache_ptr,
+                                m.shape,
+                            );
                             ip += m.len;
                         } else if let Some(m) =
                             match_local_array_mod_index_add_update(code, chunk, ip, &blocks)
@@ -1557,10 +1588,220 @@ impl JitInner {
                             );
                             let def_matches =
                                 builder.ins().icmp(IntCC::Equal, inst_def_raw, cached_def_raw);
-                            builder
-                                .ins()
-                                .brif(def_matches, hit_block, &[], miss_block, &[]);
 
+                            // Inline-expansion path: if the cache's
+                            // `inline_kind` is set, skip the JitFrame push
+                            // + thunk dispatch and emit the method body's
+                            // peephole operation directly. The full path
+                            // (hit_block) remains for non-inline callees
+                            // and as a safety fallback.
+                            let inline_dispatch_block = builder.create_block();
+                            builder.ins().brif(
+                                def_matches,
+                                inline_dispatch_block,
+                                &[],
+                                miss_block,
+                                &[],
+                            );
+
+                            // Emit the inline expansion for whichever arity
+                            // this call site has. The `inline_kind` in the
+                            // cache is only populated for arity that
+                            // matches (FieldAddConst → 0 args,
+                            // FieldAddLocal → 1 arg) so a stale or
+                            // mismatched kind can't fire here.
+                            builder.switch_to_block(inline_dispatch_block);
+                            let inline_kind_byte = builder.ins().load(
+                                types::I8,
+                                flags,
+                                cache_val,
+                                MethodCacheEntry::OFFSET_INLINE_KIND,
+                            );
+                            let none_kind = builder.ins().iconst(types::I8, 0);
+                            let is_none_kind = builder
+                                .ins()
+                                .icmp(IntCC::Equal, inline_kind_byte, none_kind);
+
+                            let target_kind: i64 = match arg_count {
+                                0 => 1, // FieldAddConst
+                                1 => 2, // FieldAddLocal
+                                _ => 0, // no inline for other arities
+                            };
+                            let inline_body_block = builder.create_block();
+                            // On inline_kind == 0 go to the full path;
+                            // otherwise check the expected kind for this
+                            // arity and fall through to the inline body or
+                            // the full path on mismatch.
+                            let kind_ok_block = builder.create_block();
+                            builder.ins().brif(
+                                is_none_kind,
+                                hit_block,
+                                &[],
+                                kind_ok_block,
+                                &[],
+                            );
+
+                            builder.switch_to_block(kind_ok_block);
+                            let expected_kind =
+                                builder.ins().iconst(types::I8, target_kind);
+                            let matches_expected = builder
+                                .ins()
+                                .icmp(IntCC::Equal, inline_kind_byte, expected_kind);
+                            builder.ins().brif(
+                                matches_expected,
+                                inline_body_block,
+                                &[],
+                                hit_block,
+                                &[],
+                            );
+
+                            // ── Inline body ─────────────────────────────
+                            builder.switch_to_block(inline_body_block);
+                            // Receiver's RcBox pointer is `receiver_raw`
+                            // (the Value payload at offset 8, == Rc bit
+                            // pattern). `inst_ptr` = RcBox + RC_VALUE_OFFSET
+                            // — already computed above.
+                            // Guard: receiver Rc strong count > 1 so that
+                            // decrementing it in-place doesn't drop the
+                            // instance (the full path handles drop).
+                            let receiver_rcbox = receiver_raw;
+                            let strong =
+                                builder.ins().load(types::I64, flags, receiver_rcbox, 0);
+                            let one_i64 = builder.ins().iconst(types::I64, 1);
+                            let strong_is_one = builder
+                                .ins()
+                                .icmp(IntCC::Equal, strong, one_i64);
+                            let after_strong_block = builder.create_block();
+                            builder.ins().brif(
+                                strong_is_one,
+                                miss_block,
+                                &[],
+                                after_strong_block,
+                                &[],
+                            );
+                            builder.switch_to_block(after_strong_block);
+
+                            // Compute the field slot pointer from the
+                            // cache's layout index.
+                            let fields_ptr = builder.ins().load(
+                                ptr_ty,
+                                flags,
+                                inst_ptr,
+                                STRUCT_INSTANCE_FIELDS_PTR_OFFSET as i32,
+                            );
+                            let field_idx_val = builder.ins().load(
+                                types::I32,
+                                flags,
+                                cache_val,
+                                MethodCacheEntry::OFFSET_INLINE_FIELD_INDEX,
+                            );
+                            let field_idx_i64 =
+                                builder.ins().uextend(types::I64, field_idx_val);
+                            let field_slot_off =
+                                builder.ins().imul(field_idx_i64, value_size);
+                            let field_slot_ptr =
+                                builder.ins().iadd(fields_ptr, field_slot_off);
+
+                            // Guard: current field value is Integer.
+                            let field_tag =
+                                builder.ins().load(types::I8, flags, field_slot_ptr, 0);
+                            let int_tag = builder
+                                .ins()
+                                .iconst(types::I8, VALUE_TAG_INTEGER as i64);
+                            let field_is_int = builder
+                                .ins()
+                                .icmp(IntCC::Equal, field_tag, int_tag);
+                            let after_field_int_block = builder.create_block();
+                            builder.ins().brif(
+                                field_is_int,
+                                after_field_int_block,
+                                &[],
+                                miss_block,
+                                &[],
+                            );
+                            builder.switch_to_block(after_field_int_block);
+
+                            // Load the operand (addend for Const, arg for
+                            // Local). For Local, also tag-guard the arg.
+                            let rhs = if arg_count == 0 {
+                                builder.ins().load(
+                                    types::I64,
+                                    flags,
+                                    cache_val,
+                                    MethodCacheEntry::OFFSET_INLINE_ADDEND,
+                                )
+                            } else {
+                                // Arg sits at stack[len - 1].
+                                let arg_slot =
+                                    builder.ins().isub(stack_len, one_i64);
+                                let arg_off = builder.ins().imul(arg_slot, value_size);
+                                let arg_ptr = builder.ins().iadd(stack_ptr, arg_off);
+                                let arg_tag =
+                                    builder.ins().load(types::I8, flags, arg_ptr, 0);
+                                let arg_is_int = builder
+                                    .ins()
+                                    .icmp(IntCC::Equal, arg_tag, int_tag);
+                                let after_arg_int_block = builder.create_block();
+                                builder.ins().brif(
+                                    arg_is_int,
+                                    after_arg_int_block,
+                                    &[],
+                                    miss_block,
+                                    &[],
+                                );
+                                builder.switch_to_block(after_arg_int_block);
+                                builder.ins().load(
+                                    types::I64,
+                                    flags,
+                                    arg_ptr,
+                                    VALUE_INT_PAYLOAD_OFFSET as i32,
+                                )
+                            };
+
+                            // Update the field payload in place. Tag is
+                            // already Integer so we don't rewrite it.
+                            let cur = builder.ins().load(
+                                types::I64,
+                                flags,
+                                field_slot_ptr,
+                                VALUE_INT_PAYLOAD_OFFSET as i32,
+                            );
+                            let sum = builder.ins().iadd(cur, rhs);
+                            builder.ins().store(
+                                flags,
+                                sum,
+                                field_slot_ptr,
+                                VALUE_INT_PAYLOAD_OFFSET as i32,
+                            );
+
+                            // Decrement receiver Rc strong count (balances
+                            // the bump that happened when the receiver was
+                            // pushed onto the stack). Guarded above so
+                            // strong > 1 here, which means we can
+                            // decrement without having to run Drop.
+                            let strong_dec =
+                                builder.ins().iadd_imm(strong, -1);
+                            builder.ins().store(flags, strong_dec, receiver_rcbox, 0);
+
+                            // Overwrite the receiver slot with Value::None
+                            // (tag-only write; the stale payload bytes are
+                            // irrelevant because `Value::None`'s Drop is a
+                            // no-op and the JIT only reads the tag to
+                            // decide what to do with a slot).
+                            let none_tag = builder
+                                .ins()
+                                .iconst(types::I8, VALUE_TAG_NONE as i64);
+                            builder.ins().store(flags, none_tag, receiver_ptr, 0);
+
+                            // For the Local variant, pop the arg slot —
+                            // its contents were guarded to Integer so
+                            // there's no Drop to run.
+                            if arg_count == 1 {
+                                emit_inline_stack_pop_one(&mut builder, vm_val);
+                            }
+                            builder.ins().jump(ok_block, &[]);
+
+                            // ── Fall-through to full path below ────────
                             builder.switch_to_block(hit_block);
                             // `closure_raw_box` is the raw `NonNull<RcBox<T>>`
                             // bit pattern (same layout as the payload of
@@ -1930,20 +2171,49 @@ fn declare_helpers(module: &mut JITModule) -> HelperIds {
     sig_vm_3u32_to_u32.params.push(AbiParam::new(types::I32));
     sig_vm_3u32_to_u32.returns.push(AbiParam::new(types::I32));
 
-    let mut sig_vm_u32_u32_i64_to_u32 = module.make_signature();
-    sig_vm_u32_u32_i64_to_u32
+    // Signature for jit_struct_field_add_const:
+    // fn(*mut VM, u32 self_slot, u32 field_idx, i64 addend,
+    //    *mut FieldCacheEntry) -> u32
+    let mut sig_vm_u32_u32_i64_ptr_to_u32 = module.make_signature();
+    sig_vm_u32_u32_i64_ptr_to_u32
         .params
         .push(AbiParam::new(ptr_ty));
-    sig_vm_u32_u32_i64_to_u32
+    sig_vm_u32_u32_i64_ptr_to_u32
         .params
         .push(AbiParam::new(types::I32));
-    sig_vm_u32_u32_i64_to_u32
+    sig_vm_u32_u32_i64_ptr_to_u32
         .params
         .push(AbiParam::new(types::I32));
-    sig_vm_u32_u32_i64_to_u32
+    sig_vm_u32_u32_i64_ptr_to_u32
         .params
         .push(AbiParam::new(types::I64));
-    sig_vm_u32_u32_i64_to_u32
+    sig_vm_u32_u32_i64_ptr_to_u32
+        .params
+        .push(AbiParam::new(ptr_ty));
+    sig_vm_u32_u32_i64_ptr_to_u32
+        .returns
+        .push(AbiParam::new(types::I32));
+
+    // Signature for jit_struct_field_add_local:
+    // fn(*mut VM, u32 self_slot, u32 field_idx, u32 rhs_slot,
+    //    *mut FieldCacheEntry) -> u32
+    let mut sig_vm_3u32_ptr_to_u32 = module.make_signature();
+    sig_vm_3u32_ptr_to_u32
+        .params
+        .push(AbiParam::new(ptr_ty));
+    sig_vm_3u32_ptr_to_u32
+        .params
+        .push(AbiParam::new(types::I32));
+    sig_vm_3u32_ptr_to_u32
+        .params
+        .push(AbiParam::new(types::I32));
+    sig_vm_3u32_ptr_to_u32
+        .params
+        .push(AbiParam::new(types::I32));
+    sig_vm_3u32_ptr_to_u32
+        .params
+        .push(AbiParam::new(ptr_ty));
+    sig_vm_3u32_ptr_to_u32
         .returns
         .push(AbiParam::new(types::I32));
 
@@ -2046,9 +2316,13 @@ fn declare_helpers(module: &mut JITModule) -> HelperIds {
         struct_field_add_const: decl(
             module,
             "jit_struct_field_add_const",
-            &sig_vm_u32_u32_i64_to_u32,
+            &sig_vm_u32_u32_i64_ptr_to_u32,
         ),
-        struct_field_add_local: decl(module, "jit_struct_field_add_local", &sig_vm_3u32_to_u32),
+        struct_field_add_local: decl(
+            module,
+            "jit_struct_field_add_local",
+            &sig_vm_3u32_ptr_to_u32,
+        ),
         get_local: decl(module, "jit_get_local", &sig_vm_u32),
         set_local: decl(module, "jit_set_local", &sig_vm_u32),
         add: decl(module, "jit_op_add", &sig_vm_to_u32),
@@ -2320,9 +2594,91 @@ struct LocalArithUpdate {
     len: usize,
 }
 
+#[derive(Debug)]
 enum StructFieldAddShape {
     Const { addend: i64 },
     Local { rhs_slot: u16 },
+}
+
+/// Result of inspecting a struct method's bytecode for an inline-expandable
+/// shape. Populated at JIT compile time (for the `detect_inline_method_info`
+/// export) and consumed by `jit_op_method_call_ic` on first MethodCall miss.
+#[derive(Debug)]
+pub(crate) struct DetectedInlineMethod {
+    pub kind: MethodInlineKind,
+    pub field_name: std::rc::Rc<str>,
+    pub addend: i64,
+}
+
+/// Detect whether `func`'s bytecode is a single field-add peephole body
+/// (`self.f = self.f + <const|arg>; return`), and if so return the kind
+/// plus the field name and addend so the caller can stamp it into the
+/// MethodCacheEntry for inline expansion at the call site.
+pub(crate) fn detect_inline_method_info(
+    func: &Function,
+) -> Option<DetectedInlineMethod> {
+    use crate::vm::value::Value;
+
+    let code = &func.chunk.code;
+    // Need at least the 16-byte peephole + a 1-byte trailing `Return`.
+    // (The compiler emits an implicit None/Return tail when the method
+    // body has no explicit return value; we accept either shape.)
+    if code.len() < 17 {
+        return None;
+    }
+
+    // Match with an empty blocks map — the peephole must cover the whole
+    // body so there can't be any branch targets inside it.
+    let empty_blocks: HashMap<usize, Block> = HashMap::new();
+    let m = match_struct_field_add_update(code, &func.chunk, 0, &empty_blocks)?;
+
+    // Everything after the peephole must be a trivial return tail:
+    //   - `Return` alone (1 byte)
+    //   - `None Return` (2 bytes, push None then return)
+    let tail_ok = match OpCode::from_byte(code[16]) {
+        Some(OpCode::Return) => code.len() == 17,
+        Some(OpCode::None) => {
+            code.len() == 18 && OpCode::from_byte(code[17]) == Some(OpCode::Return)
+        }
+        _ => false,
+    };
+    if !tail_ok {
+        return None;
+    }
+
+    // Resolve the field name from the callee's constant pool.
+    let field_name_val = func.chunk.constants.get(m.field_idx as usize)?;
+    let field_name: std::rc::Rc<str> = match field_name_val {
+        Value::String(s) => std::rc::Rc::clone(s),
+        _ => return None,
+    };
+
+    // `self` is always the first user-visible param (slot 1 — slot 0 is the
+    // closure stack-frame marker), so arity must match the shape:
+    //   - FieldAddConst → 0 user args → arity 1
+    //   - FieldAddLocal → 1 user arg → arity 2
+    match m.shape {
+        StructFieldAddShape::Const { addend } => {
+            if func.arity != 1 {
+                return None;
+            }
+            Some(DetectedInlineMethod {
+                kind: MethodInlineKind::FieldAddConst,
+                field_name,
+                addend,
+            })
+        }
+        StructFieldAddShape::Local { rhs_slot } => {
+            if func.arity != 2 || rhs_slot != 2 {
+                return None;
+            }
+            Some(DetectedInlineMethod {
+                kind: MethodInlineKind::FieldAddLocal,
+                field_name,
+                addend: 0,
+            })
+        }
+    }
 }
 
 struct StructFieldAddPeephole {
@@ -2427,9 +2783,25 @@ fn match_struct_field_add_update(
         return None;
     }
 
+    // GetField and SetField carry constant-pool indices for the field
+    // *name*. The parser may emit two separate `Value::String("val")`
+    // constants for two source-level occurrences of the same identifier,
+    // so compare resolved names rather than raw indices. The helper and
+    // inline IR then use the GetField-side index for both load and store:
+    // the runtime resolves it against the instance's `FieldLayout` which
+    // is keyed on the string name.
     let field_idx = read_u16(code, get_field_ip + 1);
-    if field_idx != read_u16(code, set_field_ip + 1) {
-        return None;
+    let set_fidx = read_u16(code, set_field_ip + 1);
+    if field_idx != set_fidx {
+        let get_name = chunk.constants.get(field_idx as usize);
+        let set_name = chunk.constants.get(set_fidx as usize);
+        match (get_name, set_name) {
+            (
+                Some(crate::vm::value::Value::String(a)),
+                Some(crate::vm::value::Value::String(b)),
+            ) if a.as_ref() == b.as_ref() => {}
+            _ => return None,
+        }
     }
 
     let shape = match OpCode::from_byte(code[rhs_ip]) {
@@ -2910,6 +3282,176 @@ fn emit_int_fast_arith(
     // Suppress the unused-warning on ptr_ty — it's the pointer type we
     // expect from `stack_as_mut_ptr` and `iadd` would verify consistency.
     let _ = ptr_ty;
+}
+
+/// Inline IR for the struct-field-add peephole (`self.f = self.f + k` /
+/// `self.f = self.f + rhs_local`). On IC hit — receiver is a
+/// `StructInstance` whose `struct_def_raw` matches the cached pointer
+/// AND the current field value is an Integer — we update the i64 payload
+/// in place. On miss, fall through to the existing runtime helper which
+/// populates the cache for the next trip.
+///
+/// Guard order, matching the runtime helper's fast-path shape:
+///   1. Receiver slot tag == `VALUE_TAG_STRUCT_INSTANCE`.
+///   2. `inst.def` raw pointer == `cache.struct_def_raw` (nonzero).
+///   3. (Local variant only) rhs slot tag == `VALUE_TAG_INTEGER`.
+///   4. Current field slot tag == `VALUE_TAG_INTEGER`.
+///
+/// Any guard failure branches to the miss path so the helper can do the
+/// full dispatch (and repopulate the cache if the shape has changed).
+fn emit_inline_struct_field_add(
+    builder: &mut FunctionBuilder<'_>,
+    refs: &HelperRefs,
+    ptr_ty: types::Type,
+    vm_val: cranelift_codegen::ir::Value,
+    slot_offset_val: cranelift_codegen::ir::Value,
+    self_slot: u16,
+    field_idx: u16,
+    cache_ptr: *mut FieldCacheEntry,
+    shape: StructFieldAddShape,
+) {
+    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::condcodes::IntCC;
+
+    let flags = MemFlags::trusted();
+    let cache_val = builder.ins().iconst(ptr_ty, cache_ptr as i64);
+
+    let check_def_block = builder.create_block();
+    let check_rhs_block = builder.create_block();
+    let check_val_block = builder.create_block();
+    let fast_block = builder.create_block();
+    let miss_block = builder.create_block();
+    let ok_block = builder.create_block();
+    let err_block = builder.create_block();
+    builder.append_block_param(err_block, types::I32);
+
+    // 1. Receiver slot address on the VM stack.
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
+    let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+    let self_slot_off = builder.ins().iconst(types::I64, self_slot as i64);
+    let self_slot_abs = builder.ins().iadd(slot_offset_val, self_slot_off);
+    let self_byte_off = builder.ins().imul(self_slot_abs, value_size);
+    let self_val_ptr = builder.ins().iadd(stack_ptr, self_byte_off);
+
+    // 2. Tag guard: StructInstance.
+    let tag = builder.ins().load(types::I8, flags, self_val_ptr, 0);
+    let struct_tag = builder
+        .ins()
+        .iconst(types::I8, VALUE_TAG_STRUCT_INSTANCE as i64);
+    let is_struct = builder.ins().icmp(IntCC::Equal, tag, struct_tag);
+    builder
+        .ins()
+        .brif(is_struct, check_def_block, &[], miss_block, &[]);
+
+    // 3. Load `inst_ptr` (past RcBox header) and compare its `def` raw
+    // pointer against the cached one. An unpopulated cache has `struct_def_raw
+    // == null`, so the comparison naturally misses on the first call.
+    builder.switch_to_block(check_def_block);
+    let rcbox = builder
+        .ins()
+        .load(ptr_ty, flags, self_val_ptr, VALUE_INT_PAYLOAD_OFFSET as i32);
+    let inst_ptr = builder.ins().iadd_imm(rcbox, RC_VALUE_OFFSET as i64);
+    let inst_def_raw = builder
+        .ins()
+        .load(ptr_ty, flags, inst_ptr, STRUCT_INSTANCE_DEF_OFFSET as i32);
+    let cached_def_raw =
+        builder
+            .ins()
+            .load(ptr_ty, flags, cache_val, FieldCacheEntry::OFFSET_STRUCT_DEF_RAW);
+    let def_matches = builder.ins().icmp(IntCC::Equal, inst_def_raw, cached_def_raw);
+    builder
+        .ins()
+        .brif(def_matches, check_rhs_block, &[], miss_block, &[]);
+
+    // 4. For the Local variant, guard the rhs slot tag too. The Const
+    // variant skips this block by jumping straight through.
+    builder.switch_to_block(check_rhs_block);
+    let rhs_payload = match shape {
+        StructFieldAddShape::Const { addend } => {
+            builder.ins().jump(check_val_block, &[]);
+            builder.switch_to_block(check_val_block);
+            builder.ins().iconst(types::I64, addend)
+        }
+        StructFieldAddShape::Local { rhs_slot } => {
+            let rhs_slot_off = builder.ins().iconst(types::I64, rhs_slot as i64);
+            let rhs_slot_abs = builder.ins().iadd(slot_offset_val, rhs_slot_off);
+            let rhs_byte_off = builder.ins().imul(rhs_slot_abs, value_size);
+            let rhs_val_ptr = builder.ins().iadd(stack_ptr, rhs_byte_off);
+            let rhs_tag = builder.ins().load(types::I8, flags, rhs_val_ptr, 0);
+            let int_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
+            let rhs_is_int = builder.ins().icmp(IntCC::Equal, rhs_tag, int_tag);
+            builder
+                .ins()
+                .brif(rhs_is_int, check_val_block, &[], miss_block, &[]);
+            builder.switch_to_block(check_val_block);
+            builder
+                .ins()
+                .load(types::I64, flags, rhs_val_ptr, VALUE_INT_PAYLOAD_OFFSET as i32)
+        }
+    };
+
+    // 5. Load fields_ptr + field_index, compute slot_ptr, guard Integer tag.
+    let fields_ptr = builder
+        .ins()
+        .load(ptr_ty, flags, inst_ptr, STRUCT_INSTANCE_FIELDS_PTR_OFFSET as i32);
+    let field_index = builder
+        .ins()
+        .load(types::I32, flags, cache_val, FieldCacheEntry::OFFSET_FIELD_INDEX);
+    let field_index_i64 = builder.ins().uextend(types::I64, field_index);
+    let slot_byte_off = builder.ins().imul(field_index_i64, value_size);
+    let slot_ptr = builder.ins().iadd(fields_ptr, slot_byte_off);
+    let cur_tag = builder.ins().load(types::I8, flags, slot_ptr, 0);
+    let int_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
+    let cur_is_int = builder.ins().icmp(IntCC::Equal, cur_tag, int_tag);
+    builder
+        .ins()
+        .brif(cur_is_int, fast_block, &[], miss_block, &[]);
+
+    // 6. Fast path — update the i64 payload in place.
+    builder.switch_to_block(fast_block);
+    let cur_payload =
+        builder
+            .ins()
+            .load(types::I64, flags, slot_ptr, VALUE_INT_PAYLOAD_OFFSET as i32);
+    let new_payload = builder.ins().iadd(cur_payload, rhs_payload);
+    builder
+        .ins()
+        .store(flags, new_payload, slot_ptr, VALUE_INT_PAYLOAD_OFFSET as i32);
+    builder.ins().jump(ok_block, &[]);
+
+    // 7. Miss path — call the runtime helper (which falls back to the
+    // interpreter's `handle_get_field`/`handle_set_field` and repopulates
+    // the IC). The helper signature now takes `cache_ptr` as its last arg.
+    builder.switch_to_block(miss_block);
+    let self_slot_v = builder.ins().iconst(types::I32, self_slot as i64);
+    let field_idx_v = builder.ins().iconst(types::I32, field_idx as i64);
+    let status = match shape {
+        StructFieldAddShape::Const { addend } => {
+            let addend_v = builder.ins().iconst(types::I64, addend);
+            let call = builder.ins().call(
+                refs.struct_field_add_const,
+                &[vm_val, self_slot_v, field_idx_v, addend_v, cache_val],
+            );
+            builder.inst_results(call)[0]
+        }
+        StructFieldAddShape::Local { rhs_slot } => {
+            let rhs_slot_v = builder.ins().iconst(types::I32, rhs_slot as i64);
+            let call = builder.ins().call(
+                refs.struct_field_add_local,
+                &[vm_val, self_slot_v, field_idx_v, rhs_slot_v, cache_val],
+            );
+            builder.inst_results(call)[0]
+        }
+    };
+    builder
+        .ins()
+        .brif(status, err_block, &[status], ok_block, &[]);
+
+    builder.switch_to_block(err_block);
+    let err_status = builder.block_params(err_block)[0];
+    builder.ins().return_(&[err_status]);
+
+    builder.switch_to_block(ok_block);
 }
 
 /// Inline `jit_stack_pop_one`: decrement `stack_view.len`. Safe only

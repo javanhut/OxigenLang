@@ -23,6 +23,12 @@ pub const VALUE_TAG_FLOAT: u8 = 1;
 /// the variant order in `Value`.
 pub const VALUE_TAG_CLOSURE: u8 = 12;
 pub const VALUE_TAG_STRUCT_INSTANCE: u8 = 15;
+/// Numeric tag of `Value::None` — the seventh variant under the
+/// `#[repr(u8)]` layout. The JIT's inline MethodCall expansion writes
+/// this tag into the receiver slot after running the inlined body to
+/// leave a "return value of None" on the stack. Pinned by
+/// `value_none_tag_is_pinned`.
+pub const VALUE_TAG_NONE: u8 = 6;
 
 /// Byte offset of the i64 payload inside a `Value::Integer(i64)`. With
 /// `#[repr(u8)]` the discriminant occupies byte 0, and the payload is
@@ -39,7 +45,14 @@ pub const REF_CELL_VALUE_OFFSET: usize = 8;
 pub const VALUE_SIZE: usize = core::mem::size_of::<Value>();
 
 pub const STRUCT_INSTANCE_DEF_OFFSET: usize = core::mem::offset_of!(ObjStructInstance, def);
-pub const STRUCT_INSTANCE_FIELDS_OFFSET: usize = core::mem::offset_of!(ObjStructInstance, fields);
+/// Byte offset of the field-storage raw pointer inside `ObjStructInstance`.
+/// The JIT loads this as `ptr_ty` to reach the start of the `Value` buffer
+/// owned by the instance without going through a `RefCell`/`Vec`
+/// indirection. Pinned by `layout_tests::struct_instance_fields_layout_is_pinned`.
+pub const STRUCT_INSTANCE_FIELDS_PTR_OFFSET: usize = core::mem::offset_of!(ObjStructInstance, fields)
+    + core::mem::offset_of!(InstanceFields, ptr);
+pub const STRUCT_INSTANCE_FIELDS_LEN_OFFSET: usize = core::mem::offset_of!(ObjStructInstance, fields)
+    + core::mem::offset_of!(InstanceFields, len);
 
 #[cfg(test)]
 mod layout_tests {
@@ -90,6 +103,22 @@ mod layout_tests {
         let payload_f = unsafe { *ptr_f.add(1) };
         assert_eq!(tag_f, 3);
         assert_eq!(payload_f, 0, "Boolean(false) payload byte must be 0");
+    }
+
+    /// The JIT's inline MethodCall expansion writes a `Value::None` tag
+    /// byte at the receiver slot after running the inlined method body.
+    /// If the variant order in `Value` changes, that write lands on the
+    /// wrong slot semantics and every inline method-call corrupts the
+    /// return value.
+    #[test]
+    fn value_none_tag_is_pinned() {
+        let v = Value::None;
+        let ptr = &v as *const Value as *const u8;
+        let tag = unsafe { *ptr };
+        assert_eq!(
+            tag, VALUE_TAG_NONE,
+            "None tag must equal VALUE_TAG_NONE (= 6, the 7th variant)",
+        );
     }
 
     #[test]
@@ -200,6 +229,68 @@ mod layout_tests {
         drop(extra);
         let restored = unsafe { *rcbox_ptr };
         assert_eq!(restored, before, "drop must restore the strong count");
+    }
+
+    /// The JIT's inline GetField / SetField / struct-field-add fast paths
+    /// load the field buffer pointer from `ObjStructInstance.fields.ptr`
+    /// at a constant byte offset, then index it directly. If the struct
+    /// layout is reordered or `InstanceFields` changes shape, every
+    /// inline field access would silently read/write the wrong slot.
+    /// Pinned here so a layout change fails at `cargo test` time.
+    #[test]
+    fn struct_instance_fields_layout_is_pinned() {
+        use crate::vm::value::{
+            FieldLayout, ObjStructDef, ObjStructInstance, Value, STRUCT_INSTANCE_DEF_OFFSET,
+            STRUCT_INSTANCE_FIELDS_LEN_OFFSET, STRUCT_INSTANCE_FIELDS_PTR_OFFSET,
+            VALUE_INT_PAYLOAD_OFFSET, VALUE_SIZE,
+        };
+        let mut indices = HashMap::new();
+        indices.insert("a".to_string(), 0);
+        indices.insert("b".to_string(), 1);
+        let layout = Rc::new(FieldLayout {
+            slots: vec![
+                ("a".to_string(), "int".to_string(), false),
+                ("b".to_string(), "int".to_string(), false),
+            ],
+            indices,
+        });
+        let def = Rc::new(ObjStructDef {
+            name: "Pair".to_string(),
+            fields: vec![
+                ("a".to_string(), "int".to_string(), false),
+                ("b".to_string(), "int".to_string(), false),
+            ],
+            methods: RefCell::new(HashMap::new()),
+            parent: None,
+            layout: std::cell::OnceCell::new(),
+        });
+        let inst = ObjStructInstance::new(
+            "Pair".to_string(),
+            vec![Value::Integer(0xAAAA), Value::Integer(0xBBBB)],
+            layout,
+            def,
+        );
+        let base = &inst as *const ObjStructInstance as *const u8;
+        // Reading through the pinned offset must reach the raw fields ptr.
+        let ptr_read =
+            unsafe { base.add(STRUCT_INSTANCE_FIELDS_PTR_OFFSET).cast::<*mut Value>().read() };
+        assert_eq!(
+            ptr_read, inst.fields.ptr,
+            "STRUCT_INSTANCE_FIELDS_PTR_OFFSET must reach ObjStructInstance.fields.ptr",
+        );
+        let len_read = unsafe { base.add(STRUCT_INSTANCE_FIELDS_LEN_OFFSET).cast::<u32>().read() };
+        assert_eq!(
+            len_read, inst.fields.len,
+            "STRUCT_INSTANCE_FIELDS_LEN_OFFSET must reach ObjStructInstance.fields.len",
+        );
+        // Reading a field through raw-ptr arithmetic matches `get_field`.
+        let slot_ptr = unsafe { ptr_read.add(1) } as *const u8;
+        let tag = unsafe { *slot_ptr };
+        let payload = unsafe { slot_ptr.add(VALUE_INT_PAYLOAD_OFFSET).cast::<i64>().read() };
+        assert_eq!(tag, 0, "field 1 tag must be Integer (0)");
+        assert_eq!(payload, 0xBBBB, "field 1 payload must match constructor");
+        let _ = VALUE_SIZE;
+        let _ = STRUCT_INSTANCE_DEF_OFFSET;
     }
 }
 
@@ -357,19 +448,114 @@ pub struct FieldLayout {
     pub indices: HashMap<String, usize>,
 }
 
-/// A struct instance at runtime. Fields are stored in a `Vec<Value>`
-/// indexed by the struct def's `FieldLayout`, so field access is a direct
-/// offset after the layout is resolved — no HashMap lookup per access.
+/// JIT-addressable field storage header for an `ObjStructInstance`.
+///
+/// `#[repr(C)]` so the layout is stable: the JIT can load `ptr` at a
+/// fixed offset from the instance and index directly into the heap
+/// buffer. Owns the buffer; freed when the enclosing `ObjStructInstance`
+/// is dropped.
+///
+/// Field count is fixed at construction and never grows, so `cap == len`
+/// in practice. `cap` is retained because the backing allocation was
+/// produced by `Vec` which may round up capacity.
+#[repr(C)]
+#[derive(Debug)]
+pub struct InstanceFields {
+    pub ptr: *mut Value,
+    pub len: u32,
+    pub cap: u32,
+}
+
+/// A struct instance at runtime. Fields live in a raw heap buffer indexed
+/// by the struct def's `FieldLayout`. `#[repr(C)]` + hot fields first so
+/// the JIT can reach `fields.ptr` / `def` at pinned offsets.
+///
+/// Single-threaded by construction (the enclosing `Rc` is `!Sync`), so
+/// field mutations go through `set_field(&self, …)` which writes through
+/// a raw pointer without a `RefCell` runtime borrow check. No caller
+/// holds a `field_slice` borrow across a mutation — all mutation sites
+/// take the value by clone first (audited in plan Phase 1).
+#[repr(C)]
 #[derive(Debug)]
 pub struct ObjStructInstance {
+    pub fields: InstanceFields,
     pub struct_name: String,
-    pub fields: RefCell<Vec<Value>>,
     /// Reference to the resolved layout so field indices stay correct.
     pub layout: std::rc::Rc<FieldLayout>,
     /// Direct reference to the struct def so method-call ICs don't need
     /// to look up `globals[struct_name]` on every dispatch. Stored as an
     /// `Rc` so identity compares match the def's stable allocation.
     pub def: std::rc::Rc<ObjStructDef>,
+}
+
+impl ObjStructInstance {
+    /// Build a new instance from a `Vec<Value>` of fields. Takes ownership
+    /// of the Vec's heap allocation — it will be freed in `Drop`.
+    #[inline]
+    pub fn new(
+        struct_name: String,
+        fields: Vec<Value>,
+        layout: std::rc::Rc<FieldLayout>,
+        def: std::rc::Rc<ObjStructDef>,
+    ) -> Self {
+        let mut v = std::mem::ManuallyDrop::new(fields);
+        let ptr = v.as_mut_ptr();
+        let len = v.len() as u32;
+        let cap = v.capacity() as u32;
+        ObjStructInstance {
+            fields: InstanceFields { ptr, len, cap },
+            struct_name,
+            layout,
+            def,
+        }
+    }
+
+    /// Immutable view of all field slots. Used for equality, formatting,
+    /// and read-only field reads via `get_field`.
+    #[inline(always)]
+    pub fn field_slice(&self) -> &[Value] {
+        if self.fields.ptr.is_null() {
+            return &[];
+        }
+        unsafe { std::slice::from_raw_parts(self.fields.ptr, self.fields.len as usize) }
+    }
+
+    /// Clone-read one field by index.
+    #[inline(always)]
+    pub fn get_field(&self, idx: usize) -> Value {
+        debug_assert!(idx < self.fields.len as usize);
+        unsafe { (*self.fields.ptr.add(idx)).clone() }
+    }
+
+    /// Replace one field by index. Drops the previous `Value` (which
+    /// decrements any embedded Rc refcounts). Callers must not hold a
+    /// `field_slice` reference when invoking this.
+    #[inline(always)]
+    pub fn set_field(&self, idx: usize, value: Value) {
+        debug_assert!(idx < self.fields.len as usize);
+        unsafe {
+            let slot = self.fields.ptr.add(idx);
+            std::ptr::drop_in_place(slot);
+            std::ptr::write(slot, value);
+        }
+    }
+}
+
+impl Drop for ObjStructInstance {
+    fn drop(&mut self) {
+        if !self.fields.ptr.is_null() {
+            // Reconstitute the original `Vec<Value>` so its allocator
+            // frees the buffer and Drops each contained `Value`.
+            unsafe {
+                let _ = Vec::from_raw_parts(
+                    self.fields.ptr,
+                    self.fields.len as usize,
+                    self.fields.cap as usize,
+                );
+            }
+            self.fields.ptr = std::ptr::null_mut();
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -506,7 +692,7 @@ impl fmt::Display for Value {
             }
             Value::StructDef(sd) => write!(f, "struct {}", sd.name),
             Value::StructInstance(si) => {
-                let fields = si.fields.borrow();
+                let fields = si.field_slice();
                 let items: Vec<String> = si
                     .layout
                     .slots
@@ -582,7 +768,7 @@ impl fmt::Debug for Value {
                     f,
                     "StructInstance({}, {:?})",
                     si.struct_name,
-                    si.fields.borrow()
+                    si.field_slice()
                 )
             }
             Value::Byte(n) => write!(f, "Byte({})", n),
@@ -634,7 +820,7 @@ impl PartialEq for Value {
             }
             (Value::Wrapped(a), Value::Wrapped(b)) => a == b,
             (Value::StructInstance(a), Value::StructInstance(b)) => {
-                a.struct_name == b.struct_name && *a.fields.borrow() == *b.fields.borrow()
+                a.struct_name == b.struct_name && a.field_slice() == b.field_slice()
             }
             (Value::Module(a), Value::Module(b)) => a.name == b.name,
             (Value::EnumDef(a), Value::EnumDef(b)) => a.name == b.name,
