@@ -1,0 +1,19 @@
+[package]
+name = "perf-poc"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Isolated: don't merge into the parent Oxigen workspace.
+[workspace]
+
+[[bin]]
+name = "perf-poc"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = 0
+opt-level = 3
