@@ -264,7 +264,7 @@ impl VM {
         // Make script args available as __args global
         let args_val: Vec<Value> = args
             .iter()
-            .map(|a| Value::String(a.as_str().into()))
+            .map(|a| Value::String(rc_str(a.as_str())))
             .collect();
         self.globals.insert(
             "__args".to_string(),
@@ -323,7 +323,7 @@ impl VM {
     /// Read the name string at constant index `name_idx`. The compiler
     /// guarantees globals use string constants, but we defensively return
     /// an error if that invariant is broken.
-    fn name_constant(&self, name_idx: u16) -> Result<Rc<str>, VMError> {
+    fn name_constant(&self, name_idx: u16) -> Result<Rc<String>, VMError> {
         match self.current_constant(name_idx) {
             Value::String(s) => Ok(s),
             _ => Err(self.runtime_error("invalid global name")),
@@ -578,7 +578,7 @@ impl VM {
                     "check the module's public API for available members",
                 )),
             },
-            Value::ErrorValue(data) => match fname.as_ref() {
+            Value::ErrorValue(data) => match fname.as_str() {
                 "msg" => Ok(Value::String(Rc::clone(&data.msg))),
                 "tag" => Ok(match &data.tag {
                     Some(t) => Value::String(Rc::clone(t)),
@@ -642,9 +642,9 @@ impl VM {
                 }
             }
             Value::EnumInstance(inst) => {
-                let name = fname.as_ref();
+                let name = fname.as_str();
                 match name {
-                    "name" => Ok(Value::String(inst.variant_name.as_str().into())),
+                    "name" => Ok(Value::String(rc_str(inst.variant_name.as_str()))),
                     "value" => match &inst.payload {
                         crate::vm::value::VmEnumPayload::Unit(Some(v)) => Ok(v.clone()),
                         crate::vm::value::VmEnumPayload::Unit(None) => Ok(Value::None),
@@ -1617,13 +1617,13 @@ impl VM {
                             format!("{}", tag).into()
                         };
                         self.push(Value::ErrorValue(Rc::new(ErrorValueData {
-                            msg: format!("{}", value).into(),
+                            msg: rc_str(format!("{}", value)),
                             tag: Some(tag_str),
                         })));
                     } else {
                         let value = self.pop();
                         self.push(Value::ErrorValue(Rc::new(ErrorValueData {
-                            msg: format!("{}", value).into(),
+                            msg: rc_str(format!("{}", value)),
                             tag: None,
                         })));
                     }
@@ -1707,7 +1707,7 @@ impl VM {
                     for part in &parts {
                         result.push_str(&format!("{}", part));
                     }
-                    self.push(Value::String(result.into()));
+                    self.push(Value::String(rc_str(result)));
                 }
 
                 // ── Misc ────────────────────────────────────────────
@@ -1857,7 +1857,7 @@ impl VM {
                         Value::String(s) => s
                             .chars()
                             .nth(idx)
-                            .map(|c| Value::String(c.to_string().into()))
+                            .map(|c| Value::String(rc_str(c.to_string())))
                             .unwrap_or(Value::None),
                         Value::Tuple(t) => t.get(idx).cloned().unwrap_or(Value::None),
                         Value::Set(s) => s.borrow().get(idx).cloned().unwrap_or(Value::None),
@@ -1929,7 +1929,7 @@ impl VM {
                     let value = self.pop();
 
                     if let Value::String(tname) = type_name {
-                        let matches = match (tname.as_ref(), &value) {
+                        let matches = match (tname.as_str(), &value) {
                             ("int", Value::Integer(_)) => true,
                             ("float", Value::Float(_)) => true,
                             ("str", Value::String(_)) => true,
@@ -2154,7 +2154,7 @@ impl VM {
                 let mut s = String::with_capacity(l.len() + r.len());
                 s.push_str(l);
                 s.push_str(r);
-                Ok(Value::String(s.into()))
+                Ok(Value::String(rc_str(s)))
             }
             (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer(*l as i64 + *r as i64)),
             (Value::Byte(l), Value::Integer(r)) => Ok(Value::Integer(*l as i64 + r)),
@@ -2170,19 +2170,19 @@ impl VM {
                 let mut s = String::with_capacity(l.len() + r.len_utf8());
                 s.push_str(l);
                 s.push(*r);
-                Ok(Value::String(s.into()))
+                Ok(Value::String(rc_str(s)))
             }
             (Value::Char(l), Value::String(r)) => {
                 let mut s = String::with_capacity(l.len_utf8() + r.len());
                 s.push(*l);
                 s.push_str(r);
-                Ok(Value::String(s.into()))
+                Ok(Value::String(rc_str(s)))
             }
             (Value::Char(l), Value::Char(r)) => {
                 let mut s = String::with_capacity(l.len_utf8() + r.len_utf8());
                 s.push(*l);
                 s.push(*r);
-                Ok(Value::String(s.into()))
+                Ok(Value::String(rc_str(s)))
             }
             (Value::Tuple(l), Value::Tuple(r)) => {
                 let mut new = (**l).clone();
@@ -2930,7 +2930,7 @@ impl VM {
                 };
                 Ok(s.chars()
                     .nth(idx)
-                    .map(|c| Value::String(c.to_string().into()))
+                    .map(|c| Value::String(rc_str(c.to_string())))
                     .unwrap_or(Value::None))
             }
             (Value::Tuple(t), Value::Integer(i)) => {
@@ -3062,9 +3062,9 @@ impl VM {
                 let start_idx = start_idx.min(s.len());
                 let end_idx = end_idx.min(s.len());
                 if start_idx <= end_idx {
-                    Ok(Value::String(s[start_idx..end_idx].into()))
+                    Ok(Value::String(rc_str(&s[start_idx..end_idx])))
                 } else {
-                    Ok(Value::String("".into()))
+                    Ok(Value::String(rc_str("")))
                 }
             }
             _ => Err(self.runtime_error_hint(
@@ -3213,7 +3213,7 @@ impl VM {
         match type_name {
             "INTEGER" => Value::Integer(0),
             "FLOAT" => Value::Float(0.0),
-            "STRING" => Value::String("".into()),
+            "STRING" => Value::String(rc_str("")),
             "BOOLEAN" => Value::Boolean(false),
             "CHAR" => Value::Char('\0'),
             "BYTE" => Value::Byte(0),
@@ -3247,7 +3247,7 @@ impl VM {
                     });
                     let final_tag = tag.or(default_tag);
                     return Ok(Value::ErrorValue(Rc::new(ErrorValueData {
-                        msg: msg.into(),
+                        msg: rc_str(msg),
                         tag: final_tag.map(|t| t.into()),
                     })));
                 } else {
@@ -3274,7 +3274,7 @@ impl VM {
             "ERROR" => {
                 if let Some((tag, msg)) = Self::error_info_from_value(&value) {
                     Ok(Value::ErrorValue(Rc::new(ErrorValueData {
-                        msg: msg.into(),
+                        msg: rc_str(msg),
                         tag: tag.map(|t| t.into()),
                     })))
                 } else {
@@ -3287,8 +3287,8 @@ impl VM {
                 if let Some((tag, msg)) = Self::error_info_from_value(&value) {
                     if tag.as_deref() == Some(wanted_tag) {
                         Ok(Value::ErrorValue(Rc::new(ErrorValueData {
-                            msg: msg.into(),
-                            tag: Some(wanted_tag.into()),
+                            msg: rc_str(msg),
+                            tag: Some(rc_str(wanted_tag)),
                         })))
                     } else {
                         Err(self.runtime_error(&format!(
@@ -3360,7 +3360,7 @@ impl VM {
                         .runtime_error(&format!("cannot convert {} to FLOAT", value.type_name()))),
                 }
             }
-            "STRING" => Ok(Value::String(format!("{}", value).into())),
+            "STRING" => Ok(Value::String(rc_str(format!("{}", value)))),
             "BOOLEAN" => match value {
                 Value::Boolean(_) => Ok(value.clone()),
                 _ => Ok(Value::Boolean(value.is_truthy())),
@@ -3426,7 +3426,7 @@ impl VM {
                     Value::String(s) => {
                         let elements: Vec<Value> = s
                             .chars()
-                            .map(|c| Value::String(c.to_string().into()))
+                            .map(|c| Value::String(rc_str(c.to_string())))
                             .collect();
                         Ok(Value::Array(Rc::new(RefCell::new(elements))))
                     }

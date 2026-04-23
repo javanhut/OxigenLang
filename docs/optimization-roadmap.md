@@ -470,6 +470,7 @@ Record each task's outcome here. Keep terse.
 | 2026-04-23 | Tier-2 Phase 4 (pre-roadmap) | ✅ landed | bench_struct_method 186 → 22 ms, 8.6× win. Merged as `cde4235` + `ca1ab10` + `86fdfd0` on `oxigen-jit`. |
 | 2026-04-23 | A1.0 NaN-box encoding module | ✅ landed | Foundation only — 8 B `NanValue` type + 16 tests, not yet wired in. Committed `e90032f` on `opt/a1-nanbox`. |
 | 2026-04-23 | A1.1a Box `ErrorValue` (40 → 24 B Value) | ✅ landed (intermediate) | Small net positive: fib −9%, closure −7%, arith −7% on controlled runs; bench_loop +4% regression (microarch, not code); struct_method unchanged. Geomean ~3% win. Not the full A1 gate, but a stepping stone toward the 16 B and 8 B targets — the 32 B `ErrorValue{msg,tag}` inline variant was the single biggest size driver. |
+| 2026-04-23 | A1.1b `Rc<str>` → `Rc<String>` (24 → 16 B Value) | ✅ landed (intermediate) | Wins compound with A1.1a but diminishing: fib −10.2%, closure −6.6%, arith −6.3% vs. 40 B baseline. bench_loop regression (+4%) persists unchanged from A1.1a. bench_struct_method now +1.8% vs baseline (regressed mildly). Geomean ~3–4% win total across A1.1a+b. Replaced `Rc<str>` (fat pointer, 16 B) with `Rc<String>` (thin pointer, 8 B) in `String` and `Error` variants and in `ErrorValueData`. Required ~250 `.into()` → `rc_str(...)` rewrites across builtins/vm/compiler (Python-regex driven, paren-balanced). Prerequisite for any NaN-box migration since NaN-box needs 8-byte aligned pointers. |
 
 ---
 

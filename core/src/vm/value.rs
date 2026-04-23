@@ -69,16 +69,15 @@ mod layout_tests {
     /// the stack-capacity memory footprint (STACK_MAX * VALUE_SIZE).
     /// Any move off 40 is a perf event worth rebenchmarking.
     ///
-    /// 24 is dictated by `String(Rc<str>)` and `Error(Rc<str>)` — both
-    /// fat pointers at 16 B plus the discriminant + alignment padding.
-    /// (A1.1a of the optimization roadmap shrank this from 40 to 24 by
-    /// boxing the inline `ErrorValue { msg, tag }` variant. A1.1b drops
-    /// it further to 16 by converting the two remaining Rc<str> to
-    /// Rc<String>; eventual target is 8 via NaN-box, roadmap A1.2+.)
+    /// 16 is the aligned width of an 8-byte Rc pointer plus a 1-byte tag
+    /// and 7-byte alignment padding. A1.1a boxed `ErrorValue`; A1.1b
+    /// converted `Rc<str>` → `Rc<String>` in the two remaining fat-
+    /// pointer variants (`String`, `Error`). Eventual target is 8 via
+    /// NaN-box (A1.2+).
     #[test]
-    fn value_size_is_pinned_at_24() {
+    fn value_size_is_pinned_at_16() {
         assert_eq!(
-            VALUE_SIZE, 24,
+            VALUE_SIZE, 16,
             "VALUE_SIZE is baked into JIT inline stack ops. A change \
              here requires rebenching the bench suite and auditing \
              the emit_inline_* functions in engine.rs."
@@ -320,8 +319,10 @@ pub enum Value {
     Uint(u64),
     None,
 
-    // Heap-allocated
-    String(Rc<str>),
+    // Heap-allocated. `String` holds `Rc<String>` (not `Rc<str>`) so the
+    // pointer stays thin (8 B); the fat variant wasted 8 B per Value
+    // across every stack slot. See roadmap A1.1b.
+    String(Rc<String>),
     Array(Rc<RefCell<Vec<Value>>>),
     Tuple(Rc<Vec<Value>>),
     Map(Rc<RefCell<Vec<(Value, Value)>>>),
@@ -349,16 +350,25 @@ pub enum Value {
     ErrorValue(Rc<ErrorValueData>),
     /// Value(...) wrapper (success side of error handling)
     Wrapped(Rc<Value>),
-    /// Terminal error — stops execution
-    Error(Rc<str>),
+    /// Terminal error — stops execution. Thin `Rc<String>` for the same
+    /// reason as `String` above.
+    Error(Rc<String>),
 }
 
 /// Boxed payload of `Value::ErrorValue`. Kept off the enum so `Value`
 /// stays small; cloned by `Rc::clone` on every enum clone.
 #[derive(Debug, Clone)]
 pub struct ErrorValueData {
-    pub msg: Rc<str>,
-    pub tag: Option<Rc<str>>,
+    pub msg: Rc<String>,
+    pub tag: Option<Rc<String>>,
+}
+
+/// Helper to produce `Rc<String>` from anything that can be turned into
+/// a `String`. Replaces the `.into()` → `Rc<str>` idiom that broke when
+/// `String(Rc<str>)` became `String(Rc<String>)` in A1.1b.
+#[inline]
+pub fn rc_str(s: impl Into<String>) -> Rc<String> {
+    Rc::new(s.into())
 }
 
 /// A compiled function (not yet a closure — no captured upvalues).

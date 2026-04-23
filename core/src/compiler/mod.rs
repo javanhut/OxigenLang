@@ -2,7 +2,7 @@ pub mod opcode;
 
 use crate::ast::*;
 use crate::vm::value::{
-    Function, LocalInfo, ObjEnumDef, ParamInfo, Value, VmEnumVariantDef, VmEnumVariantKind,
+    rc_str, Function, LocalInfo, ObjEnumDef, ParamInfo, Value, VmEnumVariantDef, VmEnumVariantKind,
 };
 use opcode::{Chunk, OpCode};
 
@@ -468,7 +468,7 @@ impl Compiler {
                     } else {
                         // Global — DefineGlobal overwrites
                         let name_const =
-                            self.make_constant(Value::String(name.value.as_str().into()), line);
+                            self.make_constant(Value::String(rc_str(name.value.as_str())), line);
                         self.emit_op_u16(OpCode::DefineGlobal, name_const, line);
                     }
                 }
@@ -496,7 +496,7 @@ impl Compiler {
                 // Walrus := converts the value to the target type.
                 // Non-walrus = does strict type checking (no conversion).
                 if !matches!(type_ann, TypeAnnotation::Generic | TypeAnnotation::NoneType) {
-                    let tc = self.make_constant(Value::String(type_name.as_str().into()), line);
+                    let tc = self.make_constant(Value::String(rc_str(type_name.as_str())), line);
                     self.emit_op_u16(OpCode::TypeWrap, tc, line);
                 }
                 if self.dup_next_define {
@@ -513,9 +513,9 @@ impl Compiler {
                     }
                 } else {
                     let name_const =
-                        self.make_constant(Value::String(name.value.as_str().into()), line);
+                        self.make_constant(Value::String(rc_str(name.value.as_str())), line);
                     let type_const =
-                        self.make_constant(Value::String(type_name.as_str().into()), line);
+                        self.make_constant(Value::String(rc_str(type_name.as_str())), line);
                     self.emit_op_u16(OpCode::DefineGlobalTyped, name_const, line);
                     self.emit_byte(if mutable { 1 } else { 0 }, line);
                     self.current_chunk().write_u16(type_const, line);
@@ -527,7 +527,7 @@ impl Compiler {
                 if let TypeAnnotation::Struct(struct_name) = type_ann {
                     // Struct type: call the struct constructor with 0 args to create default instance
                     let sn_const =
-                        self.make_constant(Value::String(struct_name.as_str().into()), line);
+                        self.make_constant(Value::String(rc_str(struct_name.as_str())), line);
                     self.emit_op_u16(OpCode::GetGlobal, sn_const, line);
                     self.emit_op_u8(OpCode::Call, 0, line);
                 } else {
@@ -546,9 +546,9 @@ impl Compiler {
                     }
                 } else {
                     let name_const =
-                        self.make_constant(Value::String(name.value.as_str().into()), line);
+                        self.make_constant(Value::String(rc_str(name.value.as_str())), line);
                     let type_const =
-                        self.make_constant(Value::String(type_name.as_str().into()), line);
+                        self.make_constant(Value::String(rc_str(type_name.as_str())), line);
                     self.emit_op_u16(OpCode::DefineGlobalTyped, name_const, line);
                     self.emit_byte(1, line); // TypedDeclare is mutable
                     self.current_chunk().write_u16(type_const, line);
@@ -577,7 +577,7 @@ impl Compiler {
                         self.emit_op_u16(OpCode::SetUpvalue, uv_idx, line);
                     } else {
                         let name_const =
-                            self.make_constant(Value::String(name.value.as_str().into()), line);
+                            self.make_constant(Value::String(rc_str(name.value.as_str())), line);
                         self.emit_op_u16(OpCode::SetGlobal, name_const, line);
                     }
                 }
@@ -797,7 +797,7 @@ impl Compiler {
                 self.compile_expression(object);
                 self.compile_expression(value);
                 let field_const =
-                    self.make_constant(Value::String(field.value.as_str().into()), line);
+                    self.make_constant(Value::String(rc_str(field.value.as_str())), line);
                 self.emit_op_u16(OpCode::SetField, field_const, line);
             }
 
@@ -848,7 +848,7 @@ impl Compiler {
                     self.add_local(&name.value, false, None);
                 } else {
                     let name_const =
-                        self.make_constant(Value::String(name.value.as_str().into()), line);
+                        self.make_constant(Value::String(rc_str(name.value.as_str())), line);
                     self.emit_op_u16(OpCode::DefineGlobal, name_const, line);
                 }
             }
@@ -873,7 +873,7 @@ impl Compiler {
                                 }
                                 Expression::Float { value, .. } => Some(Value::Float(*value)),
                                 Expression::Str { value, .. } => {
-                                    Some(Value::String(value.as_str().into()))
+                                    Some(Value::String(rc_str(value.as_str())))
                                 }
                                 Expression::Boolean { value, .. } => Some(Value::Boolean(*value)),
                                 Expression::NoneExpr { .. } => Some(Value::None),
@@ -903,7 +903,7 @@ impl Compiler {
                     self.add_local(&name.value, false, None);
                 } else {
                     let name_const =
-                        self.make_constant(Value::String(name.value.as_str().into()), line);
+                        self.make_constant(Value::String(rc_str(name.value.as_str())), line);
                     self.emit_op_u16(OpCode::DefineGlobal, name_const, line);
                 }
             }
@@ -939,11 +939,11 @@ impl Compiler {
                         self.compile_expression(method_expr);
                     }
                     // Push method name string
-                    self.emit_constant(Value::String(method_name.value.as_str().into()), line);
+                    self.emit_constant(Value::String(rc_str(method_name.value.as_str())), line);
                 }
                 // Emit DefineMethod opcode
                 let struct_const =
-                    self.make_constant(Value::String(struct_name.value.as_str().into()), line);
+                    self.make_constant(Value::String(rc_str(struct_name.value.as_str())), line);
                 self.emit_op_u16(OpCode::DefineMethod, struct_const, line);
                 self.emit_byte(methods.len() as u8, line);
             }
@@ -959,7 +959,7 @@ impl Compiler {
                 self.compile_pattern_function(&param_names, condition, line);
                 let pattern_global = format!("__pattern_{}", name.value);
                 let name_const =
-                    self.make_constant(Value::String(pattern_global.as_str().into()), line);
+                    self.make_constant(Value::String(rc_str(pattern_global.as_str())), line);
                 self.emit_op_u16(OpCode::DefineGlobal, name_const, line);
             }
 
@@ -968,7 +968,7 @@ impl Compiler {
                 // without affecting the local stack layout
                 self.compile_expression(subject);
                 let temp_name = "__choose_tmp__";
-                let temp_const = self.make_constant(Value::String(temp_name.into()), line);
+                let temp_const = self.make_constant(Value::String(rc_str(temp_name)), line);
                 self.emit_op_u16(OpCode::DefineGlobal, temp_const, line);
 
                 let mut end_jumps = Vec::new();
@@ -990,16 +990,16 @@ impl Compiler {
                         self.compile_pattern_function(&param_names, condition, line);
                         let pattern_global = format!("__pattern_{}", arm.pattern_name);
                         let nc =
-                            self.make_constant(Value::String(pattern_global.as_str().into()), line);
+                            self.make_constant(Value::String(rc_str(pattern_global.as_str())), line);
                         self.emit_op_u16(OpCode::DefineGlobal, nc, line);
                     }
 
                     // Call pattern function with subject
                     let pattern_global = format!("__pattern_{}", arm.pattern_name);
                     let pg_const =
-                        self.make_constant(Value::String(pattern_global.as_str().into()), line);
+                        self.make_constant(Value::String(rc_str(pattern_global.as_str())), line);
                     self.emit_op_u16(OpCode::GetGlobal, pg_const, line);
-                    let subj_const = self.make_constant(Value::String(temp_name.into()), line);
+                    let subj_const = self.make_constant(Value::String(rc_str(temp_name)), line);
                     self.emit_op_u16(OpCode::GetGlobal, subj_const, line);
                     self.emit_op_u8(OpCode::Call, 1, line);
 
@@ -1048,13 +1048,13 @@ impl Compiler {
                     path.segments.join("/")
                 };
 
-                let path_const = self.make_constant(Value::String(path_str.as_str().into()), line);
+                let path_const = self.make_constant(Value::String(rc_str(path_str.as_str())), line);
 
                 if let Some(names) = selective {
                     // Selective import: push the names
                     for name in names {
                         let nc =
-                            self.make_constant(Value::String(name.value.as_str().into()), line);
+                            self.make_constant(Value::String(rc_str(name.value.as_str())), line);
                         self.emit_op_u16(OpCode::Constant, nc, line);
                     }
                     self.emit_op_u16(OpCode::Import, path_const, line);
@@ -1082,7 +1082,7 @@ impl Compiler {
                 self.emit_constant(Value::Char(*value), line);
             }
             Expression::Str { value, .. } => {
-                self.emit_constant(Value::String(value.as_str().into()), line);
+                self.emit_constant(Value::String(rc_str(value.as_str())), line);
             }
             Expression::Boolean { value, .. } => {
                 self.emit_op(if *value { OpCode::True } else { OpCode::False }, line);
@@ -1218,7 +1218,7 @@ impl Compiler {
                             self.emit_op_u16(OpCode::SetUpvalue, uv_idx, line);
                         } else {
                             let name_const = self
-                                .make_constant(Value::String(ident.value.as_str().into()), line);
+                                .make_constant(Value::String(rc_str(ident.value.as_str())), line);
                             self.emit_op_u16(OpCode::SetGlobal, name_const, line);
                         }
                     }
@@ -1261,7 +1261,7 @@ impl Compiler {
                 for part in parts {
                     match part {
                         StringInterpPart::Literal(s) => {
-                            self.emit_constant(Value::String(s.as_str().into()), line);
+                            self.emit_constant(Value::String(rc_str(s.as_str())), line);
                         }
                         StringInterpPart::Expr(expr) => {
                             self.compile_expression(expr);
@@ -1304,13 +1304,13 @@ impl Compiler {
                         self.compile_expression(arg);
                     }
                     let method_const =
-                        self.make_constant(Value::String(field.value.as_str().into()), line);
+                        self.make_constant(Value::String(rc_str(field.value.as_str())), line);
                     if named_args.is_empty() {
                         self.emit_op_u16(OpCode::MethodCall, method_const, line);
                         self.emit_byte(args.len() as u8, line);
                     } else {
                         for (name, val_expr) in named_args {
-                            self.emit_constant(Value::String(name.as_str().into()), line);
+                            self.emit_constant(Value::String(rc_str(name.as_str())), line);
                             self.compile_expression(val_expr);
                         }
                         self.emit_op_u16(OpCode::MethodCallNamed, method_const, line);
@@ -1331,7 +1331,7 @@ impl Compiler {
                 } else {
                     // Push named args: name string, then value
                     for (name, val_expr) in named_args {
-                        self.emit_constant(Value::String(name.as_str().into()), line);
+                        self.emit_constant(Value::String(rc_str(name.as_str())), line);
                         self.compile_expression(val_expr);
                     }
                     self.emit_op(OpCode::CallNamed, line);
@@ -1365,7 +1365,7 @@ impl Compiler {
             Expression::DotAccess { left, field, .. } => {
                 self.compile_expression(left);
                 let field_const =
-                    self.make_constant(Value::String(field.value.as_str().into()), line);
+                    self.make_constant(Value::String(rc_str(field.value.as_str())), line);
                 self.emit_op_u16(OpCode::GetField, field_const, line);
             }
 
@@ -1382,10 +1382,10 @@ impl Compiler {
             } => {
                 // Push struct name
                 let name_const =
-                    self.make_constant(Value::String(struct_name.as_str().into()), line);
+                    self.make_constant(Value::String(rc_str(struct_name.as_str())), line);
                 // Push field name-value pairs
                 for (fname, fval) in field_values {
-                    self.emit_constant(Value::String(fname.as_str().into()), line);
+                    self.emit_constant(Value::String(rc_str(fname.as_str())), line);
                     self.compile_expression(fval);
                 }
                 self.emit_op_u16(OpCode::StructLiteral, name_const, line);
@@ -1409,7 +1409,7 @@ impl Compiler {
                     value: enum_name.clone(),
                 }));
                 let variant_const =
-                    self.make_constant(Value::String(variant_name.as_str().into()), line);
+                    self.make_constant(Value::String(rc_str(variant_name.as_str())), line);
                 match kind {
                     EnumConstructKind::Tuple(args) => {
                         for arg in args {
@@ -1420,7 +1420,7 @@ impl Compiler {
                     }
                     EnumConstructKind::Struct(fields) => {
                         for (fname, fval) in fields {
-                            self.emit_constant(Value::String(fname.as_str().into()), line);
+                            self.emit_constant(Value::String(rc_str(fname.as_str())), line);
                             self.compile_expression(fval);
                         }
                         self.emit_op_u16(OpCode::MakeEnumVariantStruct, variant_const, line);
@@ -1492,7 +1492,7 @@ impl Compiler {
             } => {
                 self.compile_expression(value);
                 let binding_const =
-                    self.make_constant(Value::String(binding.value.as_str().into()), line);
+                    self.make_constant(Value::String(rc_str(binding.value.as_str())), line);
 
                 // Emit Guard opcode with jump offset placeholder
                 self.emit_op(OpCode::Guard, line);
@@ -1520,7 +1520,7 @@ impl Compiler {
             Expression::ErrorConstruct { tag, value, .. } => {
                 self.compile_expression(value);
                 if let Some(tag_str) = tag {
-                    self.emit_constant(Value::String(tag_str.as_str().into()), line);
+                    self.emit_constant(Value::String(rc_str(tag_str.as_str())), line);
                     self.emit_op_u8(OpCode::ErrorConstruct, 1, line);
                 } else {
                     self.emit_op_u8(OpCode::ErrorConstruct, 0, line);
@@ -1540,7 +1540,7 @@ impl Compiler {
             Expression::TypeWrap { target, value, .. } => {
                 self.compile_expression(value);
                 let type_str = target.type_name();
-                let type_const = self.make_constant(Value::String(type_str.as_str().into()), line);
+                let type_const = self.make_constant(Value::String(rc_str(type_str.as_str())), line);
                 self.emit_op_u16(OpCode::TypeWrap, type_const, line);
             }
 
@@ -1552,11 +1552,11 @@ impl Compiler {
             } => {
                 let mut flags: u8 = 0;
                 if let Some(t) = tag {
-                    self.emit_constant(Value::String(t.as_str().into()), line);
+                    self.emit_constant(Value::String(rc_str(t.as_str())), line);
                     flags |= 0x01;
                 }
                 if let Some(st) = sub_tag {
-                    self.emit_constant(Value::String(st.as_str().into()), line);
+                    self.emit_constant(Value::String(rc_str(st.as_str())), line);
                     flags |= 0x02;
                 }
                 if let Some(msg) = message {
@@ -1612,7 +1612,7 @@ impl Compiler {
                 self.emit_op(OpCode::Pop, line);
             } else {
                 let name_const =
-                    self.make_constant(Value::String(name.value.as_str().into()), line);
+                    self.make_constant(Value::String(rc_str(name.value.as_str())), line);
                 self.emit_op_u16(OpCode::DefineGlobal, name_const, line);
             }
         }
@@ -1633,7 +1633,7 @@ impl Compiler {
                     self.emit_op(OpCode::Pop, line);
                 } else {
                     let name_const =
-                        self.make_constant(Value::String(name.value.as_str().into()), line);
+                        self.make_constant(Value::String(rc_str(name.value.as_str())), line);
                     self.emit_op_u16(OpCode::SetGlobal, name_const, line);
                     self.emit_op(OpCode::Pop, line);
                 }
@@ -1641,7 +1641,7 @@ impl Compiler {
         } else if self.current_frame().scope_depth > 0 {
             self.add_local(&name.value, true, None);
         } else {
-            let name_const = self.make_constant(Value::String(name.value.as_str().into()), line);
+            let name_const = self.make_constant(Value::String(rc_str(name.value.as_str())), line);
             self.emit_op_u16(OpCode::DefineGlobal, name_const, line);
         }
     }
@@ -1773,7 +1773,7 @@ impl Compiler {
             } else {
                 // Global — emit runtime check
                 let name_const =
-                    self.make_constant(Value::String(ident.value.as_str().into()), line);
+                    self.make_constant(Value::String(rc_str(ident.value.as_str())), line);
                 self.emit_op_u16(OpCode::IsMut, name_const, line);
             }
         } else if let Expression::DotAccess { .. } = &args[0] {
@@ -1797,7 +1797,7 @@ impl Compiler {
         // Second argument should be a type name identifier
         if let Expression::Ident(type_ident) = &args[1] {
             let type_const =
-                self.make_constant(Value::String(type_ident.value.as_str().into()), line);
+                self.make_constant(Value::String(rc_str(type_ident.value.as_str())), line);
             self.emit_op_u16(OpCode::IsType, type_const, line);
         } else {
             self.error("second argument to is_type must be a type name", line);
@@ -1830,7 +1830,7 @@ impl Compiler {
             } else {
                 // Global — emit runtime check
                 let name_const =
-                    self.make_constant(Value::String(ident.value.as_str().into()), line);
+                    self.make_constant(Value::String(rc_str(ident.value.as_str())), line);
                 self.emit_op_u16(OpCode::IsTypeMut, name_const, line);
             }
         } else if let Expression::DotAccess { .. } = &args[0] {
@@ -1856,7 +1856,7 @@ impl Compiler {
             return;
         }
         // Fall back to global
-        let name_const = self.make_constant(Value::String(ident.value.as_str().into()), line);
+        let name_const = self.make_constant(Value::String(rc_str(ident.value.as_str())), line);
         self.emit_op_u16(OpCode::GetGlobal, name_const, line);
     }
 
@@ -1999,7 +1999,7 @@ fn default_for_type(type_name: &str) -> Value {
     match type_name {
         "INTEGER" => Value::Integer(0),
         "FLOAT" => Value::Float(0.0),
-        "STRING" => Value::String("".into()),
+        "STRING" => Value::String(rc_str("")),
         "BOOLEAN" => Value::Boolean(false),
         "CHAR" => Value::Char('\0'),
         "BYTE" => Value::Byte(0),

@@ -2606,7 +2606,7 @@ enum StructFieldAddShape {
 #[derive(Debug)]
 pub(crate) struct DetectedInlineMethod {
     pub kind: MethodInlineKind,
-    pub field_name: std::rc::Rc<str>,
+    pub field_name: std::rc::Rc<String>,
     pub addend: i64,
 }
 
@@ -2648,7 +2648,7 @@ pub(crate) fn detect_inline_method_info(
 
     // Resolve the field name from the callee's constant pool.
     let field_name_val = func.chunk.constants.get(m.field_idx as usize)?;
-    let field_name: std::rc::Rc<str> = match field_name_val {
+    let field_name: std::rc::Rc<String> = match field_name_val {
         Value::String(s) => std::rc::Rc::clone(s),
         _ => return None,
     };
