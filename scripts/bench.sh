@@ -16,11 +16,20 @@
 set -euo pipefail
 
 # ── Configuration ──────────────────────────────────────────────────────
-WARMUPS="${WARMUPS:-3}"
+# Bumped to 8 so CPU frequency / p-state has settled by the time hyperfine
+# starts taking timed measurements. 3 warmups was not enough for short
+# (<20 ms) benches that run immediately after long ones: the first few
+# timed iterations saw a downclocked CPU and poisoned the median.
+WARMUPS="${WARMUPS:-8}"
 # Bumped to 15 for outlier resilience: one hot bench showed 4 of 7 runs
 # degraded by ~5x due to transient system noise (thermal or scheduling),
 # which corrupts a 7-run median. 15 runs make the middle 7 robust.
 RUNS="${RUNS:-15}"
+# Seconds to sleep between variants within a benchmark. Lets the CPU idle
+# down and re-enter a consistent p-state after a previous 200 ms+ variant,
+# so short variants (~10 ms) get a clean measurement baseline rather than
+# starting on a hot/throttled core.
+INTER_VARIANT_SLEEP="${INTER_VARIANT_SLEEP:-0.5}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BENCH_DIR="$REPO_ROOT/example"
@@ -103,10 +112,13 @@ has_node_ts() {
     has_ts_peer "$stem" && [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]]
 }
 
-# Run one hyperfine invocation against four or five commands, emitting
-# a JSON results file. hyperfine handles warmups, timed runs, and stats.
-# The `bun` (TypeScript) entry is included only when a .ts peer and a
-# bun runtime are both available.
+# Run each variant in its own hyperfine invocation and merge the
+# per-variant JSONs into the combined results file the summarizer
+# expects. This avoids the interleaving that caused short variants
+# (e.g. oxigen --jit on bench_loop at ~8 ms) to start on a CPU whose
+# frequency/thermal state was still carrying over from a preceding
+# long variant (e.g. oxigen --no-jit at ~250 ms), producing bimodal
+# distributions where the median was pulled off the fast cluster.
 run_one_benchmark() {
     local stem=$1
     local oxi_file="$BENCH_DIR/$stem.oxi"
@@ -115,25 +127,54 @@ run_one_benchmark() {
     local out_json="$REPORT_DIR/${stem}.native.json"
 
     echo "=== $stem ==="
-    local cmds=(
-        -n "oxigen --no-jit" "${TASKSET_PREFIX[*]} $OXIGEN_BIN --no-jit $oxi_file"
-        -n "oxigen default"  "${TASKSET_PREFIX[*]} $OXIGEN_BIN $oxi_file"
-        -n "oxigen --jit"    "${TASKSET_PREFIX[*]} $OXIGEN_BIN --jit $oxi_file"
-        -n "python3"         "${TASKSET_PREFIX[*]} $PYTHON_BIN $py_file"
-    )
+
+    # Each element: "<display name>\t<command string>". Tab-separated so
+    # names can contain spaces (they do: "oxigen --no-jit", "bun (ts)").
+    local specs=()
+    specs+=("oxigen --no-jit"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN --no-jit $oxi_file")
+    specs+=("oxigen default"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN $oxi_file")
+    specs+=("oxigen --jit"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN --jit $oxi_file")
+    specs+=("python3"$'\t'"${TASKSET_PREFIX[*]} $PYTHON_BIN $py_file")
     if has_bun_ts "$stem"; then
-        cmds+=(-n "bun (ts)"  "${TASKSET_PREFIX[*]} $BUN_BIN run $ts_file")
+        specs+=("bun (ts)"$'\t'"${TASKSET_PREFIX[*]} $BUN_BIN run $ts_file")
     fi
     if has_node_ts "$stem"; then
-        cmds+=(-n "node (ts)" "${TASKSET_PREFIX[*]} $NODE_BIN ${NODE_TS_ARGS[*]} $ts_file")
+        specs+=("node (ts)"$'\t'"${TASKSET_PREFIX[*]} $NODE_BIN ${NODE_TS_ARGS[*]} $ts_file")
     fi
-    hyperfine \
-        --warmup "$WARMUPS" \
-        --runs "$RUNS" \
-        --shell=none \
-        --export-json "$out_json" \
-        --style=basic \
-        "${cmds[@]}"
+
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+    local per_variant_jsons=()
+    local idx=0
+    local first=1
+    for spec in "${specs[@]}"; do
+        local name="${spec%%$'\t'*}"
+        local cmd="${spec#*$'\t'}"
+        local vjson="$tmp_dir/variant-$idx.json"
+        per_variant_jsons+=("$vjson")
+        idx=$((idx + 1))
+
+        if [[ $first -eq 0 ]]; then
+            # Let the CPU idle down between variants so the next one
+            # starts from a consistent p-state.
+            sleep "$INTER_VARIANT_SLEEP"
+        fi
+        first=0
+
+        hyperfine \
+            --warmup "$WARMUPS" \
+            --runs "$RUNS" \
+            --shell=none \
+            --export-json "$vjson" \
+            --style=basic \
+            -n "$name" "$cmd"
+    done
+
+    # Stitch all variants' `results` arrays into a single JSON document
+    # matching the shape hyperfine produces when given multiple commands.
+    # Downstream `summarize_one` relies on this format.
+    jq -s '{results: (map(.results) | add)}' "${per_variant_jsons[@]}" > "$out_json"
+    rm -rf "$tmp_dir"
     echo
 }
 
