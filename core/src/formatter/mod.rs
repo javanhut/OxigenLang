@@ -317,6 +317,54 @@ impl Formatter {
                 self.push_indent();
                 self.push("}");
             }
+            Statement::EnumDef { name, variants, .. } => {
+                self.push("enum ");
+                self.push(&name.value);
+                self.push(" {");
+                self.newline();
+                self.indent += 1;
+                for variant in variants {
+                    self.push_indent();
+                    self.push(&variant.name.value);
+                    match &variant.kind {
+                        crate::ast::VariantKind::Unit(None) => {}
+                        crate::ast::VariantKind::Unit(Some(expr)) => {
+                            self.push(": ");
+                            self.format_expression(expr);
+                        }
+                        crate::ast::VariantKind::Tuple(params) => {
+                            self.push("(");
+                            for (i, (pname, ptype)) in params.iter().enumerate() {
+                                if i > 0 {
+                                    self.push(", ");
+                                }
+                                self.push(&pname.value);
+                                self.push(" <");
+                                self.push(&format_type_annotation(ptype));
+                                self.push(">");
+                            }
+                            self.push(")");
+                        }
+                        crate::ast::VariantKind::Struct(fields) => {
+                            self.push(" { ");
+                            for (i, field) in fields.iter().enumerate() {
+                                if i > 0 {
+                                    self.push(", ");
+                                }
+                                self.push(&field.name.value);
+                                self.push(" <");
+                                self.push(&format_type_annotation(&field.type_ann));
+                                self.push(">");
+                            }
+                            self.push(" }");
+                        }
+                    }
+                    self.newline();
+                }
+                self.indent -= 1;
+                self.push_indent();
+                self.push("}");
+            }
             Statement::ContainsDef {
                 struct_name,
                 methods,
@@ -591,6 +639,40 @@ impl Formatter {
                     self.format_expression(e);
                 }
                 self.push("]");
+            }
+            Expression::EnumVariantConstruct {
+                enum_name,
+                variant_name,
+                kind,
+                ..
+            } => {
+                self.push(enum_name);
+                self.push(".");
+                self.push(variant_name);
+                match kind {
+                    crate::ast::EnumConstructKind::Tuple(args) => {
+                        self.push("(");
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 {
+                                self.push(", ");
+                            }
+                            self.format_expression(arg);
+                        }
+                        self.push(")");
+                    }
+                    crate::ast::EnumConstructKind::Struct(fields) => {
+                        self.push(" { ");
+                        for (i, (fname, fval)) in fields.iter().enumerate() {
+                            if i > 0 {
+                                self.push(", ");
+                            }
+                            self.push(fname);
+                            self.push(": ");
+                            self.format_expression(fval);
+                        }
+                        self.push(" }");
+                    }
+                }
             }
             Expression::TupleLiteral { elements, .. } => {
                 self.push("(");
@@ -873,6 +955,7 @@ fn format_type_annotation(ann: &TypeAnnotation) -> String {
             .collect::<Vec<_>>()
             .join(" || "),
         TypeAnnotation::Struct(name) => name.clone(),
+        TypeAnnotation::EnumGeneric => "Enum".to_string(),
     }
 }
 
@@ -906,6 +989,7 @@ fn top_level_section(stmt: &Statement) -> TopLevelSection {
         Statement::TypedDeclare { .. } | Statement::Assign { .. } => TopLevelSection::Variable,
         Statement::Pattern { .. }
         | Statement::StructDef { .. }
+        | Statement::EnumDef { .. }
         | Statement::ContainsDef { .. }
         | Statement::Main { .. } => TopLevelSection::Definition,
         _ => TopLevelSection::Other,

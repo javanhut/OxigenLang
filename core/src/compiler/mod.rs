@@ -1,7 +1,9 @@
 pub mod opcode;
 
 use crate::ast::*;
-use crate::vm::value::{Function, ParamInfo, Value};
+use crate::vm::value::{
+    Function, ObjEnumDef, ParamInfo, Value, VmEnumVariantDef, VmEnumVariantKind,
+};
 use opcode::{Chunk, OpCode};
 
 /// Unwrap nested `Grouped(...)` wrappers to get the inner expression.
@@ -365,7 +367,8 @@ impl Compiler {
             | Expression::TypeWrap { token, .. }
             | Expression::Fail { token, .. }
             | Expression::Unless { token, .. }
-            | Expression::StringInterp { token, .. } => token.span.line as u32,
+            | Expression::StringInterp { token, .. }
+            | Expression::EnumVariantConstruct { token, .. } => token.span.line as u32,
             Expression::Ident(ident) => ident.token.span.line as u32,
             Expression::Grouped(inner) => Self::expr_line(inner),
         }
@@ -382,6 +385,7 @@ impl Compiler {
             | Statement::If { token, .. }
             | Statement::Give { token, .. }
             | Statement::StructDef { token, .. }
+            | Statement::EnumDef { token, .. }
             | Statement::ContainsDef { token, .. }
             | Statement::DotAssign { token, .. }
             | Statement::Introduce { token, .. }
@@ -811,6 +815,61 @@ impl Compiler {
                 let const_idx = self.make_constant(struct_def, line);
                 self.emit_op_u16(OpCode::Constant, const_idx, line);
 
+                if self.current_frame().scope_depth > 0 {
+                    self.add_local(&name.value, false, None);
+                } else {
+                    let name_const =
+                        self.make_constant(Value::String(name.value.as_str().into()), line);
+                    self.emit_op_u16(OpCode::DefineGlobal, name_const, line);
+                }
+            }
+
+            Statement::EnumDef { name, variants, .. } => {
+                let mut next_auto: i64 = 0;
+                let mut resolved: Vec<VmEnumVariantDef> = Vec::new();
+                for variant in variants {
+                    let kind = match &variant.kind {
+                        VariantKind::Unit(None) => {
+                            let disc = next_auto;
+                            next_auto = disc + 1;
+                            VmEnumVariantKind::Unit(Some(Value::Integer(disc)))
+                        }
+                        VariantKind::Unit(Some(expr)) => {
+                            // Simple literal folding for discriminants. Non-literal
+                            // expressions produce a variant with no value.
+                            let val = match expr {
+                                Expression::Int { value, .. } => {
+                                    next_auto = *value + 1;
+                                    Some(Value::Integer(*value))
+                                }
+                                Expression::Float { value, .. } => Some(Value::Float(*value)),
+                                Expression::Str { value, .. } => {
+                                    Some(Value::String(value.as_str().into()))
+                                }
+                                Expression::Boolean { value, .. } => Some(Value::Boolean(*value)),
+                                Expression::NoneExpr { .. } => Some(Value::None),
+                                _ => None,
+                            };
+                            VmEnumVariantKind::Unit(val)
+                        }
+                        VariantKind::Tuple(params) => VmEnumVariantKind::Tuple(
+                            params.iter().map(|(id, _)| id.value.clone()).collect(),
+                        ),
+                        VariantKind::Struct(fields) => VmEnumVariantKind::Struct(
+                            fields.iter().map(|f| f.name.value.clone()).collect(),
+                        ),
+                    };
+                    resolved.push(VmEnumVariantDef {
+                        name: variant.name.value.clone(),
+                        kind,
+                    });
+                }
+                let enum_val = Value::EnumDef(std::rc::Rc::new(ObjEnumDef {
+                    name: name.value.clone(),
+                    variants: resolved,
+                }));
+                let const_idx = self.make_constant(enum_val, line);
+                self.emit_op_u16(OpCode::Constant, const_idx, line);
                 if self.current_frame().scope_depth > 0 {
                     self.add_local(&name.value, false, None);
                 } else {
@@ -1321,6 +1380,43 @@ impl Compiler {
                 }
                 self.emit_op_u16(OpCode::StructLiteral, name_const, line);
                 self.emit_byte(field_values.len() as u8, line);
+            }
+
+            Expression::EnumVariantConstruct {
+                enum_name,
+                variant_name,
+                kind,
+                ..
+            } => {
+                // Push the EnumDef (looked up by name) then the payload pieces,
+                // then emit the Make opcode.
+                self.compile_expression(&Expression::Ident(Identifier {
+                    token: crate::token::Token {
+                        token_type: crate::token::TokenType::Ident,
+                        literal: enum_name.clone(),
+                        span: crate::token::Span::new(line as usize, 0),
+                    },
+                    value: enum_name.clone(),
+                }));
+                let variant_const =
+                    self.make_constant(Value::String(variant_name.as_str().into()), line);
+                match kind {
+                    EnumConstructKind::Tuple(args) => {
+                        for arg in args {
+                            self.compile_expression(arg);
+                        }
+                        self.emit_op_u16(OpCode::MakeEnumVariantTuple, variant_const, line);
+                        self.emit_byte(args.len() as u8, line);
+                    }
+                    EnumConstructKind::Struct(fields) => {
+                        for (fname, fval) in fields {
+                            self.emit_constant(Value::String(fname.as_str().into()), line);
+                            self.compile_expression(fval);
+                        }
+                        self.emit_op_u16(OpCode::MakeEnumVariantStruct, variant_const, line);
+                        self.emit_byte(fields.len() as u8, line);
+                    }
+                }
             }
 
             Expression::Unless {

@@ -1,0 +1,23 @@
+enum Stoplight {
+    Red: 0
+    Yellow: 1
+    Green: 2
+}
+println(Stoplight.Green)
+println(Stoplight.Green.value)
+println(Stoplight.Green.name)
+x := Stoplight.Green
+println(x == Stoplight.Green)
+println(x == Stoplight.Red)
+light <Stoplight> := Stoplight.Yellow
+println(light.name, "=", light.value)
+generic_light <Enum> := Stoplight
+println(generic_light.Red.value)
+enum Direction {
+    North
+    East
+    South
+    West
+}
+println(Direction.North.value)
+println(Direction.West.value)

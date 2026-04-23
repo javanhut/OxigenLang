@@ -1,0 +1,11 @@
+y <map> := {"name": "oxigen", "version": "0.1"}
+println(y.name)
+println(y["name"])
+println(y.version)
+println(y.missing)
+y.name = "OXI"
+println(y.name)
+println(y["name"])
+y.author = "javanstorm"
+println(y.author)
+println(y["author"])

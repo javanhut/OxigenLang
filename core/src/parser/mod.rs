@@ -456,6 +456,7 @@ impl Parser {
 
         match self.curr_token.token_type {
             TokenType::Struct => self.parse_struct_definition(),
+            TokenType::Enum => self.parse_enum_definition(),
             TokenType::Each => self.parse_each_statement(),
             TokenType::Repeat => self.parse_repeat_statement(),
             TokenType::Pattern => self.parse_pattern_statement(),
@@ -1873,10 +1874,96 @@ impl Parser {
             token: self.curr_token.clone(),
             value: self.curr_token.literal.clone(),
         };
+
+        // Struct-variant construction: `EnumName.Variant { field: value, ... }`.
+        // Only recognized when LHS is a plain Ident and the braces contain a
+        // struct-literal shape (Ident Colon ... or empty). Prevents grabbing
+        // any `{` that happens to follow an expression-level dot access.
+        if let Expression::Ident(ref ident) = left {
+            if self.peek_token.token_type == TokenType::LBrace {
+                let mut idx = 1;
+                let mut is_struct_shape = false;
+                let mut is_empty = false;
+                loop {
+                    let t = self.peek_nth(idx).token_type.clone();
+                    if t == TokenType::Newline {
+                        idx += 1;
+                        continue;
+                    }
+                    if t == TokenType::RBrace {
+                        is_empty = true;
+                        break;
+                    }
+                    if t == TokenType::Ident {
+                        let t2 = self.peek_nth(idx + 1).token_type.clone();
+                        if t2 == TokenType::Colon {
+                            is_struct_shape = true;
+                        }
+                    }
+                    break;
+                }
+                if is_struct_shape || is_empty {
+                    return self.parse_enum_struct_variant(tok, ident.value.clone(), field.value);
+                }
+            }
+        }
+
         Some(Expression::DotAccess {
             token: tok,
             left: Box::new(left),
             field,
+        })
+    }
+
+    fn parse_enum_struct_variant(
+        &mut self,
+        tok: crate::token::Token,
+        enum_name: String,
+        variant_name: String,
+    ) -> Option<Expression> {
+        self.next_token(); // consume '{'
+        let mut fields: Vec<(String, Expression)> = Vec::new();
+        while self.peek_token.token_type == TokenType::Newline {
+            self.next_token();
+        }
+        if self.peek_token.token_type == TokenType::RBrace {
+            self.next_token();
+            return Some(Expression::EnumVariantConstruct {
+                token: tok,
+                enum_name,
+                variant_name,
+                kind: crate::ast::EnumConstructKind::Struct(fields),
+            });
+        }
+        loop {
+            self.next_token();
+            while self.curr_token.token_type == TokenType::Newline {
+                self.next_token();
+            }
+            if self.curr_token.token_type == TokenType::RBrace {
+                break;
+            }
+            let field_name = self.curr_token.literal.clone();
+            self.expect_peek(TokenType::Colon)?;
+            self.next_token();
+            let value = self.parse_expression(Precedence::Lowest)?;
+            fields.push((field_name, value));
+            if self.peek_token.token_type == TokenType::Comma {
+                self.next_token();
+            }
+            while self.peek_token.token_type == TokenType::Newline {
+                self.next_token();
+            }
+            if self.peek_token.token_type == TokenType::RBrace {
+                self.next_token();
+                break;
+            }
+        }
+        Some(Expression::EnumVariantConstruct {
+            token: tok,
+            enum_name,
+            variant_name,
+            kind: crate::ast::EnumConstructKind::Struct(fields),
         })
     }
 
@@ -2590,6 +2677,149 @@ impl Parser {
             name,
             parent,
             fields,
+        })
+    }
+
+    fn parse_enum_definition(&mut self) -> Option<Statement> {
+        let token = self.curr_token.clone(); // 'enum'
+
+        self.next_token(); // move to enum name
+        let name = Identifier {
+            token: self.curr_token.clone(),
+            value: self.curr_token.literal.clone(),
+        };
+
+        self.expect_peek(TokenType::LBrace)?; // '{'
+
+        let mut variants: Vec<crate::ast::EnumVariant> = Vec::new();
+
+        // Skip newlines after '{'
+        while self.peek_token.token_type == TokenType::Newline {
+            self.next_token();
+        }
+
+        while self.peek_token.token_type != TokenType::RBrace
+            && self.peek_token.token_type != TokenType::Eof
+        {
+            self.next_token(); // move to variant name (or a separator we skip)
+
+            // Skip newlines and commas between variants
+            while self.curr_token.token_type == TokenType::Newline
+                || self.curr_token.token_type == TokenType::Comma
+            {
+                self.next_token();
+            }
+
+            if self.curr_token.token_type == TokenType::RBrace {
+                return Some(Statement::EnumDef {
+                    token,
+                    name,
+                    variants,
+                });
+            }
+
+            if self.curr_token.token_type != TokenType::Ident {
+                return None;
+            }
+
+            let variant_name = Identifier {
+                token: self.curr_token.clone(),
+                value: self.curr_token.literal.clone(),
+            };
+
+            let kind = match self.peek_token.token_type {
+                TokenType::Colon => {
+                    self.next_token(); // consume ':'
+                    self.next_token(); // move to expression
+                    let expr = self.parse_expression(Precedence::Lowest)?;
+                    crate::ast::VariantKind::Unit(Some(expr))
+                }
+                TokenType::LParen => {
+                    self.next_token(); // consume '('
+                    let mut params: Vec<(Identifier, TypeAnnotation)> = Vec::new();
+                    // Empty tuple? `Name()` is fine but unusual.
+                    if self.peek_token.token_type != TokenType::RParen {
+                        loop {
+                            self.next_token(); // move to param name
+                            let param_name = Identifier {
+                                token: self.curr_token.clone(),
+                                value: self.curr_token.literal.clone(),
+                            };
+                            self.expect_peek(TokenType::Lt)?; // '<'
+                            let type_ann = self.parse_type_annotation()?;
+                            params.push((param_name, type_ann));
+                            if self.peek_token.token_type == TokenType::Comma {
+                                self.next_token();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect_peek(TokenType::RParen)?;
+                    crate::ast::VariantKind::Tuple(params)
+                }
+                TokenType::LBrace => {
+                    self.next_token(); // consume '{'
+                    let mut fields: Vec<crate::ast::StructField> = Vec::new();
+                    while self.peek_token.token_type == TokenType::Newline
+                        || self.peek_token.token_type == TokenType::Comma
+                    {
+                        self.next_token();
+                    }
+                    while self.peek_token.token_type != TokenType::RBrace
+                        && self.peek_token.token_type != TokenType::Eof
+                    {
+                        self.next_token(); // move to field name
+                        while self.curr_token.token_type == TokenType::Newline
+                            || self.curr_token.token_type == TokenType::Comma
+                        {
+                            self.next_token();
+                        }
+                        if self.curr_token.token_type == TokenType::RBrace {
+                            break;
+                        }
+                        let field_name = Identifier {
+                            token: self.curr_token.clone(),
+                            value: self.curr_token.literal.clone(),
+                        };
+                        self.expect_peek(TokenType::Lt)?; // '<'
+                        let type_ann = self.parse_type_annotation()?;
+                        fields.push(crate::ast::StructField {
+                            name: field_name,
+                            type_ann,
+                            hidden: false,
+                        });
+                        while self.peek_token.token_type == TokenType::Newline
+                            || self.peek_token.token_type == TokenType::Comma
+                        {
+                            self.next_token();
+                        }
+                    }
+                    self.expect_peek(TokenType::RBrace)?;
+                    crate::ast::VariantKind::Struct(fields)
+                }
+                _ => crate::ast::VariantKind::Unit(None),
+            };
+
+            variants.push(crate::ast::EnumVariant {
+                name: variant_name,
+                kind,
+            });
+
+            // Skip trailing newlines or commas between variants
+            while self.peek_token.token_type == TokenType::Newline
+                || self.peek_token.token_type == TokenType::Comma
+            {
+                self.next_token();
+            }
+        }
+
+        self.expect_peek(TokenType::RBrace)?;
+
+        Some(Statement::EnumDef {
+            token,
+            name,
+            variants,
         })
     }
 

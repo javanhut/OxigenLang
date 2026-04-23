@@ -306,6 +306,17 @@ Note: An empty map `{}` and an empty block `{}` use the same syntax. The parser 
 
   Both `=` and `:=` work for index assignment.
 
+- **Dot Access (string keys)**: Read and write string-keyed entries with `.name` syntax:
+
+  ```oxi
+  y <map> := {"name": "oxigen"}
+  y.name              // "oxigen"  (same as y["name"])
+  y.version = "0.1"   // inserts the key
+  y.missing           // None (missing keys return None)
+  ```
+
+  Dot access is limited to string keys. Non-string keys still require bracket syntax.
+
 - **Insert**: Returns a new map with the key-value pair added or updated:
 
   ```oxi
@@ -390,6 +401,19 @@ uint(byte(255))
 ```
 
 Negative values produce an error.
+
+## Enums
+
+Enumerations define a fixed set of named variants. See [Enums](enums.md) for the full reference.
+
+```oxi
+enum Stoplight { Red: 0, Yellow: 1, Green: 2 }
+
+light <Stoplight> := Stoplight.Green
+light.value   // 2
+```
+
+Variants may carry tuple or struct payloads (Rust-style). Type annotations support both `<Enum>` (any enum) and `<EnumName>` (a specific enum).
 
 ## Type Introspection
 

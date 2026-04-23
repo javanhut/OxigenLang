@@ -59,6 +59,50 @@ pub enum Object {
     },
     Value(Rc<Object>),
     Error(String),
+    EnumDef {
+        name: String,
+        variants: Vec<EnumVariantDef>,
+    },
+    EnumInstance {
+        enum_name: String,
+        variant_name: String,
+        payload: EnumPayload,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnumVariantDef {
+    pub name: String,
+    pub kind: EnumVariantKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum EnumVariantKind {
+    Unit(Option<Rc<Object>>),
+    Tuple(Vec<String>),
+    Struct(Vec<String>),
+}
+
+#[derive(Clone, Debug)]
+pub enum EnumPayload {
+    Unit(Option<Rc<Object>>),
+    Tuple(Vec<Rc<Object>>),
+    Struct(Vec<(String, Rc<Object>)>),
+}
+
+impl PartialEq for EnumPayload {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (EnumPayload::Unit(a), EnumPayload::Unit(b)) => match (a, b) {
+                (Some(av), Some(bv)) => av == bv,
+                (None, None) => true,
+                _ => false,
+            },
+            (EnumPayload::Tuple(a), EnumPayload::Tuple(b)) => a == b,
+            (EnumPayload::Struct(a), EnumPayload::Struct(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 impl Object {
@@ -81,6 +125,8 @@ impl Object {
             Object::Tuple(t) => !t.is_empty(),
             Object::Map(m) => !m.is_empty(),
             Object::Set(s) => !s.is_empty(),
+            Object::EnumDef { .. } => true,
+            Object::EnumInstance { .. } => true,
             _ => true,
         }
     }
@@ -115,6 +161,8 @@ impl Object {
             Object::ErrorValue { .. } => "ERROR",
             Object::Value(_) => "VALUE",
             Object::Error(_) => "ERROR",
+            Object::EnumDef { .. } => "ENUM_DEF",
+            Object::EnumInstance { .. } => "ENUM",
         }
     }
 
@@ -133,6 +181,8 @@ impl Object {
                 None => "ERROR".to_string(),
             },
             Object::Value(_) => "VALUE".to_string(),
+            Object::EnumDef { name, .. } => name.clone(),
+            Object::EnumInstance { enum_name, .. } => enum_name.clone(),
             other => other.type_name().to_string(),
         }
     }
@@ -205,6 +255,25 @@ impl fmt::Display for Object {
             },
             Object::Value(val) => write!(f, "Value({})", val),
             Object::Error(msg) => write!(f, "Error: {}", msg),
+            Object::EnumDef { name, .. } => write!(f, "enum {}", name),
+            Object::EnumInstance {
+                enum_name,
+                variant_name,
+                payload,
+            } => match payload {
+                EnumPayload::Unit(_) => write!(f, "{}.{}", enum_name, variant_name),
+                EnumPayload::Tuple(items) => {
+                    let s: Vec<String> = items.iter().map(|v| v.to_string()).collect();
+                    write!(f, "{}.{}({})", enum_name, variant_name, s.join(", "))
+                }
+                EnumPayload::Struct(fields) => {
+                    let s: Vec<String> = fields
+                        .iter()
+                        .map(|(k, v)| format!("{}: {}", k, v))
+                        .collect();
+                    write!(f, "{}.{} {{ {} }}", enum_name, variant_name, s.join(", "))
+                }
+            },
         }
     }
 }
@@ -245,6 +314,18 @@ impl fmt::Debug for Object {
             }
             Object::Value(val) => write!(f, "Value({:?})", val),
             Object::Error(msg) => write!(f, "Error({:?})", msg),
+            Object::EnumDef { name, variants } => {
+                write!(f, "EnumDef({}, {:?})", name, variants)
+            }
+            Object::EnumInstance {
+                enum_name,
+                variant_name,
+                payload,
+            } => write!(
+                f,
+                "EnumInstance({}, {}, {:?})",
+                enum_name, variant_name, payload
+            ),
         }
     }
 }
@@ -282,6 +363,19 @@ impl PartialEq for Object {
                 },
             ) => a_name == b_name && *a_fields.borrow() == *b_fields.borrow(),
             (Object::Module { name: a, .. }, Object::Module { name: b, .. }) => a == b,
+            (
+                Object::EnumInstance {
+                    enum_name: a_e,
+                    variant_name: a_v,
+                    payload: a_p,
+                },
+                Object::EnumInstance {
+                    enum_name: b_e,
+                    variant_name: b_v,
+                    payload: b_p,
+                },
+            ) => a_e == b_e && a_v == b_v && a_p == b_p,
+            (Object::EnumDef { name: a, .. }, Object::EnumDef { name: b, .. }) => a == b,
             _ => false,
         }
     }
