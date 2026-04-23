@@ -16,6 +16,23 @@ use crate::vm::value::Value;
 pub struct ScanInfo {
     /// Absolute bytecode offsets that are branch targets.
     pub branch_targets: Vec<usize>,
+    /// True if the function body contains `OpCode::Closure`, i.e. can
+    /// create closures that capture locals of the current frame. When
+    /// false, `VM::close_upvalues(frame.slot_offset)` at Return time is
+    /// provably a no-op (only `handle_closure` extends `open_upvalues`
+    /// with entries pointing into the current frame's slots), which
+    /// lets the JIT inline the return path.
+    pub may_capture_upvalues: bool,
+    /// True if the function body produces or consumes any heap-backed
+    /// (Rc-bearing) Value on its stack. When false, the stack's values
+    /// inside this frame are guaranteed to be primitive tags
+    /// (Integer/Float/Bool/etc.) with no Drop side-effect, so Return
+    /// can skip the stack_truncate drop loop entirely.
+    ///
+    /// Conservative: set true by any opcode that can place a heap-
+    /// backed Value on the stack or touch one already there (args or
+    /// upvalues we can't track statically).
+    pub touches_heap_values: bool,
 }
 
 #[derive(Debug)]
@@ -191,6 +208,73 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
             _ => {}
         }
 
+        // Heap-value detection. Conservative: any opcode that can put a
+        // heap-backed (Rc-bearing) Value on the stack sets the flag.
+        // Also any Constant pointing to an Rc-backed constant. Opcodes
+        // that only touch primitives (arithmetic, comparison, jumps,
+        // local/global primitive ops) don't set the flag.
+        match op {
+            OpCode::Closure
+            | OpCode::StructDef
+            | OpCode::StructLiteral
+            | OpCode::DefineMethod
+            | OpCode::EnumDef
+            | OpCode::MakeEnumVariantUnit
+            | OpCode::MakeEnumVariantTuple
+            | OpCode::MakeEnumVariantStruct
+            | OpCode::BuildArray
+            | OpCode::BuildTuple
+            | OpCode::BuildMap
+            | OpCode::BuildSet
+            | OpCode::StringInterp
+            | OpCode::Index
+            | OpCode::IndexAssign
+            | OpCode::Slice
+            | OpCode::GetField
+            | OpCode::SetField
+            | OpCode::MethodCall
+            | OpCode::MethodCallNamed
+            | OpCode::TypeWrap
+            | OpCode::Import
+            | OpCode::GetModuleField
+            | OpCode::GetUpvalue
+            | OpCode::SetUpvalue
+            | OpCode::CloseUpvalue
+            | OpCode::GetGlobal
+            | OpCode::SetGlobal
+            | OpCode::Call
+            | OpCode::CallNamed
+            | OpCode::ErrorConstruct
+            | OpCode::ValueConstruct
+            | OpCode::Guard
+            | OpCode::Fail
+            | OpCode::IterLen
+            | OpCode::IterGet
+            | OpCode::Unpack
+            | OpCode::Log => {
+                info.touches_heap_values = true;
+            }
+            OpCode::Constant => {
+                let idx = read_u16(code, ip + 1)
+                    .ok_or(ScanError::InvalidBytecode { offset: ip })?;
+                if let Some(v) = chunk.constants.get(idx as usize) {
+                    if !matches!(
+                        v,
+                        Value::Integer(_)
+                            | Value::Float(_)
+                            | Value::Boolean(_)
+                            | Value::Byte(_)
+                            | Value::Uint(_)
+                            | Value::Char(_)
+                            | Value::None
+                    ) {
+                        info.touches_heap_values = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+
         // Advance ip.
         if matches!(op, OpCode::Closure) {
             // Closure is variable-length: 3 bytes for fn_const_idx, then
@@ -201,6 +285,11 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
                 Some(Value::Closure(t)) => t.function.upvalue_count as usize,
                 _ => return Err(ScanError::InvalidBytecode { offset: ip }),
             };
+            // Closure opcode means this function may capture locals into
+            // upvalues of the inner closure; Return must therefore call
+            // close_upvalues. Record that fact so the JIT can NOT inline
+            // op_return for this function.
+            info.may_capture_upvalues = true;
             ip += 3 + 3 * upvalue_count;
         } else {
             ip += instr_fixed_len(op);

@@ -218,6 +218,38 @@ impl VM {
         std::mem::offset_of!(VM, jit_frame_view)
     }
 
+    /// Byte offset of `globals_version` within `VM`. Used by the JIT's
+    /// inline GetGlobal hit-path to read the current version without a
+    /// helper call.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub const fn globals_version_offset() -> usize {
+        std::mem::offset_of!(VM, globals_version)
+    }
+
+    /// Re-sync `self.stack`'s `Vec::len` from the JIT-visible
+    /// `stack_view.len`. The JIT's inline stack ops mutate
+    /// `stack_view.len` directly without touching `Vec::len`; any Rust
+    /// code that reads `self.stack` via Vec's API must call this first.
+    ///
+    /// # Safety invariant (must be upheld by every JIT inline path)
+    ///
+    /// The inline paths may only **decrement** `stack_view.len`, and
+    /// only for stack slots that hold primitive-tag values (tags 0..=6:
+    /// Integer, Float, Char, Boolean, Byte, Uint, None) — values with
+    /// no `Drop` side-effect. If an inline path abandoned an Rc-bearing
+    /// value, `Vec::set_len(shorter)` here would leak its refcount.
+    ///
+    /// This is satisfied by construction: inline pops live only inside
+    /// int-fast-arith / int-fast-cmp fast blocks gated on
+    /// `VALUE_TAG_INTEGER`, and `emit_inline_replace_top2_with_bool`
+    /// replaces two Integers with a Boolean — primitives in, primitives
+    /// abandoned.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn sync_stack_from_view(&mut self) {
+        unsafe { self.stack.set_len(self.stack_view.len); }
+    }
+
     pub fn set_source(&mut self, source: &str) {
         self.source = source.to_string();
     }
@@ -816,6 +848,10 @@ impl VM {
 
     #[inline(always)]
     pub(crate) fn push(&mut self, value: Value) {
+        // JIT inline paths may have decremented `stack_view.len` without
+        // touching `Vec::len`; re-sync before we use Vec's APIs. See
+        // `sync_stack_from_view` for the safety invariant.
+        unsafe { self.stack.set_len(self.stack_view.len); }
         if self.stack.len() >= STACK_MAX {
             panic!("stack overflow: exceeded {} slots", STACK_MAX);
         }
@@ -827,6 +863,8 @@ impl VM {
 
     #[inline(always)]
     pub(crate) fn pop(&mut self) -> Value {
+        // See push() above for the rationale.
+        unsafe { self.stack.set_len(self.stack_view.len); }
         let v = self.stack.pop().expect("stack underflow");
         self.stack_view.len = self.stack.len();
         v

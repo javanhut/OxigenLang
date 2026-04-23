@@ -282,6 +282,7 @@ struct HelperIds {
     stack_pop_one: FuncId,          // (vm)
     stack_pop_n: FuncId,            // (vm, u32)
     stack_commit_len: FuncId,       // (vm, u64)
+    stack_truncate: FuncId,         // (vm, i64)
     replace_top2_with_bool: FuncId, // (vm, u32)
     current_slot_offset: FuncId,    // (vm) -> i64
 }
@@ -290,7 +291,9 @@ struct HelperIds {
 /// table" of declared helpers.
 struct HelperRefs {
     push_constant: FuncRef,
+    #[allow(dead_code)]
     push_integer_inline: FuncRef,
+    #[allow(dead_code)]
     push_float_inline: FuncRef,
     push_none: FuncRef,
     push_true: FuncRef,
@@ -352,9 +355,11 @@ struct HelperRefs {
     stack_as_mut_ptr: FuncRef,
     #[allow(dead_code)]
     stack_len: FuncRef,
+    #[allow(dead_code)]
     stack_pop_one: FuncRef,
     stack_pop_n: FuncRef,
     stack_commit_len: FuncRef,
+    stack_truncate: FuncRef,
     replace_top2_with_bool: FuncRef,
     #[allow(dead_code)]
     current_slot_offset: FuncRef,
@@ -699,12 +704,12 @@ impl JitInner {
                         match &chunk.constants[idx as usize] {
                             crate::vm::value::Value::Integer(n) => {
                                 let v = builder.ins().iconst(types::I64, *n);
-                                builder.ins().call(refs.push_integer_inline, &[vm_val, v]);
+                                emit_inline_push_integer(&mut builder, vm_val, v);
                             }
                             crate::vm::value::Value::Float(f) => {
                                 let bits = f.to_bits() as i64;
                                 let v = builder.ins().iconst(types::I64, bits);
-                                builder.ins().call(refs.push_float_inline, &[vm_val, v]);
+                                emit_inline_push_float(&mut builder, vm_val, v);
                             }
                             _ => {
                                 // Fall back to the generic helper for
@@ -728,7 +733,7 @@ impl JitInner {
                         ip += 1;
                     }
                     OpCode::Pop => {
-                        builder.ins().call(refs.pop, &[vm_val]);
+                        emit_inline_pop_tag_gated(&mut builder, &refs, vm_val);
                         ip += 1;
                     }
                     OpCode::Dup => {
@@ -1043,11 +1048,88 @@ impl JitInner {
                         ic_ix += 1;
                         let idx_val = builder.ins().iconst(types::I32, idx as i64);
                         let cache_val = builder.ins().iconst(ptr_ty, cache_ptr as i64);
+                        // Inline the cache-hit path: version check, then
+                        // tag-gated Rc-strongcount bump + 40-byte copy to
+                        // stack top. Miss falls through to the helper.
+                        use cranelift_codegen::ir::MemFlags;
+                        use cranelift_codegen::ir::condcodes::IntCC;
+                        let flags = MemFlags::trusted();
+                        let cache_ver = builder
+                            .ins()
+                            .load(types::I64, flags, cache_val, 0);
+                        let vm_ver = builder.ins().load(
+                            types::I64,
+                            flags,
+                            vm_val,
+                            VM::globals_version_offset() as i32,
+                        );
+                        let is_hit = builder.ins().icmp(IntCC::Equal, cache_ver, vm_ver);
+                        let hit_block = builder.create_block();
+                        let miss_block = builder.create_block();
+                        let cont_block = builder.create_block();
+                        builder
+                            .ins()
+                            .brif(is_hit, hit_block, &[], miss_block, &[]);
+
+                        // ── Hit ──
+                        builder.switch_to_block(hit_block);
+                        // cache.value sits at byte offset 8 of the cache.
+                        let cache_value_ptr = builder.ins().iadd_imm(cache_val, 8);
+                        // If the value is heap-backed (tag > 6), bump the
+                        // Rc strong count at the payload pointer (RcBox
+                        // offset 0; pinned by rc_strong_count_lives_at_
+                        // rcbox_offset_zero test in vm/value.rs).
+                        let tag = builder.ins().load(types::I8, flags, cache_value_ptr, 0);
+                        let six = builder.ins().iconst(types::I8, 6);
+                        let is_heap = builder.ins().icmp(IntCC::UnsignedGreaterThan, tag, six);
+                        let bump_block = builder.create_block();
+                        let post_bump = builder.create_block();
+                        builder.ins().brif(is_heap, bump_block, &[], post_bump, &[]);
+
+                        builder.switch_to_block(bump_block);
+                        let rc_ptr = builder.ins().load(
+                            types::I64,
+                            flags,
+                            cache_value_ptr,
+                            VALUE_INT_PAYLOAD_OFFSET as i32,
+                        );
+                        let strong = builder.ins().load(types::I64, flags, rc_ptr, 0);
+                        let strong_new = builder.ins().iadd_imm(strong, 1);
+                        builder.ins().store(flags, strong_new, rc_ptr, 0);
+                        builder.ins().jump(post_bump, &[]);
+
+                        builder.switch_to_block(post_bump);
+                        // Copy the 40-byte Value from cache to stack[top].
+                        let stack_ptr_v = emit_load_stack_ptr(&mut builder, vm_val);
+                        let top_v = emit_load_stack_len(&mut builder, vm_val);
+                        let vsize = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+                        let off = builder.ins().imul(top_v, vsize);
+                        let dst = builder.ins().iadd(stack_ptr_v, off);
+                        emit_copy_value(&mut builder, cache_value_ptr, dst);
+                        let one_v = builder.ins().iconst(types::I64, 1);
+                        let new_top = builder.ins().iadd(top_v, one_v);
+                        builder.ins().store(
+                            flags,
+                            new_top,
+                            vm_val,
+                            vm_stack_view_len_offset(),
+                        );
+                        builder.ins().jump(cont_block, &[]);
+
+                        // ── Miss ──
+                        builder.switch_to_block(miss_block);
                         let call = builder
                             .ins()
                             .call(refs.get_global_ic, &[vm_val, cache_val, idx_val]);
                         let status = builder.inst_results(call)[0];
-                        emit_early_exit_on_err(&mut builder, status);
+                        let err_block = builder.create_block();
+                        builder
+                            .ins()
+                            .brif(status, err_block, &[], cont_block, &[]);
+                        builder.switch_to_block(err_block);
+                        builder.ins().return_(&[status]);
+
+                        builder.switch_to_block(cont_block);
                         ip += 3;
                     }
                     OpCode::SetGlobal => {
@@ -1796,6 +1878,7 @@ fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_stack_pop_one", runtime::jit_stack_pop_one);
     reg!("jit_stack_pop_n", runtime::jit_stack_pop_n);
     reg!("jit_stack_commit_len", runtime::jit_stack_commit_len);
+    reg!("jit_stack_truncate", runtime::jit_stack_truncate);
     reg!(
         "jit_replace_top2_with_bool",
         runtime::jit_replace_top2_with_bool
@@ -2012,6 +2095,7 @@ fn declare_helpers(module: &mut JITModule) -> HelperIds {
         stack_pop_one: decl(module, "jit_stack_pop_one", &sig_vm_only),
         stack_pop_n: decl(module, "jit_stack_pop_n", &sig_vm_u32),
         stack_commit_len: decl(module, "jit_stack_commit_len", &sig_vm_i64),
+        stack_truncate: decl(module, "jit_stack_truncate", &sig_vm_i64),
         replace_top2_with_bool: decl(module, "jit_replace_top2_with_bool", &sig_vm_u32),
         current_slot_offset: decl(module, "jit_current_slot_offset", &sig_vm_to_i64),
     }
@@ -2080,6 +2164,7 @@ fn declare_helper_refs(
         stack_pop_one: r(ids.stack_pop_one),
         stack_pop_n: r(ids.stack_pop_n),
         stack_commit_len: r(ids.stack_commit_len),
+        stack_truncate: r(ids.stack_truncate),
         replace_top2_with_bool: r(ids.replace_top2_with_bool),
         current_slot_offset: r(ids.current_slot_offset),
     }
@@ -2804,9 +2889,9 @@ fn emit_int_fast_arith(
     builder
         .ins()
         .store(flags, result, val_a_ptr, VALUE_INT_PAYLOAD_OFFSET as i32);
-    // Drop the now-duplicate top slot. Integer has no Drop so the call
-    // is cheap.
-    builder.ins().call(refs.stack_pop_one, &[vm_val]);
+    // Inline the pop. Safe because the fast block gates on
+    // VALUE_TAG_INTEGER (top value has no Drop side-effect).
+    emit_inline_stack_pop_one(builder, vm_val);
     builder.ins().jump(continue_block, &[]);
 
     // ── Slow path ──
@@ -2825,6 +2910,235 @@ fn emit_int_fast_arith(
     // Suppress the unused-warning on ptr_ty — it's the pointer type we
     // expect from `stack_as_mut_ptr` and `iadd` would verify consistency.
     let _ = ptr_ty;
+}
+
+/// Inline `jit_stack_pop_one`: decrement `stack_view.len`. Safe only
+/// when the popped slot is guaranteed to hold a primitive-tag value
+/// (no `Drop` side-effect); callers must enforce this gating.
+#[inline]
+fn emit_inline_stack_pop_one(
+    builder: &mut FunctionBuilder<'_>,
+    vm_val: cranelift_codegen::ir::Value,
+) {
+    use cranelift_codegen::ir::MemFlags;
+    let flags = MemFlags::trusted();
+    let top = emit_load_stack_len(builder, vm_val);
+    let one = builder.ins().iconst(types::I64, 1);
+    let new_top = builder.ins().isub(top, one);
+    builder
+        .ins()
+        .store(flags, new_top, vm_val, vm_stack_view_len_offset());
+}
+
+/// Inline `jit_push_integer_inline`: write Value::Integer(payload) at
+/// the current stack top and bump the length. Replaces a full ABI-cost
+/// FFI call with ~9 Cranelift instructions.
+///
+/// Layout guarded by `value_size_is_pinned_at_40` and
+/// `value_integer_layout_is_pinned` tests in vm/value.rs.
+#[inline]
+fn emit_inline_push_integer(
+    builder: &mut FunctionBuilder<'_>,
+    vm_val: cranelift_codegen::ir::Value,
+    payload: cranelift_codegen::ir::Value,
+) {
+    use cranelift_codegen::ir::MemFlags;
+    let flags = MemFlags::trusted();
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
+    let top = emit_load_stack_len(builder, vm_val);
+    let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+    let byte_off = builder.ins().imul(top, value_size);
+    let slot_ptr = builder.ins().iadd(stack_ptr, byte_off);
+    let tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
+    builder.ins().store(flags, tag, slot_ptr, 0);
+    builder
+        .ins()
+        .store(flags, payload, slot_ptr, VALUE_INT_PAYLOAD_OFFSET as i32);
+    let one = builder.ins().iconst(types::I64, 1);
+    let new_top = builder.ins().iadd(top, one);
+    builder
+        .ins()
+        .store(flags, new_top, vm_val, vm_stack_view_len_offset());
+}
+
+/// Inline the no-upvalue fast path of `jit_op_return`. Only safe when
+/// `scan_info.may_capture_upvalues == false` — the function body does
+/// not contain `OpCode::Closure`, so no upvalue ever points into this
+/// frame's slot range and `close_upvalues` is provably a no-op.
+///
+/// Currently unused: the helper-based return path is faster because
+/// `jit_stack_truncate` must still walk-and-drop each local slot, and
+/// that drop loop adds up. Kept for future work: if scan becomes
+/// precise enough to prove "all locals are primitives for this
+/// function," we can swap in a drop-free truncate and activate this.
+#[inline]
+#[allow(dead_code)]
+fn emit_inline_op_return(
+    builder: &mut FunctionBuilder<'_>,
+    refs: &HelperRefs,
+    vm_val: cranelift_codegen::ir::Value,
+) {
+    use cranelift_codegen::ir::MemFlags;
+    let flags = MemFlags::trusted();
+
+    // Load slot_offset of the current (about-to-pop) JitFrame.
+    let slot_off = emit_load_top_jit_frame_slot_offset(builder, vm_val);
+
+    // Load the return Value's source pointer (stack[top-1]).
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
+    let top = emit_load_stack_len(builder, vm_val);
+    let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+    let one = builder.ins().iconst(types::I64, 1);
+    let top_idx = builder.ins().isub(top, one);
+    let src_byte = builder.ins().imul(top_idx, value_size);
+    let src_ptr = builder.ins().iadd(stack_ptr, src_byte);
+
+    // Read the return Value into VALUE_SIZE-worth of i64s (on the
+    // Cranelift side they live as SSA values and get spilled if needed).
+    let mut words = Vec::with_capacity(VALUE_SIZE / 8);
+    for off in (0..VALUE_SIZE).step_by(8) {
+        words.push(
+            builder
+                .ins()
+                .load(types::I64, flags, src_ptr, off as i32),
+        );
+    }
+
+    // Pop the JitFrame.
+    let jf_len = builder
+        .ins()
+        .load(types::I64, flags, vm_val, vm_jit_frame_view_len_offset());
+    let new_jf_len = builder.ins().isub(jf_len, one);
+    builder
+        .ins()
+        .store(flags, new_jf_len, vm_val, vm_jit_frame_view_len_offset());
+
+    // Truncate the stack to slot_offset via a helper so Rc-bearing locals
+    // get their Drop. This is the one FFI we keep in the inline path,
+    // for correctness.
+    builder
+        .ins()
+        .call(refs.stack_truncate, &[vm_val, slot_off]);
+
+    // After stack_truncate, Vec::len == slot_off and stack_view.len ==
+    // slot_off. Write the return Value at stack[slot_off] via raw
+    // stores, then bump stack_view.len by 1.
+    let dst_byte = builder.ins().imul(slot_off, value_size);
+    let dst_ptr = builder.ins().iadd(stack_ptr, dst_byte);
+    for (i, w) in words.iter().enumerate() {
+        builder
+            .ins()
+            .store(flags, *w, dst_ptr, (i * 8) as i32);
+    }
+    let new_top = builder.ins().iadd(slot_off, one);
+    builder
+        .ins()
+        .store(flags, new_top, vm_val, vm_stack_view_len_offset());
+}
+
+/// Inline `jit_replace_top2_with_bool` for the integer fast path.
+/// Callers are inside int-fast-cmp fast blocks, so the top two values
+/// are guaranteed Integer (no Drop side-effect). Writes Value::Boolean
+/// at stack[len-2], then decrements len by 1.
+///
+/// Layout: Bool tag = 3 (pinned by `value_bool_tag_and_payload_are_pinned`
+/// in vm/value.rs), payload byte at offset 1.
+#[inline]
+fn emit_inline_replace_top2_with_bool(
+    builder: &mut FunctionBuilder<'_>,
+    vm_val: cranelift_codegen::ir::Value,
+    bool_val: cranelift_codegen::ir::Value, // i32, nonzero => true
+) {
+    use cranelift_codegen::ir::MemFlags;
+    let flags = MemFlags::trusted();
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
+    let top = emit_load_stack_len(builder, vm_val);
+    let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+    let two = builder.ins().iconst(types::I64, 2);
+    let target_idx = builder.ins().isub(top, two);
+    let target_byte = builder.ins().imul(target_idx, value_size);
+    let target_ptr = builder.ins().iadd(stack_ptr, target_byte);
+    let bool_tag = builder.ins().iconst(types::I8, 3);
+    builder.ins().store(flags, bool_tag, target_ptr, 0);
+    let bool_i8 = builder.ins().ireduce(types::I8, bool_val);
+    builder.ins().store(flags, bool_i8, target_ptr, 1);
+    let one = builder.ins().iconst(types::I64, 1);
+    let new_top = builder.ins().isub(top, one);
+    builder
+        .ins()
+        .store(flags, new_top, vm_val, vm_stack_view_len_offset());
+}
+
+/// Inline `jit_pop` for the common case where the top-of-stack holds
+/// a primitive-tag value (no `Drop` side-effect). Reads the top tag
+/// byte, and if it's in the primitive range (0..=6), decrements
+/// `stack_view.len` inline. Otherwise falls back to the helper so
+/// Rc-bearing values get their Drop run correctly.
+#[inline]
+fn emit_inline_pop_tag_gated(
+    builder: &mut FunctionBuilder<'_>,
+    refs: &HelperRefs,
+    vm_val: cranelift_codegen::ir::Value,
+) {
+    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::condcodes::IntCC;
+    let flags = MemFlags::trusted();
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
+    let top = emit_load_stack_len(builder, vm_val);
+    let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+    let one = builder.ins().iconst(types::I64, 1);
+    let top_idx = builder.ins().isub(top, one);
+    let byte_off = builder.ins().imul(top_idx, value_size);
+    let slot_ptr = builder.ins().iadd(stack_ptr, byte_off);
+    let tag = builder.ins().load(types::I8, flags, slot_ptr, 0);
+    // Primitive tags are 0..=6 (Integer..None); heap-backed start at 7.
+    let six = builder.ins().iconst(types::I8, 6);
+    let is_primitive = builder.ins().icmp(IntCC::UnsignedLessThanOrEqual, tag, six);
+    let fast_block = builder.create_block();
+    let slow_block = builder.create_block();
+    let cont_block = builder.create_block();
+    builder
+        .ins()
+        .brif(is_primitive, fast_block, &[], slow_block, &[]);
+
+    builder.switch_to_block(fast_block);
+    builder
+        .ins()
+        .store(flags, top_idx, vm_val, vm_stack_view_len_offset());
+    builder.ins().jump(cont_block, &[]);
+
+    builder.switch_to_block(slow_block);
+    builder.ins().call(refs.pop, &[vm_val]);
+    builder.ins().jump(cont_block, &[]);
+
+    builder.switch_to_block(cont_block);
+}
+
+/// Inline `jit_push_float_inline`: same shape as the integer version
+/// with `VALUE_TAG_FLOAT` and the f64 bit pattern at payload offset.
+#[inline]
+fn emit_inline_push_float(
+    builder: &mut FunctionBuilder<'_>,
+    vm_val: cranelift_codegen::ir::Value,
+    bits: cranelift_codegen::ir::Value,
+) {
+    use cranelift_codegen::ir::MemFlags;
+    let flags = MemFlags::trusted();
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
+    let top = emit_load_stack_len(builder, vm_val);
+    let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+    let byte_off = builder.ins().imul(top, value_size);
+    let slot_ptr = builder.ins().iadd(stack_ptr, byte_off);
+    let tag = builder.ins().iconst(types::I8, VALUE_TAG_FLOAT as i64);
+    builder.ins().store(flags, tag, slot_ptr, 0);
+    builder
+        .ins()
+        .store(flags, bits, slot_ptr, VALUE_INT_PAYLOAD_OFFSET as i32);
+    let one = builder.ins().iconst(types::I64, 1);
+    let new_top = builder.ins().iadd(top, one);
+    builder
+        .ins()
+        .store(flags, new_top, vm_val, vm_stack_view_len_offset());
 }
 
 fn emit_int_fast_divmod(
@@ -2903,7 +3217,8 @@ fn emit_int_fast_divmod(
     builder
         .ins()
         .store(flags, result, val_a_ptr, VALUE_INT_PAYLOAD_OFFSET as i32);
-    builder.ins().call(refs.stack_pop_one, &[vm_val]);
+    // Inline pop — same rationale as emit_int_fast_arith.
+    emit_inline_stack_pop_one(builder, vm_val);
     builder.ins().jump(continue_block, &[]);
 
     builder.switch_to_block(slow_block);
@@ -2973,9 +3288,7 @@ fn emit_inline_local_const_arith_update(
         .ins()
         .store(flags, result, addr_slot, VALUE_INT_PAYLOAD_OFFSET as i32);
     if !pop_after {
-        builder
-            .ins()
-            .call(refs.push_integer_inline, &[vm_val, result]);
+        emit_inline_push_integer(builder, vm_val, result);
     }
     builder.ins().jump(cont_block, &[]);
 
@@ -2983,7 +3296,7 @@ fn emit_inline_local_const_arith_update(
     let slot_val = builder.ins().iconst(types::I32, slot as i64);
     builder.ins().call(refs.get_local, &[vm_val, slot_val]);
     let rhs = builder.ins().iconst(types::I64, constant);
-    builder.ins().call(refs.push_integer_inline, &[vm_val, rhs]);
+    emit_inline_push_integer(builder, vm_val, rhs);
     let slow_helper = match op {
         IntArithOp::Add => refs.add,
         IntArithOp::Sub => refs.sub,
@@ -3075,9 +3388,7 @@ fn emit_inline_local_scaled_arith_update(
         .ins()
         .store(flags, result, addr_dst, VALUE_INT_PAYLOAD_OFFSET as i32);
     if !pop_after {
-        builder
-            .ins()
-            .call(refs.push_integer_inline, &[vm_val, result]);
+        emit_inline_push_integer(builder, vm_val, result);
     }
     builder.ins().jump(cont_block, &[]);
 
@@ -3087,9 +3398,7 @@ fn emit_inline_local_scaled_arith_update(
     builder.ins().call(refs.get_local, &[vm_val, dst_slot_val]);
     builder.ins().call(refs.get_local, &[vm_val, rhs_slot_val]);
     let scale = builder.ins().iconst(types::I64, constant);
-    builder
-        .ins()
-        .call(refs.push_integer_inline, &[vm_val, scale]);
+    emit_inline_push_integer(builder, vm_val, scale);
 
     let mul_call = builder.ins().call(refs.mul, &[vm_val]);
     let mul_status = builder.inst_results(mul_call)[0];
@@ -3196,9 +3505,7 @@ fn emit_int_fast_cmp(
     let cmp = builder.ins().icmp(cc, payload_a, payload_b);
     // `icmp` returns i8 (0 or 1); widen to i32 for the helper's u32 param.
     let cmp_u32 = builder.ins().uextend(types::I32, cmp);
-    builder
-        .ins()
-        .call(refs.replace_top2_with_bool, &[vm_val, cmp_u32]);
+    emit_inline_replace_top2_with_bool(builder, vm_val, cmp_u32);
     builder.ins().jump(continue_block, &[]);
 
     // ── Slow path ──
@@ -3272,9 +3579,7 @@ fn emit_int_fast_eq(
     };
     let cmp = builder.ins().icmp(cc, payload_a, payload_b);
     let cmp_u32 = builder.ins().uextend(types::I32, cmp);
-    builder
-        .ins()
-        .call(refs.replace_top2_with_bool, &[vm_val, cmp_u32]);
+    emit_inline_replace_top2_with_bool(builder, vm_val, cmp_u32);
     builder.ins().jump(continue_block, &[]);
 
     builder.switch_to_block(slow_block);
@@ -3376,9 +3681,7 @@ fn emit_fused_int_cmp_branch(
     match branch_op {
         OpCode::JumpIfFalse | OpCode::JumpIfTrue => {
             let cmp_u32 = builder.ins().uextend(types::I32, cmp);
-            builder
-                .ins()
-                .call(refs.replace_top2_with_bool, &[vm_val, cmp_u32]);
+            emit_inline_replace_top2_with_bool(builder, vm_val, cmp_u32);
         }
         OpCode::PopJumpIfFalse => {
             let two_u32 = builder.ins().iconst(types::I32, 2);
@@ -3477,9 +3780,7 @@ fn emit_inline_get_local(
     let payload = builder
         .ins()
         .load(types::I64, flags, addr, VALUE_INT_PAYLOAD_OFFSET as i32);
-    builder
-        .ins()
-        .call(refs.push_integer_inline, &[vm_val, payload]);
+    emit_inline_push_integer(builder, vm_val, payload);
     builder.ins().jump(cont_block, &[]);
 
     builder.switch_to_block(check_float_block);
@@ -3492,7 +3793,7 @@ fn emit_inline_get_local(
     let bits = builder
         .ins()
         .load(types::I64, flags, addr, VALUE_INT_PAYLOAD_OFFSET as i32);
-    builder.ins().call(refs.push_float_inline, &[vm_val, bits]);
+    emit_inline_push_float(builder, vm_val, bits);
     builder.ins().jump(cont_block, &[]);
 
     builder.switch_to_block(slow_block);

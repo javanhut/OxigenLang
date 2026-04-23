@@ -48,6 +48,50 @@ mod layout_tests {
     /// The JIT's inline int fast path relies on these exact layout
     /// invariants — if any of them break, disable the fast path until
     /// the layout is re-verified.
+    /// Pinned at 40 bytes. The JIT emits stack stride arithmetic using
+    /// the `VALUE_SIZE` constant (which is `size_of::<Value>()`), so a
+    /// change here is picked up automatically in emitted IR — but a
+    /// change ALSO shifts the interaction with `VALUE_INT_PAYLOAD_OFFSET`
+    /// (the payload still starts at 8), per-Value cache pressure, and
+    /// the stack-capacity memory footprint (STACK_MAX * VALUE_SIZE).
+    /// Any move off 40 is a perf event worth rebenchmarking.
+    ///
+    /// 40 is dictated by `ErrorValue { msg: Rc<str>, tag: Option<Rc<str>> }`
+    /// — two 16-byte fat pointers + discriminant padded to alignment.
+    #[test]
+    fn value_size_is_pinned_at_40() {
+        assert_eq!(
+            VALUE_SIZE, 40,
+            "VALUE_SIZE is baked into JIT inline stack ops. A change \
+             here requires rebenching the bench suite and auditing \
+             the emit_inline_* functions in engine.rs."
+        );
+    }
+
+    /// The JIT's inline `replace_top2_with_bool` writes a Value::Boolean
+    /// bit pattern directly: tag byte at offset 0, bool payload byte at
+    /// offset 1. If the enum is reordered or Rust's repr(u8) layout for
+    /// Bool changes, every fused int comparison silently corrupts values.
+    #[test]
+    fn value_bool_tag_and_payload_are_pinned() {
+        let v_true = Value::Boolean(true);
+        let ptr = &v_true as *const Value as *const u8;
+        let tag = unsafe { *ptr };
+        assert_eq!(tag, 3, "Boolean tag must be 3 (4th variant in Value enum)");
+        let payload_byte = unsafe { *ptr.add(1) };
+        assert_eq!(
+            payload_byte, 1,
+            "Boolean(true) payload must be at byte offset 1 with value 1"
+        );
+
+        let v_false = Value::Boolean(false);
+        let ptr_f = &v_false as *const Value as *const u8;
+        let tag_f = unsafe { *ptr_f };
+        let payload_f = unsafe { *ptr_f.add(1) };
+        assert_eq!(tag_f, 3);
+        assert_eq!(payload_f, 0, "Boolean(false) payload byte must be 0");
+    }
+
     #[test]
     fn value_integer_layout_is_pinned() {
         let v = Value::Integer(0xDEAD_BEEF_CAFE_BABE_u64 as i64);
