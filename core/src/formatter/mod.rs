@@ -214,8 +214,13 @@ impl Formatter {
             Statement::Repeat {
                 condition, body, ..
             } => {
-                self.push("repeat ");
-                self.format_expression(condition);
+                if let Some(inner) = strip_negation(condition) {
+                    self.push("repeat unless ");
+                    self.format_expression(inner);
+                } else {
+                    self.push("repeat when ");
+                    self.format_expression(condition);
+                }
                 self.push(" {");
                 self.newline();
                 self.indent += 1;
@@ -956,9 +961,9 @@ fn format_type_annotation(ann: &TypeAnnotation) -> String {
         TypeAnnotation::ValueType => "Value".to_string(),
         TypeAnnotation::Union(types) => types
             .iter()
-            .map(|t| format!("<{}>", format_type_annotation(t)))
+            .map(|t| format_type_annotation(t))
             .collect::<Vec<_>>()
-            .join(" || "),
+            .join("> || <"),
         TypeAnnotation::Struct(name) => name.clone(),
         TypeAnnotation::EnumGeneric => "Enum".to_string(),
     }

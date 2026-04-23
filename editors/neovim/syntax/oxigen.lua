@@ -25,6 +25,9 @@ syn match oxigenStructName /\w\+/ contained
 syn match oxigenMethodCall /\<\w\+\.\zs\w\+\ze\s*(/
 syn match oxigenModuleRef /\<\w\+\ze\.\w\+\s*(/
 
+" Struct reference before `contains`: LinkedList contains { ... }
+syn match oxigenStructRef /\<\w\+\>\ze\s\+contains\>/
+
 " Builtins
 syn keyword oxigenBuiltin print println len push first last rest
 syn keyword oxigenBuiltin type ord chr str int float range chars
@@ -43,9 +46,13 @@ syn match oxigenErrorType /<type<[^>]*>>/
 
 " Type annotations: <int>, <str>, etc.
 syn match oxigenType /<\(int\|str\|float\|char\|bool\|array\|byte\|uint\|tuple\|map\|set\|generic\|None\)>/
+" User-defined struct/enum type annotations: <Node>, <LinkedList>, etc.
+syn match oxigenType /<[A-Z]\w*>/
 
-" Variable declarations: name := or name <type> :=
-syn match oxigenVariable /\<\w\+\>\ze\s*<[^>]*>\s*:=\?/
+" Typed declarations / struct fields / typed params: name <type>
+syn match oxigenTypedVar /\<\w\+\>\ze\s\+<\w\+>/
+
+" Untyped walrus declarations: name :=
 syn match oxigenVariable /\<\w\+\>\ze\s*:=/
 
 " Strings
@@ -95,9 +102,11 @@ hi def link oxigenType Type
 hi def link oxigenDirective Special
 hi def link oxigenErrorType Type
 hi def link oxigenVariable Identifier
+hi def link oxigenTypedVar @field
 hi def link oxigenFuncName Function
 hi def link oxigenModule Include
 hi def link oxigenStructName Type
+hi def link oxigenStructRef Type
 hi def link oxigenMethodCall Function
 hi def link oxigenModuleRef Include
 hi def link oxigenPreProc PreProc
