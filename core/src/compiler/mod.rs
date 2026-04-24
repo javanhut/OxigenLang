@@ -1944,6 +1944,8 @@ impl Compiler {
                 loop_count: std::cell::Cell::new(0),
                 jit_state: std::cell::Cell::new(0),
                 jit_thunk: std::cell::Cell::new(None),
+            specialized_thunk: std::cell::Cell::new(None),
+            specialized_arity: std::cell::Cell::new(0),
             })),
             line,
         );

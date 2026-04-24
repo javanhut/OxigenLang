@@ -509,10 +509,27 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
     let int_mirror_param_slots =
         collect_int_mirror_param_slots(code, chunk, func.arity as u16, &captured_slots, &result);
 
-    // Post-pass 4 (A1): specialized-entry eligibility. Conservative set
-    // of rules — a function is eligible for the i64-ABI specialized
-    // entry only when ALL of the below hold. See field doc on
-    // `specialized_entry_eligible` for the full rule list.
+    // Post-pass 4 (A1): specialized-entry eligibility.
+    //
+    // Subtlety: the primary `states` map was built with untyped params
+    // classified as Value. A function like fib(n) that returns `n` in
+    // its base case would then have Value on top of the stack at the
+    // Return IP, incorrectly disqualifying it.
+    //
+    // Fix: re-run the abstract interpretation with any param in
+    // `int_mirror_param_slots` treated as Int64 (the B2.2a mirror
+    // makes that true at runtime). The eligibility check uses this
+    // LIFTED state map, not the primary one.
+    let lifted_states = if int_mirror_param_slots.is_empty() {
+        None
+    } else {
+        Some(analyze_states_with_lifted_params(
+            func,
+            chunk,
+            &int_mirror_param_slots,
+        ))
+    };
+    let eligibility_states = lifted_states.as_ref().unwrap_or(&states);
     let (specialized_entry_eligible, specialized_param_slots) = compute_specialized_entry_eligibility(
         code,
         chunk,
@@ -520,7 +537,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         &result,
         &captured_slots,
         &int_mirror_param_slots,
-        &states,
+        eligibility_states,
     );
 
     FunctionSlotTypes {
@@ -534,6 +551,89 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         specialized_entry_eligible,
         specialized_param_slots,
     }
+}
+
+/// Second-pass abstract interpretation with a subset of param slots
+/// lifted from `Value` to `Int64` in the initial entry state. Used only
+/// by A1 eligibility — we don't replace the primary `states` with this
+/// because the rest of the JIT (B2.1, B2.2a) depends on the unlifted
+/// classification.
+fn analyze_states_with_lifted_params(
+    func: &Function,
+    chunk: &Chunk,
+    lift_to_int: &HashSet<u16>,
+) -> HashMap<usize, AbstractState> {
+    let num_slots = func.locals.len().max(func.arity as usize + 1);
+    let code = &chunk.code;
+
+    let mut entry = AbstractState::new(num_slots);
+    entry.stack.push(SlotType::Value);
+    entry.write_slot(0, SlotType::Value);
+    for i in 0..func.arity as usize {
+        let slot = (i + 1) as u16;
+        let ty = if lift_to_int.contains(&slot) {
+            SlotType::Int64
+        } else {
+            match func.params.get(i).and_then(|p| p.type_ann.as_deref()) {
+                Some("int") | Some("INTEGER") => SlotType::Int64,
+                _ => SlotType::Value,
+            }
+        };
+        entry.stack.push(ty);
+        entry.write_slot(i + 1, ty);
+    }
+
+    let mut states: HashMap<usize, AbstractState> = HashMap::new();
+    states.insert(0, entry.clone());
+    let mut worklist: Vec<usize> = vec![0];
+
+    while let Some(ip) = worklist.pop() {
+        let mut state = states[&ip].clone();
+        let mut cursor = ip;
+
+        loop {
+            if cursor >= code.len() {
+                break;
+            }
+            let op = match OpCode::from_byte(code[cursor]) {
+                Some(o) => o,
+                None => break,
+            };
+            let (next_state, terminates, targets) = transfer(op, cursor, code, chunk, &state);
+            let fallthrough = cursor + opcode_len(op, code, cursor, chunk);
+
+            for tgt in &targets {
+                let entry = states
+                    .entry(*tgt)
+                    .or_insert_with(|| AbstractState::new(num_slots));
+                let changed = entry.join(&next_state);
+                if changed && !worklist.contains(tgt) {
+                    worklist.push(*tgt);
+                }
+            }
+
+            if terminates {
+                break;
+            }
+            if fallthrough >= code.len() {
+                break;
+            }
+
+            if let Some(existing) = states.get_mut(&fallthrough) {
+                let changed = existing.join(&next_state);
+                if changed && !worklist.contains(&fallthrough) {
+                    worklist.push(fallthrough);
+                }
+                break;
+            }
+
+            states.insert(fallthrough, next_state.clone());
+            state = next_state;
+            cursor = fallthrough;
+        }
+    }
+
+    states
 }
 
 /// Determine whether the function qualifies for a specialized i64-ABI
@@ -598,21 +698,24 @@ fn compute_specialized_entry_eligibility(
         return (false, Vec::new());
     }
 
-    // Every Return IP must have Int64 on top of the abstract stack.
-    // We consult the forward-propagated `states` map: `states[ip]` is
-    // the on-entry state AT that IP, so `state.stack.last()` is the
-    // type of the value that will be popped by the Return.
+    // Every Return IP must have a non-Bottom top (reachable) and must
+    // be classifiable as Int64 OR Value — Value is acceptable because
+    // the specialized trampoline tag-checks the top-of-stack at
+    // runtime and bails gracefully on non-Integer. The ONLY
+    // disqualifier at this level is dead/unreachable Return or a
+    // statically-proven non-numeric (e.g., Bottom unreachable state).
     for &rip in &return_ips {
         let state = match states.get(&rip) {
             Some(s) => s,
-            // If analysis never reached this Return (dead code), treat
-            // as ineligible — we can't prove safety.
             None => return (false, Vec::new()),
         };
         let top_ty = state.stack.last().copied().unwrap_or(SlotType::Bottom);
-        if !matches!(top_ty, SlotType::Int64) {
+        // Bottom means unreachable → still reject (can't trust).
+        if matches!(top_ty, SlotType::Bottom) {
             return (false, Vec::new());
         }
+        // Value and Int64 both ok: the trampoline's runtime tag check
+        // takes care of correctness.
     }
 
     let param_slots: Vec<u16> = (1..=arity).collect();
@@ -2166,8 +2269,11 @@ mod tests {
     }
 
     #[test]
-    fn specialized_ineligible_returns_value() {
-        // fun f(n <int>) { "hello" } — return is not Int.
+    fn specialized_eligible_even_with_value_return() {
+        // fun f(n <int>) { "hello" } — return is a String. Still
+        // eligible because the specialized trampoline tag-checks the
+        // top-of-stack at runtime and bails gracefully on non-Int.
+        // Every call will bail at runtime, but that's correct.
         let mut f = make_fn("f", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
@@ -2176,14 +2282,14 @@ mod tests {
         ];
         f.chunk.constants = vec![Value::String(crate::vm::value::rc_str("hello"))];
         let r = analyze(&f);
-        assert!(!r.specialized_entry_eligible);
+        assert!(r.specialized_entry_eligible);
     }
 
     #[test]
-    fn specialized_ineligible_untyped_value_param() {
-        // fun f(n) { n } — `n` is Value-typed (no annotation), and
-        // int_mirror wouldn't pick it up without an int-demand use.
-        // Return value at top-of-stack is Value, so ineligible.
+    fn specialized_ineligible_untyped_value_param_with_no_int_demand() {
+        // fun f(n) { n } — `n` is Value-typed (no annotation) AND has
+        // no int-demand use (Return is neutral). int_mirror won't
+        // pick it up. So the param isn't Int-stable → ineligible.
         let mut f = make_fn("f", 1, vec![], vec![]);
         // no type_ann — defaults to Value
         f.chunk.code = vec![

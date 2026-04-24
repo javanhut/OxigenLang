@@ -34,6 +34,23 @@ pub const JIT_LOOP_HOT_THRESHOLD: u32 = 10_000;
 /// Native entry point emitted by the JIT for one Oxigen function.
 pub(crate) type CompiledThunk = unsafe extern "C" fn(*mut VM) -> u32;
 
+/// Opaque raw pointer to the specialized `fn(*mut VM, i64, ..., i64)
+/// -> (i64, u32)` entry point. Its actual signature depends on the
+/// arity, so we never rebuild it into a typed Rust function — it is
+/// only invoked through Cranelift `call_indirect` with the right
+/// signature built at call-site emission time.
+pub(crate) type SpecializedThunkRaw = *const ();
+
+/// Pair of entries produced by a single `compile_function` call.
+/// `generic` is the always-present `fn(*mut VM) -> u32` thunk.
+/// `specialized` is Some only when the function qualifies per
+/// `slot_types.specialized_entry_eligible` (A1 analysis).
+pub(crate) struct CompiledEntries {
+    pub generic: CompiledThunk,
+    pub specialized: Option<SpecializedThunkRaw>,
+    pub specialized_arity: u8,
+}
+
 /// Outcome of invoking a JIT-compiled function.
 pub enum JitExit {
     /// The compiled function completed normally; its return value is on the
@@ -149,6 +166,24 @@ impl JitEngine {
             let inner = self.inner.get_or_insert_with(engine::JitInner::new);
             inner.maybe_compile_thunk(func)
         }
+    }
+
+    /// Compile if hot and return the full CompiledEntries, exposing both
+    /// the generic thunk and the specialized entry (when eligible). VM
+    /// call sites use this to install both pointers on the closure via
+    /// `install_compiled_entries_on_closure`.
+    #[cfg(feature = "jit")]
+    pub(crate) fn maybe_compile_entries_for(
+        &mut self,
+        func: &Rc<Function>,
+        call_count: u32,
+    ) -> Option<(CompiledThunk, Option<SpecializedThunkRaw>, u8)> {
+        if call_count < self.threshold {
+            return None;
+        }
+        let inner = self.inner.get_or_insert_with(engine::JitInner::new);
+        let e = inner.maybe_compile_entries(func)?;
+        Some((e.generic, e.specialized, e.specialized_arity))
     }
 
     /// Compile if loop-hot and return the compiled thunk, if one is

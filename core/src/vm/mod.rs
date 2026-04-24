@@ -301,6 +301,8 @@ impl VM {
             loop_count: std::cell::Cell::new(0),
             jit_state: std::cell::Cell::new(0),
             jit_thunk: std::cell::Cell::new(None),
+            specialized_thunk: std::cell::Cell::new(None),
+            specialized_arity: std::cell::Cell::new(0),
         });
 
         // Push the closure itself onto the stack (slot 0) — this is the
@@ -840,6 +842,8 @@ impl VM {
             loop_count: std::cell::Cell::new(0),
             jit_state: std::cell::Cell::new(0),
             jit_thunk: std::cell::Cell::new(None),
+            specialized_thunk: std::cell::Cell::new(None),
+            specialized_arity: std::cell::Cell::new(0),
         });
         self.push(Value::Closure(closure));
         Ok(())
@@ -2811,17 +2815,28 @@ impl VM {
             1 => closure.jit_thunk.get(),
             2 => None,
             _ => {
-                let thunk = self
-                    .jit
-                    .maybe_compile_loop_entry_thunk(&closure.function)
-                    .or_else(|| self.jit.maybe_compile_thunk(&closure.function, count));
-                if let Some(thunk) = thunk {
+                // Try loop-entry first; otherwise fall through to the
+                // regular threshold path. maybe_compile_entries_for also
+                // installs the specialized pointer (A2) when eligible.
+                let loop_thunk = self.jit.maybe_compile_loop_entry_thunk(&closure.function);
+                if let Some(thunk) = loop_thunk {
                     closure.jit_thunk.set(Some(thunk));
                     closure.jit_state.set(1);
-                } else if count >= self.jit.threshold() {
-                    closure.jit_state.set(2);
+                    Some(thunk)
+                } else if let Some((generic, specialized, spec_arity)) =
+                    self.jit.maybe_compile_entries_for(&closure.function, count)
+                {
+                    closure.jit_thunk.set(Some(generic));
+                    closure.specialized_thunk.set(specialized);
+                    closure.specialized_arity.set(spec_arity);
+                    closure.jit_state.set(1);
+                    Some(generic)
+                } else {
+                    if count >= self.jit.threshold() {
+                        closure.jit_state.set(2);
+                    }
+                    None
                 }
-                thunk
             }
         };
 

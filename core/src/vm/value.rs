@@ -175,6 +175,8 @@ mod layout_tests {
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
             jit_thunk: Cell::new(None),
+            specialized_thunk: Cell::new(None),
+            specialized_arity: Cell::new(0),
         });
         // Read the Rc's raw bit pattern the same way the JIT does.
         let expected_raw: usize = unsafe {
@@ -214,6 +216,8 @@ mod layout_tests {
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
             jit_thunk: Cell::new(None),
+            specialized_thunk: Cell::new(None),
+            specialized_arity: Cell::new(0),
         });
         // Read the RcBox pointer the same way the JIT does: raw bit
         // pattern of the `Rc`, which is `NonNull<RcBox<T>>`.
@@ -436,6 +440,18 @@ pub struct ObjClosure {
     /// Cached native entry point for compiled closures. Present only when
     /// `jit_state == 1`.
     pub jit_thunk: Cell<Option<CompiledThunk>>,
+    /// A2: specialized i64-ABI entry point, populated alongside
+    /// `jit_thunk` when the function qualifies per
+    /// `slot_types.specialized_entry_eligible`. Opaque pointer — only
+    /// invoked via Cranelift `call_indirect` with the specialized
+    /// signature `fn(*mut VM, i64, ..., i64) -> (i64, u32)`. None when
+    /// the function is ineligible or not yet compiled.
+    pub specialized_thunk: Cell<Option<*const ()>>,
+    /// Arity of the specialized entry point. Always equal to
+    /// `function.arity` when `specialized_thunk` is Some, 0 otherwise.
+    /// Callers validate this against the Call opcode's arg_count
+    /// before dispatching to the specialized entry.
+    pub specialized_arity: Cell<u8>,
 }
 
 /// An upvalue captures a variable from an enclosing scope.
