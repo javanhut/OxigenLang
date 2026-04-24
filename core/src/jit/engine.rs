@@ -964,6 +964,13 @@ impl JitInner {
             // so the Pop handler treats them as virtual no-ops.
             let mut virt_branch_elided_pops: HashSet<usize> = HashSet::new();
 
+            // A2.5 commit 5: lazily-allocated stack slot used as the
+            // i64 out-param for A3 direct specialized calls. One slot
+            // per caller frame is enough because each native invocation
+            // has its own machine stack frame and the result is loaded
+            // immediately after the call. Created on first A3 emission.
+            let mut a3_ret_slot: Option<cranelift_codegen::ir::StackSlot> = None;
+
             // Declare one Variable per virtualizable slot with a
             // recognized bytecode-level initializer. Variable IDs come
             // from an independent counter so they don't collide with
@@ -1249,6 +1256,7 @@ impl JitInner {
                         | OpCode::LessEqual
                         | OpCode::Greater
                         | OpCode::GreaterEqual
+                        | OpCode::Call
                 );
                 if !handles_own_flush && !expr_stack.is_empty() {
                     flush_expr_stack_to_stack_view(&mut builder, vm_val, &mut expr_stack);
@@ -2074,6 +2082,290 @@ impl JitInner {
                         let cache_ptr = call_cache_ptrs[call_ic_ix];
                         call_ic_ix += 1;
 
+                        // A2.5 commit 5: A3 direct-specialized-call
+                        // fast path for self-recursion.
+                        //
+                        // Eligibility:
+                        //   * Current function has a NativeIntBody
+                        //     specialized entry (spec_thunk_id.is_some
+                        //     AND slot_types.specialized_entry_eligible).
+                        //   * arg_count matches our arity.
+                        //   * Top arg_count entries of expr_stack are
+                        //     available as i64 SSA values.
+                        //
+                        // Runtime guard:
+                        //   callee.tag == Closure AND callee_rc ==
+                        //   current activation's closure_raw.
+                        //
+                        // On guard match: pop args from expr_stack,
+                        // push JitFrame, direct-call our own spec_id
+                        // with args in registers + a local i64 out-
+                        // param slot. Status 0 ⇒ load payload from
+                        // the slot, push as Value::Integer onto VM
+                        // stack (matching IC semantics), jump to the
+                        // shared post-call block.
+                        //
+                        // On guard miss: flush expr_stack onto VM
+                        // stack and fall through to the existing IC
+                        // code, which handles the non-self-recursive
+                        // case AND any case where the closure was
+                        // rebound since last call.
+                        let a3_eligible = slot_types.specialized_entry_eligible
+                            && spec_thunk_id.is_some()
+                            && arg_count as usize == func.arity as usize
+                            && expr_stack.len() >= arg_count as usize;
+
+                        let a3_post_call_block: Option<Block> = if a3_eligible {
+                            use cranelift_codegen::ir::MemFlags;
+                            use cranelift_codegen::ir::condcodes::IntCC;
+                            use cranelift_codegen::ir::StackSlotData;
+                            use cranelift_codegen::ir::StackSlotKind;
+
+                            let flags = MemFlags::trusted();
+                            let spec_id = spec_thunk_id.unwrap();
+
+                            // A3 callee location: since expr_stack
+                            // still holds the args (Call was added to
+                            // handles_own_flush so pre-match flush
+                            // didn't run), the callee is at stack top
+                            // — NOT stack_top - arg_count as in the
+                            // IC path where args are on VM stack.
+                            let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
+                            let stack_len = emit_load_stack_len(&mut builder, vm_val);
+                            let value_size =
+                                builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+                            let one = builder.ins().iconst(types::I64, 1);
+                            let callee_slot = builder.ins().isub(stack_len, one);
+                            let callee_off =
+                                builder.ins().imul(callee_slot, value_size);
+                            let callee_ptr =
+                                builder.ins().iadd(stack_ptr, callee_off);
+
+                            // Guard: tag == Closure.
+                            let tag = builder.ins().load(types::I8, flags, callee_ptr, 0);
+                            let closure_tag =
+                                builder.ins().iconst(types::I8, VALUE_TAG_CLOSURE as i64);
+                            let is_closure =
+                                builder.ins().icmp(IntCC::Equal, tag, closure_tag);
+
+                            let check_rc_block = builder.create_block();
+                            let direct_call_block = builder.create_block();
+                            let fallback_block = builder.create_block();
+                            let post_call_block = builder.create_block();
+
+                            builder.ins().brif(
+                                is_closure,
+                                check_rc_block,
+                                &[],
+                                fallback_block,
+                                &[],
+                            );
+
+                            builder.switch_to_block(check_rc_block);
+                            let curr_rc_raw = builder.ins().load(
+                                ptr_ty,
+                                flags,
+                                callee_ptr,
+                                VALUE_INT_PAYLOAD_OFFSET as i32,
+                            );
+                            // curr_rc_raw is NonNull<RcBox<ObjClosure>>.
+                            // JitFrame.closure_raw stores ObjClosure*
+                            // (i.e., adjusted by RC_VALUE_OFFSET).
+                            let closure_ptr = builder
+                                .ins()
+                                .iadd_imm(curr_rc_raw, RC_VALUE_OFFSET as i64);
+                            let caller_frame_ptr =
+                                emit_load_top_jit_frame_ptr(&mut builder, vm_val);
+                            let current_closure_raw = builder.ins().load(
+                                ptr_ty,
+                                flags,
+                                caller_frame_ptr,
+                                JitFrame::OFFSET_CLOSURE_RAW,
+                            );
+                            let rc_matches = builder.ins().icmp(
+                                IntCC::Equal,
+                                closure_ptr,
+                                current_closure_raw,
+                            );
+                            builder.ins().brif(
+                                rc_matches,
+                                direct_call_block,
+                                &[],
+                                fallback_block,
+                                &[],
+                            );
+
+                            // ── Direct-call block ──
+                            builder.switch_to_block(direct_call_block);
+                            if let Some(cp) = counters_ptr_opt {
+                                emit_counter_bump(
+                                    &mut builder,
+                                    cp,
+                                    counter_offsets::SELF_RECURSION_DIRECT_CALL,
+                                );
+                            }
+
+                            // Lazily allocate the shared ret-slot.
+                            let ret_slot = *a3_ret_slot.get_or_insert_with(|| {
+                                builder.create_sized_stack_slot(StackSlotData::new(
+                                    StackSlotKind::ExplicitSlot,
+                                    8,
+                                    3,
+                                ))
+                            });
+                            let ret_ptr = builder.ins().stack_addr(ptr_ty, ret_slot, 0);
+
+                            // Push JitFrame for the callee (using our own closure_ptr
+                            // — we just proved equality with it).
+                            let jit_frames_ptr = builder.ins().load(
+                                ptr_ty,
+                                flags,
+                                vm_val,
+                                vm_jit_frame_view_ptr_offset(),
+                            );
+                            let jit_frames_len = builder.ins().load(
+                                types::I64,
+                                flags,
+                                vm_val,
+                                vm_jit_frame_view_len_offset(),
+                            );
+                            let frame_size = builder.ins().iconst(
+                                types::I64,
+                                std::mem::size_of::<JitFrame>() as i64,
+                            );
+                            let frame_off =
+                                builder.ins().imul(jit_frames_len, frame_size);
+                            let new_frame_ptr =
+                                builder.ins().iadd(jit_frames_ptr, frame_off);
+                            let module_globals = builder.ins().load(
+                                ptr_ty,
+                                flags,
+                                caller_frame_ptr,
+                                JitFrame::OFFSET_MODULE_GLOBALS,
+                            );
+                            let line_val =
+                                builder.ins().iconst(types::I32, line as i64);
+                            builder.ins().store(
+                                flags,
+                                closure_ptr,
+                                new_frame_ptr,
+                                JitFrame::OFFSET_CLOSURE_RAW,
+                            );
+                            builder.ins().store(
+                                flags,
+                                callee_slot,
+                                new_frame_ptr,
+                                JitFrame::OFFSET_SLOT_OFFSET,
+                            );
+                            builder.ins().store(
+                                flags,
+                                module_globals,
+                                new_frame_ptr,
+                                JitFrame::OFFSET_MODULE_GLOBALS,
+                            );
+                            builder.ins().store(
+                                flags,
+                                line_val,
+                                new_frame_ptr,
+                                JitFrame::OFFSET_LINE,
+                            );
+                            let one64 = builder.ins().iconst(types::I64, 1);
+                            let new_fl = builder.ins().iadd(jit_frames_len, one64);
+                            builder.ins().store(
+                                flags,
+                                new_fl,
+                                vm_val,
+                                vm_jit_frame_view_len_offset(),
+                            );
+
+                            // Pop the closure from the stack so it's not
+                            // visible to the callee. Specialized prologue
+                            // expects stack[slot_offset] to be where the
+                            // closure sat — we leave it there; callee
+                            // overwrites slot+1..=arity with params and
+                            // bumps len.
+                            //
+                            // Actually: specialized prologue doesn't
+                            // touch slot 0 (closure marker). We keep
+                            // the closure on stack; callee's Return
+                            // teardown truncates to slot_offset which
+                            // drops it. No manual pop needed here.
+
+                            // Collect args from expr_stack into the
+                            // call argument list: (vm, a0, a1, ..., ret_ptr).
+                            let mut call_args: Vec<cranelift_codegen::ir::Value> =
+                                Vec::with_capacity(arg_count as usize + 2);
+                            call_args.push(vm_val);
+                            let start_idx =
+                                expr_stack.len() - (arg_count as usize);
+                            call_args.extend(expr_stack.drain(start_idx..));
+                            call_args.push(ret_ptr);
+
+                            let spec_fref =
+                                self.module.declare_func_in_func(spec_id, builder.func);
+                            let call = builder.ins().call(spec_fref, &call_args);
+                            let status = builder.inst_results(call)[0];
+
+                            // Error / bailout propagate.
+                            let ok_block_a3 = builder.create_block();
+                            let err_block_a3 = builder.create_block();
+                            builder.append_block_param(err_block_a3, types::I32);
+                            builder.ins().brif(
+                                status,
+                                err_block_a3,
+                                &[status],
+                                ok_block_a3,
+                                &[],
+                            );
+
+                            builder.switch_to_block(err_block_a3);
+                            let eb_status = builder.block_params(err_block_a3)[0];
+                            builder.ins().return_(&[eb_status]);
+
+                            // Success: load result from ret_slot. Push
+                            // Value::Integer(result) onto VM stack — matches
+                            // what the IC path would have left there via
+                            // op_return. Callee has already truncated stack
+                            // to slot_offset (dropping closure + args).
+                            builder.switch_to_block(ok_block_a3);
+                            let payload = builder
+                                .ins()
+                                .stack_load(types::I64, ret_slot, 0);
+                            emit_inline_push_integer(&mut builder, vm_val, payload);
+                            builder.ins().jump(post_call_block, &[]);
+
+                            // Fallback block — will be switched-to below
+                            // so the existing IC code emits into it.
+                            builder.switch_to_block(fallback_block);
+                            // Flush expr_stack so the existing IC code
+                            // sees args boxed on the VM stack. This
+                            // matches what the pre-match flush WOULD
+                            // have done if Call weren't in
+                            // handles_own_flush.
+                            if !expr_stack.is_empty() {
+                                flush_expr_stack_to_stack_view(
+                                    &mut builder,
+                                    vm_val,
+                                    &mut expr_stack,
+                                );
+                            }
+
+                            Some(post_call_block)
+                        } else {
+                            // A3 not eligible — the existing IC needs
+                            // args on the VM stack, so flush expr_stack.
+                            if !expr_stack.is_empty() {
+                                flush_expr_stack_to_stack_view(
+                                    &mut builder,
+                                    vm_val,
+                                    &mut expr_stack,
+                                );
+                            }
+                            None
+                        };
+
+                        let _ = a3_post_call_block; // used after IC below
+
                         // Inline IR guard backed by `vm.stack_view`:
                         // 1. Load stack base ptr + current len via direct
                         //    memory reads (no FFI).
@@ -2265,6 +2557,15 @@ impl JitInner {
                         builder.ins().return_(&[err_status]);
 
                         builder.switch_to_block(ok_block);
+
+                        // A2.5 commit 5: if the A3 path emitted a
+                        // post_call_block, converge here so both the
+                        // A3 direct-call success and the IC success
+                        // land in the same continuation.
+                        if let Some(pcb) = a3_post_call_block {
+                            builder.ins().jump(pcb, &[]);
+                            builder.switch_to_block(pcb);
+                        }
                         ip += 2;
                     }
 

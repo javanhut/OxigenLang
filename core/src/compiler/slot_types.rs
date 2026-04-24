@@ -670,7 +670,16 @@ fn compute_specialized_entry_eligibility(
     // The body must not contain opcodes we don't yet know how to
     // handle in the specialized entry: closures, upvalues, nonlocal
     // control flow that might invalidate our frame assumptions.
+    //
+    // Also require at least one `Call` opcode: A2.5 emits a
+    // specialized body ONLY to be directly-called by A3 (from a
+    // self-recursive Call site). A function with no Calls can never
+    // self-recurse, so emitting a specialized body is pure compile-
+    // time overhead. Benches with tight loops-without-calls (e.g.,
+    // bench_nested_loop) would regress from the extra codegen work
+    // without this gate.
     let mut has_return = false;
+    let mut has_call = false;
     let mut return_ips: Vec<usize> = Vec::new();
     let mut ip = 0;
     while ip < code.len() {
@@ -688,13 +697,16 @@ fn compute_specialized_entry_eligibility(
                 has_return = true;
                 return_ips.push(ip);
             }
+            OpCode::Call | OpCode::CallNamed => {
+                has_call = true;
+            }
             _ => {}
         }
 
         ip += op_len;
     }
 
-    if !has_return {
+    if !has_return || !has_call {
         return (false, Vec::new());
     }
 
@@ -2244,13 +2256,21 @@ mod tests {
 
     #[test]
     fn specialized_eligible_typed_int_param_returning_int() {
-        // fun f(n <int>) { n }
+        // fun f(n <int>) { f(0); n }  — minimal self-call to satisfy
+        // the has_call eligibility gate (A2.5 commit 5 requires at
+        // least one Call since the specialized body is only useful
+        // as a direct-call target).
         let mut f = make_fn("f", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
-            OpCode::GetLocal as u8, 0, 1,   // push n
+            OpCode::GetLocal as u8, 0, 1, // push f (self)
+            OpCode::Constant as u8, 0, 0, // push 0
+            OpCode::Call as u8, 1,        // call (synthetic arity 1)
+            OpCode::Pop as u8,            // discard result
+            OpCode::GetLocal as u8, 0, 1, // push n
             OpCode::Return as u8,
         ];
+        f.chunk.constants = vec![Value::Integer(0)];
         let r = analyze(&f);
         assert!(r.specialized_entry_eligible);
         assert_eq!(r.specialized_param_slots, vec![1]);
@@ -2270,17 +2290,24 @@ mod tests {
 
     #[test]
     fn specialized_eligible_even_with_value_return() {
-        // fun f(n <int>) { "hello" } — return is a String. Still
-        // eligible because the specialized trampoline tag-checks the
-        // top-of-stack at runtime and bails gracefully on non-Int.
-        // Every call will bail at runtime, but that's correct.
+        // fun f(n <int>) { f(0); "hello" } — return is a String; still
+        // eligible because the specialized body's Return path will
+        // bail via status 2 on non-Integer at runtime. has_call
+        // satisfied via the self-call.
         let mut f = make_fn("f", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
-            OpCode::Constant as u8, 0, 0,   // push "hello"
+            OpCode::GetLocal as u8, 0, 1,
+            OpCode::Constant as u8, 0, 0,
+            OpCode::Call as u8, 1,
+            OpCode::Pop as u8,
+            OpCode::Constant as u8, 0, 1,   // push "hello"
             OpCode::Return as u8,
         ];
-        f.chunk.constants = vec![Value::String(crate::vm::value::rc_str("hello"))];
+        f.chunk.constants = vec![
+            Value::Integer(0),
+            Value::String(crate::vm::value::rc_str("hello")),
+        ];
         let r = analyze(&f);
         assert!(r.specialized_entry_eligible);
     }
@@ -2302,16 +2329,21 @@ mod tests {
 
     #[test]
     fn specialized_eligible_int_param_with_arith_and_return() {
-        // fun f(n <int>) { n + 1 }
+        // fun f(n <int>) { f(0); n + 1 } — has_call satisfied, arith
+        // return eligible.
         let mut f = make_fn("f", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
             OpCode::GetLocal as u8, 0, 1,
             OpCode::Constant as u8, 0, 0,
+            OpCode::Call as u8, 1,
+            OpCode::Pop as u8,
+            OpCode::GetLocal as u8, 0, 1,
+            OpCode::Constant as u8, 0, 1,
             OpCode::Add as u8,
             OpCode::Return as u8,
         ];
-        f.chunk.constants = vec![Value::Integer(1)];
+        f.chunk.constants = vec![Value::Integer(0), Value::Integer(1)];
         let r = analyze(&f);
         assert!(r.specialized_entry_eligible);
         assert_eq!(r.specialized_param_slots, vec![1]);
