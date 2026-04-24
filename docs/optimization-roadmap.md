@@ -55,13 +55,16 @@ Legend: ☐ not started · ◐ in progress · ✅ landed · ❌ attempted & aban
 | ID | Task | Status | Prereqs | Target gain | Scope |
 | --- | --- | --- | --- | --- | --- |
 | **Phase A — Representation (foundational)** | | | | | |
-| A1 | NaN-box Value | ◐ | — | 30–50% geomean | vm/value.rs, jit/engine.rs, all VM consumers |
+| A1 | NaN-box Value (full 8 B migration) | ◐ partial (A1.1b landed; A1.2 deferred — see Decisions Log 2026-04-23 pivot) | — | 30–50% geomean | vm/value.rs, jit/engine.rs, all VM consumers |
 | A2 | Small-integer tagging (SMI) | ☐ | A1 | 20–30% on int-heavy benches | vm/value.rs, jit arith paths |
 | A3 | Feedback vectors (record-only) | ☐ | — | 0% standalone — enables B3 | jit/engine.rs, jit/runtime.rs |
-| **Phase B — Unboxed & specialized execution** | | | | | |
-| B1 | Type inference pass over bytecode | ☐ | — | 0% standalone — enables B2 | new module, compiler/ |
-| B2 | Unboxed integer locals in JIT | ☐ | A1, B1 | 30–50% on int loops | jit/engine.rs |
-| B3 | Tier-2 speculative JIT + deopt | ☐ | A1, A3 | 2–3× on monomorphic code | new tier2/ module, runtime deopt support |
+| **Phase B — Typed JIT frames + unboxed execution** (revised 2026-04-23) | | | | | |
+| B2.0 | Typed slot analysis pass | ☐ | — | 0% standalone — enables B2.1–B2.4 | new `core/src/compiler/slot_types.rs` (or similar) |
+| B2.1 | Unboxed int locals in JIT | ☐ | B2.0 | 15–25% on int-arith benches | jit/engine.rs |
+| B2.2 | Unboxed int calling convention (args + return) | ☐ | B2.0, B2.1 | 30–50% on self-recursive int funcs (bench_fib) | jit/engine.rs, jit/runtime.rs |
+| B2.3 | Boxed-boundary adapters | ☐ | B2.2 | enabler (correctness) | jit/engine.rs |
+| B2.4 | Guards + generic-path fallback | ☐ | B2.2 | enabler (correctness) | jit/engine.rs |
+| B3 | Tier-2 speculative JIT + deopt | ☐ | A1, A3, B2.0 | 2–3× on monomorphic code | new tier2/ module, runtime deopt support |
 | **Phase C — Eliminate allocation** | | | | | |
 | C1 | Escape analysis + SRoA | ☐ | B3 | 2–10× on alloc-heavy code | jit optimizer pass |
 | C2 | Generational nursery GC | ☐ | A1 | 20–50% on alloc-heavy code | replaces Rc throughout VM |
@@ -182,51 +185,131 @@ Each entry specifies the concrete change, what test to add, the perf gate, and t
 
 ---
 
-### B1 · Type inference pass over bytecode
+### Phase B (revised) — Typed JIT frames for int-stable functions
 
-**Goal:** for each local slot and each stack position at each program point, compute a conservative static type set. Enables B2 and informs D3.
+**Guiding principle:** hot integer code should not traffic in `Value` at all.
+Earlier framing ("unboxed integer locals") would have under-delivered because
+each function boundary re-boxes — catastrophic for recursion-heavy code
+(`bench_fib`). The revised goal is to lift integer execution out of the
+`Value` representation end-to-end: locals, params, return, arithmetic, and
+direct recursive calls all use native `i64`. `Value` is reified only at the
+boundary with the generic interpreter / unknown call targets / error paths.
 
-**Approach:** flow-sensitive, forward-propagating abstract interpretation at the bytecode level. Types form a lattice (`⊥`, `Int`, `Float`, `Bool`, `String`, `Closure`, `StructInstance<def>`, `Any`, `⊤`). Join at control-flow merges.
+SlotKind lattice (narrow on purpose — we add more kinds later):
 
-**Files touched:**
-- New module: `core/src/compiler/types.rs` (or similar)
-- `core/src/jit/engine.rs` — call the pass before codegen, attach type info to each IP
+```
+⊥           uninitialized
+Int64       provably always an integer in this slot
+Value       may hold anything — existing generic path
+```
 
-**Testing:**
-- Unit tests per opcode's transfer function.
-- End-to-end: for every `example/bench_*.oxi`, assert the inferred type at each local slot (snapshot test).
-- Soundness: no program that type-infers as `Int` for a slot ever stores a non-int there at runtime (fuzz).
+Sub-tasks are sequenced so each lands independently with its own perf test:
 
-**Acceptance gate:**
-- Pass succeeds on every bench without producing `⊤` for the loop counters in `bench_arith`, `bench_fib`, `bench_loop`, `bench_nested_loop`, `bench_struct_method`.
-- Pass adds ≤ 5ms to compile time on a typical function.
-- Perf on `--jit`: ±2% (this task doesn't change codegen, just prepares data).
+### B2.0 · Typed slot analysis pass
 
-**Rollback:** revert module. B2 was blocked on this anyway.
+**Goal:** classify each local slot of each JIT-compiled function as `Int64`
+or `Value`. Conservative — err toward `Value` when in doubt. No codegen
+change yet; this task only produces the analysis output consumed by B2.1+.
+
+**Acceptance cases (must be inferred as `Int64` to enable downstream wins):**
+- Integer literals via `Constant(Value::Integer(_))`.
+- Arithmetic results: `Add`, `Sub`, `Mul`, `Div`, `Mod`, `Negate`, bitwise ops — when both operands are already `Int64`.
+- Integer comparison results (`<`, `<=`, `==`, etc.) — when both operands are `Int64`. Result type is `Bool`, but booleans are out of scope for v1.
+- `GetLocal` of an `Int64` slot propagates `Int64`.
+- Function parameters annotated `<int>` in source (e.g., `fib(n <int>)`) — start as `Int64` at slot entry.
+
+**Non-goals for v1:** unions, flow-sensitive narrowing, inferring int types across ad-hoc call sites, generic function specialization.
+
+**Files:** new `core/src/compiler/slot_types.rs`. Emits `FunctionSlotTypes`.
+The JIT engine imports the analysis and stashes it alongside compiled entries.
+
+**Testing:** unit tests per opcode transfer function; snapshot tests per `example/bench_*.oxi` that assert which slots are `Int64`.
+
+**Acceptance gate:** all of `bench_arith`, `bench_fib`, `bench_loop`, `bench_nested_loop`, `bench_nested_loop_big` have their loop counter and accumulator slots classified as `Int64`. Perf ±2% (no codegen change).
+
+**Rollback:** revert module; B2.1+ blocked on this anyway.
 
 ---
 
-### B2 · Unboxed integer locals in JIT
+### B2.1 · Unboxed int locals in JIT
 
-**Goal:** locals that B1 proves are always `Int` live in Cranelift i64 SSA values across opcodes, not in the stack `Vec`. Zero tag check, zero payload load per access.
+**Goal:** emit raw `i64` SSA values for `Int64` slots instead of going through the stack `Vec<Value>` on every `GetLocal`/`SetLocal`. Inside the function body, arithmetic on `Int64` slots uses native `i64` ops with no tag check and no payload load/store.
 
-**Approach:** during codegen, maintain a map `local_slot -> SSA Value` for typed-int locals. `GetLocal` reads from the map; `SetLocal` writes to it. A "sync" point before any operation that could observe the stack (`Call`, builtin, helper) flushes live SSA values back to their stack slots.
+**Approach:** at function entry, allocate a Cranelift `Variable` per `Int64` slot. `GetLocal` reads via `builder.use_var`. `SetLocal` writes via `builder.def_var`. The stack `Vec<Value>` slot for that local still exists (initialized to `Value::Integer(0)` or equivalent) but is only touched at sync points.
 
-**Files touched:**
-- `core/src/jit/engine.rs` — main change, ~500 lines of codegen rework
-- New helper: `emit_sync_locals_to_stack`
+**Sync points — when to flush `Variable` → stack slot:**
+- Before any `call` to a helper that takes `*mut VM` (helpers may inspect stack).
+- Before `Return` (the return value reification is the boundary; see B2.2/B2.3).
+- Before error exits (the interpreter's error handler walks frames).
+- Before crossing a `Guard` (user-level error-propagation opcode).
 
-**Testing:**
-- Every existing bench must produce identical output.
-- New stress test: functions that interleave unboxed and boxed locals, with helper calls between them.
+**Re-hydration — when to load stack slot → `Variable`:**
+- After any sync-point call that might have mutated the slot (rare for JIT helpers; mostly for builtin calls that get passed arguments).
 
-**Acceptance gate:**
-- `bench_fib` improves by ≥ 40% (recursion ceiling lifts significantly).
-- `bench_arith`, `bench_loop`, `bench_nested_loop*` improve by ≥ 25%.
-- No bench regresses.
-- Geomean improves by ≥ 20% on top of A1+A2.
+**Files:** `core/src/jit/engine.rs` — GetLocal/SetLocal/Arithmetic handlers pick the typed path when the slot is classified `Int64`. Helper: `flush_int_locals_to_stack(dirty_set)`.
 
-**Rollback:** revert. Baseline JIT continues with boxed locals.
+**Testing:** every bench still produces identical output. Stress test: function mixing `Int64` and `Value` locals with helper calls between them.
+
+**Acceptance gate:** `bench_arith`, `bench_loop`, `bench_nested_loop*` improve by ≥ 15%. No bench regresses ≥ 3%.
+
+**Rollback:** revert; baseline JIT keeps boxing.
+
+---
+
+### B2.2 · Unboxed int calling convention
+
+**Goal:** self-recursive and direct monomorphic calls between int-stable JIT-compiled functions pass arguments and returns as native `i64`, never materializing a `Value` across the call boundary. **This is the unlock for `bench_fib`**.
+
+**Approach:** a JIT-compiled function whose B2.0 analysis says "all params are `Int64` and return is `Int64`" gets **two entry points**:
+- **Generic entry:** takes `*mut VM`, reads args from the stack as `Value`, unboxes each via a tag check, populates the `Int64` `Variable`s, runs the body, boxes the return value, pushes to stack. This is the existing thunk signature, extended with an unbox/box prelude/epilogue.
+- **Specialized entry:** takes `*mut VM, i64, i64, ...` (one `i64` per int param) and returns `i64`. No stack manipulation for args, no box on return. This is a plain C-ABI function.
+
+**Call-site emission:** at `Call` / `MethodCall` opcodes:
+1. If the callee's IC has stabilized on a specialized target with matching arity and our argument slots are all `Int64`, emit a direct `call_indirect` to the specialized entry with `i64` args in registers.
+2. Otherwise fall through to the existing generic call path (boxes args to the stack, calls generic entry).
+
+**Self-recursion fast path:** when a function calls itself (same `FunctionId`) with int args, we know the specialized entry exists — no IC needed. Direct call.
+
+**Files:** `core/src/jit/engine.rs` — two-entry-point emission, specialized call-site dispatch. `core/src/jit/runtime.rs` — the generic entry's unbox/box adapters.
+
+**Testing:** `bench_fib` must produce the same result. Stress test: mutually recursive int functions; the callee has specialized entry, the caller uses it.
+
+**Acceptance gate:** `bench_fib` improves by ≥ 30% on top of B2.1. No bench regresses ≥ 3%.
+
+**Rollback:** revert. B2.1 (unboxed locals) remains intact.
+
+---
+
+### B2.3 · Boxed-boundary adapters
+
+**Goal:** correctness infrastructure to make B2.2 safe. Make sure every transition between specialized-int code and generic-Value code boxes/unboxes exactly once, and only when needed.
+
+**Approach:** formal adapter shapes:
+- **Generic caller → specialized callee:** pops Value args from stack, tag-checks each as `Int`, extracts payload, calls specialized entry, boxes `i64` return, pushes to stack. Lives on the generic entry's prologue.
+- **Specialized caller → generic callee:** boxes its `i64` args back to `Value`, pushes to stack, calls generic entry, pops `Value` return, tag-checks as `Int`, extracts payload. Emitted inline at call sites in specialized functions when the target isn't specialized.
+- **Specialized callee → helper:** sync `Int64` `Variable`s to stack slots, call helper, re-hydrate. Already covered by B2.1's sync points; no new infrastructure.
+
+**Testing:** adversarial test — a generic function calls a specialized function with a non-integer arg; must gracefully bail to a typed error, not UB. Covered by B2.4's guards.
+
+**Acceptance gate:** no correctness regressions; all 391+ existing tests pass.
+
+**Rollback:** revert B2.2+B2.3 together.
+
+---
+
+### B2.4 · Guards + generic-path fallback
+
+**Goal:** safety net. Specialized code assumes slots remain `Int64`. If that assumption ever breaks (e.g., a caller passes a non-int from the generic world and the generic-entry tag check is skipped due to compiler bug), we must bail gracefully rather than crash.
+
+**Approach:** the generic entry's tag checks are the primary guard — they run on every call from the generic world. The specialized entry itself assumes pre-checked args and does not re-verify.
+
+For v1 we rely on B2.0's conservative analysis never classifying a slot as `Int64` unless we can prove it. If a bug in the analysis ever produces a false positive, the generic entry's guards still catch the mismatch on entry, but code inside the specialized body could have already corrupted the slot. Acceptable for v1; refine with B3's deopt machinery.
+
+**Testing:** deliberately craft a program that B2.0 *does* classify as `Int64` but that injects a non-int value via a builtin (if any such path exists). Verify the guard fires.
+
+**Acceptance gate:** guards fire correctly on the adversarial test.
+
+**Rollback:** revert B2.2–B2.4.
 
 ---
 
@@ -471,6 +554,7 @@ Record each task's outcome here. Keep terse.
 | 2026-04-23 | A1.0 NaN-box encoding module | ✅ landed | Foundation only — 8 B `NanValue` type + 16 tests, not yet wired in. Committed `e90032f` on `opt/a1-nanbox`. |
 | 2026-04-23 | A1.1a Box `ErrorValue` (40 → 24 B Value) | ✅ landed (intermediate) | Small net positive: fib −9%, closure −7%, arith −7% on controlled runs; bench_loop +4% regression (microarch, not code); struct_method unchanged. Geomean ~3% win. Not the full A1 gate, but a stepping stone toward the 16 B and 8 B targets — the 32 B `ErrorValue{msg,tag}` inline variant was the single biggest size driver. |
 | 2026-04-23 | A1.1b `Rc<str>` → `Rc<String>` (24 → 16 B Value) | ✅ landed (intermediate) | Wins compound with A1.1a but diminishing: fib −10.2%, closure −6.6%, arith −6.3% vs. 40 B baseline. bench_loop regression (+4%) persists unchanged from A1.1a. bench_struct_method now +1.8% vs baseline (regressed mildly). Geomean ~3–4% win total across A1.1a+b. Replaced `Rc<str>` (fat pointer, 16 B) with `Rc<String>` (thin pointer, 8 B) in `String` and `Error` variants and in `ErrorValueData`. Required ~250 `.into()` → `rc_str(...)` rewrites across builtins/vm/compiler (Python-regex driven, paren-balanced). Prerequisite for any NaN-box migration since NaN-box needs 8-byte aligned pointers. |
+| 2026-04-23 | **Pivot decision: A1.2 → B2 (typed JIT frames)** | ☐ (recording) | After A1.1a+b diminishing returns on struct_method (flat) and persistent bench_loop regression, user refocused on typed JIT frames rather than continuing Value-size shrinkage. Key insight: "hot integer code shouldn't traffic in `Value` at all" — unboxing locals alone under-delivers because recursive calls re-box. Phase B revised to 5 sub-tasks (B2.0–B2.4); see Phase B section above. A1.2 (full NaN-box) deferred — may be revisited later as foundation for B3 tier-2 + D1 hidden classes. A1 marked `◐ partial` in task table. |
 
 ---
 
