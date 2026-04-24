@@ -781,27 +781,28 @@ impl JitInner {
                 }
             }
 
-            // B2.2a: read-only Int64 mirror for Value params. For each
-            // eligible param slot, emit a one-shot tag guard:
-            //   load tag := stack[slot_offset + slot].tag
-            //   if tag == Integer:
-            //       payload := stack[slot_offset + slot].payload
-            //       def_var(mirror, payload)
-            //       continue
-            //   else:
-            //       return status=2 (Bailout); VM falls back to
-            //       interpreter for this invocation.
+            // Entry-time Int-param virtualization. Two sources feed into
+            // this prologue:
             //
-            // After this prologue, eligible-param GetLocal sites can
-            // push `use_var(mirror)` onto `expr_stack` as a virt Int
-            // with zero per-iteration memory ops (the read-only
-            // property means the mirror never goes stale).
+            //   1. B2.2a `int_mirror_param_slots`: Value-typed params used
+            //      only as Ints (per int-demand heuristic). Read-only by
+            //      eligibility rule — Variable lives in `param_mirrors`.
+            //
+            //   2. B2.1 Int64-typed params: params declared `<int>` in
+            //      source. May be written in the body (e.g., collatz's
+            //      `n = n / 2`), so the Variable lives in `int_locals`
+            //      where SetLocal's virt-def_var path can see it.
+            //
+            // Both go through the same one-shot tag guard: if the
+            // runtime tag isn't Integer, bail out to the interpreter.
+            // On success, extract payload + def_var.
+            //
             // Tracks the block the main dispatch loop should start
-            // emitting into. Normally equals `entry_block`; if a B2.2a
-            // prologue (tag guards) is emitted, shifts to the post-
-            // prologue block.
+            // emitting into. Normally equals `entry_block`; shifts to
+            // post-prologue when this block emits any tag guards.
             let mut effective_entry_block = entry_block;
 
+            // (1) Read-only Value-typed param mirrors (B2.2a).
             let mut param_mirrors: HashMap<u16, Variable> = HashMap::new();
             if !slot_types.int_mirror_param_slots.is_empty() {
                 let mut eligible: Vec<u16> =
@@ -814,11 +815,36 @@ impl JitInner {
                     param_mirrors.insert(slot, var);
                 }
             }
-            if !param_mirrors.is_empty() {
+
+            // (2) Int64-typed params that weren't already given a Variable
+            // by the Constant-init pass. These feed into int_locals so
+            // SetLocal's def_var path picks them up (writable params).
+            let mut int_typed_param_slots: Vec<u16> = Vec::new();
+            for slot in 1..=(func.arity as u16) {
+                if slot_types.is_virtualizable(slot) && !int_locals.contains_key(&slot) {
+                    let var = Variable::from_u32(next_var_id);
+                    next_var_id += 1;
+                    builder.declare_var(var, types::I64);
+                    int_locals.insert(slot, var);
+                    int_typed_param_slots.push(slot);
+                }
+            }
+            int_typed_param_slots.sort_unstable();
+
+            // Combined slot list for the prologue. Sort for deterministic
+            // IR output; `int_typed_param_slots` and `param_mirrors` are
+            // disjoint by construction (the int-mirror analysis excludes
+            // slots that are already Int64-typed).
+            let mut prologue_slots: Vec<u16> = param_mirrors
+                .keys()
+                .copied()
+                .chain(int_typed_param_slots.iter().copied())
+                .collect();
+            prologue_slots.sort_unstable();
+
+            if !prologue_slots.is_empty() {
                 use cranelift_codegen::ir::MemFlags;
                 let flags = MemFlags::trusted();
-                let mut eligible: Vec<u16> = param_mirrors.keys().copied().collect();
-                eligible.sort_unstable();
 
                 let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
                 let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
@@ -826,7 +852,7 @@ impl JitInner {
 
                 let bailout_block = builder.create_block();
 
-                for slot in &eligible {
+                for slot in &prologue_slots {
                     let slot_const = builder.ins().iconst(types::I64, *slot as i64);
                     let abs_slot = builder.ins().iadd(slot_offset_val, slot_const);
                     let byte_off = builder.ins().imul(abs_slot, value_size);
@@ -850,8 +876,16 @@ impl JitInner {
                         slot_ptr,
                         VALUE_INT_PAYLOAD_OFFSET as i32,
                     );
-                    let var = param_mirrors[slot];
-                    builder.def_var(var, payload);
+                    // Route the def_var through whichever map owns the
+                    // slot. `param_mirrors` for read-only Value-typed
+                    // params; `int_locals` for Int64-typed (writable)
+                    // params.
+                    if let Some(&var) = param_mirrors.get(slot) {
+                        builder.def_var(var, payload);
+                    } else if let Some(&var) = int_locals.get(slot) {
+                        builder.def_var(var, payload);
+                        live_int_slots.insert(*slot);
+                    }
                 }
 
                 // All guards passed — jump into a fresh "prologue_done"
@@ -930,6 +964,8 @@ impl JitInner {
                         | OpCode::Add
                         | OpCode::Subtract
                         | OpCode::Multiply
+                        | OpCode::Divide
+                        | OpCode::Modulo
                         | OpCode::Less
                         | OpCode::LessEqual
                         | OpCode::Greater
@@ -1343,12 +1379,37 @@ impl JitInner {
                         }
                         ip += 1;
                     }
-                    OpCode::Divide => {
-                        emit_int_fast_divmod(&mut builder, &refs, vm_val, false, refs.div);
-                        ip += 1;
-                    }
-                    OpCode::Modulo => {
-                        emit_int_fast_divmod(&mut builder, &refs, vm_val, true, refs.modu);
+                    OpCode::Divide | OpCode::Modulo => {
+                        let is_mod = matches!(op, OpCode::Modulo);
+                        // Virtual path: operands on expr_stack as virt Ints.
+                        // Emit register-resident sdiv/srem with zero +
+                        // i64::MIN/-1 guards; fall back via slow block that
+                        // re-boxes operands to the VM stack and calls the
+                        // existing helper.
+                        if expr_stack.len() >= 2 {
+                            let rhs = expr_stack.pop().unwrap();
+                            let lhs = expr_stack.pop().unwrap();
+                            let slow_helper = if is_mod { refs.modu } else { refs.div };
+                            let result = emit_int_virt_divmod(
+                                &mut builder,
+                                vm_val,
+                                is_mod,
+                                lhs,
+                                rhs,
+                                slow_helper,
+                            );
+                            expr_stack.push(result);
+                        } else {
+                            if !expr_stack.is_empty() {
+                                flush_expr_stack_to_stack_view(
+                                    &mut builder,
+                                    vm_val,
+                                    &mut expr_stack,
+                                );
+                            }
+                            let slow = if is_mod { refs.modu } else { refs.div };
+                            emit_int_fast_divmod(&mut builder, &refs, vm_val, is_mod, slow);
+                        }
                         ip += 1;
                     }
                     OpCode::Less | OpCode::LessEqual | OpCode::Greater | OpCode::GreaterEqual => {
@@ -4390,6 +4451,100 @@ fn emit_int_fast_divmod(
     builder.ins().return_(&[status]);
 
     builder.switch_to_block(continue_block);
+}
+
+/// Load the `i64` payload from the Value currently at stack[stack_view.len - 1].
+/// Used by `emit_int_virt_divmod`'s slow path to harvest the helper's
+/// pushed result without going through a helper call of its own.
+#[inline]
+fn emit_load_stack_top_integer_payload(
+    builder: &mut FunctionBuilder<'_>,
+    vm_val: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::MemFlags;
+    let flags = MemFlags::trusted();
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
+    let stack_len = emit_load_stack_len(builder, vm_val);
+    let one = builder.ins().iconst(types::I64, 1);
+    let top_idx = builder.ins().isub(stack_len, one);
+    let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+    let top_off = builder.ins().imul(top_idx, value_size);
+    let top_addr = builder.ins().iadd(stack_ptr, top_off);
+    builder
+        .ins()
+        .load(types::I64, flags, top_addr, VALUE_INT_PAYLOAD_OFFSET as i32)
+}
+
+/// Virtual Int Divide / Modulo: operands are register-resident Cranelift
+/// SSA values (never loaded from the VM stack). Emits zero + i64::MIN/-1
+/// guards on the fast path; falls back to the existing runtime helper via
+/// a slow path that first re-boxes both operands onto the VM stack.
+///
+/// Mirrors `emit_int_fast_divmod`'s guard shape but accepts operands in
+/// registers so the common case (rhs != 0 and !(i64::MIN / -1)) does zero
+/// memory traffic.
+fn emit_int_virt_divmod(
+    builder: &mut FunctionBuilder<'_>,
+    vm_val: cranelift_codegen::ir::Value,
+    is_modulo: bool,
+    lhs: cranelift_codegen::ir::Value,
+    rhs: cranelift_codegen::ir::Value,
+    slow_helper: FuncRef,
+) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::condcodes::IntCC;
+
+    let rhs_nonzero = builder.ins().icmp_imm(IntCC::NotEqual, rhs, 0);
+    let nonzero_block = builder.create_block();
+    let slow_block = builder.create_block();
+    let fast_block = builder.create_block();
+    let cont_block = builder.create_block();
+    builder.append_block_param(cont_block, types::I64);
+
+    builder
+        .ins()
+        .brif(rhs_nonzero, nonzero_block, &[], slow_block, &[]);
+
+    // i64::MIN / -1 overflow guard.
+    builder.switch_to_block(nonzero_block);
+    let lhs_min = builder.ins().icmp_imm(IntCC::Equal, lhs, i64::MIN);
+    let rhs_neg1 = builder.ins().icmp_imm(IntCC::Equal, rhs, -1);
+    let overflow = builder.ins().band(lhs_min, rhs_neg1);
+    builder
+        .ins()
+        .brif(overflow, slow_block, &[], fast_block, &[]);
+
+    // Fast path: register sdiv / srem.
+    builder.switch_to_block(fast_block);
+    let result = if is_modulo {
+        builder.ins().srem(lhs, rhs)
+    } else {
+        builder.ins().sdiv(lhs, rhs)
+    };
+    builder.ins().jump(cont_block, &[result]);
+
+    // Slow path: re-box both operands as Value::Integer onto the VM
+    // stack, call the existing helper (which handles div-by-zero and
+    // overflow errors), then read the result back as i64 payload and
+    // pop the helper-pushed result Value.
+    builder.switch_to_block(slow_block);
+    emit_inline_push_integer(builder, vm_val, lhs);
+    emit_inline_push_integer(builder, vm_val, rhs);
+    let call = builder.ins().call(slow_helper, &[vm_val]);
+    let status = builder.inst_results(call)[0];
+    let err_block = builder.create_block();
+    let slow_ok_block = builder.create_block();
+    builder
+        .ins()
+        .brif(status, err_block, &[], slow_ok_block, &[]);
+    builder.switch_to_block(err_block);
+    builder.ins().return_(&[status]);
+    builder.switch_to_block(slow_ok_block);
+    let payload = emit_load_stack_top_integer_payload(builder, vm_val);
+    emit_inline_stack_pop_one(builder, vm_val);
+    builder.ins().jump(cont_block, &[payload]);
+
+    builder.switch_to_block(cont_block);
+    builder.block_params(cont_block)[0]
 }
 
 /// Peephole fast path for `GetLocal(slot); Constant(int); Arith;
