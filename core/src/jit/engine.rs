@@ -58,6 +58,62 @@ use super::CompiledThunk;
 use super::runtime;
 use super::scan;
 
+/// Lightweight JIT instrumentation counters. Each field is a `Cell<u64>`
+/// so increments compile to plain load + inc + store in the JIT IR. On
+/// process exit, `JitInner::drop` dumps the counters to stderr when the
+/// env var `OXIGEN_JIT_STATS` is set. Off by default — zero text output.
+///
+/// Added in stage A0 ahead of the Plan A calling-convention work so a
+/// weak benchmark result is debuggable ("did the specialized path never
+/// get generated? never get hit? get hit but bail?").
+#[repr(C)]
+pub(crate) struct JitCounters {
+    pub specialized_entry_compiled: std::cell::Cell<u64>,
+    pub specialized_entry_called: std::cell::Cell<u64>,
+    pub specialized_call_ic_hit: std::cell::Cell<u64>,
+    pub specialized_call_ic_miss: std::cell::Cell<u64>,
+    pub specialized_call_no_entry: std::cell::Cell<u64>,
+    pub specialized_call_arity_mismatch: std::cell::Cell<u64>,
+    pub specialized_call_bailout: std::cell::Cell<u64>,
+    pub self_recursion_direct_call: std::cell::Cell<u64>,
+    pub virt_divmod_fast: std::cell::Cell<u64>,
+    pub virt_divmod_slow_zero: std::cell::Cell<u64>,
+    pub virt_divmod_slow_overflow: std::cell::Cell<u64>,
+}
+
+impl JitCounters {
+    fn new() -> Self {
+        Self {
+            specialized_entry_compiled: std::cell::Cell::new(0),
+            specialized_entry_called: std::cell::Cell::new(0),
+            specialized_call_ic_hit: std::cell::Cell::new(0),
+            specialized_call_ic_miss: std::cell::Cell::new(0),
+            specialized_call_no_entry: std::cell::Cell::new(0),
+            specialized_call_arity_mismatch: std::cell::Cell::new(0),
+            specialized_call_bailout: std::cell::Cell::new(0),
+            self_recursion_direct_call: std::cell::Cell::new(0),
+            virt_divmod_fast: std::cell::Cell::new(0),
+            virt_divmod_slow_zero: std::cell::Cell::new(0),
+            virt_divmod_slow_overflow: std::cell::Cell::new(0),
+        }
+    }
+
+    fn dump(&self) {
+        eprintln!("[jit stats]");
+        eprintln!("  specialized_entry_compiled:        {}", self.specialized_entry_compiled.get());
+        eprintln!("  specialized_entry_called:          {}", self.specialized_entry_called.get());
+        eprintln!("  specialized_call_ic_hit:           {}", self.specialized_call_ic_hit.get());
+        eprintln!("  specialized_call_ic_miss:          {}", self.specialized_call_ic_miss.get());
+        eprintln!("  specialized_call_no_entry:         {}", self.specialized_call_no_entry.get());
+        eprintln!("  specialized_call_arity_mismatch:   {}", self.specialized_call_arity_mismatch.get());
+        eprintln!("  specialized_call_bailout:          {}", self.specialized_call_bailout.get());
+        eprintln!("  self_recursion_direct_call:        {}", self.self_recursion_direct_call.get());
+        eprintln!("  virt_divmod_fast:                  {}", self.virt_divmod_fast.get());
+        eprintln!("  virt_divmod_slow_zero:             {}", self.virt_divmod_slow_zero.get());
+        eprintln!("  virt_divmod_slow_overflow:         {}", self.virt_divmod_slow_overflow.get());
+    }
+}
+
 pub(super) struct JitInner {
     module: JITModule,
     ctx: Context,
@@ -76,6 +132,12 @@ pub(super) struct JitInner {
 
     /// Monotonic counter for unique thunk names.
     next_id: u32,
+
+    /// Plan A0 instrumentation counters. Lives in a stable heap allocation
+    /// (Box) so emitted IR can bake the raw pointer. Raw pointer access is
+    /// sound because JitInner is single-owner and the counters box is only
+    /// mutated through single-threaded JIT execution.
+    pub(crate) counters: Box<JitCounters>,
 
     /// Per-call-site inline caches for `GetGlobal`. Each compiled
     /// GetGlobal gets its own `Box<GlobalCacheEntry>`; the raw pointer
@@ -426,11 +488,26 @@ impl JitInner {
             current_stop_depth: 0,
             pending_error: None,
             next_id: 0,
+            counters: Box::new(JitCounters::new()),
             global_caches: Vec::new(),
             call_caches: Vec::new(),
             method_caches: Vec::new(),
             field_caches: Vec::new(),
         }
+    }
+
+    /// Stable raw pointer to the counters block, safe to bake into
+    /// emitted IR. The `Box` keeps the allocation pinned for the
+    /// JitInner's lifetime.
+    pub(crate) fn counters_ptr(&self) -> *const JitCounters {
+        self.counters.as_ref() as *const _
+    }
+
+    /// Dump counters to stderr. Triggered from the Drop impl when the
+    /// env var is set. Public so other code (a future /jit-stats flag)
+    /// can invoke it on demand.
+    pub(crate) fn dump_counters(&self) {
+        self.counters.dump();
     }
 
     /// Allocate a fresh inline-cache slot for a GetGlobal call site.
@@ -631,6 +708,15 @@ impl JitInner {
         let code = &chunk.code;
 
         let info = scan::scan(chunk).map_err(|_| ())?;
+
+        // A0: emit counter-bump IR only when OXIGEN_JIT_STATS is set at
+        // compile time of this function. Keeps the normal path cost-free.
+        let counters_ptr_opt: Option<*const JitCounters> =
+            if std::env::var("OXIGEN_JIT_STATS").is_ok() {
+                Some(self.counters.as_ref() as *const _)
+            } else {
+                None
+            };
 
         // B2.1b: run the typed slot analysis. Consumed further down to
         // declare Cranelift Variables for virtualizable Int64 locals.
@@ -1397,6 +1483,7 @@ impl JitInner {
                                 lhs,
                                 rhs,
                                 slow_helper,
+                                counters_ptr_opt,
                             );
                             expr_stack.push(result);
                         } else {
@@ -2593,6 +2680,14 @@ impl JitInner {
         let raw_ptr = self.module.get_finalized_function(thunk_id);
         let thunk: CompiledThunk = unsafe { std::mem::transmute(raw_ptr) };
         Ok(thunk)
+    }
+}
+
+impl Drop for JitInner {
+    fn drop(&mut self) {
+        if std::env::var("OXIGEN_JIT_STATS").is_ok() {
+            self.counters.dump();
+        }
     }
 }
 
@@ -4453,6 +4548,55 @@ fn emit_int_fast_divmod(
     builder.switch_to_block(continue_block);
 }
 
+/// Emit IR that increments a `Cell<u64>` counter at a fixed address.
+/// The address is baked in as an immediate; since `JitCounters` lives in
+/// a `Box` owned by `JitInner`, the address is stable for the JIT's
+/// lifetime. Emits load + iadd_imm + store — 3 ops.
+#[inline]
+fn emit_counter_bump(
+    builder: &mut FunctionBuilder<'_>,
+    counters_ptr: *const JitCounters,
+    offset: isize,
+) {
+    use cranelift_codegen::ir::MemFlags;
+    let addr = unsafe { (counters_ptr as *const u8).offset(offset) } as i64;
+    let ptr = builder.ins().iconst(types::I64, addr);
+    let flags = MemFlags::trusted();
+    let cur = builder.ins().load(types::I64, flags, ptr, 0);
+    let next = builder.ins().iadd_imm(cur, 1);
+    builder.ins().store(flags, next, ptr, 0);
+}
+
+/// Byte offset of each `JitCounters` field from the struct base.
+/// The struct is `#[repr(C)]` so these are stable across Rust versions.
+/// Fields are `Cell<u64>` which is 8 bytes and identical to `u64`.
+#[allow(dead_code)] // consumed by later Plan A stages (A2/A3/A5)
+mod counter_offsets {
+    use super::JitCounters;
+    use std::mem::offset_of;
+    pub const SPECIALIZED_ENTRY_COMPILED: isize =
+        offset_of!(JitCounters, specialized_entry_compiled) as isize;
+    pub const SPECIALIZED_ENTRY_CALLED: isize =
+        offset_of!(JitCounters, specialized_entry_called) as isize;
+    pub const SPECIALIZED_CALL_IC_HIT: isize =
+        offset_of!(JitCounters, specialized_call_ic_hit) as isize;
+    pub const SPECIALIZED_CALL_IC_MISS: isize =
+        offset_of!(JitCounters, specialized_call_ic_miss) as isize;
+    pub const SPECIALIZED_CALL_NO_ENTRY: isize =
+        offset_of!(JitCounters, specialized_call_no_entry) as isize;
+    pub const SPECIALIZED_CALL_ARITY_MISMATCH: isize =
+        offset_of!(JitCounters, specialized_call_arity_mismatch) as isize;
+    pub const SPECIALIZED_CALL_BAILOUT: isize =
+        offset_of!(JitCounters, specialized_call_bailout) as isize;
+    pub const SELF_RECURSION_DIRECT_CALL: isize =
+        offset_of!(JitCounters, self_recursion_direct_call) as isize;
+    pub const VIRT_DIVMOD_FAST: isize = offset_of!(JitCounters, virt_divmod_fast) as isize;
+    pub const VIRT_DIVMOD_SLOW_ZERO: isize =
+        offset_of!(JitCounters, virt_divmod_slow_zero) as isize;
+    pub const VIRT_DIVMOD_SLOW_OVERFLOW: isize =
+        offset_of!(JitCounters, virt_divmod_slow_overflow) as isize;
+}
+
 /// Load the `i64` payload from the Value currently at stack[stack_view.len - 1].
 /// Used by `emit_int_virt_divmod`'s slow path to harvest the helper's
 /// pushed result without going through a helper call of its own.
@@ -4490,11 +4634,14 @@ fn emit_int_virt_divmod(
     lhs: cranelift_codegen::ir::Value,
     rhs: cranelift_codegen::ir::Value,
     slow_helper: FuncRef,
+    counters_ptr: Option<*const JitCounters>,
 ) -> cranelift_codegen::ir::Value {
     use cranelift_codegen::ir::condcodes::IntCC;
 
     let rhs_nonzero = builder.ins().icmp_imm(IntCC::NotEqual, rhs, 0);
     let nonzero_block = builder.create_block();
+    let zero_slow_block = builder.create_block();
+    let overflow_slow_block = builder.create_block();
     let slow_block = builder.create_block();
     let fast_block = builder.create_block();
     let cont_block = builder.create_block();
@@ -4502,7 +4649,14 @@ fn emit_int_virt_divmod(
 
     builder
         .ins()
-        .brif(rhs_nonzero, nonzero_block, &[], slow_block, &[]);
+        .brif(rhs_nonzero, nonzero_block, &[], zero_slow_block, &[]);
+
+    // Zero-divisor pre-slow block: bump counter + jump to shared slow.
+    builder.switch_to_block(zero_slow_block);
+    if let Some(cp) = counters_ptr {
+        emit_counter_bump(builder, cp, counter_offsets::VIRT_DIVMOD_SLOW_ZERO);
+    }
+    builder.ins().jump(slow_block, &[]);
 
     // i64::MIN / -1 overflow guard.
     builder.switch_to_block(nonzero_block);
@@ -4511,10 +4665,20 @@ fn emit_int_virt_divmod(
     let overflow = builder.ins().band(lhs_min, rhs_neg1);
     builder
         .ins()
-        .brif(overflow, slow_block, &[], fast_block, &[]);
+        .brif(overflow, overflow_slow_block, &[], fast_block, &[]);
+
+    // Overflow pre-slow block: bump counter + jump to shared slow.
+    builder.switch_to_block(overflow_slow_block);
+    if let Some(cp) = counters_ptr {
+        emit_counter_bump(builder, cp, counter_offsets::VIRT_DIVMOD_SLOW_OVERFLOW);
+    }
+    builder.ins().jump(slow_block, &[]);
 
     // Fast path: register sdiv / srem.
     builder.switch_to_block(fast_block);
+    if let Some(cp) = counters_ptr {
+        emit_counter_bump(builder, cp, counter_offsets::VIRT_DIVMOD_FAST);
+    }
     let result = if is_modulo {
         builder.ins().srem(lhs, rhs)
     } else {
@@ -4525,7 +4689,8 @@ fn emit_int_virt_divmod(
     // Slow path: re-box both operands as Value::Integer onto the VM
     // stack, call the existing helper (which handles div-by-zero and
     // overflow errors), then read the result back as i64 payload and
-    // pop the helper-pushed result Value.
+    // pop the helper-pushed result Value. Shared entry from both
+    // zero_slow_block and overflow_slow_block.
     builder.switch_to_block(slow_block);
     emit_inline_push_integer(builder, vm_val, lhs);
     emit_inline_push_integer(builder, vm_val, rhs);
