@@ -79,6 +79,11 @@ pub(crate) struct JitCounters {
     pub virt_divmod_fast: std::cell::Cell<u64>,
     pub virt_divmod_slow_zero: std::cell::Cell<u64>,
     pub virt_divmod_slow_overflow: std::cell::Cell<u64>,
+    /// B2.1f: incremented every time the fused `Equal` / `NotEqual`
+    /// + `JumpIf*` path fires with both operands staged as virt Ints
+    /// on `expr_stack`. Measures how often the fast branch-fusion
+    /// replaces a boxed-Bool round trip through `refs.eq`/`refs.ne`.
+    pub virt_branch_eq_hit: std::cell::Cell<u64>,
 }
 
 impl JitCounters {
@@ -95,6 +100,7 @@ impl JitCounters {
             virt_divmod_fast: std::cell::Cell::new(0),
             virt_divmod_slow_zero: std::cell::Cell::new(0),
             virt_divmod_slow_overflow: std::cell::Cell::new(0),
+            virt_branch_eq_hit: std::cell::Cell::new(0),
         }
     }
 
@@ -111,6 +117,7 @@ impl JitCounters {
         eprintln!("  virt_divmod_fast:                  {}", self.virt_divmod_fast.get());
         eprintln!("  virt_divmod_slow_zero:             {}", self.virt_divmod_slow_zero.get());
         eprintln!("  virt_divmod_slow_overflow:         {}", self.virt_divmod_slow_overflow.get());
+        eprintln!("  virt_branch_eq_hit:                {}", self.virt_branch_eq_hit.get());
     }
 }
 
@@ -1256,6 +1263,8 @@ impl JitInner {
                         | OpCode::LessEqual
                         | OpCode::Greater
                         | OpCode::GreaterEqual
+                        | OpCode::Equal
+                        | OpCode::NotEqual
                         | OpCode::Call
                 );
                 if !handles_own_flush && !expr_stack.is_empty() {
@@ -1700,13 +1709,20 @@ impl JitInner {
                         }
                         ip += 1;
                     }
-                    OpCode::Less | OpCode::LessEqual | OpCode::Greater | OpCode::GreaterEqual => {
+                    OpCode::Less
+                    | OpCode::LessEqual
+                    | OpCode::Greater
+                    | OpCode::GreaterEqual
+                    | OpCode::Equal
+                    | OpCode::NotEqual => {
                         use cranelift_codegen::ir::condcodes::IntCC;
                         let (cc, slow_helper) = match op {
                             OpCode::Less => (IntCC::SignedLessThan, refs.lt),
                             OpCode::LessEqual => (IntCC::SignedLessThanOrEqual, refs.le),
                             OpCode::Greater => (IntCC::SignedGreaterThan, refs.gt),
                             OpCode::GreaterEqual => (IntCC::SignedGreaterThanOrEqual, refs.ge),
+                            OpCode::Equal => (IntCC::Equal, refs.eq),
+                            OpCode::NotEqual => (IntCC::NotEqual, refs.ne),
                             _ => unreachable!(),
                         };
 
@@ -1769,6 +1785,20 @@ impl JitInner {
                             };
 
                             if virt_eligible {
+                                // B2.1f counter: bump when Eq/Ne hits the
+                                // fused virt-branch path. Other comparison
+                                // ops had no dedicated counter pre-B2.1f;
+                                // the diagnostic use-case was specifically
+                                // verifying Equal/NotEqual get fused.
+                                if matches!(op, OpCode::Equal | OpCode::NotEqual) {
+                                    if let Some(cp) = counters_ptr_opt {
+                                        emit_counter_bump(
+                                            &mut builder,
+                                            cp,
+                                            counter_offsets::VIRT_BRANCH_EQ_HIT,
+                                        );
+                                    }
+                                }
                                 let rhs = expr_stack.pop().unwrap();
                                 let lhs = expr_stack.pop().unwrap();
                                 let pred = builder.ins().icmp(cc, lhs, rhs);
@@ -1821,7 +1851,28 @@ impl JitInner {
                                     &mut expr_stack,
                                 );
                             }
-                            emit_int_fast_cmp(&mut builder, &refs, vm_val, cc, slow_helper);
+                            // B2.1f: Equal/NotEqual outside a fuseable
+                            // branch context goes through the existing
+                            // standalone equality helper (which handles
+                            // mixed-type Int==Float, String==String, etc.
+                            // via refs.eq / refs.ne on the slow path).
+                            // Other comparisons go through emit_int_fast_cmp.
+                            if matches!(op, OpCode::Equal | OpCode::NotEqual) {
+                                emit_int_fast_eq(
+                                    &mut builder,
+                                    &refs,
+                                    vm_val,
+                                    matches!(op, OpCode::Equal),
+                                );
+                            } else {
+                                emit_int_fast_cmp(
+                                    &mut builder,
+                                    &refs,
+                                    vm_val,
+                                    cc,
+                                    slow_helper,
+                                );
+                            }
                             ip += 1;
                         }
                     }
@@ -1832,14 +1883,11 @@ impl JitInner {
                     }
 
                     // Infallible
-                    OpCode::Equal => {
-                        emit_int_fast_eq(&mut builder, &refs, vm_val, true);
-                        ip += 1;
-                    }
-                    OpCode::NotEqual => {
-                        emit_int_fast_eq(&mut builder, &refs, vm_val, false);
-                        ip += 1;
-                    }
+                    //
+                    // OpCode::Equal / OpCode::NotEqual are merged into the
+                    // comparison arm above (B2.1f) so they share the
+                    // JumpIf*-fusion path. Non-branch cases fall through
+                    // to emit_int_fast_eq from that arm's else-branch.
                     OpCode::Not => {
                         builder.ins().call(refs.not, &[vm_val]);
                         ip += 1;
@@ -5211,6 +5259,8 @@ mod counter_offsets {
         offset_of!(JitCounters, virt_divmod_slow_zero) as isize;
     pub const VIRT_DIVMOD_SLOW_OVERFLOW: isize =
         offset_of!(JitCounters, virt_divmod_slow_overflow) as isize;
+    pub const VIRT_BRANCH_EQ_HIT: isize =
+        offset_of!(JitCounters, virt_branch_eq_hit) as isize;
 }
 
 /// Load the `i64` payload from the Value currently at stack[stack_view.len - 1].
