@@ -1946,6 +1946,7 @@ impl Compiler {
                 jit_thunk: std::cell::Cell::new(None),
             specialized_thunk: std::cell::Cell::new(None),
             specialized_arity: std::cell::Cell::new(0),
+            specialized_kind: std::cell::Cell::new(0),
             })),
             line,
         );

@@ -283,6 +283,56 @@ enum Entry {
     Failed,
 }
 
+/// Which entry point the compile_function IR emitter is currently
+/// producing. Used as a compile-time branch variable at three
+/// divergence points (entry block params, prologue, OpCode::Return
+/// success path) — everywhere else the emission logic is shared.
+///
+/// The ABI invariant: BOTH entry kinds return a single `i32` status
+/// value. Specialized entries carry their `i64` payload through an
+/// out-param pointer supplied by the caller; see `ret_out_param_index`.
+/// This keeps every existing `return_(&[status])` site in the dispatch
+/// loop unchanged, avoiding an audit of ~1900 lines of IR.
+#[allow(dead_code)] // Generic variant not yet routed through this enum
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EntryKind {
+    /// `fn(*mut VM) -> u32`. Caller pushes args onto the VM stack as
+    /// `Value`. Entry reads them through `stack_view`, optionally
+    /// through B2.2a tag guards for int mirrors. Successful
+    /// `OpCode::Return` calls the `op_return` helper.
+    Generic,
+    /// `fn(*mut VM, i64, ..., i64, *mut i64) -> u32`. Caller passes
+    /// args in registers and supplies an i64 out-param for the return
+    /// payload. Entry writes each i64 back to the backing stack slot
+    /// for helper compat + `def_var`s the mirror Variable directly —
+    /// no tag guard (args are trusted Int by the caller's contract).
+    /// Successful `OpCode::Return` stores the payload via `*ret_out`,
+    /// tears down the frame inline, and `return_(&[0])`. Early
+    /// error/bailout returns remain shaped identically to Generic
+    /// (`return_(&[status])`) thanks to the single-status ABI.
+    IntSpecialized {
+        /// Block-param index of the `*mut i64` out pointer — the last
+        /// entry-block param. Arity is `ret_out_param_index - 1` (vm
+        /// is index 0).
+        ret_out_param_index: usize,
+    },
+}
+
+/// What kind of specialized entry a CompiledEntries carries. Observable
+/// on the VM side (ObjClosure) so call sites can gate A3's direct-call
+/// path on having a real body, not a trampoline.
+#[allow(dead_code)] // NativeIntBody variant lands in a later commit
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SpecializedEntryKind {
+    /// A2's adapter: boxes i64 args → calls generic → unboxes result.
+    /// Correctness-preserving but pays more than it saves vs the IC
+    /// path. A3 must NOT direct-call trampolines.
+    ForwardTrampoline,
+    /// The real specialized body: runs the function's opcodes with
+    /// i64-resident args, no box/unbox round trip. Safe A3 target.
+    NativeIntBody,
+}
+
 pub(super) enum InvokeOutcome {
     Returned,
     Bailout,
@@ -2740,12 +2790,20 @@ impl JitInner {
         let generic_ptr = self.module.get_finalized_function(thunk_id);
         let generic: CompiledThunk = unsafe { std::mem::transmute(generic_ptr) };
 
-        let (specialized, specialized_arity) = if let Some(sid) = spec_thunk_id {
-            let raw = self.module.get_finalized_function(sid);
-            (Some(raw as SpecializedThunkRaw), func.arity)
-        } else {
-            (None, 0)
-        };
+        let (specialized, specialized_arity, specialized_kind) =
+            if let Some(sid) = spec_thunk_id {
+                let raw = self.module.get_finalized_function(sid);
+                // Today the only specialized body emitter is the A2
+                // forward trampoline. A later commit swaps this to
+                // NativeIntBody once the real body is generated.
+                (
+                    Some(raw as SpecializedThunkRaw),
+                    func.arity,
+                    Some(SpecializedEntryKind::ForwardTrampoline),
+                )
+            } else {
+                (None, 0, None)
+            };
 
         if specialized.is_some() {
             self.counters
@@ -2757,6 +2815,7 @@ impl JitInner {
             generic,
             specialized,
             specialized_arity,
+            specialized_kind,
         })
     }
 

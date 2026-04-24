@@ -45,10 +45,14 @@ pub(crate) type SpecializedThunkRaw = *const ();
 /// `generic` is the always-present `fn(*mut VM) -> u32` thunk.
 /// `specialized` is Some only when the function qualifies per
 /// `slot_types.specialized_entry_eligible` (A1 analysis).
+/// `specialized_kind` discriminates WHICH specialized body the pointer
+/// points at (forward trampoline vs. native int body) so callers can
+/// gate direct-call optimizations on a real body being present.
 pub(crate) struct CompiledEntries {
     pub generic: CompiledThunk,
     pub specialized: Option<SpecializedThunkRaw>,
     pub specialized_arity: u8,
+    pub specialized_kind: Option<engine::SpecializedEntryKind>,
 }
 
 /// Outcome of invoking a JIT-compiled function.
@@ -168,22 +172,35 @@ impl JitEngine {
         }
     }
 
-    /// Compile if hot and return the full CompiledEntries, exposing both
-    /// the generic thunk and the specialized entry (when eligible). VM
-    /// call sites use this to install both pointers on the closure via
-    /// `install_compiled_entries_on_closure`.
+    /// Compile if hot and return the full CompiledEntries fields,
+    /// exposing generic + specialized + kind discriminator. VM call
+    /// sites use this to install all three on the closure.
+    ///
+    /// The fourth tuple element is the u8 encoding of
+    /// `SpecializedEntryKind` (see `vm::value::SPECIALIZED_KIND_*`).
+    /// Returns 0 (`SPECIALIZED_KIND_NONE`) when there's no specialized
+    /// entry.
     #[cfg(feature = "jit")]
     pub(crate) fn maybe_compile_entries_for(
         &mut self,
         func: &Rc<Function>,
         call_count: u32,
-    ) -> Option<(CompiledThunk, Option<SpecializedThunkRaw>, u8)> {
+    ) -> Option<(CompiledThunk, Option<SpecializedThunkRaw>, u8, u8)> {
         if call_count < self.threshold {
             return None;
         }
         let inner = self.inner.get_or_insert_with(engine::JitInner::new);
         let e = inner.maybe_compile_entries(func)?;
-        Some((e.generic, e.specialized, e.specialized_arity))
+        let kind_u8 = match e.specialized_kind {
+            None => crate::vm::value::SPECIALIZED_KIND_NONE,
+            Some(engine::SpecializedEntryKind::ForwardTrampoline) => {
+                crate::vm::value::SPECIALIZED_KIND_FORWARD_TRAMPOLINE
+            }
+            Some(engine::SpecializedEntryKind::NativeIntBody) => {
+                crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY
+            }
+        };
+        Some((e.generic, e.specialized, e.specialized_arity, kind_u8))
     }
 
     /// Compile if loop-hot and return the compiled thunk, if one is

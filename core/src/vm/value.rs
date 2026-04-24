@@ -177,6 +177,7 @@ mod layout_tests {
             jit_thunk: Cell::new(None),
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
+            specialized_kind: Cell::new(0),
         });
         // Read the Rc's raw bit pattern the same way the JIT does.
         let expected_raw: usize = unsafe {
@@ -218,6 +219,7 @@ mod layout_tests {
             jit_thunk: Cell::new(None),
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
+            specialized_kind: Cell::new(0),
         });
         // Read the RcBox pointer the same way the JIT does: raw bit
         // pattern of the `Rc`, which is `NonNull<RcBox<T>>`.
@@ -452,7 +454,24 @@ pub struct ObjClosure {
     /// Callers validate this against the Call opcode's arg_count
     /// before dispatching to the specialized entry.
     pub specialized_arity: Cell<u8>,
+    /// Discriminator for `specialized_thunk`: does it point at a
+    /// forward trampoline (A2 adapter) or a native int body?
+    /// Encoded as `u8` so it can sit in a Cell alongside the other
+    /// JIT-state fields without needing Debug/PartialEq on the enum.
+    /// 0 = None (no specialized entry)
+    /// 1 = ForwardTrampoline
+    /// 2 = NativeIntBody
+    /// A3 direct-call dispatch gates on `== 2`; trampolines never
+    /// receive direct-call traffic.
+    pub specialized_kind: Cell<u8>,
 }
+
+/// u8 encoding of `engine::SpecializedEntryKind` stored in
+/// `ObjClosure.specialized_kind`. Callers should treat these as
+/// opaque tags and compare to the constants.
+pub const SPECIALIZED_KIND_NONE: u8 = 0;
+pub const SPECIALIZED_KIND_FORWARD_TRAMPOLINE: u8 = 1;
+pub const SPECIALIZED_KIND_NATIVE_INT_BODY: u8 = 2;
 
 /// An upvalue captures a variable from an enclosing scope.
 #[derive(Debug, Clone)]

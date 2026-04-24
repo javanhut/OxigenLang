@@ -303,6 +303,7 @@ impl VM {
             jit_thunk: std::cell::Cell::new(None),
             specialized_thunk: std::cell::Cell::new(None),
             specialized_arity: std::cell::Cell::new(0),
+            specialized_kind: std::cell::Cell::new(0),
         });
 
         // Push the closure itself onto the stack (slot 0) — this is the
@@ -844,6 +845,7 @@ impl VM {
             jit_thunk: std::cell::Cell::new(None),
             specialized_thunk: std::cell::Cell::new(None),
             specialized_arity: std::cell::Cell::new(0),
+            specialized_kind: std::cell::Cell::new(0),
         });
         self.push(Value::Closure(closure));
         Ok(())
@@ -2823,12 +2825,13 @@ impl VM {
                     closure.jit_thunk.set(Some(thunk));
                     closure.jit_state.set(1);
                     Some(thunk)
-                } else if let Some((generic, specialized, spec_arity)) =
+                } else if let Some((generic, specialized, spec_arity, spec_kind)) =
                     self.jit.maybe_compile_entries_for(&closure.function, count)
                 {
                     closure.jit_thunk.set(Some(generic));
                     closure.specialized_thunk.set(specialized);
                     closure.specialized_arity.set(spec_arity);
+                    closure.specialized_kind.set(spec_kind);
                     closure.jit_state.set(1);
                     Some(generic)
                 } else {
