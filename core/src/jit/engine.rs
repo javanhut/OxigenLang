@@ -875,6 +875,16 @@ impl JitInner {
         self.ctx.func.signature = sig;
         self.ctx.func.name = UserFuncName::user(0, generic_seq_id);
 
+        // A2.5 commit 3 scaffold: `kind` tracks which entry point this
+        // emission produces. Commit 4 will wrap the whole builder scope
+        // in a loop over entry kinds and branch at three divergence
+        // points (entry block params, prologue, OpCode::Return success
+        // path). Today, only Generic is emitted here — the specialized
+        // trampoline is still produced by emit_specialized_trampoline.
+        // No behavior change in this commit.
+        let kind: EntryKind = EntryKind::Generic;
+        let _ = kind; // silence unused until commit 4 reads it
+
         {
             let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.fbc);
 
