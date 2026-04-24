@@ -7,7 +7,7 @@
 //! mechanics are still handled by the runtime helpers; no inline fast
 //! paths yet.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use cranelift_codegen::Context;
@@ -15,11 +15,12 @@ use cranelift_codegen::ir::{
     AbiParam, Block, FuncRef, InstBuilder, Signature, UserFuncName, types,
 };
 use cranelift_codegen::settings;
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 
 use crate::compiler::opcode::{Chunk, OpCode};
+use crate::compiler::slot_types::{FunctionSlotTypes, SlotType};
 use crate::vm::VM;
 use crate::vm::VMError;
 use crate::vm::{JitFrame, JitFrameView, StackView};
@@ -632,6 +633,27 @@ impl JitInner {
 
         let info = scan::scan(chunk).map_err(|_| ())?;
 
+        // B2.1b: run the typed slot analysis. Consumed further down to
+        // declare Cranelift Variables for virtualizable Int64 locals.
+        // Runs before any IR is emitted so the analysis result is stable
+        // across the whole compile_function call.
+        let slot_types = crate::compiler::slot_types::analyze(func);
+        #[cfg(debug_assertions)]
+        {
+            if let Err(msg) = crate::compiler::slot_types::certify(func, &slot_types) {
+                // Certifier failure is a soft error: we log and continue
+                // without virtualizing. B2.1b codegen is safe because
+                // `int_locals` below is populated only from entries we
+                // then consume; a skipped declaration just means the
+                // slot stays on the Value path.
+                eprintln!(
+                    "[jit] slot_types certify failed for {:?}: {}",
+                    func.name.as_deref().unwrap_or("<anonymous>"),
+                    msg,
+                );
+            }
+        }
+
         // Pre-allocate one inline-cache slot per GetGlobal opcode in the
         // bytecode so the emit pass can hand them out sequentially
         // without needing to re-borrow `self` from inside the builder
@@ -705,6 +727,54 @@ impl JitInner {
             // lifetime of this activation.
             let slot_offset_val = emit_load_top_jit_frame_slot_offset(&mut builder, vm_val);
 
+            // B2.1b: per-function virtualization state. For each
+            // virtualizable slot with a recognized bytecode-level
+            // initializer (excludes params — those are B2.2a's job),
+            // allocate a Cranelift `Variable` to hold its authoritative
+            // value in SSA. The backing VM stack slot is still
+            // populated at initialization so stack shape remains valid;
+            // `flush_all` (below) spills the Variable back into the
+            // backing slot before any generic runtime op can observe
+            // the stack.
+            //
+            // In B2.1b the state is allocated and Variables are
+            // declared + def_var'd at their initialization IP, but no
+            // opcode CONSUMES them yet. B2.1c wires up GetLocal /
+            // SetLocal / Pop to actually use the virtualized path.
+            let mut int_locals: HashMap<u16, Variable> = HashMap::new();
+            let mut live_int_slots: HashSet<u16> = HashSet::new();
+            // `expr_stack` is infrastructure for B2.1c+. Not consumed
+            // yet — kept declared so the helper signatures stay
+            // consistent across stages.
+            let mut expr_stack: Vec<cranelift_codegen::ir::Value> = Vec::new();
+            let _ = &mut expr_stack;
+
+            // Declare one Variable per virtualizable slot with a
+            // recognized bytecode-level initializer. Variable IDs come
+            // from an independent counter so they don't collide with
+            // any future non-slot Variables.
+            {
+                let mut next_var_id: u32 = 0;
+                let mut needs_var: Vec<u16> = Vec::new();
+                for &slot in slot_types.local_init_result_ip.values() {
+                    if slot_types.is_virtualizable(slot) && !int_locals.contains_key(&slot) {
+                        needs_var.push(slot);
+                    }
+                }
+                // Sort for deterministic Variable assignment so two
+                // identical compilations produce identical IR —
+                // important for any future incremental-compile or
+                // golden-file testing.
+                needs_var.sort_unstable();
+                needs_var.dedup();
+                for slot in needs_var {
+                    let var = Variable::from_u32(next_var_id);
+                    next_var_id += 1;
+                    builder.declare_var(var, types::I64);
+                    int_locals.insert(slot, var);
+                }
+            }
+
             let mut current_block = entry_block;
             let mut terminated = false;
             let mut ip: usize = 0;
@@ -741,6 +811,21 @@ impl JitInner {
                             crate::vm::value::Value::Integer(n) => {
                                 let v = builder.ins().iconst(types::I64, *n);
                                 emit_inline_push_integer(&mut builder, vm_val, v);
+
+                                // B2.1b: if this Constant is the
+                                // recognized initializer for a
+                                // virtualizable Int64 slot, also def_var
+                                // its Variable and mark live. The push
+                                // above materializes the backing VM
+                                // stack slot so stack shape stays
+                                // valid; the Variable now holds the
+                                // same value authoritatively.
+                                if let Some(&slot) = slot_types.local_init_result_ip.get(&ip) {
+                                    if let Some(&var) = int_locals.get(&slot) {
+                                        builder.def_var(var, v);
+                                        live_int_slots.insert(slot);
+                                    }
+                                }
                             }
                             crate::vm::value::Value::Float(f) => {
                                 let bits = f.to_bits() as i64;
@@ -3501,6 +3586,127 @@ fn emit_inline_push_integer(
     builder
         .ins()
         .store(flags, new_top, vm_val, vm_stack_view_len_offset());
+}
+
+// ── B2.1 flush helpers ────────────────────────────────────────────────
+//
+// The following helpers maintain the core B2.1 invariant: while
+// virtualized Int64 locals live authoritatively in Cranelift
+// Variables, the backing VM stack slot is always a valid (possibly
+// stale) copy. Before any runtime code can observe the stack, these
+// helpers write the Variable's current value back into the slot.
+//
+// `flush_all` is the boundary-op full flush; `spill_live_int_locals`
+// and `flush_expr_stack_to_stack_view` are the two pieces. Consumers
+// (B2.1c+) pick the right level of flushing based on what's about to
+// happen. B2.1b defines the helpers; B2.1c is the first consumer.
+
+/// Store an `i64` value into the VM stack slot for `slot`, keeping the
+/// slot's existing tag as Integer. Exact-slot store — DOES NOT push,
+/// DOES NOT modify `stack_view.len` or `Vec::len`.
+///
+/// Used by `spill_live_int_locals` to write a Variable's current value
+/// back to its backing slot when runtime code is about to observe the
+/// stack.
+#[allow(dead_code)] // consumed by B2.1c
+fn emit_store_stack_slot_integer(
+    builder: &mut FunctionBuilder<'_>,
+    vm_val: cranelift_codegen::ir::Value,
+    slot_offset_val: cranelift_codegen::ir::Value,
+    slot: u16,
+    value: cranelift_codegen::ir::Value,
+) {
+    use cranelift_codegen::ir::MemFlags;
+    let flags = MemFlags::trusted();
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
+    let slot_const = builder.ins().iconst(types::I64, slot as i64);
+    let abs_slot = builder.ins().iadd(slot_offset_val, slot_const);
+    let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+    let byte_off = builder.ins().imul(abs_slot, value_size);
+    let slot_ptr = builder.ins().iadd(stack_ptr, byte_off);
+    // Rewrite tag defensively in case the slot carried something else
+    // before (shouldn't happen for virtualizable slots, but the cost
+    // is 1 byte store — cheap insurance).
+    let tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
+    builder.ins().store(flags, tag, slot_ptr, 0);
+    builder
+        .ins()
+        .store(flags, value, slot_ptr, VALUE_INT_PAYLOAD_OFFSET as i32);
+}
+
+/// Spill every currently-live virtualized Int64 local back to its
+/// backing VM stack slot. v1 is intentionally over-conservative:
+/// spills ALL live slots, not only those written since the last
+/// spill. The dirty-set refinement is deferred to B2.1f.
+///
+/// Does NOT modify `stack_view.len` — the backing slots already exist
+/// (they were materialized at initialization), we just update their
+/// contents to reflect the Variables' current values.
+///
+/// Iterates `live_int_slots` in sorted order for deterministic IR
+/// output (easier to diff across runs).
+#[allow(dead_code)] // consumed by B2.1c
+fn spill_live_int_locals(
+    builder: &mut FunctionBuilder<'_>,
+    vm_val: cranelift_codegen::ir::Value,
+    slot_offset_val: cranelift_codegen::ir::Value,
+    int_locals: &HashMap<u16, Variable>,
+    live_int_slots: &HashSet<u16>,
+) {
+    let mut slots: Vec<u16> = live_int_slots.iter().copied().collect();
+    slots.sort_unstable();
+    for slot in slots {
+        if let Some(&var) = int_locals.get(&slot) {
+            let val = builder.use_var(var);
+            emit_store_stack_slot_integer(builder, vm_val, slot_offset_val, slot, val);
+        }
+    }
+}
+
+/// Materialize every staged expression-stack temporary onto the real VM
+/// stack via `emit_inline_push_integer`. Drains `expr_stack` (leaves it
+/// empty). Each push bumps `stack_view.len`, so the VM's view matches
+/// the logical depth after the call.
+///
+/// Does NOT sync `Vec::len` — that's `commit_stack_len`'s job. See
+/// `flush_all`.
+#[allow(dead_code)] // consumed by B2.1c
+fn flush_expr_stack_to_stack_view(
+    builder: &mut FunctionBuilder<'_>,
+    vm_val: cranelift_codegen::ir::Value,
+    expr_stack: &mut Vec<cranelift_codegen::ir::Value>,
+) {
+    for val in expr_stack.drain(..) {
+        emit_inline_push_integer(builder, vm_val, val);
+    }
+}
+
+/// Full flush: spill live Int64 locals to their backing slots,
+/// materialize expr-stack temporaries onto the VM stack, and commit
+/// `Vec::len` so runtime helpers see a consistent backing store.
+///
+/// Call before any opcode that might let generic runtime code
+/// (helpers, interpreter takeover, error-handling paths, etc.)
+/// observe the stack. After this call, every virtualized value
+/// lives only on the VM stack; Cranelift `Variable`s may be stale
+/// (caller is free to re-def_var after the helper returns if the
+/// call doesn't invalidate them).
+#[allow(dead_code)] // consumed by B2.1c
+fn flush_all(
+    builder: &mut FunctionBuilder<'_>,
+    refs: &HelperRefs,
+    vm_val: cranelift_codegen::ir::Value,
+    slot_offset_val: cranelift_codegen::ir::Value,
+    int_locals: &HashMap<u16, Variable>,
+    live_int_slots: &HashSet<u16>,
+    expr_stack: &mut Vec<cranelift_codegen::ir::Value>,
+) {
+    spill_live_int_locals(builder, vm_val, slot_offset_val, int_locals, live_int_slots);
+    flush_expr_stack_to_stack_view(builder, vm_val, expr_stack);
+    // Sync Vec::len to stack_view.len. The existing stack_commit_len
+    // helper handles this — same path MethodCall's inline IC uses.
+    let new_len = emit_load_stack_len(builder, vm_val);
+    builder.ins().call(refs.stack_commit_len, &[vm_val, new_len]);
 }
 
 /// Inline the no-upvalue fast path of `jit_op_return`. Only safe when
