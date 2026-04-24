@@ -89,6 +89,11 @@ pub(crate) struct JitCounters {
     /// `0 != x % 2`) lowered to `band_imm + icmp_imm + brif`,
     /// avoiding `srem` entirely.
     pub virt_branch_parity_hit: std::cell::Cell<u64>,
+    /// B2.1h: incremented when `Divide` with a power-of-two constant
+    /// divisor is lowered to a bias-and-shift sequence, avoiding the
+    /// roughly 20-cycle `idiv` instruction Cranelift's x86_64 backend
+    /// otherwise emits.
+    pub virt_div_pow2_lowered: std::cell::Cell<u64>,
 }
 
 impl JitCounters {
@@ -107,6 +112,7 @@ impl JitCounters {
             virt_divmod_slow_overflow: std::cell::Cell::new(0),
             virt_branch_eq_hit: std::cell::Cell::new(0),
             virt_branch_parity_hit: std::cell::Cell::new(0),
+            virt_div_pow2_lowered: std::cell::Cell::new(0),
         }
     }
 
@@ -125,6 +131,7 @@ impl JitCounters {
         eprintln!("  virt_divmod_slow_overflow:         {}", self.virt_divmod_slow_overflow.get());
         eprintln!("  virt_branch_eq_hit:                {}", self.virt_branch_eq_hit.get());
         eprintln!("  virt_branch_parity_hit:            {}", self.virt_branch_parity_hit.get());
+        eprintln!("  virt_div_pow2_lowered:             {}", self.virt_div_pow2_lowered.get());
     }
 }
 
@@ -1706,6 +1713,32 @@ impl JitInner {
                             ) {
                                 terminated = true;
                                 ip = next_ip;
+                                continue;
+                            }
+                        }
+
+                        // B2.1h: signed-div-by-power-of-2. For Divide
+                        // only, when RHS is a constant pow2 integer
+                        // (and not 0 or -1), lower to bias+shift —
+                        // skipping the ~20-cycle `idiv` Cranelift's
+                        // x86_64 backend would otherwise emit.
+                        if !is_mod && expr_stack.len() >= 2 {
+                            let rhs = *expr_stack.last().unwrap();
+                            let lhs = expr_stack[expr_stack.len() - 2];
+                            if let Some(q) =
+                                try_emit_sdiv_pow2_peephole(&mut builder, lhs, rhs)
+                            {
+                                expr_stack.pop().unwrap(); // rhs (constant)
+                                expr_stack.pop().unwrap(); // lhs
+                                expr_stack.push(q);
+                                if let Some(cp) = counters_ptr_opt {
+                                    emit_counter_bump(
+                                        &mut builder,
+                                        cp,
+                                        counter_offsets::VIRT_DIV_POW2_LOWERED,
+                                    );
+                                }
+                                ip += 1;
                                 continue;
                             }
                         }
@@ -3330,6 +3363,19 @@ impl JitInner {
                 builder.finalize();
             }
 
+            // PROBE (B2.1h-probe): when OXIGEN_JIT_DISASM is set, ask
+            // Cranelift to populate the vcode (machine-code disasm)
+            // and dump it for the named function only. Will be
+            // reverted after measurement.
+            let disasm_target = std::env::var("OXIGEN_JIT_DISASM").ok();
+            let want_disasm = disasm_target
+                .as_deref()
+                .map(|t| t == func.name.as_deref().unwrap_or(""))
+                .unwrap_or(false);
+            if want_disasm {
+                self.ctx.want_disasm = true;
+            }
+
             self.module
                 .define_function(job.func_id, &mut self.ctx)
                 .map_err(|e| {
@@ -3340,6 +3386,20 @@ impl JitInner {
                         );
                     }
                 })?;
+
+            if want_disasm {
+                if let Some(code) = self.ctx.compiled_code() {
+                    if let Some(vcode) = code.vcode.as_ref() {
+                        eprintln!(
+                            "=== disasm fn={} kind={:?} ===\n{}",
+                            func.name.as_deref().unwrap_or("<anon>"),
+                            kind,
+                            vcode
+                        );
+                    }
+                }
+            }
+
             self.module.clear_context(&mut self.ctx);
         }
 
@@ -5296,6 +5356,8 @@ mod counter_offsets {
         offset_of!(JitCounters, virt_branch_eq_hit) as isize;
     pub const VIRT_BRANCH_PARITY_HIT: isize =
         offset_of!(JitCounters, virt_branch_parity_hit) as isize;
+    pub const VIRT_DIV_POW2_LOWERED: isize =
+        offset_of!(JitCounters, virt_div_pow2_lowered) as isize;
 }
 
 /// True iff `val` is the result of a Cranelift `iconst` with the
@@ -5471,6 +5533,82 @@ fn try_emit_parity_branch_peephole(
     // branch_ip + 3 == next_ip (already computed), the byte just after
     // the JumpIf*'s 3-byte opcode + offset.
     Some(branch_ip + 3)
+}
+
+/// Extract the i64 immediate of a Cranelift Value if it's the result
+/// of an `iconst`. Returns None if `val` was produced by anything else.
+#[inline]
+fn iconst_imm(builder: &FunctionBuilder<'_>, val: cranelift_codegen::ir::Value) -> Option<i64> {
+    use cranelift_codegen::ir::{InstructionData, Opcode, ValueDef};
+    let dfg = &builder.func.dfg;
+    match dfg.value_def(val) {
+        ValueDef::Result(inst, _) => match dfg.insts[inst] {
+            InstructionData::UnaryImm { opcode: Opcode::Iconst, imm } => Some(i64::from(imm)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// B2.1h signed-div-by-power-of-two peephole. Tries to lower
+/// `OpCode::Divide` whose RHS is a constant power-of-two integer to a
+/// bias-and-shift sequence, replacing Cranelift's ~20-cycle `idiv`
+/// with ~5 cycles of `sshr_imm + band_imm + iadd + sshr_imm`.
+///
+/// Trunc-toward-zero semantics for signed integers require a sign-bias
+/// before the right shift:
+///
+///     q = (x + ((x >> 63) & (|d| - 1))) >> log2(|d|)
+///     if d < 0 { q = -q }
+///
+/// For known non-negative `x`, the cheaper form `q = x >> log2(|d|)`
+/// is correct. v1 doesn't have non-negative facts yet, so we always
+/// emit the bias form. The bias is two extra ops (~2 cycles) — still
+/// far cheaper than `idiv`.
+///
+/// Bailouts (return None, fall through to virt-Modulo path's existing
+/// `idiv`-with-guards behavior):
+///
+///   * RHS not a recognized iconst at compile time.
+///   * d == 0   (must preserve div-by-zero error).
+///   * d == -1  (must preserve i64::MIN / -1 overflow trap).
+///   * |d| not a power of two.
+///
+/// Returns `Some(quotient)` on match; the caller pops both operands
+/// from `expr_stack` and pushes the returned value.
+fn try_emit_sdiv_pow2_peephole(
+    builder: &mut FunctionBuilder<'_>,
+    lhs: cranelift_codegen::ir::Value,
+    rhs: cranelift_codegen::ir::Value,
+) -> Option<cranelift_codegen::ir::Value> {
+    let d = iconst_imm(builder, rhs)?;
+    if d == 0 || d == -1 {
+        return None;
+    }
+    let abs = d.checked_abs()?;
+    if (abs as u64).count_ones() != 1 {
+        return None;
+    }
+    let k = (abs as u64).trailing_zeros() as i64;
+
+    // Bias form: (x + ((x >> 63) & (|d| - 1))) >> k.
+    let q = if k == 0 {
+        // |d| == 1: x / 1 == x; x / -1 was rejected above.
+        lhs
+    } else {
+        let sign = builder.ins().sshr_imm(lhs, 63);
+        let bias_mask = (abs - 1) as i64;
+        let bias = builder.ins().band_imm(sign, bias_mask);
+        let adjusted = builder.ins().iadd(lhs, bias);
+        builder.ins().sshr_imm(adjusted, k)
+    };
+
+    let q = if d < 0 {
+        builder.ins().ineg(q)
+    } else {
+        q
+    };
+    Some(q)
 }
 
 /// Load the `i64` payload from the Value currently at stack[stack_view.len - 1].
