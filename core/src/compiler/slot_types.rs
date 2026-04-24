@@ -319,8 +319,18 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
             // range, that push is initializing that local slot. This
             // is how Oxigen initializes `total := 0` — no SetLocal
             // emitted, just a Constant at the slot's stack position.
+            //
+            // IMPORTANT: transient expression pushes (e.g., a GetLocal
+            // in an outer loop condition that lands at the stack
+            // position of a not-yet-declared inner-scope local) must
+            // not be misclassified as slot inits. In v1 B2.1 only
+            // virtualizes slots with Constant initializers, so gate
+            // init detection on `op == Constant`. Non-Constant
+            // initializers (`x := y + 1`, `x := foo()`, etc.) will
+            // simply not be virtualized — safe and consistent with
+            // the v1 eligibility rule.
             let depth_after = next_state.stack.len();
-            if depth_after == depth_before + 1 {
+            if matches!(op, OpCode::Constant) && depth_after == depth_before + 1 {
                 let new_pos = depth_after - 1;
                 if new_pos < num_slots {
                     let ty = next_state

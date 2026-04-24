@@ -20,7 +20,6 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 
 use crate::compiler::opcode::{Chunk, OpCode};
-use crate::compiler::slot_types::{FunctionSlotTypes, SlotType};
 use crate::vm::VM;
 use crate::vm::VMError;
 use crate::vm::{JitFrame, JitFrameView, StackView};
@@ -804,35 +803,77 @@ impl JitInner {
                 let op = OpCode::from_byte(code[ip]).ok_or(())?;
                 let line = chunk.lines.get(ip).copied().unwrap_or(0);
                 emit_store_current_line(&mut builder, vm_val, line);
+
+                // B2.1c: light flush before any op we aren't
+                // explicitly virtualizing. Only drains `expr_stack`
+                // (materializes staged int temps onto the real VM
+                // stack) — does NOT spill virtualized locals' Variables
+                // to backing. Those stay live-in-SSA; `Vec::len` isn't
+                // touched either because the push helpers update
+                // `stack_view.len` inline and non-helper ops don't
+                // observe `Vec::len` directly.
+                //
+                // The three opcode families below handle their own
+                // flush decisions (GetLocal may be a peephole; SetLocal
+                // may virtualize via `expr_stack.last()`; Pop may
+                // consume from `expr_stack`).
+                let handles_own_flush = matches!(
+                    op,
+                    OpCode::GetLocal
+                        | OpCode::SetLocal
+                        | OpCode::Pop
+                        | OpCode::Constant
+                        | OpCode::Add
+                        | OpCode::Subtract
+                        | OpCode::Multiply
+                );
+                if !handles_own_flush && !expr_stack.is_empty() {
+                    flush_expr_stack_to_stack_view(&mut builder, vm_val, &mut expr_stack);
+                }
+
                 match op {
                     OpCode::Constant => {
                         let idx = read_u16(code, ip + 1);
+                        let init_slot = slot_types.local_init_result_ip.get(&ip).copied();
                         match &chunk.constants[idx as usize] {
                             crate::vm::value::Value::Integer(n) => {
                                 let v = builder.ins().iconst(types::I64, *n);
-                                emit_inline_push_integer(&mut builder, vm_val, v);
 
-                                // B2.1b: if this Constant is the
-                                // recognized initializer for a
-                                // virtualizable Int64 slot, also def_var
-                                // its Variable and mark live. The push
-                                // above materializes the backing VM
-                                // stack slot so stack shape stays
-                                // valid; the Variable now holds the
-                                // same value authoritatively.
-                                if let Some(&slot) = slot_types.local_init_result_ip.get(&ip) {
+                                if let Some(slot) = init_slot {
+                                    // Local-initializer Constant: still
+                                    // materialize backing slot so stack
+                                    // shape stays valid, and def_var.
+                                    emit_inline_push_integer(&mut builder, vm_val, v);
                                     if let Some(&var) = int_locals.get(&slot) {
                                         builder.def_var(var, v);
                                         live_int_slots.insert(slot);
                                     }
+                                } else {
+                                    // Expression-temp Integer: stage on
+                                    // expr_stack. No memory op yet.
+                                    expr_stack.push(v);
                                 }
                             }
                             crate::vm::value::Value::Float(f) => {
+                                if !expr_stack.is_empty() {
+                                    flush_expr_stack_to_stack_view(
+                                        &mut builder,
+                                        vm_val,
+                                        &mut expr_stack,
+                                    );
+                                }
                                 let bits = f.to_bits() as i64;
                                 let v = builder.ins().iconst(types::I64, bits);
                                 emit_inline_push_float(&mut builder, vm_val, v);
                             }
                             _ => {
+                                if !expr_stack.is_empty() {
+                                    flush_expr_stack_to_stack_view(
+                                        &mut builder,
+                                        vm_val,
+                                        &mut expr_stack,
+                                    );
+                                }
                                 // Fall back to the generic helper for
                                 // strings, closures, etc.
                                 let idx_val = builder.ins().iconst(types::I32, idx as i64);
@@ -854,7 +895,32 @@ impl JitInner {
                         ip += 1;
                     }
                     OpCode::Pop => {
-                        emit_inline_pop_tag_gated(&mut builder, &refs, vm_val);
+                        // B2.1c: IP-dispatched Pop handling.
+                        //   1. Scope teardown: the slot this Pop is
+                        //      destroying goes out of scope. Remove
+                        //      from live_int_slots so later flushes
+                        //      don't store into the dead slot; then
+                        //      run the existing physical Pop (which
+                        //      decrements stack_view.len).
+                        //   2. Expression cleanup: a staged int temp
+                        //      is being removed. Virtualize by
+                        //      popping expr_stack — no memory op,
+                        //      no stack_view.len change.
+                        //   3. Condition cleanup (a Pop immediately
+                        //      after JumpIfFalse/JumpIfTrue/Unless
+                        //      that removes the condition): B2.1e's
+                        //      territory. In B2.1c we treat these as
+                        //      ordinary Pops on the real stack.
+                        //   4. Everything else: ordinary Pop on the
+                        //      real stack.
+                        if let Some(slot) = slot_types.scope_pop_for(ip) {
+                            live_int_slots.remove(&slot);
+                            emit_inline_pop_tag_gated(&mut builder, &refs, vm_val);
+                        } else if !expr_stack.is_empty() {
+                            expr_stack.pop();
+                        } else {
+                            emit_inline_pop_tag_gated(&mut builder, &refs, vm_val);
+                        }
                         ip += 1;
                     }
                     OpCode::Dup => {
@@ -882,14 +948,19 @@ impl JitInner {
                         ip += 3;
                     }
                     OpCode::GetLocal => {
+                        // Peephole matches read the real VM stack; if we
+                        // have staged int temps, flush them first so the
+                        // peephole sees a consistent stack.
                         if let Some(m) =
                             match_struct_field_add_update(code, chunk, ip, &blocks)
                         {
-                            // Use the IC slot that would have been consumed
-                            // by the peephole's GetField; advance past both
-                            // the GetField and SetField slots so subsequent
-                            // standalone field ops in this function pick up
-                            // their own caches.
+                            if !expr_stack.is_empty() {
+                                flush_expr_stack_to_stack_view(
+                                    &mut builder,
+                                    vm_val,
+                                    &mut expr_stack,
+                                );
+                            }
                             let cache_ptr = field_cache_ptrs[field_ic_ix];
                             field_ic_ix += 2;
                             emit_inline_struct_field_add(
@@ -904,9 +975,18 @@ impl JitInner {
                                 m.shape,
                             );
                             ip += m.len;
-                        } else if let Some(m) =
-                            match_local_array_mod_index_add_update(code, chunk, ip, &blocks)
+                        } else if let Some(m) = match_local_array_mod_index_add_update(
+                            code, chunk, ip, &blocks,
+                        )
+                            .filter(|m| !int_locals.contains_key(&m.dst_slot))
                         {
+                            if !expr_stack.is_empty() {
+                                flush_expr_stack_to_stack_view(
+                                    &mut builder,
+                                    vm_val,
+                                    &mut expr_stack,
+                                );
+                            }
                             let dst = builder.ins().iconst(types::I32, m.dst_slot as i64);
                             let array = builder.ins().iconst(types::I32, m.array_slot as i64);
                             let index = builder.ins().iconst(types::I32, m.index_slot as i64);
@@ -920,7 +1000,17 @@ impl JitInner {
                             let status = builder.inst_results(call)[0];
                             emit_early_exit_on_err(&mut builder, status);
                             ip += m.len;
-                        } else if let Some(m) = match_local_arith_update(code, ip, &blocks) {
+                        } else if let Some(m) = match_local_arith_update(code, ip, &blocks)
+                            .filter(|m| !int_locals.contains_key(&m.dst_slot)
+                                && !int_locals.contains_key(&m.rhs_slot))
+                        {
+                            if !expr_stack.is_empty() {
+                                flush_expr_stack_to_stack_view(
+                                    &mut builder,
+                                    vm_val,
+                                    &mut expr_stack,
+                                );
+                            }
                             emit_inline_local_scaled_arith_update(
                                 &mut builder,
                                 &refs,
@@ -935,7 +1025,16 @@ impl JitInner {
                             ip += m.len;
                         } else if let Some(m) =
                             match_local_scaled_arith_update(code, chunk, ip, &blocks)
+                                .filter(|m| !int_locals.contains_key(&m.dst_slot)
+                                    && !int_locals.contains_key(&m.rhs_slot))
                         {
+                            if !expr_stack.is_empty() {
+                                flush_expr_stack_to_stack_view(
+                                    &mut builder,
+                                    vm_val,
+                                    &mut expr_stack,
+                                );
+                            }
                             emit_inline_local_scaled_arith_update(
                                 &mut builder,
                                 &refs,
@@ -950,7 +1049,15 @@ impl JitInner {
                             ip += m.len;
                         } else if let Some(m) =
                             match_local_const_arith_update(code, chunk, ip, &blocks)
+                                .filter(|m| !int_locals.contains_key(&m.slot))
                         {
+                            if !expr_stack.is_empty() {
+                                flush_expr_stack_to_stack_view(
+                                    &mut builder,
+                                    vm_val,
+                                    &mut expr_stack,
+                                );
+                            }
                             emit_inline_local_const_arith_update(
                                 &mut builder,
                                 &refs,
@@ -963,7 +1070,39 @@ impl JitInner {
                             );
                             ip += m.len;
                         } else {
+                            // Simple GetLocal. B2.1c: virtualize if
+                            // the slot has a declared Variable AND is
+                            // marked live. `use_var` produces an SSA
+                            // value that Cranelift resolves via phi
+                            // at block joins, so back-edges that
+                            // def_var (via SetLocal fallback or
+                            // virtualized SetLocal) are correctly
+                            // tracked — provided that NO other
+                            // compile-time path writes to this slot
+                            // outside of our virtualization path.
+                            // The peephole guards above ensure that:
+                            // local_{arith,scaled,const}_arith_update
+                            // peepholes that would touch a virtualized
+                            // slot's backing without def_var'ing are
+                            // skipped, so the individual
+                            // GetLocal/Constant/Add/SetLocal sequence
+                            // runs and B2.1c handles it.
                             let slot = read_u16(code, ip + 1);
+                            if let Some(&var) = int_locals.get(&slot) {
+                                if live_int_slots.contains(&slot) {
+                                    let val = builder.use_var(var);
+                                    expr_stack.push(val);
+                                    ip += 3;
+                                    continue;
+                                }
+                            }
+                            if !expr_stack.is_empty() {
+                                flush_expr_stack_to_stack_view(
+                                    &mut builder,
+                                    vm_val,
+                                    &mut expr_stack,
+                                );
+                            }
                             emit_inline_get_local(
                                 &mut builder,
                                 &refs,
@@ -975,9 +1114,74 @@ impl JitInner {
                         }
                     }
                     OpCode::SetLocal => {
+                        // B2.1c: virtualize when the slot has a
+                        // declared Variable AND we have a staged int
+                        // on top of expr_stack. SetLocal is PEEK-not-
+                        // pop (matches VM semantics — Oxigen uses
+                        // `self.peek(0).clone()`), so leave the value
+                        // on expr_stack; the following Pop drains it.
                         let slot = read_u16(code, ip + 1);
-                        emit_inline_set_local(&mut builder, &refs, vm_val, slot_offset_val, slot);
-                        ip += 3;
+                        if let (Some(&var), Some(&top)) =
+                            (int_locals.get(&slot), expr_stack.last())
+                        {
+                            builder.def_var(var, top);
+                            live_int_slots.insert(slot);
+                            ip += 3;
+                        } else {
+                            if !expr_stack.is_empty() {
+                                flush_expr_stack_to_stack_view(
+                                    &mut builder,
+                                    vm_val,
+                                    &mut expr_stack,
+                                );
+                            }
+                            // Peek top-of-stack's i64 payload BEFORE
+                            // emit_inline_set_local runs. Using the
+                            // top (which never changes under peek-
+                            // not-pop) avoids the store-then-load
+                            // reordering concern of reading stack[slot]
+                            // after the write. We pass this SSA value
+                            // to both the real store (indirectly via
+                            // emit_inline_set_local) and def_var.
+                            //
+                            // Without this re-sync the Variable's
+                            // Cranelift SSA value would be stuck at the
+                            // Constant-init def forever — a compile-
+                            // time snapshot that never reflects runtime
+                            // loop iterations. use_var would return 1
+                            // on every iteration, and the loop would
+                            // never terminate.
+                            let top_payload = int_locals.get(&slot).map(|_| {
+                                use cranelift_codegen::ir::MemFlags;
+                                let flags = MemFlags::trusted();
+                                let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
+                                let stack_len = emit_load_stack_len(&mut builder, vm_val);
+                                let value_size =
+                                    builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+                                let one = builder.ins().iconst(types::I64, 1);
+                                let top_idx = builder.ins().isub(stack_len, one);
+                                let top_off = builder.ins().imul(top_idx, value_size);
+                                let top_addr = builder.ins().iadd(stack_ptr, top_off);
+                                builder.ins().load(
+                                    types::I64,
+                                    flags,
+                                    top_addr,
+                                    VALUE_INT_PAYLOAD_OFFSET as i32,
+                                )
+                            });
+                            emit_inline_set_local(
+                                &mut builder,
+                                &refs,
+                                vm_val,
+                                slot_offset_val,
+                                slot,
+                            );
+                            if let (Some(&var), Some(payload)) = (int_locals.get(&slot), top_payload) {
+                                builder.def_var(var, payload);
+                                live_int_slots.insert(slot);
+                            }
+                            ip += 3;
+                        }
                     }
 
                     // Fallible arithmetic/comparison: call helper, return
@@ -987,16 +1191,36 @@ impl JitInner {
                     // direct tag check on the stack — skips the full
                     // dispatch in `binary_add` etc. when both operands
                     // are `Value::Integer`.
-                    OpCode::Add => {
-                        emit_int_fast_arith(&mut builder, &refs, vm_val, IntArithOp::Add, refs.add);
-                        ip += 1;
-                    }
-                    OpCode::Subtract => {
-                        emit_int_fast_arith(&mut builder, &refs, vm_val, IntArithOp::Sub, refs.sub);
-                        ip += 1;
-                    }
-                    OpCode::Multiply => {
-                        emit_int_fast_arith(&mut builder, &refs, vm_val, IntArithOp::Mul, refs.mul);
+                    OpCode::Add | OpCode::Subtract | OpCode::Multiply => {
+                        // Virtual Int arithmetic: if both operands are
+                        // staged as Int in expr_stack, fold into a
+                        // register iadd/isub/imul. No stack memory ops.
+                        if expr_stack.len() >= 2 {
+                            let rhs = expr_stack.pop().unwrap();
+                            let lhs = expr_stack.pop().unwrap();
+                            let result = match op {
+                                OpCode::Add => builder.ins().iadd(lhs, rhs),
+                                OpCode::Subtract => builder.ins().isub(lhs, rhs),
+                                OpCode::Multiply => builder.ins().imul(lhs, rhs),
+                                _ => unreachable!(),
+                            };
+                            expr_stack.push(result);
+                        } else {
+                            if !expr_stack.is_empty() {
+                                flush_expr_stack_to_stack_view(
+                                    &mut builder,
+                                    vm_val,
+                                    &mut expr_stack,
+                                );
+                            }
+                            let (arith_op, slow) = match op {
+                                OpCode::Add => (IntArithOp::Add, refs.add),
+                                OpCode::Subtract => (IntArithOp::Sub, refs.sub),
+                                OpCode::Multiply => (IntArithOp::Mul, refs.mul),
+                                _ => unreachable!(),
+                            };
+                            emit_int_fast_arith(&mut builder, &refs, vm_val, arith_op, slow);
+                        }
                         ip += 1;
                     }
                     OpCode::Divide => {
