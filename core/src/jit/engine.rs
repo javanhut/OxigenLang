@@ -824,29 +824,23 @@ impl JitInner {
 
         // Generic thunk signature: fn(*mut VM) -> u32.
         let ptr_ty = self.module.target_config().pointer_type();
-        let mut sig = self.module.make_signature();
-        sig.params.push(AbiParam::new(ptr_ty));
-        sig.returns.push(AbiParam::new(types::I32));
+        let mut generic_sig = self.module.make_signature();
+        generic_sig.params.push(AbiParam::new(ptr_ty));
+        generic_sig.returns.push(AbiParam::new(types::I32));
 
         self.next_id = self.next_id.wrapping_add(1);
         let generic_seq_id = self.next_id;
         let thunk_name = format!("oxigen_jit_thunk_{}_{:p}", generic_seq_id, Rc::as_ptr(func));
         let thunk_id = self
             .module
-            .declare_function(&thunk_name, Linkage::Local, &sig)
+            .declare_function(&thunk_name, Linkage::Local, &generic_sig)
             .map_err(|_| ())?;
 
-        // A2.5 commit 2: specialized thunk signature uses an i64 out-
-        // param instead of a 2-register (i64, u32) multi-return. This
-        // keeps every early `return_(&[status])` site identical to the
-        // Generic body — only the successful OpCode::Return path
-        // differs (it first writes the payload through the out-param).
-        //
+        // Specialized thunk signature:
         //   fn(*mut VM, i64, ..., i64, ret_out: *mut i64) -> u32
-        //
-        // Arity i64 params, then one `*mut i64` out pointer, and a
-        // single i32 status return.
-        let (spec_thunk_id, spec_seq_id): (Option<FuncId>, Option<u32>) =
+        // Single status return — the i64 payload flows through the
+        // out-param pointer provided by the caller.
+        let (spec_thunk_id, spec_seq_id, spec_sig_opt): (Option<FuncId>, Option<u32>, Option<Signature>) =
             if slot_types.specialized_entry_eligible {
                 let arity = func.arity as usize;
                 let mut spec_sig = self.module.make_signature();
@@ -867,26 +861,50 @@ impl JitInner {
                     .module
                     .declare_function(&spec_name, Linkage::Local, &spec_sig)
                     .map_err(|_| ())?;
-                (Some(sid), Some(ssid))
+                (Some(sid), Some(ssid), Some(spec_sig))
             } else {
-                (None, None)
+                (None, None, None)
             };
 
-        self.ctx.func.signature = sig;
-        self.ctx.func.name = UserFuncName::user(0, generic_seq_id);
+        // A2.5 commit 4: build the entries-to-compile list. Generic is
+        // always emitted; IntSpecialized is added when eligible. Both
+        // bodies go through the same builder-scope + dispatch-loop code
+        // below, branching on `kind` at three divergence points (entry
+        // block params, prologue, OpCode::Return success path).
+        struct EntryJob {
+            kind: EntryKind,
+            func_id: FuncId,
+            seq_id: u32,
+            sig: Signature,
+        }
 
-        // A2.5 commit 3 scaffold: `kind` tracks which entry point this
-        // emission produces. Commit 4 will wrap the whole builder scope
-        // in a loop over entry kinds and branch at three divergence
-        // points (entry block params, prologue, OpCode::Return success
-        // path). Today, only Generic is emitted here — the specialized
-        // trampoline is still produced by emit_specialized_trampoline.
-        // No behavior change in this commit.
-        let kind: EntryKind = EntryKind::Generic;
-        let _ = kind; // silence unused until commit 4 reads it
-
+        let mut entries_to_compile: Vec<EntryJob> = Vec::new();
+        entries_to_compile.push(EntryJob {
+            kind: EntryKind::Generic,
+            func_id: thunk_id,
+            seq_id: generic_seq_id,
+            sig: generic_sig.clone(),
+        });
+        if let (Some(sid), Some(ssid), Some(ssig)) =
+            (spec_thunk_id, spec_seq_id, spec_sig_opt)
         {
-            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.fbc);
+            entries_to_compile.push(EntryJob {
+                kind: EntryKind::IntSpecialized {
+                    ret_out_param_index: func.arity as usize + 1,
+                },
+                func_id: sid,
+                seq_id: ssid,
+                sig: ssig,
+            });
+        }
+
+        for job in entries_to_compile {
+            let kind = job.kind;
+            self.ctx.func.signature = job.sig;
+            self.ctx.func.name = UserFuncName::user(0, job.seq_id);
+
+            {
+                let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.fbc);
 
             let refs = declare_helper_refs(&self.helpers, &mut self.module, &mut builder);
 
@@ -1033,74 +1051,144 @@ impl JitInner {
                 .collect();
             prologue_slots.sort_unstable();
 
-            if !prologue_slots.is_empty() {
-                use cranelift_codegen::ir::MemFlags;
-                let flags = MemFlags::trusted();
+            // A2.5 commit 4: prologue divergence.
+            //
+            // Generic body: tag-guard each Int-mirror / Int64-typed
+            // param, bail out (status 2) on mismatch. Payload comes
+            // from stack[slot_offset + slot].
+            //
+            // IntSpecialized body: args arrive as i64 block params in
+            // registers. No tag guard (caller's contract guarantees
+            // Int). Write each Value::Integer(arg) back to the backing
+            // slot for helper compat, then def_var the mirror. Bump
+            // stack_view.len by arity + 1 to cover closure marker +
+            // all params — matching what the generic caller would have
+            // pushed.
+            match kind {
+                EntryKind::IntSpecialized { .. } => {
+                    use cranelift_codegen::ir::MemFlags;
+                    let flags = MemFlags::trusted();
+                    let arity = func.arity as usize;
 
-                let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
-                let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
-                let integer_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
+                    // Write each i64 param to its backing slot and
+                    // def_var the mirror. Stack position of slot `i`
+                    // is `slot_offset + i`.
+                    for slot in 1..=arity as u16 {
+                        let arg_val = builder.block_params(entry_block)[slot as usize];
+                        emit_store_stack_slot_integer(
+                            &mut builder,
+                            vm_val,
+                            slot_offset_val,
+                            slot,
+                            arg_val,
+                        );
+                        // Route to whichever map owns this slot.
+                        if let Some(&var) = int_locals.get(&slot) {
+                            builder.def_var(var, arg_val);
+                            live_int_slots.insert(slot);
+                        } else if let Some(&var) = param_mirrors.get(&slot) {
+                            builder.def_var(var, arg_val);
+                        }
+                    }
 
-                let bailout_block = builder.create_block();
-
-                for slot in &prologue_slots {
-                    let slot_const = builder.ins().iconst(types::I64, *slot as i64);
-                    let abs_slot = builder.ins().iadd(slot_offset_val, slot_const);
-                    let byte_off = builder.ins().imul(abs_slot, value_size);
-                    let slot_ptr = builder.ins().iadd(stack_ptr, byte_off);
-
-                    let tag = builder.ins().load(types::I8, flags, slot_ptr, 0);
-                    let is_int = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        tag,
-                        integer_tag,
-                    );
-                    let ok_block = builder.create_block();
-                    builder
-                        .ins()
-                        .brif(is_int, ok_block, &[], bailout_block, &[]);
-                    builder.switch_to_block(ok_block);
-
-                    let payload = builder.ins().load(
+                    // Bump stack_view.len to cover closure marker
+                    // (at slot_offset + 0 — already on stack by the
+                    // specialized caller) plus arity params we just
+                    // wrote. The caller's JitFrame.slot_offset is
+                    // already set; stack_view.len must reach
+                    // slot_offset + arity + 1.
+                    let stack_len = emit_load_stack_len(&mut builder, vm_val);
+                    let arity_plus_closure = builder.ins().iconst(
                         types::I64,
-                        flags,
-                        slot_ptr,
-                        VALUE_INT_PAYLOAD_OFFSET as i32,
+                        (arity + 1) as i64,
                     );
-                    // Route the def_var through whichever map owns the
-                    // slot. `param_mirrors` for read-only Value-typed
-                    // params; `int_locals` for Int64-typed (writable)
-                    // params.
-                    if let Some(&var) = param_mirrors.get(slot) {
-                        builder.def_var(var, payload);
-                    } else if let Some(&var) = int_locals.get(slot) {
-                        builder.def_var(var, payload);
-                        live_int_slots.insert(*slot);
+                    // Compute new_len = slot_offset + arity + 1.
+                    // The specialized caller leaves stack at
+                    // slot_offset (closure-on-top), so that's the
+                    // current length. Then we add arity to cover
+                    // params. The "+1 for closure" is already in
+                    // stack_len since the caller left the closure
+                    // pushed. So new_len = stack_len + arity.
+                    //
+                    // Formally: specialized caller's contract is that
+                    // stack_view.len at the moment of direct_call equals
+                    // slot_offset + 1 (closure at top). We add `arity`
+                    // slots for the params we just materialized.
+                    let arity_val = builder.ins().iconst(types::I64, arity as i64);
+                    let new_len = builder.ins().iadd(stack_len, arity_val);
+                    let _ = arity_plus_closure; // computed-but-unused comment anchor
+                    builder.ins().store(
+                        flags,
+                        new_len,
+                        vm_val,
+                        vm_stack_view_len_offset(),
+                    );
+
+                    // Counter: specialized entry was actually entered.
+                    if let Some(cp) = counters_ptr_opt {
+                        emit_counter_bump(
+                            &mut builder,
+                            cp,
+                            counter_offsets::SPECIALIZED_ENTRY_CALLED,
+                        );
                     }
                 }
+                EntryKind::Generic => {
+                    if !prologue_slots.is_empty() {
+                        use cranelift_codegen::ir::MemFlags;
+                        let flags = MemFlags::trusted();
 
-                // All guards passed — jump into a fresh "prologue_done"
-                // block that the main dispatch loop will emit into.
-                let prologue_done = builder.create_block();
-                builder.ins().jump(prologue_done, &[]);
+                        let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
+                        let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+                        let integer_tag =
+                            builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
 
-                // Bailout path: return status 2. VM's InvokeOutcome
-                // matches any status other than 0/1 to Bailout, which
-                // pops the JIT frame and reinstates the interpreter.
-                builder.switch_to_block(bailout_block);
-                let two = builder.ins().iconst(types::I32, 2);
-                builder.ins().return_(&[two]);
+                        let bailout_block = builder.create_block();
 
-                // Resume emission at the prologue-complete block so
-                // the main dispatch loop writes the actual function
-                // body there, not into the bailout block.
-                builder.switch_to_block(prologue_done);
-                effective_entry_block = prologue_done;
-                // The dispatch loop looks up blocks[0] on the first
-                // iteration and would otherwise jump back into the
-                // already-terminated entry_block. Remap IP 0 to the
-                // post-prologue block.
-                blocks.insert(0, prologue_done);
+                        for slot in &prologue_slots {
+                            let slot_const = builder.ins().iconst(types::I64, *slot as i64);
+                            let abs_slot = builder.ins().iadd(slot_offset_val, slot_const);
+                            let byte_off = builder.ins().imul(abs_slot, value_size);
+                            let slot_ptr = builder.ins().iadd(stack_ptr, byte_off);
+
+                            let tag = builder.ins().load(types::I8, flags, slot_ptr, 0);
+                            let is_int = builder.ins().icmp(
+                                cranelift_codegen::ir::condcodes::IntCC::Equal,
+                                tag,
+                                integer_tag,
+                            );
+                            let ok_block = builder.create_block();
+                            builder
+                                .ins()
+                                .brif(is_int, ok_block, &[], bailout_block, &[]);
+                            builder.switch_to_block(ok_block);
+
+                            let payload = builder.ins().load(
+                                types::I64,
+                                flags,
+                                slot_ptr,
+                                VALUE_INT_PAYLOAD_OFFSET as i32,
+                            );
+                            if let Some(&var) = param_mirrors.get(slot) {
+                                builder.def_var(var, payload);
+                            } else if let Some(&var) = int_locals.get(slot) {
+                                builder.def_var(var, payload);
+                                live_int_slots.insert(*slot);
+                            }
+                        }
+
+                        let prologue_done = builder.create_block();
+                        builder.ins().jump(prologue_done, &[]);
+
+                        builder.switch_to_block(bailout_block);
+                        let two = builder.ins().iconst(types::I32, 2);
+                        builder.ins().return_(&[two]);
+
+                        builder.switch_to_block(prologue_done);
+                        effective_entry_block = prologue_done;
+                        blocks.insert(0, prologue_done);
+                    }
+                }
             }
 
             let mut current_block = effective_entry_block;
@@ -2748,9 +2836,97 @@ impl JitInner {
                     }
 
                     OpCode::Return => {
-                        builder.ins().call(refs.op_return, &[vm_val]);
-                        let zero = builder.ins().iconst(types::I32, 0);
-                        builder.ins().return_(&[zero]);
+                        match kind {
+                            EntryKind::Generic => {
+                                // Call helper: pops result, pops
+                                // JitFrame, truncates stack, re-pushes
+                                // result boxed. Then return status 0.
+                                builder.ins().call(refs.op_return, &[vm_val]);
+                                let zero = builder.ins().iconst(types::I32, 0);
+                                builder.ins().return_(&[zero]);
+                            }
+                            EntryKind::IntSpecialized { ret_out_param_index } => {
+                                // Specialized ABI: caller supplies
+                                // `*mut i64` as the last block param
+                                // and reads the payload from there on
+                                // status 0. We write it, tear down the
+                                // frame inline, and return 0.
+                                use cranelift_codegen::ir::MemFlags;
+                                let flags = MemFlags::trusted();
+
+                                // Source the return payload. If the
+                                // return value is on expr_stack (virt
+                                // Int), consume it. Otherwise flush
+                                // expr_stack (shouldn't happen for
+                                // int-return functions but defensive),
+                                // then load from VM stack top.
+                                let payload = if let Some(top) = expr_stack.pop() {
+                                    top
+                                } else {
+                                    let stack_ptr =
+                                        emit_load_stack_ptr(&mut builder, vm_val);
+                                    let stack_len =
+                                        emit_load_stack_len(&mut builder, vm_val);
+                                    let value_size = builder
+                                        .ins()
+                                        .iconst(types::I64, VALUE_SIZE as i64);
+                                    let one = builder.ins().iconst(types::I64, 1);
+                                    let top_idx =
+                                        builder.ins().isub(stack_len, one);
+                                    let byte_off =
+                                        builder.ins().imul(top_idx, value_size);
+                                    let top_addr =
+                                        builder.ins().iadd(stack_ptr, byte_off);
+                                    builder.ins().load(
+                                        types::I64,
+                                        flags,
+                                        top_addr,
+                                        VALUE_INT_PAYLOAD_OFFSET as i32,
+                                    )
+                                };
+
+                                // Write payload through the caller's
+                                // out-param. ret_out sits at the
+                                // specialized signature's last param
+                                // slot.
+                                let ret_out = builder.block_params(entry_block)
+                                    [ret_out_param_index];
+                                builder.ins().store(flags, payload, ret_out, 0);
+
+                                // Inline frame teardown. Mirrors what
+                                // `jit_op_return` does but without the
+                                // helper FFI:
+                                //   1. stack_view.len = slot_offset
+                                //      (drops closure + all locals +
+                                //      any expression-stack temps).
+                                //   2. jit_frame_view.len -= 1
+                                //      (pops the callee's JitFrame).
+                                // Then return status 0.
+                                builder.ins().store(
+                                    flags,
+                                    slot_offset_val,
+                                    vm_val,
+                                    vm_stack_view_len_offset(),
+                                );
+                                let jit_frames_len = builder.ins().load(
+                                    types::I64,
+                                    flags,
+                                    vm_val,
+                                    vm_jit_frame_view_len_offset(),
+                                );
+                                let one = builder.ins().iconst(types::I64, 1);
+                                let new_fl = builder.ins().isub(jit_frames_len, one);
+                                builder.ins().store(
+                                    flags,
+                                    new_fl,
+                                    vm_val,
+                                    vm_jit_frame_view_len_offset(),
+                                );
+
+                                let zero = builder.ins().iconst(types::I32, 0);
+                                builder.ins().return_(&[zero]);
+                            }
+                        }
                         terminated = true;
                         ip += 1;
                     }
@@ -2768,36 +2944,21 @@ impl JitInner {
                 builder.ins().return_(&[two]);
             }
 
-            builder.seal_all_blocks();
-            builder.finalize();
-        }
+                builder.seal_all_blocks();
+                builder.finalize();
+            }
 
-        self.module
-            .define_function(thunk_id, &mut self.ctx)
-            .map_err(|e| {
-                if std::env::var("OXIGEN_JIT_DEBUG").is_ok() {
-                    eprintln!("[jit] define_function failed: {:?}", e);
-                }
-            })?;
-        self.module.clear_context(&mut self.ctx);
-
-        // A2: if the function is specialized-eligible, emit the
-        // specialized entry body. v1 uses a "forward trampoline" —
-        // the body boxes each i64 arg as Value::Integer onto the VM
-        // stack, pushes a JitFrame matching the generic convention,
-        // calls the generic thunk directly, unboxes the top-of-stack
-        // result, and returns (i64, u32). Correct by construction
-        // (generic body unchanged) and gives A3 a specialized
-        // dispatch target. A later stage can upgrade this to a full
-        // register-native body for more per-call savings.
-        if let (Some(spec_id), Some(spec_seq_id)) = (spec_thunk_id, spec_seq_id) {
-            self.emit_specialized_trampoline(
-                func,
-                thunk_id,
-                spec_id,
-                spec_seq_id,
-                ptr_ty,
-            )?;
+            self.module
+                .define_function(job.func_id, &mut self.ctx)
+                .map_err(|e| {
+                    if std::env::var("OXIGEN_JIT_DEBUG").is_ok() {
+                        eprintln!(
+                            "[jit] define_function failed for {:?}: {:?}",
+                            kind, e,
+                        );
+                    }
+                })?;
+            self.module.clear_context(&mut self.ctx);
         }
 
         self.module.finalize_definitions().map_err(|_| ())?;
@@ -2808,13 +2969,14 @@ impl JitInner {
         let (specialized, specialized_arity, specialized_kind) =
             if let Some(sid) = spec_thunk_id {
                 let raw = self.module.get_finalized_function(sid);
-                // Today the only specialized body emitter is the A2
-                // forward trampoline. A later commit swaps this to
-                // NativeIntBody once the real body is generated.
+                // Commit 4: specialized body is now a native int body
+                // — runs the function's opcodes with i64-resident args
+                // and returns payload through the out-param. No
+                // trampoline indirection, no box/unbox round trip.
                 (
                     Some(raw as SpecializedThunkRaw),
                     func.arity,
-                    Some(SpecializedEntryKind::ForwardTrampoline),
+                    Some(SpecializedEntryKind::NativeIntBody),
                 )
             } else {
                 (None, 0, None)
@@ -2834,175 +2996,6 @@ impl JitInner {
         })
     }
 
-    /// Emit the forward-trampoline specialized entry body.
-    ///
-    /// The body receives `(vm, i64, i64, ..., i64)` in registers per the
-    /// C ABI and must produce `(i64, u32)` for the caller. The v1
-    /// strategy is to route back through the generic thunk so correctness
-    /// is trivially provided by the unchanged generic body:
-    ///
-    /// 1. For each i64 arg, push `Value::Integer(arg)` onto the VM stack.
-    /// 2. Push a `JitFrame` whose slot_offset points one below the
-    ///    just-pushed args (so the first arg sits at `slot_offset + 1`,
-    ///    matching the generic ABI).
-    /// 3. `call_indirect` the generic thunk with `(vm)`.
-    /// 4. If status != 0, return `(0, status)` — generic already cleaned
-    ///    up its frame on the way out.
-    /// 5. On status 0, the top of the VM stack holds the boxed return
-    ///    value. We ONLY emit a specialized entry when the function's
-    ///    return is Int (A1 eligibility), so load the i64 payload from
-    ///    the top and return `(payload, 0)`.
-    fn emit_specialized_trampoline(
-        &mut self,
-        func: &Rc<Function>,
-        generic_id: FuncId,
-        spec_id: FuncId,
-        spec_seq_id: u32,
-        ptr_ty: types::Type,
-    ) -> Result<(), ()> {
-        use cranelift_codegen::ir::MemFlags;
-        use cranelift_codegen::ir::condcodes::IntCC;
-
-        let arity = func.arity as usize;
-
-        // A2.5 commit 2: new specialized ABI.
-        //   fn(*mut VM, i64, ..., i64, ret_out: *mut i64) -> u32
-        // The out-param is the LAST param (after arity i64s), so
-        // low-arity call sites keep the nicer vm+arg register layout.
-        let mut spec_sig = self.module.make_signature();
-        spec_sig.params.push(AbiParam::new(ptr_ty));
-        for _ in 0..arity {
-            spec_sig.params.push(AbiParam::new(types::I64));
-        }
-        spec_sig.params.push(AbiParam::new(ptr_ty));
-        spec_sig.returns.push(AbiParam::new(types::I32));
-
-        self.ctx.func.signature = spec_sig.clone();
-        self.ctx.func.name = UserFuncName::user(0, spec_seq_id);
-
-        let counters_ptr_opt: Option<*const JitCounters> =
-            if std::env::var("OXIGEN_JIT_STATS").is_ok() {
-                Some(self.counters.as_ref() as *const _)
-            } else {
-                None
-            };
-
-        {
-            let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.fbc);
-
-            // Import the generic thunk into this function so we can
-            // call it directly.
-            let generic_sig = {
-                let mut gs = self.module.make_signature();
-                gs.params.push(AbiParam::new(ptr_ty));
-                gs.returns.push(AbiParam::new(types::I32));
-                builder.import_signature(gs)
-            };
-            let generic_fref = self.module.declare_func_in_func(generic_id, builder.func);
-
-            let entry_block = builder.create_block();
-            builder.append_block_params_for_function_params(entry_block);
-            builder.switch_to_block(entry_block);
-
-            let vm_val = builder.block_params(entry_block)[0];
-            let args: Vec<cranelift_codegen::ir::Value> = (0..arity)
-                .map(|i| builder.block_params(entry_block)[i + 1])
-                .collect();
-            // Last param is *mut i64 ret_out.
-            let ret_out = builder.block_params(entry_block)[arity + 1];
-
-            // Counter: bump specialized_entry_called at the very top.
-            if let Some(cp) = counters_ptr_opt {
-                emit_counter_bump(
-                    &mut builder,
-                    cp,
-                    counter_offsets::SPECIALIZED_ENTRY_CALLED,
-                );
-            }
-
-            // (1) Push each i64 arg onto the VM stack as
-            // Value::Integer(arg). emit_inline_push_integer bumps
-            // stack_view.len, matching what the generic ABI caller
-            // would have done. (Trampoline-only boxing; the native
-            // int body will skip this step in a later commit.)
-            for a in &args {
-                emit_inline_push_integer(&mut builder, vm_val, *a);
-            }
-
-            let flags = MemFlags::trusted();
-
-            // (2) Call generic.
-            let call = builder.ins().call(generic_fref, &[vm_val]);
-            let _ = generic_sig;
-            let status = builder.inst_results(call)[0];
-
-            let ok_block = builder.create_block();
-            let err_block = builder.create_block();
-            builder.append_block_param(err_block, types::I32);
-            builder.ins().brif(status, err_block, &[status], ok_block, &[]);
-
-            // (3) Error / bailout passthrough: propagate status only.
-            // Do NOT touch ret_out — caller reads it only on status 0.
-            builder.switch_to_block(err_block);
-            let err_status = builder.block_params(err_block)[0];
-            builder.ins().return_(&[err_status]);
-
-            // (4) Success: generic pushed a Value::Integer(result) at
-            // stack top (via op_return). Load the i64 payload, tag-check
-            // Integer, pop the Value, store the payload through ret_out,
-            // return status 0.
-            builder.switch_to_block(ok_block);
-            let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
-            let stack_len = emit_load_stack_len(&mut builder, vm_val);
-            let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
-            let one = builder.ins().iconst(types::I64, 1);
-            let top_idx = builder.ins().isub(stack_len, one);
-            let byte_off = builder.ins().imul(top_idx, value_size);
-            let top_addr = builder.ins().iadd(stack_ptr, byte_off);
-            let payload = builder.ins().load(
-                types::I64,
-                flags,
-                top_addr,
-                VALUE_INT_PAYLOAD_OFFSET as i32,
-            );
-            // Pop the Value from stack (decrement stack_view.len).
-            emit_inline_stack_pop_one(&mut builder, vm_val);
-
-            // Defensive: verify tag is Integer; if not, signal
-            // bailout via status 2. Should never fire because A1 only
-            // marks a function eligible when every Return IP has a
-            // classifiable top — but the runtime guard is cheap insurance.
-            let tag = builder.ins().load(types::I8, flags, top_addr, 0);
-            let integer_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
-            let is_int = builder.ins().icmp(IntCC::Equal, tag, integer_tag);
-            let return_ok_block = builder.create_block();
-            let bailout_block = builder.create_block();
-            builder.ins().brif(is_int, return_ok_block, &[], bailout_block, &[]);
-
-            builder.switch_to_block(bailout_block);
-            let two = builder.ins().iconst(types::I32, 2);
-            builder.ins().return_(&[two]);
-
-            builder.switch_to_block(return_ok_block);
-            // Store payload through the caller-supplied out-param.
-            builder.ins().store(flags, payload, ret_out, 0);
-            let zero_status = builder.ins().iconst(types::I32, 0);
-            builder.ins().return_(&[zero_status]);
-
-            builder.seal_all_blocks();
-            builder.finalize();
-        }
-
-        self.module
-            .define_function(spec_id, &mut self.ctx)
-            .map_err(|e| {
-                if std::env::var("OXIGEN_JIT_DEBUG").is_ok() {
-                    eprintln!("[jit] specialized define_function failed: {:?}", e);
-                }
-            })?;
-        self.module.clear_context(&mut self.ctx);
-        Ok(())
-    }
 }
 
 impl Drop for JitInner {
