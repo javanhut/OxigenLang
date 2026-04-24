@@ -747,6 +747,13 @@ impl JitInner {
             // consistent across stages.
             let mut expr_stack: Vec<cranelift_codegen::ir::Value> = Vec::new();
             let _ = &mut expr_stack;
+            // B2.1e: cleanup-Pop IPs that the virtual-branch path has
+            // elided. When a virtual icmp+brif fires without
+            // materializing a Boolean on the stack, the compiler's
+            // subsequent Pop(s) (on both the fall-through and the
+            // jump-target paths) have nothing to pop. Add them here
+            // so the Pop handler treats them as virtual no-ops.
+            let mut virt_branch_elided_pops: HashSet<usize> = HashSet::new();
 
             // Declare one Variable per virtualizable slot with a
             // recognized bytecode-level initializer. Variable IDs come
@@ -826,6 +833,10 @@ impl JitInner {
                         | OpCode::Add
                         | OpCode::Subtract
                         | OpCode::Multiply
+                        | OpCode::Less
+                        | OpCode::LessEqual
+                        | OpCode::Greater
+                        | OpCode::GreaterEqual
                 );
                 if !handles_own_flush && !expr_stack.is_empty() {
                     flush_expr_stack_to_stack_view(&mut builder, vm_val, &mut expr_stack);
@@ -895,25 +906,24 @@ impl JitInner {
                         ip += 1;
                     }
                     OpCode::Pop => {
-                        // B2.1c: IP-dispatched Pop handling.
-                        //   1. Scope teardown: the slot this Pop is
+                        // IP-dispatched Pop handling:
+                        //   1. Virtual branch elided (B2.1e): the virt
+                        //      compare+branch path didn't materialize a
+                        //      Boolean — its cleanup Pops have nothing
+                        //      to remove. Skip entirely.
+                        //   2. Scope teardown: the slot this Pop is
                         //      destroying goes out of scope. Remove
                         //      from live_int_slots so later flushes
                         //      don't store into the dead slot; then
-                        //      run the existing physical Pop (which
-                        //      decrements stack_view.len).
-                        //   2. Expression cleanup: a staged int temp
-                        //      is being removed. Virtualize by
-                        //      popping expr_stack — no memory op,
-                        //      no stack_view.len change.
-                        //   3. Condition cleanup (a Pop immediately
-                        //      after JumpIfFalse/JumpIfTrue/Unless
-                        //      that removes the condition): B2.1e's
-                        //      territory. In B2.1c we treat these as
-                        //      ordinary Pops on the real stack.
+                        //      run the existing physical Pop.
+                        //   3. Expression cleanup: a staged temp is
+                        //      being removed. Pop expr_stack — no
+                        //      memory op.
                         //   4. Everything else: ordinary Pop on the
                         //      real stack.
-                        if let Some(slot) = slot_types.scope_pop_for(ip) {
+                        if virt_branch_elided_pops.contains(&ip) {
+                            // Virtual no-op — no mem op, no expr_stack change.
+                        } else if let Some(slot) = slot_types.scope_pop_for(ip) {
                             live_int_slots.remove(&slot);
                             emit_inline_pop_tag_gated(&mut builder, &refs, vm_val);
                         } else if !expr_stack.is_empty() {
@@ -1273,19 +1283,85 @@ impl JitInner {
                                 .entry(next_ip)
                                 .or_insert_with(|| builder.create_block());
 
-                            emit_fused_int_cmp_branch(
-                                &mut builder,
-                                &refs,
-                                vm_val,
-                                cc,
-                                slow_helper,
-                                branch_op,
-                                target_block,
-                                fall_block,
-                            );
+                            // B2.1e: virtual compare + virtual branch.
+                            // When both operands are staged as virt Ints
+                            // on expr_stack, we can emit `icmp + brif`
+                            // directly with zero memory traffic —
+                            // skipping both the stack load of the
+                            // operands and the Boolean materialization
+                            // that the non-virtual fused path uses for
+                            // JumpIfFalse/JumpIfTrue.
+                            //
+                            // Eligibility for the Bool-less path:
+                            // * PopJumpIfFalse — no cleanup Pops at all.
+                            // * JumpIfFalse/JumpIfTrue — the cleanup Pops
+                            //   at both branch successors must be
+                            //   classified in condition_cleanup_pop_ips,
+                            //   so we know where to elide them.
+                            let virt_eligible = expr_stack.len() >= 2 && match branch_op {
+                                OpCode::PopJumpIfFalse => true,
+                                OpCode::JumpIfFalse | OpCode::JumpIfTrue => {
+                                    slot_types.condition_cleanup_pop_ips.contains(&next_ip)
+                                        && slot_types
+                                            .condition_cleanup_pop_ips
+                                            .contains(&target_ip)
+                                }
+                                _ => false,
+                            };
+
+                            if virt_eligible {
+                                let rhs = expr_stack.pop().unwrap();
+                                let lhs = expr_stack.pop().unwrap();
+                                let pred = builder.ins().icmp(cc, lhs, rhs);
+                                let (true_block, false_block) = match branch_op {
+                                    // JumpIfFalse/PopJumpIfFalse: branch
+                                    // taken when predicate is FALSE.
+                                    OpCode::JumpIfFalse | OpCode::PopJumpIfFalse => {
+                                        (fall_block, target_block)
+                                    }
+                                    // JumpIfTrue: branch taken when TRUE.
+                                    OpCode::JumpIfTrue => (target_block, fall_block),
+                                    _ => unreachable!(),
+                                };
+                                builder.ins().brif(pred, true_block, &[], false_block, &[]);
+                                if matches!(
+                                    branch_op,
+                                    OpCode::JumpIfFalse | OpCode::JumpIfTrue
+                                ) {
+                                    // Mark both cleanup Pops as elided —
+                                    // the Pop handler will virtual-no-op.
+                                    virt_branch_elided_pops.insert(next_ip);
+                                    virt_branch_elided_pops.insert(target_ip);
+                                }
+                            } else {
+                                if !expr_stack.is_empty() {
+                                    flush_expr_stack_to_stack_view(
+                                        &mut builder,
+                                        vm_val,
+                                        &mut expr_stack,
+                                    );
+                                }
+                                emit_fused_int_cmp_branch(
+                                    &mut builder,
+                                    &refs,
+                                    vm_val,
+                                    cc,
+                                    slow_helper,
+                                    branch_op,
+                                    target_block,
+                                    fall_block,
+                                );
+                            }
                             terminated = true;
                             ip = branch_ip + 3;
                         } else {
+                            if !expr_stack.is_empty() {
+                                flush_expr_stack_to_stack_view(
+                                    &mut builder,
+                                    vm_val,
+                                    &mut expr_stack,
+                                );
+                            }
                             emit_int_fast_cmp(&mut builder, &refs, vm_val, cc, slow_helper);
                             ip += 1;
                         }
