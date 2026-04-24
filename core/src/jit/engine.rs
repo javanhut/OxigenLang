@@ -759,8 +759,8 @@ impl JitInner {
             // recognized bytecode-level initializer. Variable IDs come
             // from an independent counter so they don't collide with
             // any future non-slot Variables.
+            let mut next_var_id: u32 = 0;
             {
-                let mut next_var_id: u32 = 0;
                 let mut needs_var: Vec<u16> = Vec::new();
                 for &slot in slot_types.local_init_result_ip.values() {
                     if slot_types.is_virtualizable(slot) && !int_locals.contains_key(&slot) {
@@ -781,7 +781,104 @@ impl JitInner {
                 }
             }
 
-            let mut current_block = entry_block;
+            // B2.2a: read-only Int64 mirror for Value params. For each
+            // eligible param slot, emit a one-shot tag guard:
+            //   load tag := stack[slot_offset + slot].tag
+            //   if tag == Integer:
+            //       payload := stack[slot_offset + slot].payload
+            //       def_var(mirror, payload)
+            //       continue
+            //   else:
+            //       return status=2 (Bailout); VM falls back to
+            //       interpreter for this invocation.
+            //
+            // After this prologue, eligible-param GetLocal sites can
+            // push `use_var(mirror)` onto `expr_stack` as a virt Int
+            // with zero per-iteration memory ops (the read-only
+            // property means the mirror never goes stale).
+            // Tracks the block the main dispatch loop should start
+            // emitting into. Normally equals `entry_block`; if a B2.2a
+            // prologue (tag guards) is emitted, shifts to the post-
+            // prologue block.
+            let mut effective_entry_block = entry_block;
+
+            let mut param_mirrors: HashMap<u16, Variable> = HashMap::new();
+            if !slot_types.int_mirror_param_slots.is_empty() {
+                let mut eligible: Vec<u16> =
+                    slot_types.int_mirror_param_slots.iter().copied().collect();
+                eligible.sort_unstable();
+                for slot in eligible {
+                    let var = Variable::from_u32(next_var_id);
+                    next_var_id += 1;
+                    builder.declare_var(var, types::I64);
+                    param_mirrors.insert(slot, var);
+                }
+            }
+            if !param_mirrors.is_empty() {
+                use cranelift_codegen::ir::MemFlags;
+                let flags = MemFlags::trusted();
+                let mut eligible: Vec<u16> = param_mirrors.keys().copied().collect();
+                eligible.sort_unstable();
+
+                let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
+                let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+                let integer_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
+
+                let bailout_block = builder.create_block();
+
+                for slot in &eligible {
+                    let slot_const = builder.ins().iconst(types::I64, *slot as i64);
+                    let abs_slot = builder.ins().iadd(slot_offset_val, slot_const);
+                    let byte_off = builder.ins().imul(abs_slot, value_size);
+                    let slot_ptr = builder.ins().iadd(stack_ptr, byte_off);
+
+                    let tag = builder.ins().load(types::I8, flags, slot_ptr, 0);
+                    let is_int = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::Equal,
+                        tag,
+                        integer_tag,
+                    );
+                    let ok_block = builder.create_block();
+                    builder
+                        .ins()
+                        .brif(is_int, ok_block, &[], bailout_block, &[]);
+                    builder.switch_to_block(ok_block);
+
+                    let payload = builder.ins().load(
+                        types::I64,
+                        flags,
+                        slot_ptr,
+                        VALUE_INT_PAYLOAD_OFFSET as i32,
+                    );
+                    let var = param_mirrors[slot];
+                    builder.def_var(var, payload);
+                }
+
+                // All guards passed — jump into a fresh "prologue_done"
+                // block that the main dispatch loop will emit into.
+                let prologue_done = builder.create_block();
+                builder.ins().jump(prologue_done, &[]);
+
+                // Bailout path: return status 2. VM's InvokeOutcome
+                // matches any status other than 0/1 to Bailout, which
+                // pops the JIT frame and reinstates the interpreter.
+                builder.switch_to_block(bailout_block);
+                let two = builder.ins().iconst(types::I32, 2);
+                builder.ins().return_(&[two]);
+
+                // Resume emission at the prologue-complete block so
+                // the main dispatch loop writes the actual function
+                // body there, not into the bailout block.
+                builder.switch_to_block(prologue_done);
+                effective_entry_block = prologue_done;
+                // The dispatch loop looks up blocks[0] on the first
+                // iteration and would otherwise jump back into the
+                // already-terminated entry_block. Remap IP 0 to the
+                // post-prologue block.
+                blocks.insert(0, prologue_done);
+            }
+
+            let mut current_block = effective_entry_block;
             let mut terminated = false;
             let mut ip: usize = 0;
             // Counter for handing out the pre-allocated inline-cache
@@ -1105,6 +1202,19 @@ impl JitInner {
                                     ip += 3;
                                     continue;
                                 }
+                            }
+                            // B2.2a: eligible-param mirror. Read-only
+                            // Value params that passed the entry tag
+                            // guard live in a Cranelift Variable for
+                            // the lifetime of the invocation. Push
+                            // use_var as a virt Int so downstream
+                            // opcodes (virt arith/cmp, SetLocal peek)
+                            // can consume it without a memory op.
+                            if let Some(&var) = param_mirrors.get(&slot) {
+                                let val = builder.use_var(var);
+                                expr_stack.push(val);
+                                ip += 3;
+                                continue;
                             }
                             if !expr_stack.is_empty() {
                                 flush_expr_stack_to_stack_view(

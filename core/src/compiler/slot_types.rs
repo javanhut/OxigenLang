@@ -115,6 +115,24 @@ pub struct FunctionSlotTypes {
     /// variable lives in a Cranelift `Variable`. B2.1 never
     /// virtualizes captured slots.
     pub captured_slots: HashSet<u16>,
+
+    /// Param slots eligible for an Int64 register mirror (B2.2a).
+    /// Selection criteria:
+    ///   - In the param range (1..=arity).
+    ///   - Classified `Value` — already-`Int64` params don't need a
+    ///     mirror since B2.1 virtualizes them directly.
+    ///   - Never written (no `SetLocal` targeting this slot) — a
+    ///     read-only slot's mirror never goes stale, which lets us
+    ///     skip a per-write resync.
+    ///   - Not captured — same reason as other virtualization paths.
+    ///   - Used by at least one `GetLocal` in the function body —
+    ///     otherwise the mirror is pure overhead.
+    ///
+    /// Engine emits a one-shot tag guard at function entry: if the
+    /// param's runtime tag is `Integer`, extract the payload and
+    /// def_var the mirror; if not, bail the thunk out and let the
+    /// interpreter handle this invocation.
+    pub int_mirror_param_slots: HashSet<u16>,
 }
 
 impl FunctionSlotTypes {
@@ -468,6 +486,12 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
     // captures a slot of this function by reference.
     let captured_slots = collect_captured_slots(code, chunk);
 
+    // Post-pass 3 (B2.2a): param mirror eligibility. Scan the bytecode
+    // once to find SetLocal-written slots and GetLocal-read slots,
+    // then cross-check against the param range + captured_slots.
+    let int_mirror_param_slots =
+        collect_int_mirror_param_slots(code, chunk, func.arity as u16, &captured_slots, &result);
+
     FunctionSlotTypes {
         slots: result,
         local_init_result_ip,
@@ -475,7 +499,155 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         condition_cleanup_pop_ips,
         scope_pop_slot_ip,
         captured_slots,
+        int_mirror_param_slots,
     }
+}
+
+/// Walk the bytecode and pick out param slots that qualify for an
+/// Int64 register mirror (B2.2a). See the field doc on
+/// `FunctionSlotTypes::int_mirror_param_slots` for the full criteria.
+fn collect_int_mirror_param_slots(
+    code: &[u8],
+    chunk: &Chunk,
+    arity: u16,
+    captured_slots: &HashSet<u16>,
+    slot_types: &[SlotType],
+) -> HashSet<u16> {
+    if arity == 0 {
+        return HashSet::new();
+    }
+
+    let mut written: HashSet<u16> = HashSet::new();
+    // For each param slot: track whether any GetLocal is immediately
+    // followed by an int-consumer op (evidence the param is used as
+    // Int) vs. a non-int-consumer op (evidence the param is Value-
+    // shaped — a struct, array, closure, etc.). A param with a
+    // non-int consumer anywhere is not eligible; a tag guard at entry
+    // would bail the thunk out at runtime for this perfectly normal
+    // calling convention.
+    let mut has_int_demand: HashSet<u16> = HashSet::new();
+    let mut has_non_int_demand: HashSet<u16> = HashSet::new();
+
+    let mut ip = 0;
+    while ip < code.len() {
+        let op = match OpCode::from_byte(code[ip]) {
+            Some(o) => o,
+            None => break,
+        };
+        let op_len = opcode_len(op, code, ip, chunk);
+
+        match op {
+            OpCode::SetLocal => {
+                let slot = read_u16(code, ip + 1);
+                written.insert(slot);
+            }
+            OpCode::GetLocal => {
+                let slot = read_u16(code, ip + 1);
+                // Scan forward from ip + op_len, skipping a BOUNDED
+                // number of "push-one-int" opcodes (Constant(Integer)
+                // is the common case — `n - 1`, `n < 2`). The param
+                // stays at stack[top-1]; when the first real classifier
+                // op fires, it either uses the param directly (unary
+                // op) or as lhs of a binary (top-1 after one push).
+                // We classify based on the classifier op.
+                let mut cursor = ip + op_len;
+                let mut skipped = 0;
+                let classifier_op = loop {
+                    if skipped > 4 || cursor >= code.len() {
+                        break None;
+                    }
+                    let cop = OpCode::from_byte(code[cursor]);
+                    match cop {
+                        // Neutral "push a constant" — the param is
+                        // still on the stack, just below the new top.
+                        // Skip past it and keep scanning.
+                        Some(OpCode::Constant)
+                        | Some(OpCode::None)
+                        | Some(OpCode::True)
+                        | Some(OpCode::False) => {
+                            let step = opcode_len(cop.unwrap(), code, cursor, chunk);
+                            cursor += step;
+                            skipped += 1;
+                            continue;
+                        }
+                        _ => break cop,
+                    }
+                };
+                match classifier_op {
+                    Some(
+                        OpCode::Add
+                        | OpCode::Subtract
+                        | OpCode::Multiply
+                        | OpCode::Divide
+                        | OpCode::Modulo
+                        | OpCode::Negate
+                        | OpCode::Less
+                        | OpCode::LessEqual
+                        | OpCode::Greater
+                        | OpCode::GreaterEqual,
+                    ) => {
+                        has_int_demand.insert(slot);
+                    }
+                    Some(
+                        OpCode::GetField
+                        | OpCode::SetField
+                        | OpCode::MethodCall
+                        | OpCode::MethodCallNamed
+                        | OpCode::Index
+                        | OpCode::IndexAssign
+                        | OpCode::BuildArray
+                        | OpCode::BuildTuple
+                        | OpCode::BuildMap
+                        | OpCode::BuildSet
+                        | OpCode::StringInterp
+                        | OpCode::StructLiteral
+                        | OpCode::IterLen
+                        | OpCode::IterGet
+                        | OpCode::Closure,
+                    ) => {
+                        has_non_int_demand.insert(slot);
+                    }
+                    _ => {
+                        // Neutral / ambiguous / unknown — no classify.
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        ip += op_len;
+    }
+
+    let mut out = HashSet::new();
+    for slot in 1..=arity {
+        if written.contains(&slot) {
+            continue;
+        }
+        if !has_int_demand.contains(&slot) {
+            // No evidence the param is used as int — the tag guard
+            // would be pure overhead.
+            continue;
+        }
+        if has_non_int_demand.contains(&slot) {
+            // Evidence the param isn't always int — skip, or the
+            // guard would bail out for every Value-shaped invocation
+            // and permanently un-JIT the function.
+            continue;
+        }
+        if captured_slots.contains(&slot) {
+            continue;
+        }
+        // Already-Int64 params don't need a mirror — B2.1 covers them.
+        if slot_types
+            .get(slot as usize)
+            .copied()
+            .map_or(false, |t| matches!(t, SlotType::Int64))
+        {
+            continue;
+        }
+        out.insert(slot);
+    }
+    out
 }
 
 /// Walk the bytecode and find every conditional-branch-cleanup `Pop`
