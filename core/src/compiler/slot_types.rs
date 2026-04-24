@@ -133,6 +133,23 @@ pub struct FunctionSlotTypes {
     /// def_var the mirror; if not, bail the thunk out and let the
     /// interpreter handle this invocation.
     pub int_mirror_param_slots: HashSet<u16>,
+
+    /// True iff the function qualifies for a second, specialized
+    /// calling-convention entry point `fn(*mut VM, i64, ..., i64) -> (i64, u32)`
+    /// with args passed in registers and result returned as raw i64.
+    /// See `collect_specialized_entry_eligibility` for the full rule set.
+    /// Not written here — consumers check `specialized_param_slots`
+    /// and the `Return` IPs separately if they need per-IP info.
+    pub specialized_entry_eligible: bool,
+
+    /// Param slots that the specialized entry would receive as i64
+    /// (1..=arity when eligible; empty otherwise). Distinct from
+    /// `int_mirror_param_slots`: specialized slots include BOTH the
+    /// read-only Int-demand Value-typed params AND the Int64-typed
+    /// params (whether writable or not). Used by the codegen stage to
+    /// know the specialized signature arity and which slots to
+    /// materialize from register args.
+    pub specialized_param_slots: Vec<u16>,
 }
 
 impl FunctionSlotTypes {
@@ -492,6 +509,20 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
     let int_mirror_param_slots =
         collect_int_mirror_param_slots(code, chunk, func.arity as u16, &captured_slots, &result);
 
+    // Post-pass 4 (A1): specialized-entry eligibility. Conservative set
+    // of rules — a function is eligible for the i64-ABI specialized
+    // entry only when ALL of the below hold. See field doc on
+    // `specialized_entry_eligible` for the full rule list.
+    let (specialized_entry_eligible, specialized_param_slots) = compute_specialized_entry_eligibility(
+        code,
+        chunk,
+        func.arity as u16,
+        &result,
+        &captured_slots,
+        &int_mirror_param_slots,
+        &states,
+    );
+
     FunctionSlotTypes {
         slots: result,
         local_init_result_ip,
@@ -500,7 +531,92 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         scope_pop_slot_ip,
         captured_slots,
         int_mirror_param_slots,
+        specialized_entry_eligible,
+        specialized_param_slots,
     }
+}
+
+/// Determine whether the function qualifies for a specialized i64-ABI
+/// entry point. Returns `(eligible, param_slots)` — the second value
+/// is empty when ineligible, or the full `(1..=arity)` list otherwise.
+fn compute_specialized_entry_eligibility(
+    code: &[u8],
+    chunk: &Chunk,
+    arity: u16,
+    slot_types: &[SlotType],
+    captured_slots: &HashSet<u16>,
+    int_mirror_param_slots: &HashSet<u16>,
+    states: &HashMap<usize, AbstractState>,
+) -> (bool, Vec<u16>) {
+    if arity == 0 {
+        return (false, Vec::new());
+    }
+
+    // Every param slot must be Int-stable AND not captured.
+    for slot in 1..=arity {
+        let is_int_typed = matches!(
+            slot_types.get(slot as usize).copied().unwrap_or(SlotType::Value),
+            SlotType::Int64
+        );
+        let is_int_demand_mirror = int_mirror_param_slots.contains(&slot);
+        if !(is_int_typed || is_int_demand_mirror) {
+            return (false, Vec::new());
+        }
+        if captured_slots.contains(&slot) {
+            return (false, Vec::new());
+        }
+    }
+
+    // The body must not contain opcodes we don't yet know how to
+    // handle in the specialized entry: closures, upvalues, nonlocal
+    // control flow that might invalidate our frame assumptions.
+    let mut has_return = false;
+    let mut return_ips: Vec<usize> = Vec::new();
+    let mut ip = 0;
+    while ip < code.len() {
+        let op = match OpCode::from_byte(code[ip]) {
+            Some(o) => o,
+            None => break,
+        };
+        let op_len = opcode_len(op, code, ip, chunk);
+
+        match op {
+            OpCode::Closure | OpCode::GetUpvalue | OpCode::SetUpvalue | OpCode::CloseUpvalue => {
+                return (false, Vec::new());
+            }
+            OpCode::Return => {
+                has_return = true;
+                return_ips.push(ip);
+            }
+            _ => {}
+        }
+
+        ip += op_len;
+    }
+
+    if !has_return {
+        return (false, Vec::new());
+    }
+
+    // Every Return IP must have Int64 on top of the abstract stack.
+    // We consult the forward-propagated `states` map: `states[ip]` is
+    // the on-entry state AT that IP, so `state.stack.last()` is the
+    // type of the value that will be popped by the Return.
+    for &rip in &return_ips {
+        let state = match states.get(&rip) {
+            Some(s) => s,
+            // If analysis never reached this Return (dead code), treat
+            // as ineligible — we can't prove safety.
+            None => return (false, Vec::new()),
+        };
+        let top_ty = state.stack.last().copied().unwrap_or(SlotType::Bottom);
+        if !matches!(top_ty, SlotType::Int64) {
+            return (false, Vec::new());
+        }
+    }
+
+    let param_slots: Vec<u16> = (1..=arity).collect();
+    (true, param_slots)
 }
 
 /// Walk the bytecode and pick out param slots that qualify for an
@@ -2019,5 +2135,79 @@ mod tests {
             !r.local_init_result_ip.values().any(|&s| s == 1),
             "param slot should NOT have a local_init_result_ip entry"
         );
+    }
+
+    // ── A1: specialized-entry eligibility ────────────────────────────
+
+    #[test]
+    fn specialized_eligible_typed_int_param_returning_int() {
+        // fun f(n <int>) { n }
+        let mut f = make_fn("f", 1, vec![], vec![]);
+        f.params[0].type_ann = Some("int".to_string());
+        f.chunk.code = vec![
+            OpCode::GetLocal as u8, 0, 1,   // push n
+            OpCode::Return as u8,
+        ];
+        let r = analyze(&f);
+        assert!(r.specialized_entry_eligible);
+        assert_eq!(r.specialized_param_slots, vec![1]);
+    }
+
+    #[test]
+    fn specialized_ineligible_zero_arity() {
+        // fun f() { 42 } — nothing to unbox, not worth a second entry.
+        let f = make_fn("f", 0, vec![
+            OpCode::Constant as u8, 0, 0,
+            OpCode::Return as u8,
+        ], vec![Value::Integer(42)]);
+        let r = analyze(&f);
+        assert!(!r.specialized_entry_eligible);
+        assert!(r.specialized_param_slots.is_empty());
+    }
+
+    #[test]
+    fn specialized_ineligible_returns_value() {
+        // fun f(n <int>) { "hello" } — return is not Int.
+        let mut f = make_fn("f", 1, vec![], vec![]);
+        f.params[0].type_ann = Some("int".to_string());
+        f.chunk.code = vec![
+            OpCode::Constant as u8, 0, 0,   // push "hello"
+            OpCode::Return as u8,
+        ];
+        f.chunk.constants = vec![Value::String(crate::vm::value::rc_str("hello"))];
+        let r = analyze(&f);
+        assert!(!r.specialized_entry_eligible);
+    }
+
+    #[test]
+    fn specialized_ineligible_untyped_value_param() {
+        // fun f(n) { n } — `n` is Value-typed (no annotation), and
+        // int_mirror wouldn't pick it up without an int-demand use.
+        // Return value at top-of-stack is Value, so ineligible.
+        let mut f = make_fn("f", 1, vec![], vec![]);
+        // no type_ann — defaults to Value
+        f.chunk.code = vec![
+            OpCode::GetLocal as u8, 0, 1,
+            OpCode::Return as u8,
+        ];
+        let r = analyze(&f);
+        assert!(!r.specialized_entry_eligible);
+    }
+
+    #[test]
+    fn specialized_eligible_int_param_with_arith_and_return() {
+        // fun f(n <int>) { n + 1 }
+        let mut f = make_fn("f", 1, vec![], vec![]);
+        f.params[0].type_ann = Some("int".to_string());
+        f.chunk.code = vec![
+            OpCode::GetLocal as u8, 0, 1,
+            OpCode::Constant as u8, 0, 0,
+            OpCode::Add as u8,
+            OpCode::Return as u8,
+        ];
+        f.chunk.constants = vec![Value::Integer(1)];
+        let r = analyze(&f);
+        assert!(r.specialized_entry_eligible);
+        assert_eq!(r.specialized_param_slots, vec![1]);
     }
 }
