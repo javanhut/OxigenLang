@@ -1,4 +1,5 @@
 pub mod opcode;
+pub mod slot_types;
 
 use crate::ast::*;
 use crate::vm::value::{
