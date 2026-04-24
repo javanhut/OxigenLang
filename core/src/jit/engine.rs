@@ -84,6 +84,11 @@ pub(crate) struct JitCounters {
     /// on `expr_stack`. Measures how often the fast branch-fusion
     /// replaces a boxed-Bool round trip through `refs.eq`/`refs.ne`.
     pub virt_branch_eq_hit: std::cell::Cell<u64>,
+    /// B2.1g: incremented when the parity branch peephole fires —
+    /// `(x % 2) == 0` / `!= 0` (and the commuted `0 == x % 2` /
+    /// `0 != x % 2`) lowered to `band_imm + icmp_imm + brif`,
+    /// avoiding `srem` entirely.
+    pub virt_branch_parity_hit: std::cell::Cell<u64>,
 }
 
 impl JitCounters {
@@ -101,6 +106,7 @@ impl JitCounters {
             virt_divmod_slow_zero: std::cell::Cell::new(0),
             virt_divmod_slow_overflow: std::cell::Cell::new(0),
             virt_branch_eq_hit: std::cell::Cell::new(0),
+            virt_branch_parity_hit: std::cell::Cell::new(0),
         }
     }
 
@@ -118,6 +124,7 @@ impl JitCounters {
         eprintln!("  virt_divmod_slow_zero:             {}", self.virt_divmod_slow_zero.get());
         eprintln!("  virt_divmod_slow_overflow:         {}", self.virt_divmod_slow_overflow.get());
         eprintln!("  virt_branch_eq_hit:                {}", self.virt_branch_eq_hit.get());
+        eprintln!("  virt_branch_parity_hit:            {}", self.virt_branch_parity_hit.get());
     }
 }
 
@@ -1677,6 +1684,32 @@ impl JitInner {
                     }
                     OpCode::Divide | OpCode::Modulo => {
                         let is_mod = matches!(op, OpCode::Modulo);
+
+                        // B2.1g: parity branch peephole. For Modulo only,
+                        // try to detect `(virt Int x) % 2 == 0` (and 3
+                        // commuted variants) immediately consumed by a
+                        // JumpIf*. If matched, lower to band_imm +
+                        // icmp_imm + brif and skip past all consumed
+                        // bytecode. Otherwise fall through to the
+                        // existing virt-Modulo path (still emits srem).
+                        if is_mod {
+                            if let Some(next_ip) = try_emit_parity_branch_peephole(
+                                &mut builder,
+                                chunk,
+                                code,
+                                ip,
+                                &mut expr_stack,
+                                &mut virt_branch_elided_pops,
+                                &mut blocks,
+                                &slot_types,
+                                counters_ptr_opt,
+                            ) {
+                                terminated = true;
+                                ip = next_ip;
+                                continue;
+                            }
+                        }
+
                         // Virtual path: operands on expr_stack as virt Ints.
                         // Emit register-resident sdiv/srem with zero +
                         // i64::MIN/-1 guards; fall back via slow block that
@@ -5261,6 +5294,183 @@ mod counter_offsets {
         offset_of!(JitCounters, virt_divmod_slow_overflow) as isize;
     pub const VIRT_BRANCH_EQ_HIT: isize =
         offset_of!(JitCounters, virt_branch_eq_hit) as isize;
+    pub const VIRT_BRANCH_PARITY_HIT: isize =
+        offset_of!(JitCounters, virt_branch_parity_hit) as isize;
+}
+
+/// True iff `val` is the result of a Cranelift `iconst` with the
+/// given immediate. Used by the parity-branch peephole to recognise
+/// the constants `2` (Modulo RHS) and `0` (Equal/NotEqual operand)
+/// without relying on bytecode position. Returns false for any value
+/// that wasn't materialised by a recent iconst — which is also the
+/// safe-fallback answer for the peephole (we just don't fire it).
+#[inline]
+fn is_iconst_imm(builder: &FunctionBuilder<'_>, val: cranelift_codegen::ir::Value, imm: i64) -> bool {
+    use cranelift_codegen::ir::{InstructionData, Opcode, ValueDef};
+    let dfg = &builder.func.dfg;
+    match dfg.value_def(val) {
+        ValueDef::Result(inst, _) => match dfg.insts[inst] {
+            InstructionData::UnaryImm { opcode: Opcode::Iconst, imm: i } => i64::from(i) == imm,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// B2.1g parity-branch peephole. Detects the four shapes
+///
+///     (x % 2) == 0      —— pattern A, evaluating "is even"
+///     (x % 2) != 0      —— pattern A, "is odd"
+///     0 == (x % 2)      —— pattern B, "is even" (commuted)
+///     0 != (x % 2)      —— pattern B, "is odd"  (commuted)
+///
+/// when followed immediately by `JumpIfFalse` / `JumpIfTrue` /
+/// `PopJumpIfFalse`. On match, lowers to `band_imm + icmp_imm + brif`
+/// and returns `Some(next_ip)` for the dispatch loop to skip past all
+/// consumed bytecode opcodes. On any mismatch returns None and the
+/// caller proceeds with the existing virt-Modulo path (which still
+/// emits `srem`).
+///
+/// Caller must invoke this BEFORE emitting any IR for the Modulo
+/// itself — otherwise the rewrite would be too late and `srem` would
+/// stay in the IR.
+fn try_emit_parity_branch_peephole(
+    builder: &mut FunctionBuilder<'_>,
+    chunk: &Chunk,
+    code: &[u8],
+    ip: usize,
+    expr_stack: &mut Vec<cranelift_codegen::ir::Value>,
+    virt_branch_elided_pops: &mut HashSet<usize>,
+    blocks: &mut HashMap<usize, Block>,
+    slot_types: &crate::compiler::slot_types::FunctionSlotTypes,
+    counters_ptr_opt: Option<*const JitCounters>,
+) -> Option<usize> {
+    use cranelift_codegen::ir::condcodes::IntCC;
+
+    // Need at least (x, 2) on expr_stack — both must be virt Ints.
+    if expr_stack.len() < 2 {
+        return None;
+    }
+
+    // Top of expr_stack is the Modulo RHS (most recently pushed). It
+    // must be `iconst 2`. Without IR introspection we'd have to look
+    // at bytecode position, which is fragile under future peepholes.
+    let rhs = *expr_stack.last().unwrap();
+    if !is_iconst_imm(builder, rhs, 2) {
+        return None;
+    }
+
+    // Forward-bytecode lookahead from the byte AFTER Modulo.
+    // Pattern A: Constant(0); Equal|NotEqual; JumpIf*
+    // Pattern B:                Equal|NotEqual; JumpIf*  (with 0 already
+    //                                                     under x on expr_stack)
+    let after_mod = ip + 1;
+
+    let try_constant_zero = |start: usize| -> Option<usize> {
+        if OpCode::from_byte(*code.get(start)?)? != OpCode::Constant {
+            return None;
+        }
+        let idx = read_u16(code, start + 1) as usize;
+        match chunk.constants.get(idx) {
+            Some(crate::vm::value::Value::Integer(0)) => Some(start + 3),
+            _ => None,
+        }
+    };
+
+    // Decide A vs B by trying A first (Constant(0) then Equal/NotEqual).
+    let (cmp_ip, is_pattern_b) = match try_constant_zero(after_mod) {
+        Some(post_const_ip) => (post_const_ip, false),
+        None => (after_mod, true),
+    };
+
+    let cmp_op = OpCode::from_byte(*code.get(cmp_ip)?)?;
+    let is_equal = match cmp_op {
+        OpCode::Equal => true,
+        OpCode::NotEqual => false,
+        _ => return None,
+    };
+
+    let branch_ip = cmp_ip + 1;
+    let branch_op = OpCode::from_byte(*code.get(branch_ip)?)?;
+    if !matches!(
+        branch_op,
+        OpCode::JumpIfFalse | OpCode::JumpIfTrue | OpCode::PopJumpIfFalse
+    ) {
+        return None;
+    }
+    // Mid-instruction branch target rejection: if the byte after Modulo
+    // is itself a known branch target, some other block expects to
+    // emit there. Mirrors B2.1f's gate (shifted by the bytes we'd skip).
+    if blocks.contains_key(&after_mod) {
+        return None;
+    }
+
+    let off = read_u16(code, branch_ip + 1) as usize;
+    let target_ip = branch_ip + 3 + off;
+    let next_ip = branch_ip + 3;
+
+    // Cleanup-Pop classification (mirrors B2.1f).
+    let cleanup_ok = match branch_op {
+        OpCode::PopJumpIfFalse => true,
+        OpCode::JumpIfFalse | OpCode::JumpIfTrue => {
+            slot_types.condition_cleanup_pop_ips.contains(&next_ip)
+                && slot_types.condition_cleanup_pop_ips.contains(&target_ip)
+        }
+        _ => return None,
+    };
+    if !cleanup_ok {
+        return None;
+    }
+
+    // For pattern B, expr_stack[-3] must be `iconst 0`.
+    if is_pattern_b {
+        if expr_stack.len() < 3 {
+            return None;
+        }
+        let zero_val = expr_stack[expr_stack.len() - 3];
+        if !is_iconst_imm(builder, zero_val, 0) {
+            return None;
+        }
+    }
+
+    // ── Match — emit. ──────────────────────────────────────────────
+    if let Some(cp) = counters_ptr_opt {
+        emit_counter_bump(builder, cp, counter_offsets::VIRT_BRANCH_PARITY_HIT);
+    }
+
+    // Pop expr_stack entries: rhs (2), lhs (the Modulo arg). For
+    // pattern B, also pop the leading 0.
+    expr_stack.pop().unwrap(); // rhs (2) — discarded; we use band_imm
+    let lhs = expr_stack.pop().unwrap();
+    if is_pattern_b {
+        expr_stack.pop().unwrap(); // 0 — already proven via is_iconst_imm
+    }
+
+    let parity = builder.ins().band_imm(lhs, 1);
+    let cc = if is_equal { IntCC::Equal } else { IntCC::NotEqual };
+    let pred = builder.ins().icmp_imm(cc, parity, 0);
+
+    let target_block = blocks[&target_ip];
+    let fall_block = *blocks
+        .entry(next_ip)
+        .or_insert_with(|| builder.create_block());
+
+    let (true_block, false_block) = match branch_op {
+        OpCode::JumpIfFalse | OpCode::PopJumpIfFalse => (fall_block, target_block),
+        OpCode::JumpIfTrue => (target_block, fall_block),
+        _ => unreachable!(),
+    };
+    builder.ins().brif(pred, true_block, &[], false_block, &[]);
+
+    if matches!(branch_op, OpCode::JumpIfFalse | OpCode::JumpIfTrue) {
+        virt_branch_elided_pops.insert(next_ip);
+        virt_branch_elided_pops.insert(target_ip);
+    }
+
+    // Skip the dispatch loop past the entire consumed sequence.
+    // branch_ip + 3 == next_ip (already computed), the byte just after
+    // the JumpIf*'s 3-byte opcode + offset.
+    Some(branch_ip + 3)
 }
 
 /// Load the `i64` payload from the Value currently at stack[stack_view.len - 1].
