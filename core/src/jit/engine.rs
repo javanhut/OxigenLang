@@ -1222,6 +1222,17 @@ impl JitInner {
             let mut current_block = effective_entry_block;
             let mut terminated = false;
             let mut ip: usize = 0;
+            // C-line cache: every opcode normally writes the current
+            // source line to JitFrame.line for error reporting. In
+            // tight loops most opcodes share a source line — the
+            // closure body `{ x + y }` has 4 opcodes all on the same
+            // line. Tracking the last-emitted line lets us skip the
+            // store when unchanged. ALWAYS emit at block boundaries
+            // (terminated=true reset, or block switch above) so error
+            // messages from a foreign block's first op see the right
+            // line. We use `Option` so the very first opcode of the
+            // body always writes (initial state == "no line known").
+            let mut last_emitted_line: Option<u32> = None;
             // Counter for handing out the pre-allocated inline-cache
             // slots as we emit GetGlobal opcodes.
             let mut ic_ix: usize = 0;
@@ -1242,12 +1253,21 @@ impl JitInner {
                         builder.switch_to_block(block);
                         current_block = block;
                         terminated = false;
+                        // Reset line cache at block boundaries — a
+                        // predecessor block could have written any
+                        // line to JitFrame.line. The first opcode of
+                        // this block must re-emit so error messages
+                        // see the right line.
+                        last_emitted_line = None;
                     }
                 }
 
                 let op = OpCode::from_byte(code[ip]).ok_or(())?;
                 let line = chunk.lines.get(ip).copied().unwrap_or(0);
-                emit_store_current_line(&mut builder, vm_val, line);
+                if last_emitted_line != Some(line) {
+                    emit_store_current_line(&mut builder, vm_val, line);
+                    last_emitted_line = Some(line);
+                }
 
                 // B2.1c: light flush before any op we aren't
                 // explicitly virtualizing. Only drains `expr_stack`
@@ -3363,15 +3383,16 @@ impl JitInner {
                 builder.finalize();
             }
 
-            // PROBE (B2.1h-probe): when OXIGEN_JIT_DISASM is set, ask
-            // Cranelift to populate the vcode (machine-code disasm)
-            // and dump it for the named function only. Will be
-            // reverted after measurement.
+            // Diagnostic: when OXIGEN_JIT_DISASM is set to a function
+            // name, dump that function's machine-code disasm. The
+            // special value "ALL" dumps every compiled function (with
+            // a leading header line so they can be told apart).
             let disasm_target = std::env::var("OXIGEN_JIT_DISASM").ok();
-            let want_disasm = disasm_target
-                .as_deref()
-                .map(|t| t == func.name.as_deref().unwrap_or(""))
-                .unwrap_or(false);
+            let want_disasm = match disasm_target.as_deref() {
+                Some("ALL") => true,
+                Some(name) => name == func.name.as_deref().unwrap_or(""),
+                None => false,
+            };
             if want_disasm {
                 self.ctx.want_disasm = true;
             }
