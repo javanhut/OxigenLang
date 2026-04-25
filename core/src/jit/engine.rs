@@ -131,6 +131,14 @@ pub(crate) struct JitCounters {
     /// hit. So `inline_hit + get_upvalue_calls ≈ total dynamic GetUpvalue
     /// count`, and the first-call miss counts toward `get_upvalue_calls`.
     pub get_upvalue_inline_hit: std::cell::Cell<u64>,
+    /// A4.0 probe: subset of `call_ic_hit` where the callee closure
+    /// has `specialized_kind == NATIVE_INT_BODY` (its specialized
+    /// entry exists and would be invocable via direct i64 dispatch).
+    /// Measures the upper bound on how often A4 (Call IC routes to
+    /// specialized entry) would fire if we built that path. Bumped
+    /// from IR inside the IC hit block — does NOT change behavior;
+    /// the call still dispatches to the generic thunk.
+    pub ic_callee_has_spec_entry: std::cell::Cell<u64>,
 }
 
 impl JitCounters {
@@ -158,6 +166,7 @@ impl JitCounters {
             call_ic_hit: std::cell::Cell::new(0),
             call_ic_miss: std::cell::Cell::new(0),
             get_upvalue_inline_hit: std::cell::Cell::new(0),
+            ic_callee_has_spec_entry: std::cell::Cell::new(0),
         }
     }
 
@@ -185,6 +194,7 @@ impl JitCounters {
         eprintln!("  call_ic_hit:                       {}", self.call_ic_hit.get());
         eprintln!("  call_ic_miss:                      {}", self.call_ic_miss.get());
         eprintln!("  get_upvalue_inline_hit:            {}", self.get_upvalue_inline_hit.get());
+        eprintln!("  ic_callee_has_spec_entry:          {}", self.ic_callee_has_spec_entry.get());
     }
 }
 
@@ -2722,6 +2732,53 @@ impl JitInner {
                                 cp,
                                 counter_offsets::CALL_IC_HIT,
                             );
+                            // A4.0 probe: count how often the cached
+                            // callee has a NativeIntBody specialized
+                            // entry. This is the population A4 (Call
+                            // IC routes to specialized entry) would
+                            // potentially convert. Reuses the same
+                            // closure pointer derivation we'll need
+                            // for the actual A4 path: curr_rc is the
+                            // raw `NonNull<RcBox<ObjClosure>>`; add
+                            // RC_VALUE_OFFSET to land on ObjClosure.
+                            let probe_closure_ptr = builder
+                                .ins()
+                                .iadd_imm(curr_rc, RC_VALUE_OFFSET as i64);
+                            let spec_kind_off = std::mem::offset_of!(
+                                crate::vm::value::ObjClosure,
+                                specialized_kind
+                            )
+                                as i32;
+                            let spec_kind = builder.ins().load(
+                                types::I8,
+                                flags,
+                                probe_closure_ptr,
+                                spec_kind_off,
+                            );
+                            let is_native = builder.ins().icmp_imm(
+                                IntCC::Equal,
+                                spec_kind,
+                                crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY as i64,
+                            );
+                            let probe_bump_block = builder.create_block();
+                            let probe_after_block = builder.create_block();
+                            builder.ins().brif(
+                                is_native,
+                                probe_bump_block,
+                                &[],
+                                probe_after_block,
+                                &[],
+                            );
+                            builder.switch_to_block(probe_bump_block);
+                            emit_counter_bump(
+                                &mut builder,
+                                cp,
+                                counter_offsets::IC_CALLEE_HAS_SPEC_ENTRY,
+                            );
+                            builder.ins().jump(probe_after_block, &[]);
+                            builder.switch_to_block(probe_after_block);
+                            builder.seal_block(probe_bump_block);
+                            builder.seal_block(probe_after_block);
                         }
                         let jit_frames_ptr = builder.ins().load(
                             ptr_ty,
@@ -5542,6 +5599,8 @@ mod counter_offsets {
     pub const CALL_IC_MISS: isize = offset_of!(JitCounters, call_ic_miss) as isize;
     pub const GET_UPVALUE_INLINE_HIT: isize =
         offset_of!(JitCounters, get_upvalue_inline_hit) as isize;
+    pub const IC_CALLEE_HAS_SPEC_ENTRY: isize =
+        offset_of!(JitCounters, ic_callee_has_spec_entry) as isize;
 }
 
 /// True iff `val` is the result of a Cranelift `iconst` with the
