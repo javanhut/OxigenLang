@@ -294,6 +294,7 @@ impl VM {
 
     /// Run a compiled function.
     pub fn run(&mut self, function: Function) -> Result<Value, VMError> {
+        let (uv_kinds, uv_values) = crate::vm::value::make_upvalue_int_caches(0);
         let closure = Rc::new(ObjClosure {
             function: Rc::new(function),
             upvalues: Vec::new(),
@@ -304,6 +305,8 @@ impl VM {
             specialized_thunk: std::cell::Cell::new(None),
             specialized_arity: std::cell::Cell::new(0),
             specialized_kind: std::cell::Cell::new(0),
+            upvalue_int_kinds: uv_kinds,
+            upvalue_int_values: uv_values,
         });
 
         // Push the closure itself onto the stack (slot 0) — this is the
@@ -836,6 +839,7 @@ impl VM {
             }
         }
 
+        let (uv_kinds, uv_values) = crate::vm::value::make_upvalue_int_caches(upvalues.len());
         let closure = Rc::new(ObjClosure {
             function: Rc::clone(&template.function),
             upvalues,
@@ -846,6 +850,8 @@ impl VM {
             specialized_thunk: std::cell::Cell::new(None),
             specialized_arity: std::cell::Cell::new(0),
             specialized_kind: std::cell::Cell::new(0),
+            upvalue_int_kinds: uv_kinds,
+            upvalue_int_values: uv_values,
         });
         self.push(Value::Closure(closure));
         Ok(())

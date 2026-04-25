@@ -168,6 +168,7 @@ mod layout_tests {
     fn value_closure_layout_is_pinned() {
         use std::cell::Cell;
         let func = Rc::new(Function::new(None, 0));
+        let (kinds, values) = super::make_upvalue_int_caches(0);
         let obj = Rc::new(ObjClosure {
             function: func,
             upvalues: Vec::new(),
@@ -178,6 +179,8 @@ mod layout_tests {
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
             specialized_kind: Cell::new(0),
+            upvalue_int_kinds: kinds,
+            upvalue_int_values: values,
         });
         // Read the Rc's raw bit pattern the same way the JIT does.
         let expected_raw: usize = unsafe {
@@ -210,6 +213,7 @@ mod layout_tests {
     fn rc_strong_count_lives_at_rcbox_offset_zero() {
         use std::cell::Cell;
         let func = Rc::new(Function::new(None, 0));
+        let (kinds, values) = super::make_upvalue_int_caches(0);
         let obj = Rc::new(ObjClosure {
             function: func,
             upvalues: Vec::new(),
@@ -220,6 +224,8 @@ mod layout_tests {
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
             specialized_kind: Cell::new(0),
+            upvalue_int_kinds: kinds,
+            upvalue_int_values: values,
         });
         // Read the RcBox pointer the same way the JIT does: raw bit
         // pattern of the `Rc`, which is `NonNull<RcBox<T>>`.
@@ -464,6 +470,31 @@ pub struct ObjClosure {
     /// A3 direct-call dispatch gates on `== 2`; trampolines never
     /// receive direct-call traffic.
     pub specialized_kind: Cell<u8>,
+    /// B2.2: JIT-visible parallel cache for the `Closed(Integer)`
+    /// upvalue shape. `upvalue_int_kinds[i] == 1` means upvalue `i` is
+    /// currently `Upvalue::Closed(Value::Integer(_))` and the i64 is in
+    /// `upvalue_int_values[i]`. Any other state (`Open`, `Closed(non-
+    /// Integer)`, never observed) maps to `kinds[i] == 0`. The JIT's
+    /// inline GetUpvalue path reads `kinds[i]` to gate against
+    /// `jit_get_upvalue` helper dispatch. `Cell<u8>` and `Cell<i64>` are
+    /// `#[repr(transparent)]` so `Box<[Cell<T>]>` matches `Box<[T]>`
+    /// layout — the JIT loads through these at known struct offsets.
+    /// Populated lazily by `jit_get_upvalue` once it observes the
+    /// `Closed(Integer)` shape; invalidated by `jit_set_upvalue`.
+    /// Length matches `upvalues.len()`.
+    pub upvalue_int_kinds: Box<[Cell<u8>]>,
+    pub upvalue_int_values: Box<[Cell<i64>]>,
+}
+
+/// Construct the empty parallel kinds/values arrays for an `ObjClosure`
+/// holding `n` upvalues. All slots start at `kind = 0` (fallback) so the
+/// JIT inline GetUpvalue path defers to `jit_get_upvalue` until the
+/// helper observes `Closed(Integer)` and populates the cache.
+#[inline]
+pub fn make_upvalue_int_caches(n: usize) -> (Box<[Cell<u8>]>, Box<[Cell<i64>]>) {
+    let kinds = (0..n).map(|_| Cell::new(0u8)).collect::<Vec<_>>().into_boxed_slice();
+    let values = (0..n).map(|_| Cell::new(0i64)).collect::<Vec<_>>().into_boxed_slice();
+    (kinds, values)
 }
 
 /// u8 encoding of `engine::SpecializedEntryKind` stored in

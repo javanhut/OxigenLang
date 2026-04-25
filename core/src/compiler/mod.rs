@@ -1936,6 +1936,7 @@ impl Compiler {
         let upvalues = frame.upvalues;
 
         // Add the function as a constant in the enclosing scope
+        let (uv_kinds, uv_values) = crate::vm::value::make_upvalue_int_caches(0);
         let func_const = self.make_constant(
             Value::Closure(std::rc::Rc::new(crate::vm::value::ObjClosure {
                 function: std::rc::Rc::new(function),
@@ -1944,9 +1945,11 @@ impl Compiler {
                 loop_count: std::cell::Cell::new(0),
                 jit_state: std::cell::Cell::new(0),
                 jit_thunk: std::cell::Cell::new(None),
-            specialized_thunk: std::cell::Cell::new(None),
-            specialized_arity: std::cell::Cell::new(0),
-            specialized_kind: std::cell::Cell::new(0),
+                specialized_thunk: std::cell::Cell::new(None),
+                specialized_arity: std::cell::Cell::new(0),
+                specialized_kind: std::cell::Cell::new(0),
+                upvalue_int_kinds: uv_kinds,
+                upvalue_int_values: uv_values,
             })),
             line,
         );

@@ -607,27 +607,39 @@ pub unsafe extern "C" fn jit_define_global_typed(
 pub unsafe extern "C" fn jit_get_upvalue(vm: *mut VM, idx: u32) {
     let vm = unsafe { &mut *vm };
     vm.sync_stack_from_view();
-    // Probe: classify the upvalue for diagnostic counting before
-    // we mutate the stack. The `Closed(Integer)` shape is the one
-    // an inline fast path would cover.
+    // Probe + B2.2 cache classify: inspect the upvalue's current shape
+    // before mutating the stack. If it's `Closed(Integer(n))`, populate
+    // the JIT-visible per-closure cache so subsequent inline GetUpvalue
+    // emissions can fast-path. If not, clear the cache slot — defends
+    // against the (currently impossible, but cheap to handle)
+    // Closed-Integer → Closed-Other transition without going through
+    // SetUpvalue.
+    let mut closed_int_value: Option<i64> = None;
     {
-        let counters = vm.jit.counters_ptr_opt();
-        if let Some(c) = counters {
-            let c = unsafe { &*c };
-            c.get_upvalue_calls.set(c.get_upvalue_calls.get() + 1);
-            let closed_int = {
-                let upvalue = &vm.active_closure().upvalues[idx as usize];
-                matches!(
-                    &*upvalue.borrow(),
-                    crate::vm::value::Upvalue::Closed(crate::vm::value::Value::Integer(_))
-                )
-            };
-            if closed_int {
-                c.get_upvalue_closed_integer_hit
-                    .set(c.get_upvalue_closed_integer_hit.get() + 1);
-            } else {
-                c.get_upvalue_fallback.set(c.get_upvalue_fallback.get() + 1);
-            }
+        let upvalue = &vm.active_closure().upvalues[idx as usize];
+        if let crate::vm::value::Upvalue::Closed(crate::vm::value::Value::Integer(n)) =
+            &*upvalue.borrow()
+        {
+            closed_int_value = Some(*n);
+        }
+    }
+    let closure = vm.active_closure();
+    if (idx as usize) < closure.upvalue_int_kinds.len() {
+        if let Some(n) = closed_int_value {
+            closure.upvalue_int_values[idx as usize].set(n);
+            closure.upvalue_int_kinds[idx as usize].set(1);
+        } else {
+            closure.upvalue_int_kinds[idx as usize].set(0);
+        }
+    }
+    if let Some(c) = vm.jit.counters_ptr_opt() {
+        let c = unsafe { &*c };
+        c.get_upvalue_calls.set(c.get_upvalue_calls.get() + 1);
+        if closed_int_value.is_some() {
+            c.get_upvalue_closed_integer_hit
+                .set(c.get_upvalue_closed_integer_hit.get() + 1);
+        } else {
+            c.get_upvalue_fallback.set(c.get_upvalue_fallback.get() + 1);
         }
     }
     // handle_get_upvalue returns Result but can't actually fail today;
@@ -646,6 +658,29 @@ pub unsafe extern "C" fn jit_set_upvalue(vm: *mut VM, idx: u32) {
     }
     if let Err(e) = vm.handle_set_upvalue(idx as u16) {
         vm.jit.stash_error(e);
+        return;
+    }
+    // B2.2: refresh the cache from the post-write upvalue shape. If the
+    // new value is an Integer, the inline fast path stays armed; if it
+    // shifted to a non-integer payload, clear the kind so the next JIT
+    // GetUpvalue routes to the helper.
+    let mut closed_int_value: Option<i64> = None;
+    {
+        let upvalue = &vm.active_closure().upvalues[idx as usize];
+        if let crate::vm::value::Upvalue::Closed(crate::vm::value::Value::Integer(n)) =
+            &*upvalue.borrow()
+        {
+            closed_int_value = Some(*n);
+        }
+    }
+    let closure = vm.active_closure();
+    if (idx as usize) < closure.upvalue_int_kinds.len() {
+        if let Some(n) = closed_int_value {
+            closure.upvalue_int_values[idx as usize].set(n);
+            closure.upvalue_int_kinds[idx as usize].set(1);
+        } else {
+            closure.upvalue_int_kinds[idx as usize].set(0);
+        }
     }
 }
 

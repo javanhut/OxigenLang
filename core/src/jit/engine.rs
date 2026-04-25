@@ -121,6 +121,16 @@ pub(crate) struct JitCounters {
     /// Probe: inline Call IC misses (cache miss or non-closure tag).
     /// Bumped from emitted IR at the miss-block entry.
     pub call_ic_miss: std::cell::Cell<u64>,
+    /// B2.2: incremented when the inline GetUpvalue closed-integer fast
+    /// path fires — `kinds[idx] == 1` lets the JIT load the cached i64
+    /// directly from `ObjClosure.upvalue_int_values` and push it as a
+    /// `Value::Integer` without crossing into Rust. Bumped from IR at
+    /// the fast-block entry. The first GetUpvalue against any given
+    /// closure always misses (cache empty) and goes through
+    /// `jit_get_upvalue`, which populates the cache; subsequent reads
+    /// hit. So `inline_hit + get_upvalue_calls ≈ total dynamic GetUpvalue
+    /// count`, and the first-call miss counts toward `get_upvalue_calls`.
+    pub get_upvalue_inline_hit: std::cell::Cell<u64>,
 }
 
 impl JitCounters {
@@ -147,6 +157,7 @@ impl JitCounters {
             jit_op_return_calls: std::cell::Cell::new(0),
             call_ic_hit: std::cell::Cell::new(0),
             call_ic_miss: std::cell::Cell::new(0),
+            get_upvalue_inline_hit: std::cell::Cell::new(0),
         }
     }
 
@@ -173,6 +184,7 @@ impl JitCounters {
         eprintln!("  jit_op_return_calls:               {}", self.jit_op_return_calls.get());
         eprintln!("  call_ic_hit:                       {}", self.call_ic_hit.get());
         eprintln!("  call_ic_miss:                      {}", self.call_ic_miss.get());
+        eprintln!("  get_upvalue_inline_hit:            {}", self.get_upvalue_inline_hit.get());
     }
 }
 
@@ -2216,9 +2228,101 @@ impl JitInner {
 
                     // ── Upvalues ────────────────────────────────────
                     OpCode::GetUpvalue => {
+                        // B2.2: inline closed-integer fast path. Load
+                        // `kinds[idx]` from the active closure's
+                        // JIT-visible cache; if it equals 1, read the
+                        // cached i64 and push it as Value::Integer
+                        // without crossing into Rust. Otherwise fall
+                        // through to `jit_get_upvalue`, which populates
+                        // the cache as a side-effect so subsequent
+                        // executions of the same opcode hit the fast
+                        // path. `Box<[Cell<u8>]>` and `Box<[Cell<i64>]>`
+                        // are wide pointers `(data: *const T, len:
+                        // usize)`; we read just the data pointer at
+                        // struct-relative offset.
+                        use cranelift_codegen::ir::MemFlags;
+                        use cranelift_codegen::ir::condcodes::IntCC;
                         let idx = read_u16(code, ip + 1);
                         let idx_val = builder.ins().iconst(types::I32, idx as i64);
+                        let flags = MemFlags::trusted();
+
+                        let frame_ptr =
+                            emit_load_top_jit_frame_ptr(&mut builder, vm_val);
+                        let closure_ptr = builder.ins().load(
+                            ptr_ty,
+                            flags,
+                            frame_ptr,
+                            JitFrame::OFFSET_CLOSURE_RAW,
+                        );
+                        // Pinned by `obj_closure_upvalue_caches_layout`
+                        // test: the kinds/values fields sit at known
+                        // offsets, each a `Box<[T]>` whose first usize
+                        // is the data pointer.
+                        let kinds_box_off =
+                            std::mem::offset_of!(crate::vm::value::ObjClosure, upvalue_int_kinds)
+                                as i32;
+                        let values_box_off =
+                            std::mem::offset_of!(crate::vm::value::ObjClosure, upvalue_int_values)
+                                as i32;
+                        let kinds_data = builder.ins().load(
+                            ptr_ty,
+                            flags,
+                            closure_ptr,
+                            kinds_box_off,
+                        );
+                        let kind_byte = builder.ins().load(
+                            types::I8,
+                            flags,
+                            kinds_data,
+                            idx as i32,
+                        );
+                        let is_int =
+                            builder.ins().icmp_imm(IntCC::Equal, kind_byte, 1);
+
+                        let fast_block = builder.create_block();
+                        let fallback_block = builder.create_block();
+                        let cont_block = builder.create_block();
+                        builder.ins().brif(
+                            is_int,
+                            fast_block,
+                            &[],
+                            fallback_block,
+                            &[],
+                        );
+
+                        // ── Fast block: cache hit ──
+                        builder.switch_to_block(fast_block);
+                        let values_data = builder.ins().load(
+                            ptr_ty,
+                            flags,
+                            closure_ptr,
+                            values_box_off,
+                        );
+                        let int_val = builder.ins().load(
+                            types::I64,
+                            flags,
+                            values_data,
+                            (idx as i32) * 8,
+                        );
+                        emit_inline_push_integer(&mut builder, vm_val, int_val);
+                        if let Some(cp) = counters_ptr_opt {
+                            emit_counter_bump(
+                                &mut builder,
+                                cp,
+                                counter_offsets::GET_UPVALUE_INLINE_HIT,
+                            );
+                        }
+                        builder.ins().jump(cont_block, &[]);
+
+                        // ── Fallback block: helper ──
+                        builder.switch_to_block(fallback_block);
                         builder.ins().call(refs.get_upvalue, &[vm_val, idx_val]);
+                        builder.ins().jump(cont_block, &[]);
+
+                        builder.switch_to_block(cont_block);
+                        builder.seal_block(fast_block);
+                        builder.seal_block(fallback_block);
+                        builder.seal_block(cont_block);
                         ip += 3;
                     }
                     OpCode::SetUpvalue => {
@@ -5436,6 +5540,8 @@ mod counter_offsets {
         offset_of!(JitCounters, virt_div_pow2_lowered) as isize;
     pub const CALL_IC_HIT: isize = offset_of!(JitCounters, call_ic_hit) as isize;
     pub const CALL_IC_MISS: isize = offset_of!(JitCounters, call_ic_miss) as isize;
+    pub const GET_UPVALUE_INLINE_HIT: isize =
+        offset_of!(JitCounters, get_upvalue_inline_hit) as isize;
 }
 
 /// True iff `val` is the result of a Cranelift `iconst` with the
