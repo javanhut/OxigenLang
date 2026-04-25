@@ -94,6 +94,33 @@ pub(crate) struct JitCounters {
     /// roughly 20-cycle `idiv` instruction Cranelift's x86_64 backend
     /// otherwise emits.
     pub virt_div_pow2_lowered: std::cell::Cell<u64>,
+    /// Probe (bench_closure): raw count of `jit_get_upvalue` FFI
+    /// crossings. Bumped from the Rust helper. Nonzero count here
+    /// with zero coverage from a fast path indicates GetUpvalue is
+    /// a candidate for inline lowering.
+    pub get_upvalue_calls: std::cell::Cell<u64>,
+    /// Probe: subset of `get_upvalue_calls` where the upvalue was
+    /// `Closed(Value::Integer(_))`. If this ≈ `get_upvalue_calls`
+    /// for a hot bench, an inline Closed+Integer fast path would
+    /// cover nearly all traffic.
+    pub get_upvalue_closed_integer_hit: std::cell::Cell<u64>,
+    /// Probe: subset of `get_upvalue_calls` that were Open, or
+    /// Closed non-Integer. Measures how often a fast path would
+    /// have to fall back to the generic helper.
+    pub get_upvalue_fallback: std::cell::Cell<u64>,
+    /// Probe: raw count of `jit_set_upvalue` FFI crossings. Mutable
+    /// upvalues disqualify simple caching strategies.
+    pub set_upvalue_calls: std::cell::Cell<u64>,
+    /// Probe: raw count of `jit_op_return` FFI crossings. Large
+    /// values indicate return-path FFI is a significant fixed cost
+    /// per function invocation.
+    pub jit_op_return_calls: std::cell::Cell<u64>,
+    /// Probe: inline Call IC hits (cache matches expected closure).
+    /// Bumped from emitted IR at the hit-block entry.
+    pub call_ic_hit: std::cell::Cell<u64>,
+    /// Probe: inline Call IC misses (cache miss or non-closure tag).
+    /// Bumped from emitted IR at the miss-block entry.
+    pub call_ic_miss: std::cell::Cell<u64>,
 }
 
 impl JitCounters {
@@ -113,6 +140,13 @@ impl JitCounters {
             virt_branch_eq_hit: std::cell::Cell::new(0),
             virt_branch_parity_hit: std::cell::Cell::new(0),
             virt_div_pow2_lowered: std::cell::Cell::new(0),
+            get_upvalue_calls: std::cell::Cell::new(0),
+            get_upvalue_closed_integer_hit: std::cell::Cell::new(0),
+            get_upvalue_fallback: std::cell::Cell::new(0),
+            set_upvalue_calls: std::cell::Cell::new(0),
+            jit_op_return_calls: std::cell::Cell::new(0),
+            call_ic_hit: std::cell::Cell::new(0),
+            call_ic_miss: std::cell::Cell::new(0),
         }
     }
 
@@ -132,6 +166,13 @@ impl JitCounters {
         eprintln!("  virt_branch_eq_hit:                {}", self.virt_branch_eq_hit.get());
         eprintln!("  virt_branch_parity_hit:            {}", self.virt_branch_parity_hit.get());
         eprintln!("  virt_div_pow2_lowered:             {}", self.virt_div_pow2_lowered.get());
+        eprintln!("  get_upvalue_calls:                 {}", self.get_upvalue_calls.get());
+        eprintln!("  get_upvalue_closed_integer_hit:    {}", self.get_upvalue_closed_integer_hit.get());
+        eprintln!("  get_upvalue_fallback:              {}", self.get_upvalue_fallback.get());
+        eprintln!("  set_upvalue_calls:                 {}", self.set_upvalue_calls.get());
+        eprintln!("  jit_op_return_calls:               {}", self.jit_op_return_calls.get());
+        eprintln!("  call_ic_hit:                       {}", self.call_ic_hit.get());
+        eprintln!("  call_ic_miss:                      {}", self.call_ic_miss.get());
     }
 }
 
@@ -2571,6 +2612,13 @@ impl JitInner {
 
                         // Hit — cached closure matches.
                         builder.switch_to_block(hit_block);
+                        if let Some(cp) = counters_ptr_opt {
+                            emit_counter_bump(
+                                &mut builder,
+                                cp,
+                                counter_offsets::CALL_IC_HIT,
+                            );
+                        }
                         let jit_frames_ptr = builder.ins().load(
                             ptr_ty,
                             flags,
@@ -2670,6 +2718,13 @@ impl JitInner {
 
                         // Miss — fallback + populate cache.
                         builder.switch_to_block(miss_block);
+                        if let Some(cp) = counters_ptr_opt {
+                            emit_counter_bump(
+                                &mut builder,
+                                cp,
+                                counter_offsets::CALL_IC_MISS,
+                            );
+                        }
                         let ac_val =
                             builder.ins().iconst(types::I32, arg_count as i64);
                         let miss_call = builder.ins().call(
@@ -5379,6 +5434,8 @@ mod counter_offsets {
         offset_of!(JitCounters, virt_branch_parity_hit) as isize;
     pub const VIRT_DIV_POW2_LOWERED: isize =
         offset_of!(JitCounters, virt_div_pow2_lowered) as isize;
+    pub const CALL_IC_HIT: isize = offset_of!(JitCounters, call_ic_hit) as isize;
+    pub const CALL_IC_MISS: isize = offset_of!(JitCounters, call_ic_miss) as isize;
 }
 
 /// True iff `val` is the result of a Cranelift `iconst` with the

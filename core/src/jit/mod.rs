@@ -97,6 +97,16 @@ impl JitEngine {
         }
     }
 
+    /// Raw pointer to the JIT counters block, if the inner engine has
+    /// been instantiated. Callers use this from runtime helpers that
+    /// only have `&mut self` access to JitEngine via the VM and need
+    /// to bump diagnostic counters without going through borrow-check
+    /// acrobatics. Returns None before first JIT compilation.
+    #[cfg(feature = "jit")]
+    pub(crate) fn counters_ptr_opt(&self) -> Option<*const engine::JitCounters> {
+        self.inner.as_ref().map(|i| i.counters_ptr())
+    }
+
     /// Lower the hot-threshold so `--jit` runs and tests don't need a long
     /// warmup. Clamped to at least 1.
     pub fn set_threshold(&mut self, t: u32) {

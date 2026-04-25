@@ -1088,7 +1088,7 @@ impl VM {
     }
 
     #[inline(always)]
-    fn active_closure(&self) -> &ObjClosure {
+    pub(crate) fn active_closure(&self) -> &ObjClosure {
         if self.jit_executing.get() {
             if let Some(frame) = self.jit_frame_top() {
                 return unsafe { &*frame.closure_raw };

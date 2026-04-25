@@ -607,6 +607,29 @@ pub unsafe extern "C" fn jit_define_global_typed(
 pub unsafe extern "C" fn jit_get_upvalue(vm: *mut VM, idx: u32) {
     let vm = unsafe { &mut *vm };
     vm.sync_stack_from_view();
+    // Probe: classify the upvalue for diagnostic counting before
+    // we mutate the stack. The `Closed(Integer)` shape is the one
+    // an inline fast path would cover.
+    {
+        let counters = vm.jit.counters_ptr_opt();
+        if let Some(c) = counters {
+            let c = unsafe { &*c };
+            c.get_upvalue_calls.set(c.get_upvalue_calls.get() + 1);
+            let closed_int = {
+                let upvalue = &vm.active_closure().upvalues[idx as usize];
+                matches!(
+                    &*upvalue.borrow(),
+                    crate::vm::value::Upvalue::Closed(crate::vm::value::Value::Integer(_))
+                )
+            };
+            if closed_int {
+                c.get_upvalue_closed_integer_hit
+                    .set(c.get_upvalue_closed_integer_hit.get() + 1);
+            } else {
+                c.get_upvalue_fallback.set(c.get_upvalue_fallback.get() + 1);
+            }
+        }
+    }
     // handle_get_upvalue returns Result but can't actually fail today;
     // fold any future error into a stashed error rather than propagating.
     if let Err(e) = vm.handle_get_upvalue(idx as u16) {
@@ -617,6 +640,10 @@ pub unsafe extern "C" fn jit_get_upvalue(vm: *mut VM, idx: u32) {
 pub unsafe extern "C" fn jit_set_upvalue(vm: *mut VM, idx: u32) {
     let vm = unsafe { &mut *vm };
     vm.sync_stack_from_view();
+    if let Some(c) = vm.jit.counters_ptr_opt() {
+        let c = unsafe { &*c };
+        c.set_upvalue_calls.set(c.set_upvalue_calls.get() + 1);
+    }
     if let Err(e) = vm.handle_set_upvalue(idx as u16) {
         vm.jit.stash_error(e);
     }
@@ -1175,6 +1202,11 @@ pub unsafe extern "C" fn jit_stack_truncate(vm: *mut VM, new_len: i64) {
 pub unsafe extern "C" fn jit_op_return(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
     vm.sync_stack_from_view();
+    if let Some(c) = vm.jit.counters_ptr_opt() {
+        let c = unsafe { &*c };
+        c.jit_op_return_calls
+            .set(c.jit_op_return_calls.get() + 1);
+    }
     let result = vm.pop();
     let frame = vm
         .jit_frame_pop_raw()
