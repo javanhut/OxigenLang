@@ -372,11 +372,17 @@ enum Entry {
 /// divergence points (entry block params, prologue, OpCode::Return
 /// success path) — everywhere else the emission logic is shared.
 ///
-/// The ABI invariant: BOTH entry kinds return a single `i32` status
-/// value. Specialized entries carry their `i64` payload through an
-/// out-param pointer supplied by the caller; see `ret_out_param_index`.
-/// This keeps every existing `return_(&[status])` site in the dispatch
-/// loop unchanged, avoiding an audit of ~1900 lines of IR.
+/// The ABI shape per entry kind.
+///   Generic:        fn(*mut VM) -> u32
+///   IntSpecialized: fn(*mut VM, i64, ..., i64) -> (u32, i64)
+///
+/// Every emit site within `compile_function` funnels its return through
+/// a single `exit_block` with two block params (status: I32, payload:
+/// I64). The post-dispatch tail of the entry then issues
+/// `return_(&[status])` for Generic (dropping payload) or
+/// `return_(&[status, payload])` for IntSpecialized. Early-exit /
+/// bailout sites pass `(status, iconst(0))` since payload is only
+/// meaningful on status == 0 success-Return.
 #[allow(dead_code)] // Generic variant not yet routed through this enum
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum EntryKind {
@@ -385,21 +391,18 @@ pub(crate) enum EntryKind {
     /// through B2.2a tag guards for int mirrors. Successful
     /// `OpCode::Return` calls the `op_return` helper.
     Generic,
-    /// `fn(*mut VM, i64, ..., i64, *mut i64) -> u32`. Caller passes
-    /// args in registers and supplies an i64 out-param for the return
-    /// payload. Entry writes each i64 back to the backing stack slot
-    /// for helper compat + `def_var`s the mirror Variable directly —
-    /// no tag guard (args are trusted Int by the caller's contract).
-    /// Successful `OpCode::Return` stores the payload via `*ret_out`,
-    /// tears down the frame inline, and `return_(&[0])`. Early
-    /// error/bailout returns remain shaped identically to Generic
-    /// (`return_(&[status])`) thanks to the single-status ABI.
-    IntSpecialized {
-        /// Block-param index of the `*mut i64` out pointer — the last
-        /// entry-block param. Arity is `ret_out_param_index - 1` (vm
-        /// is index 0).
-        ret_out_param_index: usize,
-    },
+    /// `fn(*mut VM, i64, ..., i64) -> (u32, i64)`. Caller passes args
+    /// in registers; status returns in the first ABI return slot,
+    /// payload (valid iff status == 0) in the second. Entry writes
+    /// each i64 back to the backing stack slot for helper compat +
+    /// `def_var`s the mirror Variable directly — no tag guard (args
+    /// are trusted Int by the caller's contract). Successful
+    /// `OpCode::Return` jumps to `exit_block` with `(0, payload)`;
+    /// the post-dispatch tail issues the multi-value return. Early
+    /// error/bailout returns flow through the same exit_block with
+    /// `(status, 0)` — the payload slot is ignored by the caller on
+    /// non-zero status.
+    IntSpecialized,
 }
 
 /// What kind of specialized entry a CompiledEntries carries. Observable
@@ -921,9 +924,9 @@ impl JitInner {
             .map_err(|_| ())?;
 
         // Specialized thunk signature:
-        //   fn(*mut VM, i64, ..., i64, ret_out: *mut i64) -> u32
-        // Single status return — the i64 payload flows through the
-        // out-param pointer provided by the caller.
+        //   fn(*mut VM, i64, ..., i64) -> (u32, i64)
+        // Multi-return: status in result 0, payload in result 1.
+        // Caller reads payload only when status == 0.
         let (spec_thunk_id, spec_seq_id, spec_sig_opt): (Option<FuncId>, Option<u32>, Option<Signature>) =
             if slot_types.specialized_entry_eligible {
                 let arity = func.arity as usize;
@@ -932,8 +935,8 @@ impl JitInner {
                 for _ in 0..arity {
                     spec_sig.params.push(AbiParam::new(types::I64));
                 }
-                spec_sig.params.push(AbiParam::new(ptr_ty));
                 spec_sig.returns.push(AbiParam::new(types::I32));
+                spec_sig.returns.push(AbiParam::new(types::I64));
                 self.next_id = self.next_id.wrapping_add(1);
                 let ssid = self.next_id;
                 let spec_name = format!(
@@ -973,9 +976,7 @@ impl JitInner {
             (spec_thunk_id, spec_seq_id, spec_sig_opt)
         {
             entries_to_compile.push(EntryJob {
-                kind: EntryKind::IntSpecialized {
-                    ret_out_param_index: func.arity as usize + 1,
-                },
+                kind: EntryKind::IntSpecialized,
                 func_id: sid,
                 seq_id: ssid,
                 sig: ssig,
@@ -995,6 +996,16 @@ impl JitInner {
             // Create blocks.
             let entry_block = builder.create_block();
             builder.append_block_params_for_function_params(entry_block);
+
+            // Track B: shared exit block. Every early-exit, bailout, and
+            // success-Return path jumps here with `(status: I32, payload:
+            // I64)`. Generic emits `return_(&[status])`; IntSpecialized
+            // emits `return_(&[status, payload])`. Payload is meaningful
+            // only on status == 0 specialized success-Return; all other
+            // sites pass `iconst(0)`.
+            let exit_block = builder.create_block();
+            builder.append_block_param(exit_block, types::I32);
+            builder.append_block_param(exit_block, types::I64);
 
             let mut blocks: HashMap<usize, Block> = HashMap::new();
             blocks.insert(0, entry_block);
@@ -1048,12 +1059,9 @@ impl JitInner {
             // so the Pop handler treats them as virtual no-ops.
             let mut virt_branch_elided_pops: HashSet<usize> = HashSet::new();
 
-            // A2.5 commit 5: lazily-allocated stack slot used as the
-            // i64 out-param for A3 direct specialized calls. One slot
-            // per caller frame is enough because each native invocation
-            // has its own machine stack frame and the result is loaded
-            // immediately after the call. Created on first A3 emission.
-            let mut a3_ret_slot: Option<cranelift_codegen::ir::StackSlot> = None;
+            // Track B multi-return ABI: A3 direct specialized calls no
+            // longer need an i64 out-slot — payload comes back as the
+            // call's second SSA result.
 
             // Declare one Variable per virtualizable slot with a
             // recognized bytecode-level initializer. Variable IDs come
@@ -1156,7 +1164,7 @@ impl JitInner {
             // all params — matching what the generic caller would have
             // pushed.
             match kind {
-                EntryKind::IntSpecialized { .. } => {
+                EntryKind::IntSpecialized => {
                     use cranelift_codegen::ir::MemFlags;
                     let flags = MemFlags::trusted();
                     let arity = func.arity as usize;
@@ -1273,7 +1281,8 @@ impl JitInner {
 
                         builder.switch_to_block(bailout_block);
                         let two = builder.ins().iconst(types::I32, 2);
-                        builder.ins().return_(&[two]);
+                        let zero64 = builder.ins().iconst(types::I64, 0);
+                        builder.ins().jump(exit_block, &[two, zero64]);
 
                         builder.switch_to_block(prologue_done);
                         effective_entry_block = prologue_done;
@@ -1472,7 +1481,7 @@ impl JitInner {
                     OpCode::Index => {
                         let call = builder.ins().call(refs.index_fast_array_int, &[vm_val]);
                         let status = builder.inst_results(call)[0];
-                        emit_early_exit_on_err(&mut builder, status);
+                        emit_early_exit_on_err(&mut builder, exit_block, status);
                         ip += 1;
                     }
                     OpCode::TypeWrap => {
@@ -1480,7 +1489,7 @@ impl JitInner {
                         let idx_val = builder.ins().iconst(types::I32, idx as i64);
                         let call = builder.ins().call(refs.type_wrap, &[vm_val, idx_val]);
                         let status = builder.inst_results(call)[0];
-                        emit_early_exit_on_err(&mut builder, status);
+                        emit_early_exit_on_err(&mut builder, exit_block, status);
                         ip += 3;
                     }
                     OpCode::GetLocal => {
@@ -1501,6 +1510,7 @@ impl JitInner {
                             field_ic_ix += 2;
                             emit_inline_struct_field_add(
                                 &mut builder,
+                                exit_block,
                                 &refs,
                                 ptr_ty,
                                 vm_val,
@@ -1534,7 +1544,7 @@ impl JitInner {
                                 &[vm_val, dst, array, index, modulus, pop_after],
                             );
                             let status = builder.inst_results(call)[0];
-                            emit_early_exit_on_err(&mut builder, status);
+                            emit_early_exit_on_err(&mut builder, exit_block, status);
                             ip += m.len;
                         } else if let Some(m) = match_local_arith_update(code, ip, &blocks)
                             .filter(|m| !int_locals.contains_key(&m.dst_slot)
@@ -1549,6 +1559,7 @@ impl JitInner {
                             }
                             emit_inline_local_scaled_arith_update(
                                 &mut builder,
+                                exit_block,
                                 &refs,
                                 vm_val,
                                 slot_offset_val,
@@ -1573,6 +1584,7 @@ impl JitInner {
                             }
                             emit_inline_local_scaled_arith_update(
                                 &mut builder,
+                                exit_block,
                                 &refs,
                                 vm_val,
                                 slot_offset_val,
@@ -1596,6 +1608,7 @@ impl JitInner {
                             }
                             emit_inline_local_const_arith_update(
                                 &mut builder,
+                                exit_block,
                                 &refs,
                                 vm_val,
                                 slot_offset_val,
@@ -1768,7 +1781,7 @@ impl JitInner {
                                 OpCode::Multiply => (IntArithOp::Mul, refs.mul),
                                 _ => unreachable!(),
                             };
-                            emit_int_fast_arith(&mut builder, &refs, vm_val, arith_op, slow);
+                            emit_int_fast_arith(&mut builder, exit_block, &refs, vm_val, arith_op, slow);
                         }
                         ip += 1;
                     }
@@ -1837,6 +1850,7 @@ impl JitInner {
                             let slow_helper = if is_mod { refs.modu } else { refs.div };
                             let result = emit_int_virt_divmod(
                                 &mut builder,
+                                exit_block,
                                 vm_val,
                                 is_mod,
                                 lhs,
@@ -1854,7 +1868,7 @@ impl JitInner {
                                 );
                             }
                             let slow = if is_mod { refs.modu } else { refs.div };
-                            emit_int_fast_divmod(&mut builder, &refs, vm_val, is_mod, slow);
+                            emit_int_fast_divmod(&mut builder, exit_block, &refs, vm_val, is_mod, slow);
                         }
                         ip += 1;
                     }
@@ -1981,6 +1995,7 @@ impl JitInner {
                                 }
                                 emit_fused_int_cmp_branch(
                                     &mut builder,
+                                    exit_block,
                                     &refs,
                                     vm_val,
                                     cc,
@@ -2016,6 +2031,7 @@ impl JitInner {
                             } else {
                                 emit_int_fast_cmp(
                                     &mut builder,
+                                    exit_block,
                                     &refs,
                                     vm_val,
                                     cc,
@@ -2027,7 +2043,7 @@ impl JitInner {
                     }
 
                     OpCode::Negate => {
-                        emit_fallible(&mut builder, refs.negate, vm_val);
+                        emit_fallible(&mut builder, exit_block, refs.negate, vm_val);
                         ip += 1;
                     }
 
@@ -2199,7 +2215,8 @@ impl JitInner {
                             .ins()
                             .brif(status, err_block, &[], cont_block, &[]);
                         builder.switch_to_block(err_block);
-                        builder.ins().return_(&[status]);
+                        let zero64 = builder.ins().iconst(types::I64, 0);
+                        builder.ins().jump(exit_block, &[status, zero64]);
 
                         builder.switch_to_block(cont_block);
                         ip += 3;
@@ -2209,7 +2226,7 @@ impl JitInner {
                         let idx_val = builder.ins().iconst(types::I32, idx as i64);
                         let call = builder.ins().call(refs.set_global, &[vm_val, idx_val]);
                         let status = builder.inst_results(call)[0];
-                        emit_early_exit_on_err(&mut builder, status);
+                        emit_early_exit_on_err(&mut builder, exit_block, status);
                         ip += 3;
                     }
                     OpCode::DefineGlobal => {
@@ -2217,7 +2234,7 @@ impl JitInner {
                         let idx_val = builder.ins().iconst(types::I32, idx as i64);
                         let call = builder.ins().call(refs.define_global, &[vm_val, idx_val]);
                         let status = builder.inst_results(call)[0];
-                        emit_early_exit_on_err(&mut builder, status);
+                        emit_early_exit_on_err(&mut builder, exit_block, status);
                         ip += 3;
                     }
                     OpCode::DefineGlobalTyped => {
@@ -2232,7 +2249,7 @@ impl JitInner {
                             &[vm_val, name_val, mut_val, ty_val],
                         );
                         let status = builder.inst_results(call)[0];
-                        emit_early_exit_on_err(&mut builder, status);
+                        emit_early_exit_on_err(&mut builder, exit_block, status);
                         ip += 6;
                     }
 
@@ -2362,7 +2379,7 @@ impl JitInner {
                             .ins()
                             .call(refs.op_closure, &[vm_val, fn_val, off_val]);
                         let status = builder.inst_results(call)[0];
-                        emit_early_exit_on_err(&mut builder, status);
+                        emit_early_exit_on_err(&mut builder, exit_block, status);
                         ip = descriptors_offset + 3 * upvalue_count;
                     }
 
@@ -2407,8 +2424,6 @@ impl JitInner {
                         let a3_post_call_block: Option<Block> = if a3_eligible {
                             use cranelift_codegen::ir::MemFlags;
                             use cranelift_codegen::ir::condcodes::IntCC;
-                            use cranelift_codegen::ir::StackSlotData;
-                            use cranelift_codegen::ir::StackSlotKind;
 
                             let flags = MemFlags::trusted();
                             let spec_id = spec_thunk_id.unwrap();
@@ -2494,15 +2509,9 @@ impl JitInner {
                                 );
                             }
 
-                            // Lazily allocate the shared ret-slot.
-                            let ret_slot = *a3_ret_slot.get_or_insert_with(|| {
-                                builder.create_sized_stack_slot(StackSlotData::new(
-                                    StackSlotKind::ExplicitSlot,
-                                    8,
-                                    3,
-                                ))
-                            });
-                            let ret_ptr = builder.ins().stack_addr(ptr_ty, ret_slot, 0);
+                            // Track B: multi-return ABI — no ret-slot
+                            // allocation needed; payload comes back in
+                            // the second SSA result of the call.
 
                             // Push JitFrame for the callee (using our own closure_ptr
                             // — we just proved equality with it).
@@ -2581,19 +2590,21 @@ impl JitInner {
                             // drops it. No manual pop needed here.
 
                             // Collect args from expr_stack into the
-                            // call argument list: (vm, a0, a1, ..., ret_ptr).
+                            // call argument list: (vm, a0, a1, ...).
+                            // Track B multi-return: no ret-pointer arg.
                             let mut call_args: Vec<cranelift_codegen::ir::Value> =
-                                Vec::with_capacity(arg_count as usize + 2);
+                                Vec::with_capacity(arg_count as usize + 1);
                             call_args.push(vm_val);
                             let start_idx =
                                 expr_stack.len() - (arg_count as usize);
                             call_args.extend(expr_stack.drain(start_idx..));
-                            call_args.push(ret_ptr);
 
                             let spec_fref =
                                 self.module.declare_func_in_func(spec_id, builder.func);
                             let call = builder.ins().call(spec_fref, &call_args);
-                            let status = builder.inst_results(call)[0];
+                            let results = builder.inst_results(call);
+                            let status = results[0];
+                            let payload = results[1];
 
                             // Error / bailout propagate.
                             let ok_block_a3 = builder.create_block();
@@ -2609,17 +2620,17 @@ impl JitInner {
 
                             builder.switch_to_block(err_block_a3);
                             let eb_status = builder.block_params(err_block_a3)[0];
-                            builder.ins().return_(&[eb_status]);
+                            let zero64 = builder.ins().iconst(types::I64, 0);
+                            builder.ins().jump(exit_block, &[eb_status, zero64]);
 
-                            // Success: load result from ret_slot. Push
-                            // Value::Integer(result) onto VM stack — matches
-                            // what the IC path would have left there via
-                            // op_return. Callee has already truncated stack
-                            // to slot_offset (dropping closure + args).
+                            // Success: payload arrives directly in the
+                            // call's second SSA result. Push as
+                            // Value::Integer onto VM stack — matches
+                            // what the IC path would have left there
+                            // via op_return. Callee has already
+                            // truncated stack to slot_offset (dropping
+                            // closure + args).
                             builder.switch_to_block(ok_block_a3);
-                            let payload = builder
-                                .ins()
-                                .stack_load(types::I64, ret_slot, 0);
                             emit_inline_push_integer(&mut builder, vm_val, payload);
                             builder.ins().jump(post_call_block, &[]);
 
@@ -2904,7 +2915,8 @@ impl JitInner {
                         // Error exit.
                         builder.switch_to_block(err_block);
                         let err_status = builder.block_params(err_block)[0];
-                        builder.ins().return_(&[err_status]);
+                        let zero64 = builder.ins().iconst(types::I64, 0);
+                        builder.ins().jump(exit_block, &[err_status, zero64]);
 
                         builder.switch_to_block(ok_block);
 
@@ -2935,7 +2947,7 @@ impl JitInner {
                             .ins()
                             .call(refs.op_struct_literal, &[vm_val, name_val, fc_val]);
                         let status = builder.inst_results(call)[0];
-                        emit_early_exit_on_err(&mut builder, status);
+                        emit_early_exit_on_err(&mut builder, exit_block, status);
                         ip += 4;
                     }
                     OpCode::GetField => {
@@ -2957,7 +2969,8 @@ impl JitInner {
 
                         builder.switch_to_block(err_block);
                         let err_status = builder.block_params(err_block)[0];
-                        builder.ins().return_(&[err_status]);
+                        let zero64 = builder.ins().iconst(types::I64, 0);
+                        builder.ins().jump(exit_block, &[err_status, zero64]);
                         builder.switch_to_block(ok_block);
                         ip += 3;
                     }
@@ -2980,7 +2993,8 @@ impl JitInner {
 
                         builder.switch_to_block(err_block);
                         let err_status = builder.block_params(err_block)[0];
-                        builder.ins().return_(&[err_status]);
+                        let zero64 = builder.ins().iconst(types::I64, 0);
+                        builder.ins().jump(exit_block, &[err_status, zero64]);
                         builder.switch_to_block(ok_block);
                         ip += 3;
                     }
@@ -2993,7 +3007,7 @@ impl JitInner {
                             .ins()
                             .call(refs.op_define_method, &[vm_val, sn_val, mc_val]);
                         let status = builder.inst_results(call)[0];
-                        emit_early_exit_on_err(&mut builder, status);
+                        emit_early_exit_on_err(&mut builder, exit_block, status);
                         ip += 4;
                     }
                     OpCode::MethodCall => {
@@ -3469,7 +3483,8 @@ impl JitInner {
 
                             builder.switch_to_block(err_block);
                             let err_status = builder.block_params(err_block)[0];
-                            builder.ins().return_(&[err_status]);
+                            let zero64 = builder.ins().iconst(types::I64, 0);
+                            builder.ins().jump(exit_block, &[err_status, zero64]);
 
                             builder.switch_to_block(ok_block);
                         } else {
@@ -3481,7 +3496,7 @@ impl JitInner {
                                 &[vm_val, mi_val, ac_val, cache_val],
                             );
                             let status = builder.inst_results(call)[0];
-                            emit_early_exit_on_err(&mut builder, status);
+                            emit_early_exit_on_err(&mut builder, exit_block, status);
                         }
                         ip += 4;
                     }
@@ -3491,26 +3506,26 @@ impl JitInner {
                             EntryKind::Generic => {
                                 // Call helper: pops result, pops
                                 // JitFrame, truncates stack, re-pushes
-                                // result boxed. Then return status 0.
+                                // result boxed. Then exit with status 0;
+                                // payload is unused on the Generic ABI
+                                // tail.
                                 builder.ins().call(refs.op_return, &[vm_val]);
-                                let zero = builder.ins().iconst(types::I32, 0);
-                                builder.ins().return_(&[zero]);
+                                let zero32 = builder.ins().iconst(types::I32, 0);
+                                let zero64 = builder.ins().iconst(types::I64, 0);
+                                builder.ins().jump(exit_block, &[zero32, zero64]);
                             }
-                            EntryKind::IntSpecialized { ret_out_param_index } => {
-                                // Specialized ABI: caller supplies
-                                // `*mut i64` as the last block param
-                                // and reads the payload from there on
-                                // status 0. We write it, tear down the
-                                // frame inline, and return 0.
+                            EntryKind::IntSpecialized => {
+                                // Track B: multi-return specialized ABI.
+                                // Source the i64 payload (from expr_stack
+                                // when virtualized; else from the VM
+                                // stack top), tear down the frame inline,
+                                // and jump to exit_block with (0,
+                                // payload). The exit-tail emits
+                                // return_(&[status, payload]) for the
+                                // multi-return signature.
                                 use cranelift_codegen::ir::MemFlags;
                                 let flags = MemFlags::trusted();
 
-                                // Source the return payload. If the
-                                // return value is on expr_stack (virt
-                                // Int), consume it. Otherwise flush
-                                // expr_stack (shouldn't happen for
-                                // int-return functions but defensive),
-                                // then load from VM stack top.
                                 let payload = if let Some(top) = expr_stack.pop() {
                                     top
                                 } else {
@@ -3536,23 +3551,10 @@ impl JitInner {
                                     )
                                 };
 
-                                // Write payload through the caller's
-                                // out-param. ret_out sits at the
-                                // specialized signature's last param
-                                // slot.
-                                let ret_out = builder.block_params(entry_block)
-                                    [ret_out_param_index];
-                                builder.ins().store(flags, payload, ret_out, 0);
-
-                                // Inline frame teardown. Mirrors what
-                                // `jit_op_return` does but without the
-                                // helper FFI:
+                                // Inline frame teardown. Mirrors
+                                // `jit_op_return` minus the helper FFI:
                                 //   1. stack_view.len = slot_offset
-                                //      (drops closure + all locals +
-                                //      any expression-stack temps).
                                 //   2. jit_frame_view.len -= 1
-                                //      (pops the callee's JitFrame).
-                                // Then return status 0.
                                 builder.ins().store(
                                     flags,
                                     slot_offset_val,
@@ -3574,8 +3576,8 @@ impl JitInner {
                                     vm_jit_frame_view_len_offset(),
                                 );
 
-                                let zero = builder.ins().iconst(types::I32, 0);
-                                builder.ins().return_(&[zero]);
+                                let zero32 = builder.ins().iconst(types::I32, 0);
+                                builder.ins().jump(exit_block, &[zero32, payload]);
                             }
                         }
                         terminated = true;
@@ -3589,10 +3591,28 @@ impl JitInner {
 
             // If the last block fell off the end without terminating,
             // something's wrong with the bytecode (every path should end
-            // in Return). Defensive: emit a runtime bailout.
+            // in Return). Defensive: emit a runtime bailout via the
+            // shared exit_block.
             if !terminated {
                 let two = builder.ins().iconst(types::I32, 2);
-                builder.ins().return_(&[two]);
+                let zero64 = builder.ins().iconst(types::I64, 0);
+                builder.ins().jump(exit_block, &[two, zero64]);
+            }
+
+            // Track B: emit the per-kind tail at the shared exit block.
+            // Generic returns single status; IntSpecialized returns
+            // (status, payload).
+            builder.switch_to_block(exit_block);
+            let exit_status = builder.block_params(exit_block)[0];
+            let exit_payload = builder.block_params(exit_block)[1];
+            match kind {
+                EntryKind::Generic => {
+                    let _ = exit_payload;
+                    builder.ins().return_(&[exit_status]);
+                }
+                EntryKind::IntSpecialized => {
+                    builder.ins().return_(&[exit_status, exit_payload]);
+                }
             }
 
                 builder.seal_all_blocks();
@@ -4096,23 +4116,29 @@ fn declare_helper_refs(
 /// "ok" block.
 fn emit_fallible(
     builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
     helper: FuncRef,
     vm_val: cranelift_codegen::ir::Value,
 ) {
     let call = builder.ins().call(helper, &[vm_val]);
     let status = builder.inst_results(call)[0];
-    emit_early_exit_on_err(builder, status);
+    emit_early_exit_on_err(builder, exit_block, status);
 }
 
 /// Given a u32 status produced by a helper call, branch on status != 0:
 /// non-zero returns the status from the thunk; zero continues in a fresh
 /// "ok" block.
-fn emit_early_exit_on_err(builder: &mut FunctionBuilder<'_>, status: cranelift_codegen::ir::Value) {
+fn emit_early_exit_on_err(
+    builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
+    status: cranelift_codegen::ir::Value,
+) {
     let err_block = builder.create_block();
     let ok_block = builder.create_block();
     builder.ins().brif(status, err_block, &[], ok_block, &[]);
     builder.switch_to_block(err_block);
-    builder.ins().return_(&[status]);
+    let zero64 = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(exit_block, &[status, zero64]);
     builder.switch_to_block(ok_block);
 }
 
@@ -4837,6 +4863,7 @@ enum IntArithOp {
 /// Otherwise it falls through to `slow_helper`.
 fn emit_int_fast_arith(
     builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
     refs: &HelperRefs,
     vm_val: cranelift_codegen::ir::Value,
     op: IntArithOp,
@@ -4920,7 +4947,8 @@ fn emit_int_fast_arith(
         .ins()
         .brif(status, err_block, &[], continue_block, &[]);
     builder.switch_to_block(err_block);
-    builder.ins().return_(&[status]);
+    let zero64 = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(exit_block, &[status, zero64]);
 
     builder.switch_to_block(continue_block);
 
@@ -4946,6 +4974,7 @@ fn emit_int_fast_arith(
 /// full dispatch (and repopulate the cache if the shape has changed).
 fn emit_inline_struct_field_add(
     builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
     refs: &HelperRefs,
     ptr_ty: types::Type,
     vm_val: cranelift_codegen::ir::Value,
@@ -5094,7 +5123,8 @@ fn emit_inline_struct_field_add(
 
     builder.switch_to_block(err_block);
     let err_status = builder.block_params(err_block)[0];
-    builder.ins().return_(&[err_status]);
+    let zero64 = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(exit_block, &[err_status, zero64]);
 
     builder.switch_to_block(ok_block);
 }
@@ -5451,6 +5481,7 @@ fn emit_inline_push_float(
 
 fn emit_int_fast_divmod(
     builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
     refs: &HelperRefs,
     vm_val: cranelift_codegen::ir::Value,
     is_modulo: bool,
@@ -5537,7 +5568,8 @@ fn emit_int_fast_divmod(
         .ins()
         .brif(status, err_block, &[], continue_block, &[]);
     builder.switch_to_block(err_block);
-    builder.ins().return_(&[status]);
+    let zero64 = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(exit_block, &[status, zero64]);
 
     builder.switch_to_block(continue_block);
 }
@@ -5886,6 +5918,7 @@ fn emit_load_stack_top_integer_payload(
 /// memory traffic.
 fn emit_int_virt_divmod(
     builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
     vm_val: cranelift_codegen::ir::Value,
     is_modulo: bool,
     lhs: cranelift_codegen::ir::Value,
@@ -5959,7 +5992,8 @@ fn emit_int_virt_divmod(
         .ins()
         .brif(status, err_block, &[], slow_ok_block, &[]);
     builder.switch_to_block(err_block);
-    builder.ins().return_(&[status]);
+    let zero64 = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(exit_block, &[status, zero64]);
     builder.switch_to_block(slow_ok_block);
     let payload = emit_load_stack_top_integer_payload(builder, vm_val);
     emit_inline_stack_pop_one(builder, vm_val);
@@ -5976,6 +6010,7 @@ fn emit_int_virt_divmod(
 /// semantics stay unchanged.
 fn emit_inline_local_const_arith_update(
     builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
     refs: &HelperRefs,
     vm_val: cranelift_codegen::ir::Value,
     slot_offset_val: cranelift_codegen::ir::Value,
@@ -6043,7 +6078,8 @@ fn emit_inline_local_const_arith_update(
     let set_block = builder.create_block();
     builder.ins().brif(status, err_block, &[], set_block, &[]);
     builder.switch_to_block(err_block);
-    builder.ins().return_(&[status]);
+    let zero64 = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(exit_block, &[status, zero64]);
 
     builder.switch_to_block(set_block);
     builder.ins().call(refs.set_local, &[vm_val, slot_val]);
@@ -6061,6 +6097,7 @@ fn emit_inline_local_const_arith_update(
 /// stack values on the integer path.
 fn emit_inline_local_scaled_arith_update(
     builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
     refs: &HelperRefs,
     vm_val: cranelift_codegen::ir::Value,
     slot_offset_val: cranelift_codegen::ir::Value,
@@ -6143,7 +6180,8 @@ fn emit_inline_local_scaled_arith_update(
         .ins()
         .brif(mul_status, mul_err_block, &[], arith_block, &[]);
     builder.switch_to_block(mul_err_block);
-    builder.ins().return_(&[mul_status]);
+    let zero64_a = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(exit_block, &[mul_status, zero64_a]);
 
     builder.switch_to_block(arith_block);
     let slow_helper = match op {
@@ -6159,7 +6197,8 @@ fn emit_inline_local_scaled_arith_update(
         .ins()
         .brif(arith_status, arith_err_block, &[], set_block, &[]);
     builder.switch_to_block(arith_err_block);
-    builder.ins().return_(&[arith_status]);
+    let zero64_b = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(exit_block, &[arith_status, zero64_b]);
 
     builder.switch_to_block(set_block);
     builder.ins().call(refs.set_local, &[vm_val, dst_slot_val]);
@@ -6179,6 +6218,7 @@ fn emit_inline_local_scaled_arith_update(
 /// `slow_helper`.
 fn emit_int_fast_cmp(
     builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
     refs: &HelperRefs,
     vm_val: cranelift_codegen::ir::Value,
     cc: cranelift_codegen::ir::condcodes::IntCC,
@@ -6252,7 +6292,8 @@ fn emit_int_fast_cmp(
         .ins()
         .brif(status, err_block, &[], continue_block, &[]);
     builder.switch_to_block(err_block);
-    builder.ins().return_(&[status]);
+    let zero64 = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(exit_block, &[status, zero64]);
 
     builder.switch_to_block(continue_block);
 }
@@ -6337,6 +6378,7 @@ fn emit_int_fast_eq(
 /// `fall_block` (jump not taken).
 fn emit_fused_int_cmp_branch(
     builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
     refs: &HelperRefs,
     vm_val: cranelift_codegen::ir::Value,
     cc: cranelift_codegen::ir::condcodes::IntCC,
@@ -6443,7 +6485,8 @@ fn emit_fused_int_cmp_branch(
     let cont_block = builder.create_block();
     builder.ins().brif(status, err_block, &[], cont_block, &[]);
     builder.switch_to_block(err_block);
-    builder.ins().return_(&[status]);
+    let zero64 = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(exit_block, &[status, zero64]);
 
     builder.switch_to_block(cont_block);
     // `slow_helper` pushed a `Boolean`; now replicate the branch opcode's
