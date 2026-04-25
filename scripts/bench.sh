@@ -29,7 +29,7 @@ RUNS="${RUNS:-15}"
 # down and re-enter a consistent p-state after a previous 200 ms+ variant,
 # so short variants (~10 ms) get a clean measurement baseline rather than
 # starting on a hot/throttled core.
-INTER_VARIANT_SLEEP="${INTER_VARIANT_SLEEP:-0.5}"
+INTER_VARIANT_SLEEP="${INTER_VARIANT_SLEEP:-30}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BENCH_DIR="$REPO_ROOT/example"
