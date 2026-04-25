@@ -130,17 +130,25 @@ run_one_benchmark() {
 
     # Each element: "<display name>\t<command string>". Tab-separated so
     # names can contain spaces (they do: "oxigen --no-jit", "bun (ts)").
+    #
+    # Variants are ordered to give the CPU the coolest thermal state to
+    # the measurements we care most about. `oxigen --jit` runs first
+    # (the headline JIT number), then `oxigen default`, then the
+    # external comparison runtimes, then `oxigen --no-jit` last — its
+    # ~6s of full-CPU work would heat-saturate the chip and pollute
+    # everything that ran after it (which is what produced the bench_fib
+    # 156ms median artifact pre-fix).
     local specs=()
-    specs+=("oxigen --no-jit"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN --no-jit $oxi_file")
-    specs+=("oxigen default"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN $oxi_file")
     specs+=("oxigen --jit"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN --jit $oxi_file")
-    specs+=("python3"$'\t'"${TASKSET_PREFIX[*]} $PYTHON_BIN $py_file")
+    specs+=("oxigen default"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN $oxi_file")
     if has_bun_ts "$stem"; then
         specs+=("bun (ts)"$'\t'"${TASKSET_PREFIX[*]} $BUN_BIN run $ts_file")
     fi
     if has_node_ts "$stem"; then
         specs+=("node (ts)"$'\t'"${TASKSET_PREFIX[*]} $NODE_BIN ${NODE_TS_ARGS[*]} $ts_file")
     fi
+    specs+=("python3"$'\t'"${TASKSET_PREFIX[*]} $PYTHON_BIN $py_file")
+    specs+=("oxigen --no-jit"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN --no-jit $oxi_file")
 
     local tmp_dir
     tmp_dir="$(mktemp -d)"
@@ -178,11 +186,20 @@ run_one_benchmark() {
     echo
 }
 
-# Extract key metrics from hyperfine's JSON (median in ms) into a TSV
+# Extract key metrics from hyperfine's JSON (min in ms) into a TSV
 # line. Columns: stem, no-jit, default, jit, python, bun, node,
 # jit-vs-python, jit-vs-bun, jit-vs-node. Missing TS runtimes show "-".
 # Command-name-based lookup so the "bun" and "node" columns are filled
 # regardless of which position each ran in.
+#
+# Uses the per-variant `min` rather than `median` so a single thermal
+# event mid-sequence can't pull the headline number off the steady-
+# state cluster. Median is only stable when >50% of runs land in the
+# same thermal regime; once even a few runs throttle, median becomes
+# meaningless on small datasets (15 runs). The `min` tracks the
+# best-case CPU state, which is what every other process on a healthy
+# system would also see; it's the closest single number to "actual
+# performance under non-thermal-stressed conditions".
 summarize_one() {
     local stem=$1
     local out_json="$REPORT_DIR/${stem}.native.json"
@@ -190,12 +207,12 @@ summarize_one() {
         def fmt1: . * 10 | round / 10 | tostring;
         def fmtx: . * 100 | round / 100 | tostring + "x";
         def by_name($n): [.results[] | select(.command | startswith($n))][0];
-        (by_name("oxigen --no-jit").median * 1000) as $nojit
-        | (by_name("oxigen default").median * 1000)  as $default
-        | (by_name("oxigen --jit").median * 1000)    as $jit
-        | (by_name("python3").median * 1000)         as $python
-        | (by_name("bun (ts)")  | if . == null then null else (.median * 1000) end) as $bun
-        | (by_name("node (ts)") | if . == null then null else (.median * 1000) end) as $node
+        (by_name("oxigen --no-jit").min * 1000) as $nojit
+        | (by_name("oxigen default").min * 1000)  as $default
+        | (by_name("oxigen --jit").min * 1000)    as $jit
+        | (by_name("python3").min * 1000)         as $python
+        | (by_name("bun (ts)")  | if . == null then null else (.min * 1000) end) as $bun
+        | (by_name("node (ts)") | if . == null then null else (.min * 1000) end) as $node
         | [
             $stem,
             ($nojit   | fmt1),
@@ -270,7 +287,12 @@ latest_md="$REPORT_DIR/latest-native.md"
         echo "- Git branch: \`$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)\`"
     fi
     echo
-    echo "## Medians (ms)"
+    echo "## Min times (ms)"
+    echo
+    echo "Each cell is the fastest single timed run across \`$RUNS\` runs"
+    echo "after \`$WARMUPS\` warmups. Min is more thermally stable than"
+    echo "median on a desktop CPU that may throttle after sustained"
+    echo "full-CPU work. See \`bench_*.native.json\` for full samples."
     echo
     echo "| benchmark | no-jit | default | jit | python | bun (ts) | node (ts) | jit vs py | jit vs bun | jit vs node |"
     echo "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
