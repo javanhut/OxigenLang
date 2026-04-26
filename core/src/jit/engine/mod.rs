@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use cranelift_codegen::Context;
 use cranelift_codegen::ir::{
-    AbiParam, Block, FuncRef, InstBuilder, Signature, UserFuncName, types,
+    AbiParam, Block, BlockArg, FuncRef, InstBuilder, Signature, UserFuncName, types,
 };
 use cranelift_codegen::settings;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -29,174 +29,27 @@ use crate::vm::value::{
     VALUE_TAG_NONE, VALUE_TAG_STRUCT_INSTANCE,
 };
 
-/// Byte offset of the `stack_view.ptr` field from the base of `VM`.
-/// Computed once and baked into emitted IR as a constant.
-#[inline(always)]
-fn vm_stack_view_ptr_offset() -> i32 {
-    (VM::stack_view_offset() + StackView::OFFSET_PTR as usize) as i32
-}
-
-/// Byte offset of the `stack_view.len` field from the base of `VM`.
-#[inline(always)]
-fn vm_stack_view_len_offset() -> i32 {
-    (VM::stack_view_offset() + StackView::OFFSET_LEN as usize) as i32
-}
-
-#[allow(dead_code)]
-#[inline(always)]
-fn vm_jit_frame_view_ptr_offset() -> i32 {
-    (VM::jit_frame_view_offset() + JitFrameView::OFFSET_PTR as usize) as i32
-}
-
-#[allow(dead_code)]
-#[inline(always)]
-fn vm_jit_frame_view_len_offset() -> i32 {
-    (VM::jit_frame_view_offset() + JitFrameView::OFFSET_LEN as usize) as i32
-}
-
 use super::{CompiledEntries, CompiledThunk, SpecializedThunkRaw};
 use super::runtime;
 use super::scan;
+use super::virt_stack::{VirtConst, VirtSlot, VirtStack};
 
-/// Lightweight JIT instrumentation counters. Each field is a `Cell<u64>`
-/// so increments compile to plain load + inc + store in the JIT IR. On
-/// process exit, `JitInner::drop` dumps the counters to stderr when the
-/// env var `OXIGEN_JIT_STATS` is set. Off by default — zero text output.
-///
-/// Added in stage A0 ahead of the Plan A calling-convention work so a
-/// weak benchmark result is debuggable ("did the specialized path never
-/// get generated? never get hit? get hit but bail?").
-#[repr(C)]
-pub(crate) struct JitCounters {
-    pub specialized_entry_compiled: std::cell::Cell<u64>,
-    pub specialized_entry_called: std::cell::Cell<u64>,
-    pub specialized_call_ic_hit: std::cell::Cell<u64>,
-    pub specialized_call_ic_miss: std::cell::Cell<u64>,
-    pub specialized_call_no_entry: std::cell::Cell<u64>,
-    pub specialized_call_arity_mismatch: std::cell::Cell<u64>,
-    pub specialized_call_bailout: std::cell::Cell<u64>,
-    pub self_recursion_direct_call: std::cell::Cell<u64>,
-    pub virt_divmod_fast: std::cell::Cell<u64>,
-    pub virt_divmod_slow_zero: std::cell::Cell<u64>,
-    pub virt_divmod_slow_overflow: std::cell::Cell<u64>,
-    /// B2.1f: incremented every time the fused `Equal` / `NotEqual`
-    /// + `JumpIf*` path fires with both operands staged as virt Ints
-    /// on `expr_stack`. Measures how often the fast branch-fusion
-    /// replaces a boxed-Bool round trip through `refs.eq`/`refs.ne`.
-    pub virt_branch_eq_hit: std::cell::Cell<u64>,
-    /// B2.1g: incremented when the parity branch peephole fires —
-    /// `(x % 2) == 0` / `!= 0` (and the commuted `0 == x % 2` /
-    /// `0 != x % 2`) lowered to `band_imm + icmp_imm + brif`,
-    /// avoiding `srem` entirely.
-    pub virt_branch_parity_hit: std::cell::Cell<u64>,
-    /// B2.1h: incremented when `Divide` with a power-of-two constant
-    /// divisor is lowered to a bias-and-shift sequence, avoiding the
-    /// roughly 20-cycle `idiv` instruction Cranelift's x86_64 backend
-    /// otherwise emits.
-    pub virt_div_pow2_lowered: std::cell::Cell<u64>,
-    /// Probe (bench_closure): raw count of `jit_get_upvalue` FFI
-    /// crossings. Bumped from the Rust helper. Nonzero count here
-    /// with zero coverage from a fast path indicates GetUpvalue is
-    /// a candidate for inline lowering.
-    pub get_upvalue_calls: std::cell::Cell<u64>,
-    /// Probe: subset of `get_upvalue_calls` where the upvalue was
-    /// `Closed(Value::Integer(_))`. If this ≈ `get_upvalue_calls`
-    /// for a hot bench, an inline Closed+Integer fast path would
-    /// cover nearly all traffic.
-    pub get_upvalue_closed_integer_hit: std::cell::Cell<u64>,
-    /// Probe: subset of `get_upvalue_calls` that were Open, or
-    /// Closed non-Integer. Measures how often a fast path would
-    /// have to fall back to the generic helper.
-    pub get_upvalue_fallback: std::cell::Cell<u64>,
-    /// Probe: raw count of `jit_set_upvalue` FFI crossings. Mutable
-    /// upvalues disqualify simple caching strategies.
-    pub set_upvalue_calls: std::cell::Cell<u64>,
-    /// Probe: raw count of `jit_op_return` FFI crossings. Large
-    /// values indicate return-path FFI is a significant fixed cost
-    /// per function invocation.
-    pub jit_op_return_calls: std::cell::Cell<u64>,
-    /// Probe: inline Call IC hits (cache matches expected closure).
-    /// Bumped from emitted IR at the hit-block entry.
-    pub call_ic_hit: std::cell::Cell<u64>,
-    /// Probe: inline Call IC misses (cache miss or non-closure tag).
-    /// Bumped from emitted IR at the miss-block entry.
-    pub call_ic_miss: std::cell::Cell<u64>,
-    /// B2.2: incremented when the inline GetUpvalue closed-integer fast
-    /// path fires — `kinds[idx] == 1` lets the JIT load the cached i64
-    /// directly from `ObjClosure.upvalue_int_values` and push it as a
-    /// `Value::Integer` without crossing into Rust. Bumped from IR at
-    /// the fast-block entry. The first GetUpvalue against any given
-    /// closure always misses (cache empty) and goes through
-    /// `jit_get_upvalue`, which populates the cache; subsequent reads
-    /// hit. So `inline_hit + get_upvalue_calls ≈ total dynamic GetUpvalue
-    /// count`, and the first-call miss counts toward `get_upvalue_calls`.
-    pub get_upvalue_inline_hit: std::cell::Cell<u64>,
-    /// A4.0 probe: subset of `call_ic_hit` where the callee closure
-    /// has `specialized_kind == NATIVE_INT_BODY` (its specialized
-    /// entry exists and would be invocable via direct i64 dispatch).
-    /// Measures the upper bound on how often A4 (Call IC routes to
-    /// specialized entry) would fire if we built that path. Bumped
-    /// from IR inside the IC hit block — does NOT change behavior;
-    /// the call still dispatches to the generic thunk.
-    pub ic_callee_has_spec_entry: std::cell::Cell<u64>,
-}
-
-impl JitCounters {
-    fn new() -> Self {
-        Self {
-            specialized_entry_compiled: std::cell::Cell::new(0),
-            specialized_entry_called: std::cell::Cell::new(0),
-            specialized_call_ic_hit: std::cell::Cell::new(0),
-            specialized_call_ic_miss: std::cell::Cell::new(0),
-            specialized_call_no_entry: std::cell::Cell::new(0),
-            specialized_call_arity_mismatch: std::cell::Cell::new(0),
-            specialized_call_bailout: std::cell::Cell::new(0),
-            self_recursion_direct_call: std::cell::Cell::new(0),
-            virt_divmod_fast: std::cell::Cell::new(0),
-            virt_divmod_slow_zero: std::cell::Cell::new(0),
-            virt_divmod_slow_overflow: std::cell::Cell::new(0),
-            virt_branch_eq_hit: std::cell::Cell::new(0),
-            virt_branch_parity_hit: std::cell::Cell::new(0),
-            virt_div_pow2_lowered: std::cell::Cell::new(0),
-            get_upvalue_calls: std::cell::Cell::new(0),
-            get_upvalue_closed_integer_hit: std::cell::Cell::new(0),
-            get_upvalue_fallback: std::cell::Cell::new(0),
-            set_upvalue_calls: std::cell::Cell::new(0),
-            jit_op_return_calls: std::cell::Cell::new(0),
-            call_ic_hit: std::cell::Cell::new(0),
-            call_ic_miss: std::cell::Cell::new(0),
-            get_upvalue_inline_hit: std::cell::Cell::new(0),
-            ic_callee_has_spec_entry: std::cell::Cell::new(0),
-        }
-    }
-
-    fn dump(&self) {
-        eprintln!("[jit stats]");
-        eprintln!("  specialized_entry_compiled:        {}", self.specialized_entry_compiled.get());
-        eprintln!("  specialized_entry_called:          {}", self.specialized_entry_called.get());
-        eprintln!("  specialized_call_ic_hit:           {}", self.specialized_call_ic_hit.get());
-        eprintln!("  specialized_call_ic_miss:          {}", self.specialized_call_ic_miss.get());
-        eprintln!("  specialized_call_no_entry:         {}", self.specialized_call_no_entry.get());
-        eprintln!("  specialized_call_arity_mismatch:   {}", self.specialized_call_arity_mismatch.get());
-        eprintln!("  specialized_call_bailout:          {}", self.specialized_call_bailout.get());
-        eprintln!("  self_recursion_direct_call:        {}", self.self_recursion_direct_call.get());
-        eprintln!("  virt_divmod_fast:                  {}", self.virt_divmod_fast.get());
-        eprintln!("  virt_divmod_slow_zero:             {}", self.virt_divmod_slow_zero.get());
-        eprintln!("  virt_divmod_slow_overflow:         {}", self.virt_divmod_slow_overflow.get());
-        eprintln!("  virt_branch_eq_hit:                {}", self.virt_branch_eq_hit.get());
-        eprintln!("  virt_branch_parity_hit:            {}", self.virt_branch_parity_hit.get());
-        eprintln!("  virt_div_pow2_lowered:             {}", self.virt_div_pow2_lowered.get());
-        eprintln!("  get_upvalue_calls:                 {}", self.get_upvalue_calls.get());
-        eprintln!("  get_upvalue_closed_integer_hit:    {}", self.get_upvalue_closed_integer_hit.get());
-        eprintln!("  get_upvalue_fallback:              {}", self.get_upvalue_fallback.get());
-        eprintln!("  set_upvalue_calls:                 {}", self.set_upvalue_calls.get());
-        eprintln!("  jit_op_return_calls:               {}", self.jit_op_return_calls.get());
-        eprintln!("  call_ic_hit:                       {}", self.call_ic_hit.get());
-        eprintln!("  call_ic_miss:                      {}", self.call_ic_miss.get());
-        eprintln!("  get_upvalue_inline_hit:            {}", self.get_upvalue_inline_hit.get());
-        eprintln!("  ic_callee_has_spec_entry:          {}", self.ic_callee_has_spec_entry.get());
-    }
-}
+mod cache;
+mod counters;
+mod defs;
+mod helpers;
+pub(crate) use cache::{
+    CallCacheEntry, FieldCacheEntry, FieldCacheKind, GlobalCacheEntry, MethodCacheEntry,
+    MethodInlineKind,
+};
+pub(crate) use counters::{HELPER_NAMES, HelperCounter, JitCounters};
+use counters::{counter_offsets, emit_counter_bump};
+pub(crate) use defs::{EntryKind, InvokeOutcome, SpecializedEntryKind};
+use defs::{
+    Entry, vm_jit_frame_view_len_offset, vm_jit_frame_view_ptr_offset, vm_stack_view_len_offset,
+    vm_stack_view_ptr_offset,
+};
+use helpers::{HelperIds, HelperRefs, declare_helper_refs, declare_helpers, register_helpers};
 
 pub(super) struct JitInner {
     module: JITModule,
@@ -243,362 +96,24 @@ pub(super) struct JitInner {
     field_caches: Vec<Box<FieldCacheEntry>>,
 }
 
-/// Per-call-site GetGlobal cache. `version` tracks the VM's
-/// `globals_version` at the time the entry was populated; a mismatch
-/// means the globals map has been mutated and the cached `value` is
-/// stale.
-#[repr(C)]
-pub(crate) struct GlobalCacheEntry {
-    pub version: u64,
-    pub value: crate::vm::value::Value,
-}
-
-/// Per-call-site Call cache — readable from Cranelift IR.
-///
-/// Layout (pinned by `#[repr(C)]`):
-/// - offset 0: `closure_raw` — raw `*const ObjClosure` for identity
-///   compare. `null` means the cache is empty.
-/// - offset 8: `thunk` — raw function pointer for the cached thunk.
-///   Valid iff `closure_raw != null`.
-/// - offset 16: `arity` — the callee's arity; used to compute the
-///   stack slot_offset without reading the closure.
-/// - after that: `_keeper` keeps the `Rc` alive so the raw pointer
-///   stays valid (Rc would be freed without this). Rust-only; never
-///   read from IR.
-#[repr(C)]
-pub(crate) struct CallCacheEntry {
-    pub closure_raw: *const crate::vm::value::ObjClosure,
-    pub thunk_raw: *const (),
-    pub arity: u8,
-    _pad: [u8; 7],
-    pub _keeper: Option<std::rc::Rc<crate::vm::value::ObjClosure>>,
-}
-
-impl CallCacheEntry {
-    pub(crate) const OFFSET_CLOSURE_RAW: i32 = 0;
-    /// Reserved for a future pass that loads the thunk directly in IR
-    /// and emits an indirect call, skipping the `jit_op_call_hit`
-    /// helper's FFI crossing entirely. Not yet wired.
-    #[allow(dead_code)]
-    pub(crate) const OFFSET_THUNK_RAW: i32 = 8;
-}
-
-/// Kind tag for inline expansion of a struct-method body at its caller.
-/// Populated by `jit_op_method_call_ic` when the resolved callee's
-/// bytecode matches a whitelisted peephole shape. On subsequent hits the
-/// MethodCall IR reads `inline_kind` and emits the peephole operation
-/// directly instead of pushing a `JitFrame` and calling the thunk.
-///
-/// `#[repr(u8)]` so the JIT can read a single byte at the pinned offset.
-#[repr(u8)]
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum MethodInlineKind {
-    /// No inline expansion known; take the normal JitFrame + thunk path.
-    None = 0,
-    /// Body is `self.f = self.f + <const addend>; return` — arity must be 0.
-    FieldAddConst = 1,
-    /// Body is `self.f = self.f + <arg>; return` — arity must be 1.
-    FieldAddLocal = 2,
-}
-
-/// Per-MethodCall-site cache. Stores the struct def pointer (identity-
-/// compared, held alive by the `Rc`) and the resolved method closure so
-/// that a hit skips `find_struct_method`'s two HashMap lookups entirely.
-///
-/// Also carries optional inline-expansion info (`inline_kind` and
-/// friends). When set, the JIT's MethodCall hit path bypasses the
-/// JitFrame push + thunk dispatch entirely and emits the peephole
-/// operation (currently just the struct-field-add shape) inline at the
-/// caller. See `MethodInlineKind` above.
-#[repr(C)]
-pub(crate) struct MethodCacheEntry {
-    pub struct_def_raw: *const crate::vm::value::ObjStructDef,
-    pub closure_raw: *const crate::vm::value::ObjClosure,
-    pub thunk_raw: *const (),
-    pub arity: u8,
-    pub inline_kind: MethodInlineKind,
-    _pad: [u8; 6],
-    pub inline_field_index: u32,
-    _pad2: [u8; 4],
-    pub inline_addend: i64,
-    pub struct_def: Option<std::rc::Rc<crate::vm::value::ObjStructDef>>,
-    pub closure: Option<std::rc::Rc<crate::vm::value::ObjClosure>>,
-}
-
-impl MethodCacheEntry {
-    pub(crate) const OFFSET_STRUCT_DEF_RAW: i32 = 0;
-    pub(crate) const OFFSET_CLOSURE_RAW: i32 = 8;
-    pub(crate) const OFFSET_THUNK_RAW: i32 = 16;
-    pub(crate) const OFFSET_INLINE_KIND: i32 = 25;
-    pub(crate) const OFFSET_INLINE_FIELD_INDEX: i32 = 32;
-    pub(crate) const OFFSET_INLINE_ADDEND: i32 = 40;
-}
-
-#[repr(u8)]
-#[derive(Clone, Copy)]
-pub(crate) enum FieldCacheKind {
-    Invalid = 0,
-    InstanceField = 1,
-    DefMethod = 2,
-}
-
-#[repr(C)]
-pub(crate) struct FieldCacheEntry {
-    pub struct_def_raw: *const crate::vm::value::ObjStructDef,
-    pub field_index: u32,
-    pub kind: FieldCacheKind,
-    _pad: [u8; 3],
-    pub closure_raw: *const crate::vm::value::ObjClosure,
-    pub thunk_raw: *const (),
-    pub struct_def: Option<std::rc::Rc<crate::vm::value::ObjStructDef>>,
-    pub closure: Option<std::rc::Rc<crate::vm::value::ObjClosure>>,
-}
-
-#[allow(dead_code)]
-impl FieldCacheEntry {
-    pub(crate) const OFFSET_STRUCT_DEF_RAW: i32 = 0;
-    pub(crate) const OFFSET_FIELD_INDEX: i32 = 8;
-    pub(crate) const OFFSET_KIND: i32 = 12;
-    pub(crate) const OFFSET_CLOSURE_RAW: i32 = 16;
-}
-
-enum Entry {
-    Compiled { entries: CompiledEntries },
-    Failed,
-}
-
-/// Which entry point the compile_function IR emitter is currently
-/// producing. Used as a compile-time branch variable at three
-/// divergence points (entry block params, prologue, OpCode::Return
-/// success path) — everywhere else the emission logic is shared.
-///
-/// The ABI shape per entry kind.
-///   Generic:        fn(*mut VM) -> u32
-///   IntSpecialized: fn(*mut VM, i64, ..., i64) -> (u32, i64)
-///
-/// Every emit site within `compile_function` funnels its return through
-/// a single `exit_block` with two block params (status: I32, payload:
-/// I64). The post-dispatch tail of the entry then issues
-/// `return_(&[status])` for Generic (dropping payload) or
-/// `return_(&[status, payload])` for IntSpecialized. Early-exit /
-/// bailout sites pass `(status, iconst(0))` since payload is only
-/// meaningful on status == 0 success-Return.
-#[allow(dead_code)] // Generic variant not yet routed through this enum
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum EntryKind {
-    /// `fn(*mut VM) -> u32`. Caller pushes args onto the VM stack as
-    /// `Value`. Entry reads them through `stack_view`, optionally
-    /// through B2.2a tag guards for int mirrors. Successful
-    /// `OpCode::Return` calls the `op_return` helper.
-    Generic,
-    /// `fn(*mut VM, i64, ..., i64) -> (u32, i64)`. Caller passes args
-    /// in registers; status returns in the first ABI return slot,
-    /// payload (valid iff status == 0) in the second. Entry writes
-    /// each i64 back to the backing stack slot for helper compat +
-    /// `def_var`s the mirror Variable directly — no tag guard (args
-    /// are trusted Int by the caller's contract). Successful
-    /// `OpCode::Return` jumps to `exit_block` with `(0, payload)`;
-    /// the post-dispatch tail issues the multi-value return. Early
-    /// error/bailout returns flow through the same exit_block with
-    /// `(status, 0)` — the payload slot is ignored by the caller on
-    /// non-zero status.
-    IntSpecialized,
-}
-
-/// What kind of specialized entry a CompiledEntries carries. Observable
-/// on the VM side (ObjClosure) so call sites can gate A3's direct-call
-/// path on having a real body, not a trampoline.
-#[allow(dead_code)] // NativeIntBody variant lands in a later commit
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SpecializedEntryKind {
-    /// A2's adapter: boxes i64 args → calls generic → unboxes result.
-    /// Correctness-preserving but pays more than it saves vs the IC
-    /// path. A3 must NOT direct-call trampolines.
-    ForwardTrampoline,
-    /// The real specialized body: runs the function's opcodes with
-    /// i64-resident args, no box/unbox round trip. Safe A3 target.
-    NativeIntBody,
-}
-
-pub(super) enum InvokeOutcome {
-    Returned,
-    Bailout,
-    RuntimeError(VMError),
-}
-
-/// FuncIds of every runtime helper the translator might call.
-struct HelperIds {
-    // Push
-    push_constant: FuncId,       // (vm, u32)
-    push_integer_inline: FuncId, // (vm, i64)
-    push_float_inline: FuncId,   // (vm, i64 bits-of-f64)
-    push_none: FuncId,           // (vm)
-    push_true: FuncId,           // (vm)
-    push_false: FuncId,          // (vm)
-
-    // Stack manip
-    pop: FuncId, // (vm)
-    dup: FuncId, // (vm)
-
-    // Collections
-    build_array: FuncId,          // (vm, u32)
-    index_fast_array_int: FuncId, // (vm) -> u32
-    type_wrap: FuncId,            // (vm, u32) -> u32
-    local_add_array_mod_index: FuncId, // (vm, u32, u32, u32, i64, u32) -> u32
-    struct_field_add_const: FuncId, // (vm, u32, u32, i64) -> u32
-    struct_field_add_local: FuncId, // (vm, u32, u32, u32) -> u32
-
-    // Locals
-    get_local: FuncId, // (vm, u32)
-    set_local: FuncId, // (vm, u32)
-
-    // Arithmetic (fallible)
-    add: FuncId,
-    sub: FuncId,
-    mul: FuncId,
-    div: FuncId,
-    modu: FuncId,
-
-    // Comparison
-    eq: FuncId, // infallible
-    ne: FuncId, // infallible
-    lt: FuncId,
-    le: FuncId,
-    gt: FuncId,
-    ge: FuncId,
-
-    // Logical / unary
-    not: FuncId,    // infallible
-    negate: FuncId, // fallible
-
-    // Branching truthy checks
-    peek_truthy: FuncId, // (vm) -> u32
-    pop_truthy: FuncId,  // (vm) -> u32
-
-    // Return
-    op_return: FuncId, // (vm)
-
-    // Call (fallible, takes arg_count)
-    op_call: FuncId,    // (vm, u32) -> u32
-    op_call_hit: FuncId,  // (vm, *mut CallCacheEntry) -> u32
-    op_call_miss: FuncId, // (vm, u32, *mut CallCacheEntry) -> u32
-
-    // Globals
-    get_global: FuncId,          // (vm, u32) -> u32
-    get_global_ic: FuncId,       // (vm, *mut GlobalCacheEntry, u32) -> u32
-    set_global: FuncId,          // (vm, u32) -> u32
-    define_global: FuncId,       // (vm, u32) -> u32
-    define_global_typed: FuncId, // (vm, u32, u32, u32) -> u32
-
-    // Upvalues
-    get_upvalue: FuncId,   // (vm, u32)
-    set_upvalue: FuncId,   // (vm, u32)
-    close_upvalue: FuncId, // (vm)
-
-    // Closure
-    op_closure: FuncId, // (vm, u32, u32) -> u32
-
-    // Struct ops
-    op_struct_def: FuncId,     // (vm, u32)
-    op_struct_literal: FuncId, // (vm, u32, u32) -> u32
-    op_get_field_ic_miss: FuncId, // (vm, u32, *mut FieldCacheEntry) -> u32
-    op_set_field_ic_miss: FuncId, // (vm, u32, *mut FieldCacheEntry) -> u32
-    op_define_method: FuncId,  // (vm, u32, u32) -> u32
-    op_method_call: FuncId,    // (vm, u32, u32) -> u32
-    op_method_call_ic: FuncId, // (vm, u32, u32, *mut MethodCacheEntry) -> u32
-
-    // Inline int fast-path support
-    stack_as_mut_ptr: FuncId,       // (vm) -> *mut Value (pointer-sized)
-    stack_len: FuncId,              // (vm) -> i64
-    stack_pop_one: FuncId,          // (vm)
-    stack_pop_n: FuncId,            // (vm, u32)
-    stack_commit_len: FuncId,       // (vm, u64)
-    stack_truncate: FuncId,         // (vm, i64)
-    replace_top2_with_bool: FuncId, // (vm, u32)
-    current_slot_offset: FuncId,    // (vm) -> i64
-}
-
-/// FuncRefs for the current function's context — the in-function "import
-/// table" of declared helpers.
-struct HelperRefs {
-    push_constant: FuncRef,
-    #[allow(dead_code)]
-    push_integer_inline: FuncRef,
-    #[allow(dead_code)]
-    push_float_inline: FuncRef,
-    push_none: FuncRef,
-    push_true: FuncRef,
-    push_false: FuncRef,
-    pop: FuncRef,
-    dup: FuncRef,
-    build_array: FuncRef,
-    index_fast_array_int: FuncRef,
-    type_wrap: FuncRef,
-    local_add_array_mod_index: FuncRef,
-    struct_field_add_const: FuncRef,
-    struct_field_add_local: FuncRef,
-    get_local: FuncRef,
-    set_local: FuncRef,
-    add: FuncRef,
-    sub: FuncRef,
-    mul: FuncRef,
-    div: FuncRef,
-    modu: FuncRef,
-    eq: FuncRef,
-    ne: FuncRef,
-    lt: FuncRef,
-    le: FuncRef,
-    gt: FuncRef,
-    ge: FuncRef,
-    not: FuncRef,
-    negate: FuncRef,
-    peek_truthy: FuncRef,
-    pop_truthy: FuncRef,
-    op_return: FuncRef,
-    #[allow(dead_code)]
-    op_call: FuncRef,
-    #[allow(dead_code)]
-    op_call_hit: FuncRef,
-    op_call_miss: FuncRef,
-    #[allow(dead_code)]
-    get_global: FuncRef,
-    get_global_ic: FuncRef,
-    set_global: FuncRef,
-    define_global: FuncRef,
-    define_global_typed: FuncRef,
-    get_upvalue: FuncRef,
-    set_upvalue: FuncRef,
-    close_upvalue: FuncRef,
-    op_closure: FuncRef,
-    op_struct_def: FuncRef,
-    op_struct_literal: FuncRef,
-    op_get_field_ic_miss: FuncRef,
-    op_set_field_ic_miss: FuncRef,
-    op_define_method: FuncRef,
-    #[allow(dead_code)]
-    op_method_call: FuncRef,
-    op_method_call_ic: FuncRef,
-    // `stack_as_mut_ptr` and `stack_len` are still registered as runtime
-    // helpers for backwards compatibility, but the hot JIT paths now
-    // read `vm.stack_view.{ptr, len}` directly via `emit_load_stack_*`
-    // — no FFI crossing.
-    #[allow(dead_code)]
-    stack_as_mut_ptr: FuncRef,
-    #[allow(dead_code)]
-    stack_len: FuncRef,
-    #[allow(dead_code)]
-    stack_pop_one: FuncRef,
-    stack_pop_n: FuncRef,
-    stack_commit_len: FuncRef,
-    stack_truncate: FuncRef,
-    replace_top2_with_bool: FuncRef,
-    #[allow(dead_code)]
-    current_slot_offset: FuncRef,
-}
+// IC entry layouts moved to engine::cache (see use below).
+// Helper FuncId / FuncRef tables and registration moved to engine::helpers.
 
 impl JitInner {
     pub fn new() -> Self {
-        let flag_builder = settings::builder();
+        use cranelift_codegen::settings::Configurable;
+        let mut flag_builder = settings::builder();
+        // Cranelift defaults to `opt_level=none`, which skips the
+        // egraph mid-end and most ISLE peephole rules. With `speed`
+        // we let Cranelift do the work the now-deleted manual
+        // peepholes (`try_emit_sdiv_pow2_peephole`,
+        // `try_emit_parity_branch_peephole`) used to do — including
+        // div-by-constant magic-multiply lowering, eq+brif fusion,
+        // and the parity-test recognition that turns `srem x, 2`
+        // into `band x, 1`.
+        flag_builder
+            .set("opt_level", "speed")
+            .expect("Cranelift accepts opt_level=speed");
         let flags = settings::Flags::new(flag_builder);
 
         let isa_builder =
@@ -923,6 +438,28 @@ impl JitInner {
             .declare_function(&thunk_name, Linkage::Local, &generic_sig)
             .map_err(|_| ())?;
 
+        // Step 0 attribution: bump the per-outcome counter for this
+        // function's spec-entry analysis result. Bumped once per
+        // compile (not per call), so the count == "how many functions
+        // were rejected for reason X". Helpful for spotting "this bench
+        // has 50 callees rejected for has_upvalue_op" patterns.
+        {
+            use crate::compiler::slot_types::SpecEligibilityOutcome::*;
+            let c = &self.counters;
+            let cell = match slot_types.specialized_entry_outcome {
+                Eligible => &c.spec_entry_eligible,
+                RejectedZeroArity => &c.spec_entry_rejected_zero_arity,
+                RejectedParamNotInt => &c.spec_entry_rejected_param_not_int,
+                RejectedParamCaptured => &c.spec_entry_rejected_param_captured,
+                RejectedHasClosureOp => &c.spec_entry_rejected_has_closure_op,
+                RejectedHasUpvalueOp => &c.spec_entry_rejected_has_upvalue_op,
+                RejectedNoReturn => &c.spec_entry_rejected_no_return,
+                RejectedNoCall => &c.spec_entry_rejected_no_call,
+                RejectedReturnUnreachable => &c.spec_entry_rejected_return_unreachable,
+            };
+            cell.set(cell.get() + 1);
+        }
+
         // Specialized thunk signature:
         //   fn(*mut VM, i64, ..., i64) -> (u32, i64)
         // Multi-return: status in result 0, payload in result 1.
@@ -1046,11 +583,20 @@ impl JitInner {
             // SetLocal / Pop to actually use the virtualized path.
             let mut int_locals: HashMap<u16, Variable> = HashMap::new();
             let mut live_int_slots: HashSet<u16> = HashSet::new();
-            // `expr_stack` is infrastructure for B2.1c+. Not consumed
-            // yet — kept declared so the helper signatures stay
-            // consistent across stages.
-            let mut expr_stack: Vec<cranelift_codegen::ir::Value> = Vec::new();
-            let _ = &mut expr_stack;
+            // Compile-time virt stack. Each slot is either a pending
+            // Cranelift SSA value (Int / Float) or a zero-payload
+            // const (None / True / False), staged above the
+            // memory-resident `vm.stack` tail. Any opcode that lets
+            // runtime code observe `vm.stack` must call
+            // `virt_stack.flush_to_memory(...)` first; that contract
+            // is enforced at each opcode arm in this dispatch loop.
+            //
+            // Replaces the previous `expr_stack: Vec<ir::Value>` —
+            // see `core/src/jit/virt_stack.rs` for the full design
+            // and rationale (constant folding across opcodes,
+            // register allocation, eliminated tag-byte writes for
+            // transient ints).
+            let mut virt_stack = VirtStack::new();
             // B2.1e: cleanup-Pop IPs that the virtual-branch path has
             // elided. When a virtual icmp+brif fires without
             // materializing a Boolean on the stack, the compiler's
@@ -1064,10 +610,10 @@ impl JitInner {
             // call's second SSA result.
 
             // Declare one Variable per virtualizable slot with a
-            // recognized bytecode-level initializer. Variable IDs come
-            // from an independent counter so they don't collide with
-            // any future non-slot Variables.
-            let mut next_var_id: u32 = 0;
+            // recognized bytecode-level initializer. Cranelift 0.131+
+            // owns Variable IDs internally — `declare_var(ty)` returns
+            // a fresh `Variable`, replacing the old
+            // `Variable::from_u32` + manual counter pattern.
             {
                 let mut needs_var: Vec<u16> = Vec::new();
                 for &slot in slot_types.local_init_result_ip.values() {
@@ -1082,9 +628,7 @@ impl JitInner {
                 needs_var.sort_unstable();
                 needs_var.dedup();
                 for slot in needs_var {
-                    let var = Variable::from_u32(next_var_id);
-                    next_var_id += 1;
-                    builder.declare_var(var, types::I64);
+                    let var = builder.declare_var(types::I64);
                     int_locals.insert(slot, var);
                 }
             }
@@ -1117,9 +661,7 @@ impl JitInner {
                     slot_types.int_mirror_param_slots.iter().copied().collect();
                 eligible.sort_unstable();
                 for slot in eligible {
-                    let var = Variable::from_u32(next_var_id);
-                    next_var_id += 1;
-                    builder.declare_var(var, types::I64);
+                    let var = builder.declare_var(types::I64);
                     param_mirrors.insert(slot, var);
                 }
             }
@@ -1130,9 +672,7 @@ impl JitInner {
             let mut int_typed_param_slots: Vec<u16> = Vec::new();
             for slot in 1..=(func.arity as u16) {
                 if slot_types.is_virtualizable(slot) && !int_locals.contains_key(&slot) {
-                    let var = Variable::from_u32(next_var_id);
-                    next_var_id += 1;
-                    builder.declare_var(var, types::I64);
+                    let var = builder.declare_var(types::I64);
                     int_locals.insert(slot, var);
                     int_typed_param_slots.push(slot);
                 }
@@ -1282,7 +822,9 @@ impl JitInner {
                         builder.switch_to_block(bailout_block);
                         let two = builder.ins().iconst(types::I32, 2);
                         let zero64 = builder.ins().iconst(types::I64, 0);
-                        builder.ins().jump(exit_block, &[two, zero64]);
+                        builder
+                            .ins()
+                            .jump(exit_block, &[two.into(), zero64.into()]);
 
                         builder.switch_to_block(prologue_done);
                         effective_entry_block = prologue_done;
@@ -1360,6 +902,9 @@ impl JitInner {
                         | OpCode::SetLocal
                         | OpCode::Pop
                         | OpCode::Constant
+                        | OpCode::None
+                        | OpCode::True
+                        | OpCode::False
                         | OpCode::Add
                         | OpCode::Subtract
                         | OpCode::Multiply
@@ -1373,8 +918,8 @@ impl JitInner {
                         | OpCode::NotEqual
                         | OpCode::Call
                 );
-                if !handles_own_flush && !expr_stack.is_empty() {
-                    flush_expr_stack_to_stack_view(&mut builder, vm_val, &mut expr_stack);
+                if !handles_own_flush && !virt_stack.is_empty() {
+                    virt_stack.flush_to_memory(&mut builder, vm_val);
                 }
 
                 match op {
@@ -1397,28 +942,35 @@ impl JitInner {
                                 } else {
                                     // Expression-temp Integer: stage on
                                     // expr_stack. No memory op yet.
-                                    expr_stack.push(v);
+                                    virt_stack.push_int_ssa(v);
                                 }
                             }
                             crate::vm::value::Value::Float(f) => {
-                                if !expr_stack.is_empty() {
-                                    flush_expr_stack_to_stack_view(
-                                        &mut builder,
-                                        vm_val,
-                                        &mut expr_stack,
-                                    );
-                                }
                                 let bits = f.to_bits() as i64;
                                 let v = builder.ins().iconst(types::I64, bits);
-                                emit_inline_push_float(&mut builder, vm_val, v);
+                                if init_slot.is_some() {
+                                    // Local-initializer Float: must
+                                    // materialize so subsequent ops
+                                    // (notably the
+                                    // emit_inline_local_scaled_arith_update
+                                    // peephole) see the slot's value
+                                    // in memory. Mirrors the Integer
+                                    // init_slot path above. There's no
+                                    // float-typed `int_locals` Variable
+                                    // today (B2.0 only tracks Int64),
+                                    // so we don't def_var here.
+                                    emit_inline_push_float(&mut builder, vm_val, v);
+                                } else {
+                                    // Expression-temp Float: stage on
+                                    // virt stack. The next consumer
+                                    // either pops it (no memory op) or
+                                    // forces a flush.
+                                    virt_stack.push_float_ssa(v);
+                                }
                             }
                             _ => {
-                                if !expr_stack.is_empty() {
-                                    flush_expr_stack_to_stack_view(
-                                        &mut builder,
-                                        vm_val,
-                                        &mut expr_stack,
-                                    );
+                                if !virt_stack.is_empty() {
+                                    virt_stack.flush_to_memory(&mut builder, vm_val);
                                 }
                                 // Fall back to the generic helper for
                                 // strings, closures, etc.
@@ -1429,15 +981,21 @@ impl JitInner {
                         ip += 3;
                     }
                     OpCode::None => {
-                        builder.ins().call(refs.push_none, &[vm_val]);
+                        // Virt-stack push: defer the memory write +
+                        // tag-byte store. If the next op is Pop (the
+                        // common case for `option { ... }` expressions
+                        // whose result is discarded — e.g. bench_collatz's
+                        // 5M push_none crossings), the flush never fires
+                        // and the entire push+pop pair disappears.
+                        virt_stack.push_const(VirtConst::None);
                         ip += 1;
                     }
                     OpCode::True => {
-                        builder.ins().call(refs.push_true, &[vm_val]);
+                        virt_stack.push_const(VirtConst::True);
                         ip += 1;
                     }
                     OpCode::False => {
-                        builder.ins().call(refs.push_false, &[vm_val]);
+                        virt_stack.push_const(VirtConst::False);
                         ip += 1;
                     }
                     OpCode::Pop => {
@@ -1461,8 +1019,12 @@ impl JitInner {
                         } else if let Some(slot) = slot_types.scope_pop_for(ip) {
                             live_int_slots.remove(&slot);
                             emit_inline_pop_tag_gated(&mut builder, &refs, vm_val);
-                        } else if !expr_stack.is_empty() {
-                            expr_stack.pop();
+                        } else if !virt_stack.is_empty() {
+                            // Pop the pending virt slot — works for any
+                            // variant (IntSsa, FloatSsa, Const). No
+                            // memory op since the virt slot was never
+                            // materialised.
+                            virt_stack.pop();
                         } else {
                             emit_inline_pop_tag_gated(&mut builder, &refs, vm_val);
                         }
@@ -1499,12 +1061,8 @@ impl JitInner {
                         if let Some(m) =
                             match_struct_field_add_update(code, chunk, ip, &blocks)
                         {
-                            if !expr_stack.is_empty() {
-                                flush_expr_stack_to_stack_view(
-                                    &mut builder,
-                                    vm_val,
-                                    &mut expr_stack,
-                                );
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
                             let cache_ptr = field_cache_ptrs[field_ic_ix];
                             field_ic_ix += 2;
@@ -1526,12 +1084,8 @@ impl JitInner {
                         )
                             .filter(|m| !int_locals.contains_key(&m.dst_slot))
                         {
-                            if !expr_stack.is_empty() {
-                                flush_expr_stack_to_stack_view(
-                                    &mut builder,
-                                    vm_val,
-                                    &mut expr_stack,
-                                );
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
                             let dst = builder.ins().iconst(types::I32, m.dst_slot as i64);
                             let array = builder.ins().iconst(types::I32, m.array_slot as i64);
@@ -1550,12 +1104,8 @@ impl JitInner {
                             .filter(|m| !int_locals.contains_key(&m.dst_slot)
                                 && !int_locals.contains_key(&m.rhs_slot))
                         {
-                            if !expr_stack.is_empty() {
-                                flush_expr_stack_to_stack_view(
-                                    &mut builder,
-                                    vm_val,
-                                    &mut expr_stack,
-                                );
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
                             emit_inline_local_scaled_arith_update(
                                 &mut builder,
@@ -1575,12 +1125,8 @@ impl JitInner {
                                 .filter(|m| !int_locals.contains_key(&m.dst_slot)
                                     && !int_locals.contains_key(&m.rhs_slot))
                         {
-                            if !expr_stack.is_empty() {
-                                flush_expr_stack_to_stack_view(
-                                    &mut builder,
-                                    vm_val,
-                                    &mut expr_stack,
-                                );
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
                             emit_inline_local_scaled_arith_update(
                                 &mut builder,
@@ -1599,12 +1145,8 @@ impl JitInner {
                             match_local_const_arith_update(code, chunk, ip, &blocks)
                                 .filter(|m| !int_locals.contains_key(&m.slot))
                         {
-                            if !expr_stack.is_empty() {
-                                flush_expr_stack_to_stack_view(
-                                    &mut builder,
-                                    vm_val,
-                                    &mut expr_stack,
-                                );
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
                             emit_inline_local_const_arith_update(
                                 &mut builder,
@@ -1640,7 +1182,7 @@ impl JitInner {
                             if let Some(&var) = int_locals.get(&slot) {
                                 if live_int_slots.contains(&slot) {
                                     let val = builder.use_var(var);
-                                    expr_stack.push(val);
+                                    virt_stack.push_int_ssa(val);
                                     ip += 3;
                                     continue;
                                 }
@@ -1654,16 +1196,12 @@ impl JitInner {
                             // can consume it without a memory op.
                             if let Some(&var) = param_mirrors.get(&slot) {
                                 let val = builder.use_var(var);
-                                expr_stack.push(val);
+                                virt_stack.push_int_ssa(val);
                                 ip += 3;
                                 continue;
                             }
-                            if !expr_stack.is_empty() {
-                                flush_expr_stack_to_stack_view(
-                                    &mut builder,
-                                    vm_val,
-                                    &mut expr_stack,
-                                );
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
                             emit_inline_get_local(
                                 &mut builder,
@@ -1683,19 +1221,15 @@ impl JitInner {
                         // `self.peek(0).clone()`), so leave the value
                         // on expr_stack; the following Pop drains it.
                         let slot = read_u16(code, ip + 1);
-                        if let (Some(&var), Some(&top)) =
-                            (int_locals.get(&slot), expr_stack.last())
+                        if let (Some(&var), Some(top)) =
+                            (int_locals.get(&slot), virt_stack.peek_int_ssa())
                         {
                             builder.def_var(var, top);
                             live_int_slots.insert(slot);
                             ip += 3;
                         } else {
-                            if !expr_stack.is_empty() {
-                                flush_expr_stack_to_stack_view(
-                                    &mut builder,
-                                    vm_val,
-                                    &mut expr_stack,
-                                );
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
                             // Peek top-of-stack's i64 payload BEFORE
                             // emit_inline_set_local runs. Using the
@@ -1755,25 +1289,21 @@ impl JitInner {
                     // are `Value::Integer`.
                     OpCode::Add | OpCode::Subtract | OpCode::Multiply => {
                         // Virtual Int arithmetic: if both operands are
-                        // staged as Int in expr_stack, fold into a
+                        // staged as Int in the virt stack, fold into a
                         // register iadd/isub/imul. No stack memory ops.
-                        if expr_stack.len() >= 2 {
-                            let rhs = expr_stack.pop().unwrap();
-                            let lhs = expr_stack.pop().unwrap();
+                        if virt_stack.top_n_are_int_ssa(2) {
+                            let rhs = virt_stack.pop_int_ssa().unwrap();
+                            let lhs = virt_stack.pop_int_ssa().unwrap();
                             let result = match op {
                                 OpCode::Add => builder.ins().iadd(lhs, rhs),
                                 OpCode::Subtract => builder.ins().isub(lhs, rhs),
                                 OpCode::Multiply => builder.ins().imul(lhs, rhs),
                                 _ => unreachable!(),
                             };
-                            expr_stack.push(result);
+                            virt_stack.push_int_ssa(result);
                         } else {
-                            if !expr_stack.is_empty() {
-                                flush_expr_stack_to_stack_view(
-                                    &mut builder,
-                                    vm_val,
-                                    &mut expr_stack,
-                                );
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
                             let (arith_op, slow) = match op {
                                 OpCode::Add => (IntArithOp::Add, refs.add),
@@ -1795,13 +1325,23 @@ impl JitInner {
                         // icmp_imm + brif and skip past all consumed
                         // bytecode. Otherwise fall through to the
                         // existing virt-Modulo path (still emits srem).
+                        //
+                        // RETAINED post-Cranelift-0.131 bump: tested
+                        // removing this on the assumption Cranelift's
+                        // egraph would recognize `srem(x,2) == 0` as
+                        // `band(x,1) == 0`, but bench_collatz min
+                        // regressed 42.6 → 49.9 ms. Cranelift's mid-end
+                        // does fold `srem x, 2` to a shift-and-and
+                        // sequence, but doesn't simplify the subsequent
+                        // `cmp 0 + brif` down to a single bit-test the
+                        // way this peephole's `band 1 + icmp 0` does.
                         if is_mod {
                             if let Some(next_ip) = try_emit_parity_branch_peephole(
                                 &mut builder,
                                 chunk,
                                 code,
                                 ip,
-                                &mut expr_stack,
+                                &mut virt_stack,
                                 &mut virt_branch_elided_pops,
                                 &mut blocks,
                                 &slot_types,
@@ -1813,40 +1353,23 @@ impl JitInner {
                             }
                         }
 
-                        // B2.1h: signed-div-by-power-of-2. For Divide
-                        // only, when RHS is a constant pow2 integer
-                        // (and not 0 or -1), lower to bias+shift —
-                        // skipping the ~20-cycle `idiv` Cranelift's
-                        // x86_64 backend would otherwise emit.
-                        if !is_mod && expr_stack.len() >= 2 {
-                            let rhs = *expr_stack.last().unwrap();
-                            let lhs = expr_stack[expr_stack.len() - 2];
-                            if let Some(q) =
-                                try_emit_sdiv_pow2_peephole(&mut builder, lhs, rhs)
-                            {
-                                expr_stack.pop().unwrap(); // rhs (constant)
-                                expr_stack.pop().unwrap(); // lhs
-                                expr_stack.push(q);
-                                if let Some(cp) = counters_ptr_opt {
-                                    emit_counter_bump(
-                                        &mut builder,
-                                        cp,
-                                        counter_offsets::VIRT_DIV_POW2_LOWERED,
-                                    );
-                                }
-                                ip += 1;
-                                continue;
-                            }
-                        }
+                        // Cranelift 0.122+ lowers `sdiv` by any
+                        // constant divisor with the bias-and-shift /
+                        // magic-multiply transform in its mid-end, so
+                        // the prior B2.1h power-of-2 peephole has been
+                        // removed — emitting plain `sdiv lhs, iconst`
+                        // through the virtual path below produces the
+                        // same machine code without our manual
+                        // lowering.
 
                         // Virtual path: operands on expr_stack as virt Ints.
                         // Emit register-resident sdiv/srem with zero +
                         // i64::MIN/-1 guards; fall back via slow block that
                         // re-boxes operands to the VM stack and calls the
                         // existing helper.
-                        if expr_stack.len() >= 2 {
-                            let rhs = expr_stack.pop().unwrap();
-                            let lhs = expr_stack.pop().unwrap();
+                        if virt_stack.top_n_are_int_ssa(2) {
+                            let rhs = virt_stack.pop_int_ssa().unwrap();
+                            let lhs = virt_stack.pop_int_ssa().unwrap();
                             let slow_helper = if is_mod { refs.modu } else { refs.div };
                             let result = emit_int_virt_divmod(
                                 &mut builder,
@@ -1858,14 +1381,10 @@ impl JitInner {
                                 slow_helper,
                                 counters_ptr_opt,
                             );
-                            expr_stack.push(result);
+                            virt_stack.push_int_ssa(result);
                         } else {
-                            if !expr_stack.is_empty() {
-                                flush_expr_stack_to_stack_view(
-                                    &mut builder,
-                                    vm_val,
-                                    &mut expr_stack,
-                                );
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
                             let slow = if is_mod { refs.modu } else { refs.div };
                             emit_int_fast_divmod(&mut builder, exit_block, &refs, vm_val, is_mod, slow);
@@ -1879,13 +1398,18 @@ impl JitInner {
                     | OpCode::Equal
                     | OpCode::NotEqual => {
                         use cranelift_codegen::ir::condcodes::IntCC;
-                        let (cc, slow_helper) = match op {
-                            OpCode::Less => (IntCC::SignedLessThan, refs.lt),
-                            OpCode::LessEqual => (IntCC::SignedLessThanOrEqual, refs.le),
-                            OpCode::Greater => (IntCC::SignedGreaterThan, refs.gt),
-                            OpCode::GreaterEqual => (IntCC::SignedGreaterThanOrEqual, refs.ge),
-                            OpCode::Equal => (IntCC::Equal, refs.eq),
-                            OpCode::NotEqual => (IntCC::NotEqual, refs.ne),
+                        // `slow_helper_fallible`: lt/le/gt/ge return u32
+                        // status; eq/ne return nothing. The fused-branch
+                        // slow path needs to know which to skip the
+                        // status read for eq/ne (otherwise inst_results
+                        // panics on an empty result list).
+                        let (cc, slow_helper, slow_helper_fallible) = match op {
+                            OpCode::Less => (IntCC::SignedLessThan, refs.lt, true),
+                            OpCode::LessEqual => (IntCC::SignedLessThanOrEqual, refs.le, true),
+                            OpCode::Greater => (IntCC::SignedGreaterThan, refs.gt, true),
+                            OpCode::GreaterEqual => (IntCC::SignedGreaterThanOrEqual, refs.ge, true),
+                            OpCode::Equal => (IntCC::Equal, refs.eq, false),
+                            OpCode::NotEqual => (IntCC::NotEqual, refs.ne, false),
                             _ => unreachable!(),
                         };
 
@@ -1936,7 +1460,7 @@ impl JitInner {
                             //   at both branch successors must be
                             //   classified in condition_cleanup_pop_ips,
                             //   so we know where to elide them.
-                            let virt_eligible = expr_stack.len() >= 2 && match branch_op {
+                            let virt_eligible = virt_stack.top_n_are_int_ssa(2) && match branch_op {
                                 OpCode::PopJumpIfFalse => true,
                                 OpCode::JumpIfFalse | OpCode::JumpIfTrue => {
                                     slot_types.condition_cleanup_pop_ips.contains(&next_ip)
@@ -1962,8 +1486,8 @@ impl JitInner {
                                         );
                                     }
                                 }
-                                let rhs = expr_stack.pop().unwrap();
-                                let lhs = expr_stack.pop().unwrap();
+                                let rhs = virt_stack.pop_int_ssa().unwrap();
+                                let lhs = virt_stack.pop_int_ssa().unwrap();
                                 let pred = builder.ins().icmp(cc, lhs, rhs);
                                 let (true_block, false_block) = match branch_op {
                                     // JumpIfFalse/PopJumpIfFalse: branch
@@ -1986,12 +1510,8 @@ impl JitInner {
                                     virt_branch_elided_pops.insert(target_ip);
                                 }
                             } else {
-                                if !expr_stack.is_empty() {
-                                    flush_expr_stack_to_stack_view(
-                                        &mut builder,
-                                        vm_val,
-                                        &mut expr_stack,
-                                    );
+                                if !virt_stack.is_empty() {
+                                    virt_stack.flush_to_memory(&mut builder, vm_val);
                                 }
                                 emit_fused_int_cmp_branch(
                                     &mut builder,
@@ -2000,6 +1520,7 @@ impl JitInner {
                                     vm_val,
                                     cc,
                                     slow_helper,
+                                    slow_helper_fallible,
                                     branch_op,
                                     target_block,
                                     fall_block,
@@ -2008,12 +1529,8 @@ impl JitInner {
                             terminated = true;
                             ip = branch_ip + 3;
                         } else {
-                            if !expr_stack.is_empty() {
-                                flush_expr_stack_to_stack_view(
-                                    &mut builder,
-                                    vm_val,
-                                    &mut expr_stack,
-                                );
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
                             // B2.1f: Equal/NotEqual outside a fuseable
                             // branch context goes through the existing
@@ -2216,7 +1733,7 @@ impl JitInner {
                             .brif(status, err_block, &[], cont_block, &[]);
                         builder.switch_to_block(err_block);
                         let zero64 = builder.ins().iconst(types::I64, 0);
-                        builder.ins().jump(exit_block, &[status, zero64]);
+                        builder.ins().jump(exit_block, &[status.into(), zero64.into()]);
 
                         builder.switch_to_block(cont_block);
                         ip += 3;
@@ -2419,7 +1936,7 @@ impl JitInner {
                         let a3_eligible = slot_types.specialized_entry_eligible
                             && spec_thunk_id.is_some()
                             && arg_count as usize == func.arity as usize
-                            && expr_stack.len() >= arg_count as usize;
+                            && virt_stack.top_n_are_int_ssa(arg_count as usize);
 
                         let a3_post_call_block: Option<Block> = if a3_eligible {
                             use cranelift_codegen::ir::MemFlags;
@@ -2589,15 +2106,23 @@ impl JitInner {
                             // teardown truncates to slot_offset which
                             // drops it. No manual pop needed here.
 
-                            // Collect args from expr_stack into the
-                            // call argument list: (vm, a0, a1, ...).
+                            // Collect args from the virt stack into
+                            // the call argument list: (vm, a0, a1, ...).
                             // Track B multi-return: no ret-pointer arg.
+                            //
+                            // Pop in reverse (top is rightmost arg)
+                            // and reverse to get lhs-first order
+                            // matching the original Vec::drain.
                             let mut call_args: Vec<cranelift_codegen::ir::Value> =
                                 Vec::with_capacity(arg_count as usize + 1);
                             call_args.push(vm_val);
-                            let start_idx =
-                                expr_stack.len() - (arg_count as usize);
-                            call_args.extend(expr_stack.drain(start_idx..));
+                            let mut popped: Vec<cranelift_codegen::ir::Value> =
+                                Vec::with_capacity(arg_count as usize);
+                            for _ in 0..arg_count {
+                                popped.push(virt_stack.pop_int_ssa().unwrap());
+                            }
+                            popped.reverse();
+                            call_args.extend(popped);
 
                             let spec_fref =
                                 self.module.declare_func_in_func(spec_id, builder.func);
@@ -2613,7 +2138,7 @@ impl JitInner {
                             builder.ins().brif(
                                 status,
                                 err_block_a3,
-                                &[status],
+                                &[status.into()],
                                 ok_block_a3,
                                 &[],
                             );
@@ -2621,7 +2146,7 @@ impl JitInner {
                             builder.switch_to_block(err_block_a3);
                             let eb_status = builder.block_params(err_block_a3)[0];
                             let zero64 = builder.ins().iconst(types::I64, 0);
-                            builder.ins().jump(exit_block, &[eb_status, zero64]);
+                            builder.ins().jump(exit_block, &[eb_status.into(), zero64.into()]);
 
                             // Success: payload arrives directly in the
                             // call's second SSA result. Push as
@@ -2642,24 +2167,16 @@ impl JitInner {
                             // matches what the pre-match flush WOULD
                             // have done if Call weren't in
                             // handles_own_flush.
-                            if !expr_stack.is_empty() {
-                                flush_expr_stack_to_stack_view(
-                                    &mut builder,
-                                    vm_val,
-                                    &mut expr_stack,
-                                );
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
 
                             Some(post_call_block)
                         } else {
                             // A3 not eligible — the existing IC needs
                             // args on the VM stack, so flush expr_stack.
-                            if !expr_stack.is_empty() {
-                                flush_expr_stack_to_stack_view(
-                                    &mut builder,
-                                    vm_val,
-                                    &mut expr_stack,
-                                );
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
                             None
                         };
@@ -2874,7 +2391,7 @@ impl JitInner {
                         builder.ins().brif(
                             hit_status,
                             restore_err_block,
-                            &[hit_status],
+                            &[hit_status.into()],
                             ok_block,
                             &[],
                         );
@@ -2886,7 +2403,7 @@ impl JitInner {
                             vm_val,
                             vm_jit_frame_view_len_offset(),
                         );
-                        builder.ins().jump(err_block, &[err_status]);
+                        builder.ins().jump(err_block, &[err_status.into()]);
 
                         // Miss — fallback + populate cache.
                         builder.switch_to_block(miss_block);
@@ -2907,7 +2424,7 @@ impl JitInner {
                         builder.ins().brif(
                             miss_status,
                             err_block,
-                            &[miss_status],
+                            &[miss_status.into()],
                             ok_block,
                             &[],
                         );
@@ -2916,7 +2433,7 @@ impl JitInner {
                         builder.switch_to_block(err_block);
                         let err_status = builder.block_params(err_block)[0];
                         let zero64 = builder.ins().iconst(types::I64, 0);
-                        builder.ins().jump(exit_block, &[err_status, zero64]);
+                        builder.ins().jump(exit_block, &[err_status.into(), zero64.into()]);
 
                         builder.switch_to_block(ok_block);
 
@@ -2965,12 +2482,12 @@ impl JitInner {
                         let status = builder.inst_results(call)[0];
                         builder
                             .ins()
-                            .brif(status, err_block, &[status], ok_block, &[]);
+                            .brif(status, err_block, &[status.into()], ok_block, &[]);
 
                         builder.switch_to_block(err_block);
                         let err_status = builder.block_params(err_block)[0];
                         let zero64 = builder.ins().iconst(types::I64, 0);
-                        builder.ins().jump(exit_block, &[err_status, zero64]);
+                        builder.ins().jump(exit_block, &[err_status.into(), zero64.into()]);
                         builder.switch_to_block(ok_block);
                         ip += 3;
                     }
@@ -2989,12 +2506,12 @@ impl JitInner {
                         let status = builder.inst_results(call)[0];
                         builder
                             .ins()
-                            .brif(status, err_block, &[status], ok_block, &[]);
+                            .brif(status, err_block, &[status.into()], ok_block, &[]);
 
                         builder.switch_to_block(err_block);
                         let err_status = builder.block_params(err_block)[0];
                         let zero64 = builder.ins().iconst(types::I64, 0);
-                        builder.ins().jump(exit_block, &[err_status, zero64]);
+                        builder.ins().jump(exit_block, &[err_status.into(), zero64.into()]);
                         builder.switch_to_block(ok_block);
                         ip += 3;
                     }
@@ -3446,7 +2963,7 @@ impl JitInner {
                             builder.ins().brif(
                                 hit_status,
                                 restore_err_block,
-                                &[hit_status],
+                                &[hit_status.into()],
                                 ok_block,
                                 &[],
                             );
@@ -3469,7 +2986,7 @@ impl JitInner {
                                 vm_val,
                                 vm_jit_frame_view_len_offset(),
                             );
-                            builder.ins().jump(err_block, &[err_status]);
+                            builder.ins().jump(err_block, &[err_status.into()]);
 
                             builder.switch_to_block(miss_block);
                             let call = builder.ins().call(
@@ -3479,12 +2996,12 @@ impl JitInner {
                             let status = builder.inst_results(call)[0];
                             builder
                                 .ins()
-                                .brif(status, err_block, &[status], ok_block, &[]);
+                                .brif(status, err_block, &[status.into()], ok_block, &[]);
 
                             builder.switch_to_block(err_block);
                             let err_status = builder.block_params(err_block)[0];
                             let zero64 = builder.ins().iconst(types::I64, 0);
-                            builder.ins().jump(exit_block, &[err_status, zero64]);
+                            builder.ins().jump(exit_block, &[err_status.into(), zero64.into()]);
 
                             builder.switch_to_block(ok_block);
                         } else {
@@ -3512,7 +3029,7 @@ impl JitInner {
                                 builder.ins().call(refs.op_return, &[vm_val]);
                                 let zero32 = builder.ins().iconst(types::I32, 0);
                                 let zero64 = builder.ins().iconst(types::I64, 0);
-                                builder.ins().jump(exit_block, &[zero32, zero64]);
+                                builder.ins().jump(exit_block, &[zero32.into(), zero64.into()]);
                             }
                             EntryKind::IntSpecialized => {
                                 // Track B: multi-return specialized ABI.
@@ -3526,7 +3043,7 @@ impl JitInner {
                                 use cranelift_codegen::ir::MemFlags;
                                 let flags = MemFlags::trusted();
 
-                                let payload = if let Some(top) = expr_stack.pop() {
+                                let payload = if let Some(top) = virt_stack.pop_int_ssa() {
                                     top
                                 } else {
                                     let stack_ptr =
@@ -3577,7 +3094,7 @@ impl JitInner {
                                 );
 
                                 let zero32 = builder.ins().iconst(types::I32, 0);
-                                builder.ins().jump(exit_block, &[zero32, payload]);
+                                builder.ins().jump(exit_block, &[zero32.into(), payload.into()]);
                             }
                         }
                         terminated = true;
@@ -3596,7 +3113,7 @@ impl JitInner {
             if !terminated {
                 let two = builder.ins().iconst(types::I32, 2);
                 let zero64 = builder.ins().iconst(types::I64, 0);
-                builder.ins().jump(exit_block, &[two, zero64]);
+                builder.ins().jump(exit_block, &[two.into(), zero64.into()]);
             }
 
             // Track B: emit the per-kind tail at the shared exit block.
@@ -3707,407 +3224,6 @@ impl Drop for JitInner {
 
 // ── Helper registration & declaration ──────────────────────────────────
 
-fn register_helpers(builder: &mut JITBuilder) {
-    macro_rules! reg {
-        ($name:literal, $fn:path) => {
-            builder.symbol($name, $fn as *const u8);
-        };
-    }
-
-    reg!("jit_run_via_interpreter", runtime::jit_run_via_interpreter);
-    reg!("jit_push_constant", runtime::jit_push_constant);
-    reg!("jit_push_integer_inline", runtime::jit_push_integer_inline);
-    reg!("jit_push_float_inline", runtime::jit_push_float_inline);
-    reg!("jit_push_none", runtime::jit_push_none);
-    reg!("jit_push_true", runtime::jit_push_true);
-    reg!("jit_push_false", runtime::jit_push_false);
-    reg!("jit_pop", runtime::jit_pop);
-    reg!("jit_dup", runtime::jit_dup);
-    reg!("jit_build_array", runtime::jit_build_array);
-    reg!(
-        "jit_op_index_fast_array_int",
-        runtime::jit_op_index_fast_array_int
-    );
-    reg!("jit_type_wrap", runtime::jit_type_wrap);
-    reg!(
-        "jit_local_add_array_mod_index",
-        runtime::jit_local_add_array_mod_index
-    );
-    reg!(
-        "jit_struct_field_add_const",
-        runtime::jit_struct_field_add_const
-    );
-    reg!(
-        "jit_struct_field_add_local",
-        runtime::jit_struct_field_add_local
-    );
-    reg!("jit_get_local", runtime::jit_get_local);
-    reg!("jit_set_local", runtime::jit_set_local);
-    reg!("jit_op_add", runtime::jit_op_add);
-    reg!("jit_op_sub", runtime::jit_op_sub);
-    reg!("jit_op_mul", runtime::jit_op_mul);
-    reg!("jit_op_div", runtime::jit_op_div);
-    reg!("jit_op_mod", runtime::jit_op_mod);
-    reg!("jit_op_eq", runtime::jit_op_eq);
-    reg!("jit_op_ne", runtime::jit_op_ne);
-    reg!("jit_op_lt", runtime::jit_op_lt);
-    reg!("jit_op_le", runtime::jit_op_le);
-    reg!("jit_op_gt", runtime::jit_op_gt);
-    reg!("jit_op_ge", runtime::jit_op_ge);
-    reg!("jit_op_not", runtime::jit_op_not);
-    reg!("jit_op_negate", runtime::jit_op_negate);
-    reg!("jit_peek_truthy", runtime::jit_peek_truthy);
-    reg!("jit_pop_truthy", runtime::jit_pop_truthy);
-    reg!("jit_op_return", runtime::jit_op_return);
-    reg!("jit_op_call", runtime::jit_op_call);
-    reg!("jit_op_call_hit", runtime::jit_op_call_hit);
-    reg!("jit_op_call_miss", runtime::jit_op_call_miss);
-    reg!("jit_get_global", runtime::jit_get_global);
-    reg!("jit_set_global", runtime::jit_set_global);
-    reg!("jit_define_global", runtime::jit_define_global);
-    reg!("jit_define_global_typed", runtime::jit_define_global_typed);
-    reg!("jit_get_upvalue", runtime::jit_get_upvalue);
-    reg!("jit_set_upvalue", runtime::jit_set_upvalue);
-    reg!("jit_close_upvalue", runtime::jit_close_upvalue);
-    reg!("jit_op_closure", runtime::jit_op_closure);
-    reg!("jit_op_struct_def", runtime::jit_op_struct_def);
-    reg!("jit_op_struct_literal", runtime::jit_op_struct_literal);
-    reg!("jit_op_get_field", runtime::jit_op_get_field);
-    reg!("jit_op_set_field", runtime::jit_op_set_field);
-    reg!("jit_op_get_field_ic_miss", runtime::jit_op_get_field_ic_miss);
-    reg!("jit_op_set_field_ic_miss", runtime::jit_op_set_field_ic_miss);
-    reg!("jit_op_define_method", runtime::jit_op_define_method);
-    reg!("jit_op_method_call", runtime::jit_op_method_call);
-    reg!("jit_op_method_call_ic", runtime::jit_op_method_call_ic);
-    reg!("jit_stack_as_mut_ptr", runtime::jit_stack_as_mut_ptr);
-    reg!("jit_stack_len", runtime::jit_stack_len);
-    reg!("jit_stack_pop_one", runtime::jit_stack_pop_one);
-    reg!("jit_stack_pop_n", runtime::jit_stack_pop_n);
-    reg!("jit_stack_commit_len", runtime::jit_stack_commit_len);
-    reg!("jit_stack_truncate", runtime::jit_stack_truncate);
-    reg!(
-        "jit_replace_top2_with_bool",
-        runtime::jit_replace_top2_with_bool
-    );
-    reg!("jit_current_slot_offset", runtime::jit_current_slot_offset);
-    reg!("jit_get_global_ic", runtime::jit_get_global_ic);
-}
-
-fn declare_helpers(module: &mut JITModule) -> HelperIds {
-    let ptr_ty = module.target_config().pointer_type();
-
-    let mut sig_vm_only = module.make_signature();
-    sig_vm_only.params.push(AbiParam::new(ptr_ty));
-
-    let mut sig_vm_u32 = module.make_signature();
-    sig_vm_u32.params.push(AbiParam::new(ptr_ty));
-    sig_vm_u32.params.push(AbiParam::new(types::I32));
-
-    // Signature for inline primitive pushes: fn(*mut VM, i64).
-    // Floats are passed as their u64 bit pattern reinterpreted as i64.
-    let mut sig_vm_i64 = module.make_signature();
-    sig_vm_i64.params.push(AbiParam::new(ptr_ty));
-    sig_vm_i64.params.push(AbiParam::new(types::I64));
-
-    let mut sig_vm_to_u32 = module.make_signature();
-    sig_vm_to_u32.params.push(AbiParam::new(ptr_ty));
-    sig_vm_to_u32.returns.push(AbiParam::new(types::I32));
-
-    // Signature for jit_op_call: fn(*mut VM, u32) -> u32
-    let mut sig_vm_u32_to_u32 = module.make_signature();
-    sig_vm_u32_to_u32.params.push(AbiParam::new(ptr_ty));
-    sig_vm_u32_to_u32.params.push(AbiParam::new(types::I32));
-    sig_vm_u32_to_u32.returns.push(AbiParam::new(types::I32));
-
-    // Signature for jit_op_closure: fn(*mut VM, u32, u32) -> u32
-    let mut sig_vm_u32_u32_to_u32 = module.make_signature();
-    sig_vm_u32_u32_to_u32.params.push(AbiParam::new(ptr_ty));
-    sig_vm_u32_u32_to_u32.params.push(AbiParam::new(types::I32));
-    sig_vm_u32_u32_to_u32.params.push(AbiParam::new(types::I32));
-    sig_vm_u32_u32_to_u32
-        .returns
-        .push(AbiParam::new(types::I32));
-
-    // Signature for jit_define_global_typed: fn(*mut VM, u32, u32, u32) -> u32
-    let mut sig_vm_3u32_to_u32 = module.make_signature();
-    sig_vm_3u32_to_u32.params.push(AbiParam::new(ptr_ty));
-    sig_vm_3u32_to_u32.params.push(AbiParam::new(types::I32));
-    sig_vm_3u32_to_u32.params.push(AbiParam::new(types::I32));
-    sig_vm_3u32_to_u32.params.push(AbiParam::new(types::I32));
-    sig_vm_3u32_to_u32.returns.push(AbiParam::new(types::I32));
-
-    // Signature for jit_struct_field_add_const:
-    // fn(*mut VM, u32 self_slot, u32 field_idx, i64 addend,
-    //    *mut FieldCacheEntry) -> u32
-    let mut sig_vm_u32_u32_i64_ptr_to_u32 = module.make_signature();
-    sig_vm_u32_u32_i64_ptr_to_u32
-        .params
-        .push(AbiParam::new(ptr_ty));
-    sig_vm_u32_u32_i64_ptr_to_u32
-        .params
-        .push(AbiParam::new(types::I32));
-    sig_vm_u32_u32_i64_ptr_to_u32
-        .params
-        .push(AbiParam::new(types::I32));
-    sig_vm_u32_u32_i64_ptr_to_u32
-        .params
-        .push(AbiParam::new(types::I64));
-    sig_vm_u32_u32_i64_ptr_to_u32
-        .params
-        .push(AbiParam::new(ptr_ty));
-    sig_vm_u32_u32_i64_ptr_to_u32
-        .returns
-        .push(AbiParam::new(types::I32));
-
-    // Signature for jit_struct_field_add_local:
-    // fn(*mut VM, u32 self_slot, u32 field_idx, u32 rhs_slot,
-    //    *mut FieldCacheEntry) -> u32
-    let mut sig_vm_3u32_ptr_to_u32 = module.make_signature();
-    sig_vm_3u32_ptr_to_u32
-        .params
-        .push(AbiParam::new(ptr_ty));
-    sig_vm_3u32_ptr_to_u32
-        .params
-        .push(AbiParam::new(types::I32));
-    sig_vm_3u32_ptr_to_u32
-        .params
-        .push(AbiParam::new(types::I32));
-    sig_vm_3u32_ptr_to_u32
-        .params
-        .push(AbiParam::new(types::I32));
-    sig_vm_3u32_ptr_to_u32
-        .params
-        .push(AbiParam::new(ptr_ty));
-    sig_vm_3u32_ptr_to_u32
-        .returns
-        .push(AbiParam::new(types::I32));
-
-    // Signature for jit_op_method_call_ic: fn(*mut VM, u32, u32, *mut ptr) -> u32
-    let mut sig_vm_u32_u32_ptr_to_u32 = module.make_signature();
-    sig_vm_u32_u32_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
-    sig_vm_u32_u32_ptr_to_u32.params.push(AbiParam::new(types::I32));
-    sig_vm_u32_u32_ptr_to_u32.params.push(AbiParam::new(types::I32));
-    sig_vm_u32_u32_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
-    sig_vm_u32_u32_ptr_to_u32
-        .returns
-        .push(AbiParam::new(types::I32));
-
-    // Signature for jit_local_add_array_mod_index:
-    // fn(*mut VM, u32, u32, u32, i64, u32) -> u32
-    let mut sig_vm_3u32_i64_u32_to_u32 = module.make_signature();
-    sig_vm_3u32_i64_u32_to_u32
-        .params
-        .push(AbiParam::new(ptr_ty));
-    sig_vm_3u32_i64_u32_to_u32
-        .params
-        .push(AbiParam::new(types::I32));
-    sig_vm_3u32_i64_u32_to_u32
-        .params
-        .push(AbiParam::new(types::I32));
-    sig_vm_3u32_i64_u32_to_u32
-        .params
-        .push(AbiParam::new(types::I32));
-    sig_vm_3u32_i64_u32_to_u32
-        .params
-        .push(AbiParam::new(types::I64));
-    sig_vm_3u32_i64_u32_to_u32
-        .params
-        .push(AbiParam::new(types::I32));
-    sig_vm_3u32_i64_u32_to_u32
-        .returns
-        .push(AbiParam::new(types::I32));
-
-    // Signature for fallible with one u32 operand: fn(*mut VM, u32) -> u32
-    // (same as sig_vm_u32_to_u32)
-    let sig_vm_u32_fallible = &sig_vm_u32_to_u32;
-
-    // Signature: fn(*mut VM) -> *mut T (pointer-sized return)
-    let mut sig_vm_to_ptr = module.make_signature();
-    sig_vm_to_ptr.params.push(AbiParam::new(ptr_ty));
-    sig_vm_to_ptr.returns.push(AbiParam::new(ptr_ty));
-
-    // Signature: fn(*mut VM) -> i64
-    let mut sig_vm_to_i64 = module.make_signature();
-    sig_vm_to_i64.params.push(AbiParam::new(ptr_ty));
-    sig_vm_to_i64.returns.push(AbiParam::new(types::I64));
-
-    // Signature: fn(*mut VM, *mut GlobalCacheEntry, u32) -> u32
-    // Signature for jit_op_call_hit: fn(*mut VM, *mut ptr) -> u32
-    let mut sig_vm_ptr_to_u32 = module.make_signature();
-    sig_vm_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
-    sig_vm_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
-    sig_vm_ptr_to_u32.returns.push(AbiParam::new(types::I32));
-
-    // Signature for jit_op_call_miss: fn(*mut VM, u32, *mut ptr) -> u32
-    let mut sig_vm_u32_ptr_to_u32 = module.make_signature();
-    sig_vm_u32_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
-    sig_vm_u32_ptr_to_u32.params.push(AbiParam::new(types::I32));
-    sig_vm_u32_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
-    sig_vm_u32_ptr_to_u32
-        .returns
-        .push(AbiParam::new(types::I32));
-
-    let mut sig_vm_ptr_u32_to_u32 = module.make_signature();
-    sig_vm_ptr_u32_to_u32.params.push(AbiParam::new(ptr_ty));
-    sig_vm_ptr_u32_to_u32.params.push(AbiParam::new(ptr_ty));
-    sig_vm_ptr_u32_to_u32.params.push(AbiParam::new(types::I32));
-    sig_vm_ptr_u32_to_u32
-        .returns
-        .push(AbiParam::new(types::I32));
-
-    fn decl(module: &mut JITModule, name: &str, sig: &Signature) -> FuncId {
-        module
-            .declare_function(name, Linkage::Import, sig)
-            .expect("helper declaration should succeed")
-    }
-
-    HelperIds {
-        push_constant: decl(module, "jit_push_constant", &sig_vm_u32),
-        push_integer_inline: decl(module, "jit_push_integer_inline", &sig_vm_i64),
-        push_float_inline: decl(module, "jit_push_float_inline", &sig_vm_i64),
-        push_none: decl(module, "jit_push_none", &sig_vm_only),
-        push_true: decl(module, "jit_push_true", &sig_vm_only),
-        push_false: decl(module, "jit_push_false", &sig_vm_only),
-        pop: decl(module, "jit_pop", &sig_vm_only),
-        dup: decl(module, "jit_dup", &sig_vm_only),
-        build_array: decl(module, "jit_build_array", &sig_vm_u32),
-        index_fast_array_int: decl(module, "jit_op_index_fast_array_int", &sig_vm_to_u32),
-        type_wrap: decl(module, "jit_type_wrap", sig_vm_u32_fallible),
-        local_add_array_mod_index: decl(
-            module,
-            "jit_local_add_array_mod_index",
-            &sig_vm_3u32_i64_u32_to_u32,
-        ),
-        struct_field_add_const: decl(
-            module,
-            "jit_struct_field_add_const",
-            &sig_vm_u32_u32_i64_ptr_to_u32,
-        ),
-        struct_field_add_local: decl(
-            module,
-            "jit_struct_field_add_local",
-            &sig_vm_3u32_ptr_to_u32,
-        ),
-        get_local: decl(module, "jit_get_local", &sig_vm_u32),
-        set_local: decl(module, "jit_set_local", &sig_vm_u32),
-        add: decl(module, "jit_op_add", &sig_vm_to_u32),
-        sub: decl(module, "jit_op_sub", &sig_vm_to_u32),
-        mul: decl(module, "jit_op_mul", &sig_vm_to_u32),
-        div: decl(module, "jit_op_div", &sig_vm_to_u32),
-        modu: decl(module, "jit_op_mod", &sig_vm_to_u32),
-        eq: decl(module, "jit_op_eq", &sig_vm_only),
-        ne: decl(module, "jit_op_ne", &sig_vm_only),
-        lt: decl(module, "jit_op_lt", &sig_vm_to_u32),
-        le: decl(module, "jit_op_le", &sig_vm_to_u32),
-        gt: decl(module, "jit_op_gt", &sig_vm_to_u32),
-        ge: decl(module, "jit_op_ge", &sig_vm_to_u32),
-        not: decl(module, "jit_op_not", &sig_vm_only),
-        negate: decl(module, "jit_op_negate", &sig_vm_to_u32),
-        peek_truthy: decl(module, "jit_peek_truthy", &sig_vm_to_u32),
-        pop_truthy: decl(module, "jit_pop_truthy", &sig_vm_to_u32),
-        op_return: decl(module, "jit_op_return", &sig_vm_only),
-        op_call: decl(module, "jit_op_call", &sig_vm_u32_to_u32),
-        op_call_hit: decl(module, "jit_op_call_hit", &sig_vm_ptr_to_u32),
-        op_call_miss: decl(module, "jit_op_call_miss", &sig_vm_u32_ptr_to_u32),
-        get_global: decl(module, "jit_get_global", sig_vm_u32_fallible),
-        get_global_ic: decl(module, "jit_get_global_ic", &sig_vm_ptr_u32_to_u32),
-        set_global: decl(module, "jit_set_global", sig_vm_u32_fallible),
-        define_global: decl(module, "jit_define_global", sig_vm_u32_fallible),
-        define_global_typed: decl(module, "jit_define_global_typed", &sig_vm_3u32_to_u32),
-        get_upvalue: decl(module, "jit_get_upvalue", &sig_vm_u32),
-        set_upvalue: decl(module, "jit_set_upvalue", &sig_vm_u32),
-        close_upvalue: decl(module, "jit_close_upvalue", &sig_vm_only),
-        op_closure: decl(module, "jit_op_closure", &sig_vm_u32_u32_to_u32),
-        op_struct_def: decl(module, "jit_op_struct_def", &sig_vm_u32),
-        op_struct_literal: decl(module, "jit_op_struct_literal", &sig_vm_u32_u32_to_u32),
-        op_get_field_ic_miss: decl(module, "jit_op_get_field_ic_miss", &sig_vm_u32_ptr_to_u32),
-        op_set_field_ic_miss: decl(module, "jit_op_set_field_ic_miss", &sig_vm_u32_ptr_to_u32),
-        op_define_method: decl(module, "jit_op_define_method", &sig_vm_u32_u32_to_u32),
-        op_method_call: decl(module, "jit_op_method_call", &sig_vm_u32_u32_to_u32),
-        op_method_call_ic: decl(
-            module,
-            "jit_op_method_call_ic",
-            &sig_vm_u32_u32_ptr_to_u32,
-        ),
-        stack_as_mut_ptr: decl(module, "jit_stack_as_mut_ptr", &sig_vm_to_ptr),
-        stack_len: decl(module, "jit_stack_len", &sig_vm_to_i64),
-        stack_pop_one: decl(module, "jit_stack_pop_one", &sig_vm_only),
-        stack_pop_n: decl(module, "jit_stack_pop_n", &sig_vm_u32),
-        stack_commit_len: decl(module, "jit_stack_commit_len", &sig_vm_i64),
-        stack_truncate: decl(module, "jit_stack_truncate", &sig_vm_i64),
-        replace_top2_with_bool: decl(module, "jit_replace_top2_with_bool", &sig_vm_u32),
-        current_slot_offset: decl(module, "jit_current_slot_offset", &sig_vm_to_i64),
-    }
-}
-
-fn declare_helper_refs(
-    ids: &HelperIds,
-    module: &mut JITModule,
-    builder: &mut FunctionBuilder<'_>,
-) -> HelperRefs {
-    let mut r = |id| module.declare_func_in_func(id, builder.func);
-    HelperRefs {
-        push_constant: r(ids.push_constant),
-        push_integer_inline: r(ids.push_integer_inline),
-        push_float_inline: r(ids.push_float_inline),
-        push_none: r(ids.push_none),
-        push_true: r(ids.push_true),
-        push_false: r(ids.push_false),
-        pop: r(ids.pop),
-        dup: r(ids.dup),
-        build_array: r(ids.build_array),
-        index_fast_array_int: r(ids.index_fast_array_int),
-        type_wrap: r(ids.type_wrap),
-        local_add_array_mod_index: r(ids.local_add_array_mod_index),
-        struct_field_add_const: r(ids.struct_field_add_const),
-        struct_field_add_local: r(ids.struct_field_add_local),
-        get_local: r(ids.get_local),
-        set_local: r(ids.set_local),
-        add: r(ids.add),
-        sub: r(ids.sub),
-        mul: r(ids.mul),
-        div: r(ids.div),
-        modu: r(ids.modu),
-        eq: r(ids.eq),
-        ne: r(ids.ne),
-        lt: r(ids.lt),
-        le: r(ids.le),
-        gt: r(ids.gt),
-        ge: r(ids.ge),
-        not: r(ids.not),
-        negate: r(ids.negate),
-        peek_truthy: r(ids.peek_truthy),
-        pop_truthy: r(ids.pop_truthy),
-        op_return: r(ids.op_return),
-        op_call: r(ids.op_call),
-        op_call_hit: r(ids.op_call_hit),
-        op_call_miss: r(ids.op_call_miss),
-        get_global: r(ids.get_global),
-        get_global_ic: r(ids.get_global_ic),
-        set_global: r(ids.set_global),
-        define_global: r(ids.define_global),
-        define_global_typed: r(ids.define_global_typed),
-        get_upvalue: r(ids.get_upvalue),
-        set_upvalue: r(ids.set_upvalue),
-        close_upvalue: r(ids.close_upvalue),
-        op_closure: r(ids.op_closure),
-        op_struct_def: r(ids.op_struct_def),
-        op_struct_literal: r(ids.op_struct_literal),
-        op_get_field_ic_miss: r(ids.op_get_field_ic_miss),
-        op_set_field_ic_miss: r(ids.op_set_field_ic_miss),
-        op_define_method: r(ids.op_define_method),
-        op_method_call: r(ids.op_method_call),
-        op_method_call_ic: r(ids.op_method_call_ic),
-        stack_as_mut_ptr: r(ids.stack_as_mut_ptr),
-        stack_len: r(ids.stack_len),
-        stack_pop_one: r(ids.stack_pop_one),
-        stack_pop_n: r(ids.stack_pop_n),
-        stack_commit_len: r(ids.stack_commit_len),
-        stack_truncate: r(ids.stack_truncate),
-        replace_top2_with_bool: r(ids.replace_top2_with_bool),
-        current_slot_offset: r(ids.current_slot_offset),
-    }
-}
 
 // ── Fallible-helper emission ───────────────────────────────────────────
 
@@ -4138,7 +3254,7 @@ fn emit_early_exit_on_err(
     builder.ins().brif(status, err_block, &[], ok_block, &[]);
     builder.switch_to_block(err_block);
     let zero64 = builder.ins().iconst(types::I64, 0);
-    builder.ins().jump(exit_block, &[status, zero64]);
+    builder.ins().jump(exit_block, &[status.into(), zero64.into()]);
     builder.switch_to_block(ok_block);
 }
 
@@ -4948,7 +4064,7 @@ fn emit_int_fast_arith(
         .brif(status, err_block, &[], continue_block, &[]);
     builder.switch_to_block(err_block);
     let zero64 = builder.ins().iconst(types::I64, 0);
-    builder.ins().jump(exit_block, &[status, zero64]);
+    builder.ins().jump(exit_block, &[status.into(), zero64.into()]);
 
     builder.switch_to_block(continue_block);
 
@@ -5119,12 +4235,12 @@ fn emit_inline_struct_field_add(
     };
     builder
         .ins()
-        .brif(status, err_block, &[status], ok_block, &[]);
+        .brif(status, err_block, &[status.into()], ok_block, &[]);
 
     builder.switch_to_block(err_block);
     let err_status = builder.block_params(err_block)[0];
     let zero64 = builder.ins().iconst(types::I64, 0);
-    builder.ins().jump(exit_block, &[err_status, zero64]);
+    builder.ins().jump(exit_block, &[err_status.into(), zero64.into()]);
 
     builder.switch_to_block(ok_block);
 }
@@ -5253,51 +4369,12 @@ fn spill_live_int_locals(
     }
 }
 
-/// Materialize every staged expression-stack temporary onto the real VM
-/// stack via `emit_inline_push_integer`. Drains `expr_stack` (leaves it
-/// empty). Each push bumps `stack_view.len`, so the VM's view matches
-/// the logical depth after the call.
-///
-/// Does NOT sync `Vec::len` — that's `commit_stack_len`'s job. See
-/// `flush_all`.
-#[allow(dead_code)] // consumed by B2.1c
-fn flush_expr_stack_to_stack_view(
-    builder: &mut FunctionBuilder<'_>,
-    vm_val: cranelift_codegen::ir::Value,
-    expr_stack: &mut Vec<cranelift_codegen::ir::Value>,
-) {
-    for val in expr_stack.drain(..) {
-        emit_inline_push_integer(builder, vm_val, val);
-    }
-}
-
-/// Full flush: spill live Int64 locals to their backing slots,
-/// materialize expr-stack temporaries onto the VM stack, and commit
-/// `Vec::len` so runtime helpers see a consistent backing store.
-///
-/// Call before any opcode that might let generic runtime code
-/// (helpers, interpreter takeover, error-handling paths, etc.)
-/// observe the stack. After this call, every virtualized value
-/// lives only on the VM stack; Cranelift `Variable`s may be stale
-/// (caller is free to re-def_var after the helper returns if the
-/// call doesn't invalidate them).
-#[allow(dead_code)] // consumed by B2.1c
-fn flush_all(
-    builder: &mut FunctionBuilder<'_>,
-    refs: &HelperRefs,
-    vm_val: cranelift_codegen::ir::Value,
-    slot_offset_val: cranelift_codegen::ir::Value,
-    int_locals: &HashMap<u16, Variable>,
-    live_int_slots: &HashSet<u16>,
-    expr_stack: &mut Vec<cranelift_codegen::ir::Value>,
-) {
-    spill_live_int_locals(builder, vm_val, slot_offset_val, int_locals, live_int_slots);
-    flush_expr_stack_to_stack_view(builder, vm_val, expr_stack);
-    // Sync Vec::len to stack_view.len. The existing stack_commit_len
-    // helper handles this — same path MethodCall's inline IC uses.
-    let new_len = emit_load_stack_len(builder, vm_val);
-    builder.ins().call(refs.stack_commit_len, &[vm_val, new_len]);
-}
+// `flush_expr_stack_to_stack_view` and `flush_all` were the legacy
+// flush helpers used by the previous `expr_stack: Vec<ir::Value>`
+// model. Both are now superseded by `VirtStack::flush_to_memory`
+// (in `core/src/jit/virt_stack.rs`) and have been removed. The full-
+// flush composition (spill live int locals + flush virt + commit
+// Vec::len) is now done inline at the few sites that need it.
 
 /// Inline the no-upvalue fast path of `jit_op_return`. Only safe when
 /// `scan_info.may_capture_upvalues == false` — the function body does
@@ -5569,71 +4646,11 @@ fn emit_int_fast_divmod(
         .brif(status, err_block, &[], continue_block, &[]);
     builder.switch_to_block(err_block);
     let zero64 = builder.ins().iconst(types::I64, 0);
-    builder.ins().jump(exit_block, &[status, zero64]);
+    builder.ins().jump(exit_block, &[status.into(), zero64.into()]);
 
     builder.switch_to_block(continue_block);
 }
 
-/// Emit IR that increments a `Cell<u64>` counter at a fixed address.
-/// The address is baked in as an immediate; since `JitCounters` lives in
-/// a `Box` owned by `JitInner`, the address is stable for the JIT's
-/// lifetime. Emits load + iadd_imm + store — 3 ops.
-#[inline]
-fn emit_counter_bump(
-    builder: &mut FunctionBuilder<'_>,
-    counters_ptr: *const JitCounters,
-    offset: isize,
-) {
-    use cranelift_codegen::ir::MemFlags;
-    let addr = unsafe { (counters_ptr as *const u8).offset(offset) } as i64;
-    let ptr = builder.ins().iconst(types::I64, addr);
-    let flags = MemFlags::trusted();
-    let cur = builder.ins().load(types::I64, flags, ptr, 0);
-    let next = builder.ins().iadd_imm(cur, 1);
-    builder.ins().store(flags, next, ptr, 0);
-}
-
-/// Byte offset of each `JitCounters` field from the struct base.
-/// The struct is `#[repr(C)]` so these are stable across Rust versions.
-/// Fields are `Cell<u64>` which is 8 bytes and identical to `u64`.
-#[allow(dead_code)] // consumed by later Plan A stages (A2/A3/A5)
-mod counter_offsets {
-    use super::JitCounters;
-    use std::mem::offset_of;
-    pub const SPECIALIZED_ENTRY_COMPILED: isize =
-        offset_of!(JitCounters, specialized_entry_compiled) as isize;
-    pub const SPECIALIZED_ENTRY_CALLED: isize =
-        offset_of!(JitCounters, specialized_entry_called) as isize;
-    pub const SPECIALIZED_CALL_IC_HIT: isize =
-        offset_of!(JitCounters, specialized_call_ic_hit) as isize;
-    pub const SPECIALIZED_CALL_IC_MISS: isize =
-        offset_of!(JitCounters, specialized_call_ic_miss) as isize;
-    pub const SPECIALIZED_CALL_NO_ENTRY: isize =
-        offset_of!(JitCounters, specialized_call_no_entry) as isize;
-    pub const SPECIALIZED_CALL_ARITY_MISMATCH: isize =
-        offset_of!(JitCounters, specialized_call_arity_mismatch) as isize;
-    pub const SPECIALIZED_CALL_BAILOUT: isize =
-        offset_of!(JitCounters, specialized_call_bailout) as isize;
-    pub const SELF_RECURSION_DIRECT_CALL: isize =
-        offset_of!(JitCounters, self_recursion_direct_call) as isize;
-    pub const VIRT_DIVMOD_FAST: isize = offset_of!(JitCounters, virt_divmod_fast) as isize;
-    pub const VIRT_DIVMOD_SLOW_ZERO: isize =
-        offset_of!(JitCounters, virt_divmod_slow_zero) as isize;
-    pub const VIRT_DIVMOD_SLOW_OVERFLOW: isize =
-        offset_of!(JitCounters, virt_divmod_slow_overflow) as isize;
-    pub const VIRT_BRANCH_EQ_HIT: isize =
-        offset_of!(JitCounters, virt_branch_eq_hit) as isize;
-    pub const VIRT_BRANCH_PARITY_HIT: isize =
-        offset_of!(JitCounters, virt_branch_parity_hit) as isize;
-    pub const VIRT_DIV_POW2_LOWERED: isize =
-        offset_of!(JitCounters, virt_div_pow2_lowered) as isize;
-    pub const CALL_IC_HIT: isize = offset_of!(JitCounters, call_ic_hit) as isize;
-    pub const CALL_IC_MISS: isize = offset_of!(JitCounters, call_ic_miss) as isize;
-    pub const GET_UPVALUE_INLINE_HIT: isize =
-        offset_of!(JitCounters, get_upvalue_inline_hit) as isize;
-    pub const IC_CALLEE_HAS_SPEC_ENTRY: isize =
-        offset_of!(JitCounters, ic_callee_has_spec_entry) as isize;
-}
 
 /// True iff `val` is the result of a Cranelift `iconst` with the
 /// given immediate. Used by the parity-branch peephole to recognise
@@ -5676,7 +4693,7 @@ fn try_emit_parity_branch_peephole(
     chunk: &Chunk,
     code: &[u8],
     ip: usize,
-    expr_stack: &mut Vec<cranelift_codegen::ir::Value>,
+    virt_stack: &mut VirtStack,
     virt_branch_elided_pops: &mut HashSet<usize>,
     blocks: &mut HashMap<usize, Block>,
     slot_types: &crate::compiler::slot_types::FunctionSlotTypes,
@@ -5684,15 +4701,17 @@ fn try_emit_parity_branch_peephole(
 ) -> Option<usize> {
     use cranelift_codegen::ir::condcodes::IntCC;
 
-    // Need at least (x, 2) on expr_stack — both must be virt Ints.
-    if expr_stack.len() < 2 {
+    // Need at least (x, 2) on the virt stack — both must be virt Ints.
+    if virt_stack.pending_depth() < 2 {
         return None;
     }
 
-    // Top of expr_stack is the Modulo RHS (most recently pushed). It
-    // must be `iconst 2`. Without IR introspection we'd have to look
-    // at bytecode position, which is fragile under future peepholes.
-    let rhs = *expr_stack.last().unwrap();
+    // Top of the virt stack is the Modulo RHS (most recently pushed).
+    // It must be `iconst 2`.
+    let rhs = match virt_stack.peek_int_ssa() {
+        Some(v) => v,
+        None => return None,
+    };
     if !is_iconst_imm(builder, rhs, 2) {
         return None;
     }
@@ -5759,12 +4778,12 @@ fn try_emit_parity_branch_peephole(
         return None;
     }
 
-    // For pattern B, expr_stack[-3] must be `iconst 0`.
+    // For pattern B, virt_stack[-3] must be `iconst 0`.
     if is_pattern_b {
-        if expr_stack.len() < 3 {
-            return None;
-        }
-        let zero_val = expr_stack[expr_stack.len() - 3];
+        let zero_val = match virt_stack.peek_int_ssa_at(2) {
+            Some(v) => v,
+            None => return None,
+        };
         if !is_iconst_imm(builder, zero_val, 0) {
             return None;
         }
@@ -5775,12 +4794,12 @@ fn try_emit_parity_branch_peephole(
         emit_counter_bump(builder, cp, counter_offsets::VIRT_BRANCH_PARITY_HIT);
     }
 
-    // Pop expr_stack entries: rhs (2), lhs (the Modulo arg). For
-    // pattern B, also pop the leading 0.
-    expr_stack.pop().unwrap(); // rhs (2) — discarded; we use band_imm
-    let lhs = expr_stack.pop().unwrap();
+    // Pop virt entries: rhs (2), lhs (the Modulo arg). For pattern B,
+    // also pop the leading 0.
+    virt_stack.pop_int_ssa().unwrap(); // rhs (2) — discarded; we use band_imm
+    let lhs = virt_stack.pop_int_ssa().unwrap();
     if is_pattern_b {
-        expr_stack.pop().unwrap(); // 0 — already proven via is_iconst_imm
+        virt_stack.pop_int_ssa().unwrap(); // 0 — already proven via is_iconst_imm
     }
 
     let parity = builder.ins().band_imm(lhs, 1);
@@ -5808,82 +4827,6 @@ fn try_emit_parity_branch_peephole(
     // branch_ip + 3 == next_ip (already computed), the byte just after
     // the JumpIf*'s 3-byte opcode + offset.
     Some(branch_ip + 3)
-}
-
-/// Extract the i64 immediate of a Cranelift Value if it's the result
-/// of an `iconst`. Returns None if `val` was produced by anything else.
-#[inline]
-fn iconst_imm(builder: &FunctionBuilder<'_>, val: cranelift_codegen::ir::Value) -> Option<i64> {
-    use cranelift_codegen::ir::{InstructionData, Opcode, ValueDef};
-    let dfg = &builder.func.dfg;
-    match dfg.value_def(val) {
-        ValueDef::Result(inst, _) => match dfg.insts[inst] {
-            InstructionData::UnaryImm { opcode: Opcode::Iconst, imm } => Some(i64::from(imm)),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// B2.1h signed-div-by-power-of-two peephole. Tries to lower
-/// `OpCode::Divide` whose RHS is a constant power-of-two integer to a
-/// bias-and-shift sequence, replacing Cranelift's ~20-cycle `idiv`
-/// with ~5 cycles of `sshr_imm + band_imm + iadd + sshr_imm`.
-///
-/// Trunc-toward-zero semantics for signed integers require a sign-bias
-/// before the right shift:
-///
-///     q = (x + ((x >> 63) & (|d| - 1))) >> log2(|d|)
-///     if d < 0 { q = -q }
-///
-/// For known non-negative `x`, the cheaper form `q = x >> log2(|d|)`
-/// is correct. v1 doesn't have non-negative facts yet, so we always
-/// emit the bias form. The bias is two extra ops (~2 cycles) — still
-/// far cheaper than `idiv`.
-///
-/// Bailouts (return None, fall through to virt-Modulo path's existing
-/// `idiv`-with-guards behavior):
-///
-///   * RHS not a recognized iconst at compile time.
-///   * d == 0   (must preserve div-by-zero error).
-///   * d == -1  (must preserve i64::MIN / -1 overflow trap).
-///   * |d| not a power of two.
-///
-/// Returns `Some(quotient)` on match; the caller pops both operands
-/// from `expr_stack` and pushes the returned value.
-fn try_emit_sdiv_pow2_peephole(
-    builder: &mut FunctionBuilder<'_>,
-    lhs: cranelift_codegen::ir::Value,
-    rhs: cranelift_codegen::ir::Value,
-) -> Option<cranelift_codegen::ir::Value> {
-    let d = iconst_imm(builder, rhs)?;
-    if d == 0 || d == -1 {
-        return None;
-    }
-    let abs = d.checked_abs()?;
-    if (abs as u64).count_ones() != 1 {
-        return None;
-    }
-    let k = (abs as u64).trailing_zeros() as i64;
-
-    // Bias form: (x + ((x >> 63) & (|d| - 1))) >> k.
-    let q = if k == 0 {
-        // |d| == 1: x / 1 == x; x / -1 was rejected above.
-        lhs
-    } else {
-        let sign = builder.ins().sshr_imm(lhs, 63);
-        let bias_mask = (abs - 1) as i64;
-        let bias = builder.ins().band_imm(sign, bias_mask);
-        let adjusted = builder.ins().iadd(lhs, bias);
-        builder.ins().sshr_imm(adjusted, k)
-    };
-
-    let q = if d < 0 {
-        builder.ins().ineg(q)
-    } else {
-        q
-    };
-    Some(q)
 }
 
 /// Load the `i64` payload from the Value currently at stack[stack_view.len - 1].
@@ -5974,7 +4917,7 @@ fn emit_int_virt_divmod(
     } else {
         builder.ins().sdiv(lhs, rhs)
     };
-    builder.ins().jump(cont_block, &[result]);
+    builder.ins().jump(cont_block, &[result.into()]);
 
     // Slow path: re-box both operands as Value::Integer onto the VM
     // stack, call the existing helper (which handles div-by-zero and
@@ -5993,11 +4936,11 @@ fn emit_int_virt_divmod(
         .brif(status, err_block, &[], slow_ok_block, &[]);
     builder.switch_to_block(err_block);
     let zero64 = builder.ins().iconst(types::I64, 0);
-    builder.ins().jump(exit_block, &[status, zero64]);
+    builder.ins().jump(exit_block, &[status.into(), zero64.into()]);
     builder.switch_to_block(slow_ok_block);
     let payload = emit_load_stack_top_integer_payload(builder, vm_val);
     emit_inline_stack_pop_one(builder, vm_val);
-    builder.ins().jump(cont_block, &[payload]);
+    builder.ins().jump(cont_block, &[payload.into()]);
 
     builder.switch_to_block(cont_block);
     builder.block_params(cont_block)[0]
@@ -6079,7 +5022,7 @@ fn emit_inline_local_const_arith_update(
     builder.ins().brif(status, err_block, &[], set_block, &[]);
     builder.switch_to_block(err_block);
     let zero64 = builder.ins().iconst(types::I64, 0);
-    builder.ins().jump(exit_block, &[status, zero64]);
+    builder.ins().jump(exit_block, &[status.into(), zero64.into()]);
 
     builder.switch_to_block(set_block);
     builder.ins().call(refs.set_local, &[vm_val, slot_val]);
@@ -6181,7 +5124,7 @@ fn emit_inline_local_scaled_arith_update(
         .brif(mul_status, mul_err_block, &[], arith_block, &[]);
     builder.switch_to_block(mul_err_block);
     let zero64_a = builder.ins().iconst(types::I64, 0);
-    builder.ins().jump(exit_block, &[mul_status, zero64_a]);
+    builder.ins().jump(exit_block, &[mul_status.into(), zero64_a.into()]);
 
     builder.switch_to_block(arith_block);
     let slow_helper = match op {
@@ -6198,7 +5141,7 @@ fn emit_inline_local_scaled_arith_update(
         .brif(arith_status, arith_err_block, &[], set_block, &[]);
     builder.switch_to_block(arith_err_block);
     let zero64_b = builder.ins().iconst(types::I64, 0);
-    builder.ins().jump(exit_block, &[arith_status, zero64_b]);
+    builder.ins().jump(exit_block, &[arith_status.into(), zero64_b.into()]);
 
     builder.switch_to_block(set_block);
     builder.ins().call(refs.set_local, &[vm_val, dst_slot_val]);
@@ -6293,7 +5236,7 @@ fn emit_int_fast_cmp(
         .brif(status, err_block, &[], continue_block, &[]);
     builder.switch_to_block(err_block);
     let zero64 = builder.ins().iconst(types::I64, 0);
-    builder.ins().jump(exit_block, &[status, zero64]);
+    builder.ins().jump(exit_block, &[status.into(), zero64.into()]);
 
     builder.switch_to_block(continue_block);
 }
@@ -6376,6 +5319,10 @@ fn emit_int_fast_eq(
 ///
 /// Both paths finish by branching to either `target_block` (jump taken) or
 /// `fall_block` (jump not taken).
+// `slow_helper_fallible`: true when `slow_helper` returns a `u32`
+// status (`refs.lt`/`le`/`gt`/`ge`); false when it returns nothing
+// (`refs.eq`/`ne`). The slow path skips the err-block / status brif
+// when false because there's no value to read.
 fn emit_fused_int_cmp_branch(
     builder: &mut FunctionBuilder<'_>,
     exit_block: Block,
@@ -6383,6 +5330,7 @@ fn emit_fused_int_cmp_branch(
     vm_val: cranelift_codegen::ir::Value,
     cc: cranelift_codegen::ir::condcodes::IntCC,
     slow_helper: FuncRef,
+    slow_helper_fallible: bool,
     branch_op: OpCode,
     target_block: Block,
     fall_block: Block,
@@ -6480,13 +5428,24 @@ fn emit_fused_int_cmp_branch(
     // ── Slow path: comparison helper, then truthy helper, then brif ──
     builder.switch_to_block(slow_block);
     let call = builder.ins().call(slow_helper, &[vm_val]);
-    let status = builder.inst_results(call)[0];
-    let err_block = builder.create_block();
     let cont_block = builder.create_block();
-    builder.ins().brif(status, err_block, &[], cont_block, &[]);
-    builder.switch_to_block(err_block);
-    let zero64 = builder.ins().iconst(types::I64, 0);
-    builder.ins().jump(exit_block, &[status, zero64]);
+    if slow_helper_fallible {
+        // Fallible helpers (`lt`/`le`/`gt`/`ge`) return a u32 status.
+        // Forward to exit_block on non-zero (runtime error) so the
+        // status surfaces as a JIT bailout to the caller.
+        let status = builder.inst_results(call)[0];
+        let err_block = builder.create_block();
+        builder.ins().brif(status, err_block, &[], cont_block, &[]);
+        builder.switch_to_block(err_block);
+        let zero64 = builder.ins().iconst(types::I64, 0);
+        builder.ins().jump(exit_block, &[status.into(), zero64.into()]);
+    } else {
+        // Infallible helpers (`eq`/`ne`) return nothing. There's no
+        // status to inspect; `inst_results(call)` is empty (indexing
+        // it panics — that's the bug this branch was added to fix).
+        // Continue straight to the truthy + brif step.
+        builder.ins().jump(cont_block, &[]);
+    }
 
     builder.switch_to_block(cont_block);
     // `slow_helper` pushed a `Boolean`; now replicate the branch opcode's

@@ -58,6 +58,57 @@ impl SlotType {
     }
 }
 
+// ── Specialized-entry eligibility outcome ─────────────────────────────
+
+/// Per-function classification of why specialized-entry eligibility
+/// passed or failed. Step 0 attribution: each outcome maps to a
+/// JitCounter so we can attribute "bench_closure has 0 spec dispatches"
+/// to the specific rule that excluded the callee.
+///
+/// Order follows the rejection cascade in
+/// `compute_specialized_entry_eligibility` — each variant corresponds
+/// to the first rule that rejected the function. A function reaching
+/// the end of the cascade is `Eligible`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SpecEligibilityOutcome {
+    Eligible,
+    /// Function takes no args; specialized entry's reason for existing
+    /// (passing args in registers) doesn't apply.
+    RejectedZeroArity,
+    /// At least one param is neither Int64-typed nor an int-mirror
+    /// candidate. Cannot pass the arg as raw i64 safely.
+    RejectedParamNotInt,
+    /// At least one param is captured by an upvalue. The specialized
+    /// entry would need to materialize a heap slot for the capture,
+    /// which the current ABI doesn't do.
+    RejectedParamCaptured,
+    /// Body contains a `Closure` opcode (creates a new closure).
+    /// Heap effect; defer to a later step that handles allocation.
+    RejectedHasClosureOp,
+    /// Body contains `GetUpvalue` / `SetUpvalue` / `CloseUpvalue`.
+    /// Step 4a will lift this restriction by adding a closure pointer
+    /// to the specialized ABI; until then these are unsafe to run
+    /// without the surrounding generic frame.
+    RejectedHasUpvalueOp,
+    /// Function has no `Return` opcode (e.g., always errors out or
+    /// loops forever). Specialized return slot would never fire.
+    RejectedNoReturn,
+    /// Function has no `Call` opcode. Without a call there's no
+    /// self-recursion, and the IC never observes this callee — pure
+    /// compile-time overhead to emit a specialized body.
+    RejectedNoCall,
+    /// At least one Return IP is unreachable per the abstract
+    /// interpretation (Bottom on top-of-stack at that IP).
+    RejectedReturnUnreachable,
+}
+
+impl SpecEligibilityOutcome {
+    #[inline]
+    pub fn is_eligible(self) -> bool {
+        matches!(self, SpecEligibilityOutcome::Eligible)
+    }
+}
+
 // ── Per-function result ───────────────────────────────────────────────
 
 /// Per-slot classification for one JIT-compiled function, plus the
@@ -141,6 +192,13 @@ pub struct FunctionSlotTypes {
     /// Not written here — consumers check `specialized_param_slots`
     /// and the `Return` IPs separately if they need per-IP info.
     pub specialized_entry_eligible: bool,
+
+    /// Step 0 attribution: per-rejection reason for `specialized_entry_eligible`.
+    /// `Eligible` when the function qualifies; otherwise the first rule
+    /// that rejected it. Consumed by the JIT to bump per-reason counters
+    /// so we can attribute "why didn't this benchmark take the spec
+    /// dispatch path" without re-running the analysis.
+    pub specialized_entry_outcome: SpecEligibilityOutcome,
 
     /// Param slots that the specialized entry would receive as i64
     /// (1..=arity when eligible; empty otherwise). Distinct from
@@ -389,6 +447,42 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                 }
             }
 
+            // Step 0 bugfix: any op that LEAVES a value at a position
+            // within the local range — not just Constant — should join
+            // its pushed type into slot_types[pos]. Without this, the
+            // slot_types only sees the FIRST push at that position
+            // (recorded by the Constant block above), and subsequent
+            // ops that consume those constants and push a different
+            // type at the same position (`arr := [10, 20, 30]` pops
+            // three Int64 transients via BuildArray and pushes an
+            // Array at the slot's position) leave slot_types[N] stuck
+            // at the transient's Int64. The JIT then virtualizes the
+            // slot as Int64 and reads the cached Constant integer,
+            // skipping the actual Array — `arr[1]` becomes `10[1]`,
+            // and the Index helper errors with "cannot index INTEGER
+            // with INTEGER". Joining on every push converges
+            // `slot_types[N]` to the lattice top (Value) whenever any
+            // non-Int64 type ever lands at that position, correctly
+            // disqualifying the slot from virtualization.
+            //
+            // Init-IP / `init_sites` are NOT extended here: those
+            // gate the *virtualization* fast path that synthesises
+            // values from a Constant initializer, and that mechanism
+            // only handles Constant initializers today (per the
+            // comment block above). Joining slot_types is sufficient
+            // because is_virtualizable also checks `slot is Int64`.
+            if depth_after >= 1 && !matches!(op, OpCode::Constant) {
+                let new_pos = depth_after - 1;
+                if new_pos < num_slots {
+                    let ty = next_state
+                        .stack
+                        .last()
+                        .copied()
+                        .unwrap_or(SlotType::Bottom);
+                    next_state.write_slot(new_pos, ty);
+                }
+            }
+
             // Scope-pop detection: a `Pop` whose depth_after lands on
             // a local slot's position (i.e., the thing being popped
             // occupied slot N). Only record when that slot has been
@@ -530,7 +624,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         ))
     };
     let eligibility_states = lifted_states.as_ref().unwrap_or(&states);
-    let (specialized_entry_eligible, specialized_param_slots) = compute_specialized_entry_eligibility(
+    let (specialized_entry_outcome, specialized_param_slots) = compute_specialized_entry_eligibility(
         code,
         chunk,
         func.arity as u16,
@@ -539,6 +633,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         &int_mirror_param_slots,
         eligibility_states,
     );
+    let specialized_entry_eligible = specialized_entry_outcome.is_eligible();
 
     FunctionSlotTypes {
         slots: result,
@@ -549,6 +644,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         captured_slots,
         int_mirror_param_slots,
         specialized_entry_eligible,
+        specialized_entry_outcome,
         specialized_param_slots,
     }
 }
@@ -637,8 +733,11 @@ fn analyze_states_with_lifted_params(
 }
 
 /// Determine whether the function qualifies for a specialized i64-ABI
-/// entry point. Returns `(eligible, param_slots)` — the second value
-/// is empty when ineligible, or the full `(1..=arity)` list otherwise.
+/// entry point. Returns `(outcome, param_slots)` — the second value is
+/// empty when ineligible, or the full `(1..=arity)` list otherwise.
+/// `outcome` carries the specific rule that rejected the function so
+/// the JIT can attribute "why didn't this take the spec dispatch path"
+/// without re-running the analysis.
 fn compute_specialized_entry_eligibility(
     code: &[u8],
     chunk: &Chunk,
@@ -647,9 +746,9 @@ fn compute_specialized_entry_eligibility(
     captured_slots: &HashSet<u16>,
     int_mirror_param_slots: &HashSet<u16>,
     states: &HashMap<usize, AbstractState>,
-) -> (bool, Vec<u16>) {
+) -> (SpecEligibilityOutcome, Vec<u16>) {
     if arity == 0 {
-        return (false, Vec::new());
+        return (SpecEligibilityOutcome::RejectedZeroArity, Vec::new());
     }
 
     // Every param slot must be Int-stable AND not captured.
@@ -660,10 +759,10 @@ fn compute_specialized_entry_eligibility(
         );
         let is_int_demand_mirror = int_mirror_param_slots.contains(&slot);
         if !(is_int_typed || is_int_demand_mirror) {
-            return (false, Vec::new());
+            return (SpecEligibilityOutcome::RejectedParamNotInt, Vec::new());
         }
         if captured_slots.contains(&slot) {
-            return (false, Vec::new());
+            return (SpecEligibilityOutcome::RejectedParamCaptured, Vec::new());
         }
     }
 
@@ -690,8 +789,11 @@ fn compute_specialized_entry_eligibility(
         let op_len = opcode_len(op, code, ip, chunk);
 
         match op {
-            OpCode::Closure | OpCode::GetUpvalue | OpCode::SetUpvalue | OpCode::CloseUpvalue => {
-                return (false, Vec::new());
+            OpCode::Closure => {
+                return (SpecEligibilityOutcome::RejectedHasClosureOp, Vec::new());
+            }
+            OpCode::GetUpvalue | OpCode::SetUpvalue | OpCode::CloseUpvalue => {
+                return (SpecEligibilityOutcome::RejectedHasUpvalueOp, Vec::new());
             }
             OpCode::Return => {
                 has_return = true;
@@ -706,8 +808,11 @@ fn compute_specialized_entry_eligibility(
         ip += op_len;
     }
 
-    if !has_return || !has_call {
-        return (false, Vec::new());
+    if !has_return {
+        return (SpecEligibilityOutcome::RejectedNoReturn, Vec::new());
+    }
+    if !has_call {
+        return (SpecEligibilityOutcome::RejectedNoCall, Vec::new());
     }
 
     // Every Return IP must have a non-Bottom top (reachable) and must
@@ -719,19 +824,21 @@ fn compute_specialized_entry_eligibility(
     for &rip in &return_ips {
         let state = match states.get(&rip) {
             Some(s) => s,
-            None => return (false, Vec::new()),
+            None => {
+                return (SpecEligibilityOutcome::RejectedReturnUnreachable, Vec::new());
+            }
         };
         let top_ty = state.stack.last().copied().unwrap_or(SlotType::Bottom);
         // Bottom means unreachable → still reject (can't trust).
         if matches!(top_ty, SlotType::Bottom) {
-            return (false, Vec::new());
+            return (SpecEligibilityOutcome::RejectedReturnUnreachable, Vec::new());
         }
         // Value and Int64 both ok: the trampoline's runtime tag check
         // takes care of correctness.
     }
 
     let param_slots: Vec<u16> = (1..=arity).collect();
-    (true, param_slots)
+    (SpecEligibilityOutcome::Eligible, param_slots)
 }
 
 /// Walk the bytecode and pick out param slots that qualify for an

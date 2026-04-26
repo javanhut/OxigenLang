@@ -229,6 +229,30 @@ summarize_one() {
     ' "$out_json"
 }
 
+# Step 0 (plan): emit JIT min/p50 in ms for the under-10ms pass criterion.
+# `min < 10ms AND p50 comfortably below 11ms` — bare min can be a thermal
+# outlier on a desktop. Median is computed in jq from `.times[]`.
+summarize_jit_min_p50() {
+    local stem=$1
+    local out_json="$REPORT_DIR/${stem}.native.json"
+    jq -r --arg stem "$stem" '
+        def fmt1: . * 10 | round / 10 | tostring;
+        def median(arr):
+            (arr | sort) as $s
+            | ($s | length) as $n
+            | if $n == 0 then null
+              elif ($n % 2) == 1 then $s[($n - 1) / 2]
+              else (($s[$n/2 - 1] + $s[$n/2]) / 2)
+              end;
+        def by_name($n): [.results[] | select(.command | startswith($n))][0];
+        (by_name("oxigen --jit")) as $j
+        | ($j.min * 1000) as $jit_min
+        | (median([$j.times[] | . * 1000])) as $jit_p50
+        | [ $stem, ($jit_min | fmt1), ($jit_p50 | fmt1) ]
+        | @tsv
+    ' "$out_json"
+}
+
 # ── Main ───────────────────────────────────────────────────────────────
 
 mkdir -p "$REPORT_DIR"
@@ -299,6 +323,18 @@ latest_md="$REPORT_DIR/latest-native.md"
     for stem in "${benchmarks[@]}"; do
         summarize_one "$stem" \
             | awk -F'\t' '{printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7,$8,$9,$10}'
+    done
+    echo
+    # Step 0: JIT min vs p50 for the under-10ms pass criterion. A bench
+    # passes when `min < 10` AND `p50 < ~11` — guards against celebrating
+    # a thermally lucky outlier.
+    echo "## JIT min / p50 (ms)"
+    echo
+    echo "| benchmark | jit min | jit p50 |"
+    echo "| --- | ---: | ---: |"
+    for stem in "${benchmarks[@]}"; do
+        summarize_jit_min_p50 "$stem" \
+            | awk -F'\t' '{printf "| %s | %s | %s |\n", $1,$2,$3}'
     done
     echo
     echo "Per-benchmark JSON (full samples + hyperfine stats) in \`$REPORT_DIR/\`."

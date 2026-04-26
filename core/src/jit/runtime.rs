@@ -17,6 +17,8 @@ use crate::vm::value::{Upvalue, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use super::engine::HelperCounter;
+
 // ── Fallback harness (Step 2, still used for functions the translator
 //    itself rejects — currently none, but kept as a safety valve) ────────
 
@@ -24,6 +26,7 @@ use std::rc::Rc;
 /// See the Milestone-1 plan for the full contract.
 pub unsafe extern "C" fn jit_run_via_interpreter(vm: *mut VM) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::RunViaInterpreter);
     vm.sync_stack_from_view();
     let stop_depth = vm.jit.current_stop_depth();
     match vm.execute_until(stop_depth) {
@@ -39,6 +42,7 @@ pub unsafe extern "C" fn jit_run_via_interpreter(vm: *mut VM) -> u32 {
 
 pub unsafe extern "C" fn jit_push_constant(vm: *mut VM, idx: u32) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::PushConstant);
     vm.sync_stack_from_view();
     let value = vm.current_constant(idx as u16);
     vm.push(value);
@@ -46,30 +50,35 @@ pub unsafe extern "C" fn jit_push_constant(vm: *mut VM, idx: u32) {
 
 pub unsafe extern "C" fn jit_push_integer_inline(vm: *mut VM, value: i64) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::PushIntegerInline);
     vm.sync_stack_from_view();
     vm.push(Value::Integer(value));
 }
 
 pub unsafe extern "C" fn jit_push_float_inline(vm: *mut VM, bits: u64) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::PushFloatInline);
     vm.sync_stack_from_view();
     vm.push(Value::Float(f64::from_bits(bits)));
 }
 
 pub unsafe extern "C" fn jit_push_none(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::PushNone);
     vm.sync_stack_from_view();
     vm.push(Value::None);
 }
 
 pub unsafe extern "C" fn jit_push_true(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::PushTrue);
     vm.sync_stack_from_view();
     vm.push(Value::Boolean(true));
 }
 
 pub unsafe extern "C" fn jit_push_false(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::PushFalse);
     vm.sync_stack_from_view();
     vm.push(Value::Boolean(false));
 }
@@ -78,12 +87,14 @@ pub unsafe extern "C" fn jit_push_false(vm: *mut VM) {
 
 pub unsafe extern "C" fn jit_pop(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::Pop);
     vm.sync_stack_from_view();
     vm.pop();
 }
 
 pub unsafe extern "C" fn jit_dup(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::Dup);
     vm.sync_stack_from_view();
     let top = vm.peek(0).clone();
     vm.push(top);
@@ -93,6 +104,7 @@ pub unsafe extern "C" fn jit_dup(vm: *mut VM) {
 
 pub unsafe extern "C" fn jit_build_array(vm: *mut VM, count: u32) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::BuildArray);
     vm.sync_stack_from_view();
     let count = count as usize;
     let mut elements = Vec::with_capacity(count);
@@ -105,6 +117,7 @@ pub unsafe extern "C" fn jit_build_array(vm: *mut VM, count: u32) {
 
 pub unsafe extern "C" fn jit_op_index_fast_array_int(vm: *mut VM) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::IndexFastArrayInt);
     vm.sync_stack_from_view();
     let index = vm.pop();
     let collection = vm.pop();
@@ -136,6 +149,7 @@ pub unsafe extern "C" fn jit_op_index_fast_array_int(vm: *mut VM) -> u32 {
 
 pub unsafe extern "C" fn jit_type_wrap(vm: *mut VM, type_idx: u32) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::TypeWrap);
     vm.sync_stack_from_view();
     let type_name = vm.current_constant(type_idx as u16);
     let value = vm.pop();
@@ -166,6 +180,7 @@ pub unsafe extern "C" fn jit_local_add_array_mod_index(
     pop_after: u32,
 ) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::LocalAddArrayModIndex);
     vm.sync_stack_from_view();
     if modulus == 0 {
         vm.jit.stash_error(vm.runtime_error("modulo by zero"));
@@ -242,6 +257,7 @@ pub unsafe extern "C" fn jit_struct_field_add_const(
     cache_ptr: *mut super::engine::FieldCacheEntry,
 ) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::StructFieldAddConst);
     vm.sync_stack_from_view();
     let base = vm.current_slot_offset();
     let self_val = vm.stack_slot(base + self_slot as usize).clone();
@@ -332,6 +348,7 @@ pub unsafe extern "C" fn jit_struct_field_add_local(
     cache_ptr: *mut super::engine::FieldCacheEntry,
 ) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::StructFieldAddLocal);
     vm.sync_stack_from_view();
     let base = vm.current_slot_offset();
     let self_val = vm.stack_slot(base + self_slot as usize).clone();
@@ -387,12 +404,14 @@ pub unsafe extern "C" fn jit_struct_field_add_local(
 /// rewritten once pushed.
 pub unsafe extern "C" fn jit_current_slot_offset(vm: *mut VM) -> i64 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::CurrentSlotOffset);
     vm.sync_stack_from_view();
     vm.current_slot_offset() as i64
 }
 
 pub unsafe extern "C" fn jit_get_local(vm: *mut VM, slot: u32) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::GetLocal);
     vm.sync_stack_from_view();
     let base = vm.current_slot_offset();
     let value = vm.stack_slot(base + slot as usize).clone();
@@ -401,6 +420,7 @@ pub unsafe extern "C" fn jit_get_local(vm: *mut VM, slot: u32) {
 
 pub unsafe extern "C" fn jit_set_local(vm: *mut VM, slot: u32) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::SetLocal);
     vm.sync_stack_from_view();
     let base = vm.current_slot_offset();
     let value = vm.peek(0).clone();
@@ -410,10 +430,11 @@ pub unsafe extern "C" fn jit_set_local(vm: *mut VM, slot: u32) {
 // ── Arithmetic — return 0 on ok, 1 on runtime error ────────────────────
 
 macro_rules! binop_fallible {
-    ($name:ident, $method:ident) => {
+    ($name:ident, $method:ident, $counter:ident) => {
         pub unsafe extern "C" fn $name(vm: *mut VM) -> u32 {
             let vm = unsafe { &mut *vm };
-    vm.sync_stack_from_view();
+            vm.jit.bump_helper(HelperCounter::$counter);
+            vm.sync_stack_from_view();
             let b = vm.pop();
             let a = vm.pop();
             match vm.$method(a, b) {
@@ -430,20 +451,21 @@ macro_rules! binop_fallible {
     };
 }
 
-binop_fallible!(jit_op_add, binary_add);
-binop_fallible!(jit_op_sub, binary_sub);
-binop_fallible!(jit_op_mul, binary_mul);
-binop_fallible!(jit_op_div, binary_div);
-binop_fallible!(jit_op_mod, binary_mod);
-binop_fallible!(jit_op_lt, compare_less);
-binop_fallible!(jit_op_le, compare_less_equal);
-binop_fallible!(jit_op_gt, compare_greater);
-binop_fallible!(jit_op_ge, compare_greater_equal);
+binop_fallible!(jit_op_add, binary_add, Add);
+binop_fallible!(jit_op_sub, binary_sub, Sub);
+binop_fallible!(jit_op_mul, binary_mul, Mul);
+binop_fallible!(jit_op_div, binary_div, Div);
+binop_fallible!(jit_op_mod, binary_mod, Mod);
+binop_fallible!(jit_op_lt, compare_less, Lt);
+binop_fallible!(jit_op_le, compare_less_equal, Le);
+binop_fallible!(jit_op_gt, compare_greater, Gt);
+binop_fallible!(jit_op_ge, compare_greater_equal, Ge);
 
 // ── Comparison that can't fail (PartialEq over Value) ─────────────────
 
 pub unsafe extern "C" fn jit_op_eq(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::Eq);
     vm.sync_stack_from_view();
     let b = vm.pop();
     let a = vm.pop();
@@ -452,6 +474,7 @@ pub unsafe extern "C" fn jit_op_eq(vm: *mut VM) {
 
 pub unsafe extern "C" fn jit_op_ne(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::Ne);
     vm.sync_stack_from_view();
     let b = vm.pop();
     let a = vm.pop();
@@ -462,6 +485,7 @@ pub unsafe extern "C" fn jit_op_ne(vm: *mut VM) {
 
 pub unsafe extern "C" fn jit_op_not(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::Not);
     vm.sync_stack_from_view();
     let v = vm.pop();
     vm.push(Value::Boolean(!v.is_truthy()));
@@ -469,6 +493,7 @@ pub unsafe extern "C" fn jit_op_not(vm: *mut VM) {
 
 pub unsafe extern "C" fn jit_op_negate(vm: *mut VM) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::Negate);
     vm.sync_stack_from_view();
     let v = vm.pop();
     match v {
@@ -500,6 +525,7 @@ pub unsafe extern "C" fn jit_op_negate(vm: *mut VM) -> u32 {
 /// Matches the semantics of `JumpIfFalse`/`JumpIfTrue`.
 pub unsafe extern "C" fn jit_peek_truthy(vm: *mut VM) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::PeekTruthy);
     vm.sync_stack_from_view();
     if vm.peek(0).is_truthy() { 1 } else { 0 }
 }
@@ -508,6 +534,7 @@ pub unsafe extern "C" fn jit_peek_truthy(vm: *mut VM) -> u32 {
 /// `PopJumpIfFalse`.
 pub unsafe extern "C" fn jit_pop_truthy(vm: *mut VM) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::PopTruthy);
     vm.sync_stack_from_view();
     let v = vm.pop();
     if v.is_truthy() { 1 } else { 0 }
@@ -517,6 +544,7 @@ pub unsafe extern "C" fn jit_pop_truthy(vm: *mut VM) -> u32 {
 
 pub unsafe extern "C" fn jit_get_global(vm: *mut VM, name_idx: u32) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::GetGlobal);
     vm.sync_stack_from_view();
     match vm.handle_get_global(name_idx as u16) {
         Ok(()) => 0,
@@ -542,6 +570,7 @@ pub unsafe extern "C" fn jit_get_global_ic(
     name_idx: u32,
 ) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::GetGlobalIc);
     vm.sync_stack_from_view();
     let cache = unsafe { &mut *cache_ptr };
     if cache.version == vm.globals_version {
@@ -563,6 +592,7 @@ pub unsafe extern "C" fn jit_get_global_ic(
 
 pub unsafe extern "C" fn jit_set_global(vm: *mut VM, name_idx: u32) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::SetGlobal);
     vm.sync_stack_from_view();
     match vm.handle_set_global(name_idx as u16) {
         Ok(()) => 0,
@@ -575,6 +605,7 @@ pub unsafe extern "C" fn jit_set_global(vm: *mut VM, name_idx: u32) -> u32 {
 
 pub unsafe extern "C" fn jit_define_global(vm: *mut VM, name_idx: u32) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::DefineGlobal);
     vm.sync_stack_from_view();
     match vm.handle_define_global(name_idx as u16) {
         Ok(()) => 0,
@@ -592,6 +623,7 @@ pub unsafe extern "C" fn jit_define_global_typed(
     type_idx: u32,
 ) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::DefineGlobalTyped);
     vm.sync_stack_from_view();
     match vm.handle_define_global_typed(name_idx as u16, mutable != 0, type_idx as u16) {
         Ok(()) => 0,
@@ -606,6 +638,7 @@ pub unsafe extern "C" fn jit_define_global_typed(
 
 pub unsafe extern "C" fn jit_get_upvalue(vm: *mut VM, idx: u32) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::GetUpvalue);
     vm.sync_stack_from_view();
     // Probe + B2.2 cache classify: inspect the upvalue's current shape
     // before mutating the stack. If it's `Closed(Integer(n))`, populate
@@ -651,6 +684,7 @@ pub unsafe extern "C" fn jit_get_upvalue(vm: *mut VM, idx: u32) {
 
 pub unsafe extern "C" fn jit_set_upvalue(vm: *mut VM, idx: u32) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::SetUpvalue);
     vm.sync_stack_from_view();
     if let Some(c) = vm.jit.counters_ptr_opt() {
         let c = unsafe { &*c };
@@ -686,6 +720,7 @@ pub unsafe extern "C" fn jit_set_upvalue(vm: *mut VM, idx: u32) {
 
 pub unsafe extern "C" fn jit_close_upvalue(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::CloseUpvalue);
     vm.sync_stack_from_view();
     vm.handle_close_upvalue();
 }
@@ -697,6 +732,7 @@ pub unsafe extern "C" fn jit_close_upvalue(vm: *mut VM) {
 /// first upvalue descriptor.
 pub unsafe extern "C" fn jit_op_closure(vm: *mut VM, fn_idx: u32, descriptors_offset: u32) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpClosure);
     vm.sync_stack_from_view();
     match vm.handle_closure(fn_idx as u16, descriptors_offset as usize) {
         Ok(()) => 0,
@@ -709,7 +745,9 @@ pub unsafe extern "C" fn jit_op_closure(vm: *mut VM, fn_idx: u32, descriptors_of
 
 // ── Struct ops ─────────────────────────────────────────────────────────
 
-pub unsafe extern "C" fn jit_op_struct_def(_vm: *mut VM, _const_idx: u32) {
+pub unsafe extern "C" fn jit_op_struct_def(vm: *mut VM, _const_idx: u32) {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpStructDef);
     // `StructDef` is currently a no-op in the interpreter (structs are
     // loaded via `Constant`), so we mirror that.
 }
@@ -720,6 +758,7 @@ pub unsafe extern "C" fn jit_op_struct_literal(
     field_count: u32,
 ) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpStructLiteral);
     vm.sync_stack_from_view();
     match vm.handle_struct_literal(name_idx as u16, field_count as u8) {
         Ok(()) => 0,
@@ -732,6 +771,7 @@ pub unsafe extern "C" fn jit_op_struct_literal(
 
 pub unsafe extern "C" fn jit_op_get_field(vm: *mut VM, field_idx: u32) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpGetField);
     vm.sync_stack_from_view();
     match vm.handle_get_field(field_idx as u16) {
         Ok(()) => 0,
@@ -744,6 +784,7 @@ pub unsafe extern "C" fn jit_op_get_field(vm: *mut VM, field_idx: u32) -> u32 {
 
 pub unsafe extern "C" fn jit_op_set_field(vm: *mut VM, field_idx: u32) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpSetField);
     vm.sync_stack_from_view();
     match vm.handle_set_field(field_idx as u16) {
         Ok(()) => 0,
@@ -760,6 +801,7 @@ pub unsafe extern "C" fn jit_op_get_field_ic_miss(
     cache_ptr: *mut super::engine::FieldCacheEntry,
 ) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpGetFieldIcMiss);
     vm.sync_stack_from_view();
     let cache = unsafe { &mut *cache_ptr };
     let object = vm.peek(0).clone();
@@ -820,6 +862,7 @@ pub unsafe extern "C" fn jit_op_set_field_ic_miss(
     cache_ptr: *mut super::engine::FieldCacheEntry,
 ) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpSetFieldIcMiss);
     vm.sync_stack_from_view();
     let cache = unsafe { &mut *cache_ptr };
     let object = vm.stack_at(vm.stack_len() - 2).clone();
@@ -863,6 +906,7 @@ pub unsafe extern "C" fn jit_op_define_method(
     method_count: u32,
 ) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpDefineMethod);
     vm.sync_stack_from_view();
     match vm.handle_define_method(struct_name_idx as u16, method_count as u8) {
         Ok(()) => 0,
@@ -890,6 +934,7 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
     cache_ptr: *mut super::engine::MethodCacheEntry,
 ) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpMethodCallIc);
     vm.sync_stack_from_view();
     let cache = unsafe { &mut *cache_ptr };
     let ac = arg_count as usize;
@@ -1023,6 +1068,7 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
 /// drive the interpreter until it returns.
 pub unsafe extern "C" fn jit_op_method_call(vm: *mut VM, method_idx: u32, arg_count: u32) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpMethodCall);
     vm.sync_stack_from_view();
     let before_depth = vm.frames_len();
     match vm.handle_method_call(method_idx as u16, arg_count as u8) {
@@ -1059,6 +1105,7 @@ pub unsafe extern "C" fn jit_op_method_call(vm: *mut VM, method_idx: u32, arg_co
 #[inline(always)]
 pub unsafe extern "C" fn jit_op_call(vm: *mut VM, arg_count: u32) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpCall);
     vm.sync_stack_from_view();
     let before_depth = vm.frames_len();
 
@@ -1107,6 +1154,7 @@ pub unsafe extern "C" fn jit_op_call_hit(
     cache_ptr: *mut super::engine::CallCacheEntry,
 ) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpCallHit);
     vm.sync_stack_from_view();
     let cache = unsafe { &mut *cache_ptr };
 
@@ -1157,6 +1205,7 @@ pub unsafe extern "C" fn jit_op_call_miss(
     cache_ptr: *mut super::engine::CallCacheEntry,
 ) -> u32 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpCallMiss);
     vm.sync_stack_from_view();
     let cache = unsafe { &mut *cache_ptr };
     let ac = arg_count as usize;
@@ -1227,6 +1276,7 @@ pub unsafe extern "C" fn jit_op_call_miss(
 /// locals safely without needing to emit Drop IR inline.
 pub unsafe extern "C" fn jit_stack_truncate(vm: *mut VM, new_len: i64) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::StackTruncate);
     vm.sync_stack_from_view();
     vm.stack_truncate(new_len as usize);
 }
@@ -1236,6 +1286,7 @@ pub unsafe extern "C" fn jit_stack_truncate(vm: *mut VM, new_len: i64) {
 /// content plus the result on top, and `frames.len()` has decreased by 1.
 pub unsafe extern "C" fn jit_op_return(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpReturn);
     vm.sync_stack_from_view();
     if let Some(c) = vm.jit.counters_ptr_opt() {
         let c = unsafe { &*c };
@@ -1259,12 +1310,14 @@ pub unsafe extern "C" fn jit_op_return(vm: *mut VM) {
 /// other runtime helper that might reallocate the stack invalidates it.
 pub unsafe extern "C" fn jit_stack_as_mut_ptr(vm: *mut VM) -> *mut crate::vm::value::Value {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::StackAsMutPtr);
     vm.sync_stack_from_view();
     vm.stack_as_mut_ptr()
 }
 
 pub unsafe extern "C" fn jit_stack_len(vm: *mut VM) -> u64 {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::StackLen);
     vm.sync_stack_from_view();
     vm.stack_len() as u64
 }
@@ -1274,6 +1327,7 @@ pub unsafe extern "C" fn jit_stack_len(vm: *mut VM) -> u64 {
 /// via direct memory write) and truncate the stack by one.
 pub unsafe extern "C" fn jit_stack_pop_one(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::StackPopOne);
     vm.sync_stack_from_view();
     vm.stack_shrink(1);
 }
@@ -1282,6 +1336,7 @@ pub unsafe extern "C" fn jit_stack_pop_one(vm: *mut VM) {
 /// drop both operands in a single helper call after the integer icmp.
 pub unsafe extern "C" fn jit_stack_pop_n(vm: *mut VM, n: u32) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::StackPopN);
     vm.sync_stack_from_view();
     vm.stack_shrink(n as usize);
 }
@@ -1302,6 +1357,7 @@ pub unsafe extern "C" fn jit_stack_pop_n(vm: *mut VM, n: u32) {
 #[inline(always)]
 pub unsafe extern "C" fn jit_stack_commit_len(vm: *mut VM, new_len: u64) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::StackCommitLen);
     vm.sync_stack_from_view();
     unsafe { vm.stack_set_len_raw(new_len as usize) };
 }
@@ -1313,6 +1369,7 @@ pub unsafe extern "C" fn jit_stack_commit_len(vm: *mut VM, new_len: u64) {
 /// heap-backed.
 pub unsafe extern "C" fn jit_replace_top2_with_bool(vm: *mut VM, result: u32) {
     let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::ReplaceTop2WithBool);
     vm.sync_stack_from_view();
     vm.pop();
     vm.pop();

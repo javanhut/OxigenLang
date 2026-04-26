@@ -19,8 +19,8 @@ jit = [
 toml = "1.1.2"
 ureq = "3"
 
-cranelift-jit       = { version = "0.115", optional = true }
-cranelift-module    = { version = "0.115", optional = true }
-cranelift-codegen   = { version = "0.115", optional = true }
-cranelift-frontend  = { version = "0.115", optional = true }
-cranelift-native    = { version = "0.115", optional = true }
+cranelift-jit       = { version = "0.131", optional = true }
+cranelift-module    = { version = "0.131", optional = true }
+cranelift-codegen   = { version = "0.131", optional = true }
+cranelift-frontend  = { version = "0.131", optional = true }
+cranelift-native    = { version = "0.131", optional = true }

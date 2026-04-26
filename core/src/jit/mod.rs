@@ -23,6 +23,8 @@ pub mod scan;
 mod engine;
 #[cfg(feature = "jit")]
 pub(crate) mod runtime;
+#[cfg(feature = "jit")]
+mod virt_stack;
 
 /// Default call-count threshold at which a function is considered hot
 /// enough to compile.
@@ -105,6 +107,19 @@ impl JitEngine {
     #[cfg(feature = "jit")]
     pub(crate) fn counters_ptr_opt(&self) -> Option<*const engine::JitCounters> {
         self.inner.as_ref().map(|i| i.counters_ptr())
+    }
+
+    /// Step 0 attribution: bump a per-helper FFI call counter. Called
+    /// from the entry of every `extern "C"` runtime helper. Cheap when
+    /// counters are present (load + cmp + load + inc + store), no-op
+    /// otherwise. The Option-on-self pattern keeps non-JIT runs paying
+    /// only a nullable check.
+    #[cfg(feature = "jit")]
+    #[inline]
+    pub(crate) fn bump_helper(&self, h: engine::HelperCounter) {
+        if let Some(inner) = self.inner.as_ref() {
+            inner.counters.bump_helper(h);
+        }
     }
 
     /// Lower the hot-threshold so `--jit` runs and tests don't need a long
