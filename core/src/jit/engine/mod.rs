@@ -5705,23 +5705,26 @@ fn emit_fused_int_cmp_branch(
     }
 }
 
-/// Inline fast path for `GetLocal(slot)`. Reads the slot's 16-byte
-/// `Value` and pushes a clone onto the VM stack, all inline:
+/// Inline fast path for `GetLocal(slot)`. Reads the slot's tag and
+/// dispatches:
 ///
-/// * **Primitive tags (0..=6):** the source value's bit pattern is a
-///   valid clone — just memcpy 16 bytes to the new top and bump
-///   `stack_view.len`. No Rc traffic, no variant dispatch.
-/// * **Heap-Rc tags (7..=12, 14..=21):** memcpy + atomic-free
-///   strong-count bump on the `RcBox` at the payload pointer. Mirrors
-///   what `Value::Clone` does for these variants without crossing FFI.
-///   Eliminates the residual `jit_get_local` helper crossings on hot
-///   GetLocal sites whose slot holds a Closure / Array / String /
-///   StructInstance / etc.
-/// * **`Value::Builtin` (tag 13):** the payload is a function pointer,
-///   not an `Rc`. Memcpy is sufficient (it's `Copy`); no bump.
+/// * **`Integer` (tag 0):** load the i64 payload and call
+///   `emit_inline_push_integer` — same path as before. Branch-free
+///   for the common int-local case; minimal IR per site.
+/// * **`Float` (tag 1):** mirror Integer with the float push helper.
+/// * **Anything else (tags 2..=21):** memcpy 16 bytes to the new
+///   stack top, then conditionally Rc-bump the payload (tags 7..=12
+///   and 14..=21). Replaces the old `jit_get_local` helper FFI
+///   crossing for slots holding Closure / Array / StructInstance /
+///   etc. — the case that produced 1M `get_local` helper hits in
+///   `bench_struct_method` and 500K in `bench_closure`.
 ///
-/// The whole path is a single straight-line `tag-load + memcpy +
-/// optional Rc bump + len bump`. No helper call.
+/// Keeping the Integer/Float fast paths matters: an earlier revision
+/// that unified everything onto a memcpy-based path widened the IR
+/// for every Int GetLocal site and inflated cold-compile time enough
+/// to regress `--jit` mode on bench_arith / bench_loop /
+/// bench_struct_method by 3–5×. The branch-free int path keeps those
+/// cheap.
 fn emit_inline_get_local(
     builder: &mut FunctionBuilder<'_>,
     refs: &HelperRefs,
@@ -5744,23 +5747,60 @@ fn emit_inline_get_local(
 
     let flags = MemFlags::trusted();
     let tag = builder.ins().load(types::I8, flags, src_addr, 0);
+    let int_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
+    let float_tag = builder.ins().iconst(types::I8, VALUE_TAG_FLOAT as i64);
 
-    // Compute destination address (stack[len] before increment).
+    let int_block = builder.create_block();
+    let check_float_block = builder.create_block();
+    let float_block = builder.create_block();
+    let non_primitive_block = builder.create_block();
+    let cont_block = builder.create_block();
+
+    let is_int = builder.ins().icmp(IntCC::Equal, tag, int_tag);
+    builder
+        .ins()
+        .brif(is_int, int_block, &[], check_float_block, &[]);
+
+    // ── Int fast path: branch-free push of the i64 payload ──
+    builder.switch_to_block(int_block);
+    let payload = builder
+        .ins()
+        .load(types::I64, flags, src_addr, VALUE_INT_PAYLOAD_OFFSET as i32);
+    emit_inline_push_integer(builder, vm_val, payload);
+    builder.ins().jump(cont_block, &[]);
+
+    // ── Float check ──
+    builder.switch_to_block(check_float_block);
+    let is_float = builder.ins().icmp(IntCC::Equal, tag, float_tag);
+    builder
+        .ins()
+        .brif(is_float, float_block, &[], non_primitive_block, &[]);
+
+    // ── Float fast path ──
+    builder.switch_to_block(float_block);
+    let bits = builder
+        .ins()
+        .load(types::I64, flags, src_addr, VALUE_INT_PAYLOAD_OFFSET as i32);
+    emit_inline_push_float(builder, vm_val, bits);
+    builder.ins().jump(cont_block, &[]);
+
+    // ── Non-primitive path: memcpy + conditional Rc-bump ──
+    //
+    // Replaces the previous `jit_get_local` helper call for tags >=2.
+    // Most of these (7..=12, 14..=21) are heap-Rc — memcpy then bump
+    // the strong count at the payload's RcBox offset 0. Tags 2..=6
+    // (Char/Bool/Byte/Uint/None) and 13 (Builtin) are primitives that
+    // happen not to be Int/Float; memcpy alone is a valid clone.
+    builder.switch_to_block(non_primitive_block);
+
     let stack_len = emit_load_stack_len(builder, vm_val);
     let dst_off = builder.ins().imul(stack_len, value_size);
     let dst_addr = builder.ins().iadd(stack_ptr, dst_off);
-
-    // Memcpy 16 bytes from src to dst.
     emit_copy_value(builder, src_addr, dst_addr);
 
-    // Conditionally bump the Rc strong count: tag > 6 && tag != 13.
-    // The two checks together can be expressed as
-    // `(tag - 7) <= (21 - 7)` excluding tag == 13, but a simple
-    // sequence of two icmps + a branch tree is shorter and Cranelift
-    // handles it cleanly.
+    // tag > 6 && tag != 13 → Rc bump.
     let six = builder.ins().iconst(types::I8, 6);
     let is_heap = builder.ins().icmp(IntCC::UnsignedGreaterThan, tag, six);
-
     let check_builtin_block = builder.create_block();
     let post_bump_block = builder.create_block();
     builder
@@ -5769,8 +5809,7 @@ fn emit_inline_get_local(
 
     builder.switch_to_block(check_builtin_block);
     // Tag 13 = `Value::Builtin(fn)`. The payload is a function pointer,
-    // not an Rc, so we must skip the bump (treating it as Rc would
-    // dereference into code memory).
+    // not an Rc — treating it as Rc would dereference into code memory.
     let builtin_tag = builder.ins().iconst(types::I8, 13);
     let is_builtin = builder.ins().icmp(IntCC::Equal, tag, builtin_tag);
     let bump_block = builder.create_block();
@@ -5779,8 +5818,7 @@ fn emit_inline_get_local(
         .brif(is_builtin, post_bump_block, &[], bump_block, &[]);
 
     builder.switch_to_block(bump_block);
-    // Load the `RcBox<T>` raw pointer from the payload (offset 8 of
-    // the Value). The strong count is at RcBox offset 0 — pinned by
+    // Strong count lives at RcBox offset 0; pinned by
     // `rc_strong_count_lives_at_rcbox_offset_zero` in vm/value.rs.
     // Single-threaded VM: non-atomic load+inc+store is correct.
     let rc_ptr = builder.ins().load(
@@ -5795,12 +5833,14 @@ fn emit_inline_get_local(
     builder.ins().jump(post_bump_block, &[]);
 
     builder.switch_to_block(post_bump_block);
-    // Bump stack_view.len.
     let one = builder.ins().iconst(types::I64, 1);
     let new_len = builder.ins().iadd(stack_len, one);
     builder
         .ins()
         .store(flags, new_len, vm_val, vm_stack_view_len_offset());
+    builder.ins().jump(cont_block, &[]);
+
+    builder.switch_to_block(cont_block);
 }
 
 /// Inline fast path for `SetLocal(slot)`. Mirrors the interpreter's
