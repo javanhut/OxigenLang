@@ -103,14 +103,34 @@ impl JitInner {
     pub fn new() -> Self {
         use cranelift_codegen::settings::Configurable;
         let mut flag_builder = settings::builder();
-        // Cranelift defaults to `opt_level=none`, which skips the
-        // egraph mid-end and most ISLE peephole rules. With `speed`
-        // we let Cranelift do the work the now-deleted manual
-        // peepholes (`try_emit_sdiv_pow2_peephole`,
-        // `try_emit_parity_branch_peephole`) used to do — including
-        // div-by-constant magic-multiply lowering, eq+brif fusion,
-        // and the parity-test recognition that turns `srem x, 2`
-        // into `band x, 1`.
+        // opt_level=speed activates Cranelift 0.131's egraph mid-end
+        // and ISLE peephole rules. A/B'd against opt_level=none and
+        // against the parent commit's Cranelift 0.115 (which used
+        // the default opt_level=none) on the loop-heavy benches:
+        //
+        //   bench               0.115 default   0.131 speed   0.131 none
+        //   ------------------  -------------   -----------   ----------
+        //   loop                         4 ms          4 ms         4 ms
+        //   nested_loop                 11 ms          6 ms         7 ms
+        //   nested_loop_big             49 ms         58 ms        69 ms
+        //   collatz                     43 ms         42 ms       216 ms
+        //
+        // `speed` matches or beats `none` on every loop bench and is
+        // competitive with 0.115 default. The other 0.131 knobs we
+        // tested all regressed at least one bench:
+        // `enable_verifier=false` blew up bench_loop (4 → 19 ms),
+        // `enable_alias_analysis=false` did the same (4 → 20 ms),
+        // `regalloc_algorithm=single_pass` regressed everything,
+        // and `opt_level=speed_and_size` took bench_nested_loop_big
+        // from 58 → 258 ms. So `speed` with otherwise-default flags
+        // is the configuration we ship.
+        //
+        // The hand-rolled `try_emit_sdiv_pow2_peephole` and
+        // `try_emit_parity_branch_peephole` peepholes run before
+        // Cranelift sees the IR, so they remain complementary at
+        // any opt_level — they cover patterns the mid-end doesn't
+        // collapse (e.g. `(x % 2) cmp 0 + brif` to a single
+        // bit-test).
         flag_builder
             .set("opt_level", "speed")
             .expect("Cranelift accepts opt_level=speed");
@@ -1353,14 +1373,15 @@ impl JitInner {
                             }
                         }
 
-                        // Cranelift 0.122+ lowers `sdiv` by any
-                        // constant divisor with the bias-and-shift /
-                        // magic-multiply transform in its mid-end, so
-                        // the prior B2.1h power-of-2 peephole has been
-                        // removed — emitting plain `sdiv lhs, iconst`
-                        // through the virtual path below produces the
-                        // same machine code without our manual
-                        // lowering.
+                        // B2.1h: signed-div-by-power-of-two peephole.
+                        // Replaces Cranelift's ~20-cycle `idiv` with a
+                        // bias-and-shift sequence when RHS is a known
+                        // power-of-two iconst. Only fires for Divide
+                        // (not Modulo) and only when both operands are
+                        // already on the virt stack as Int SSA values.
+                        // Required at `opt_level=none`; without this,
+                        // bench_collatz's `n / 2` falls through to a
+                        // real `idiv` instead of `sshr`.
 
                         // Virtual path: operands on expr_stack as virt Ints.
                         // Emit register-resident sdiv/srem with zero +
@@ -1370,6 +1391,20 @@ impl JitInner {
                         if virt_stack.top_n_are_int_ssa(2) {
                             let rhs = virt_stack.pop_int_ssa().unwrap();
                             let lhs = virt_stack.pop_int_ssa().unwrap();
+                            if !is_mod {
+                                if let Some(q) = try_emit_sdiv_pow2_peephole(&mut builder, lhs, rhs) {
+                                    if let Some(cp) = counters_ptr_opt {
+                                        emit_counter_bump(
+                                            &mut builder,
+                                            cp,
+                                            counter_offsets::VIRT_DIV_POW2_LOWERED,
+                                        );
+                                    }
+                                    virt_stack.push_int_ssa(q);
+                                    ip += 1;
+                                    continue;
+                                }
+                            }
                             let slow_helper = if is_mod { refs.modu } else { refs.div };
                             let result = emit_int_virt_divmod(
                                 &mut builder,
@@ -4671,6 +4706,21 @@ fn is_iconst_imm(builder: &FunctionBuilder<'_>, val: cranelift_codegen::ir::Valu
     }
 }
 
+/// Extract the i64 immediate of a Cranelift Value if it's the result
+/// of an `iconst`. Returns None if `val` was produced by anything else.
+#[inline]
+fn iconst_imm(builder: &FunctionBuilder<'_>, val: cranelift_codegen::ir::Value) -> Option<i64> {
+    use cranelift_codegen::ir::{InstructionData, Opcode, ValueDef};
+    let dfg = &builder.func.dfg;
+    match dfg.value_def(val) {
+        ValueDef::Result(inst, _) => match dfg.insts[inst] {
+            InstructionData::UnaryImm { opcode: Opcode::Iconst, imm } => Some(i64::from(imm)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// B2.1g parity-branch peephole. Detects the four shapes
 ///
 ///     (x % 2) == 0      —— pattern A, evaluating "is even"
@@ -4859,6 +4909,67 @@ fn emit_load_stack_top_integer_payload(
 /// Mirrors `emit_int_fast_divmod`'s guard shape but accepts operands in
 /// registers so the common case (rhs != 0 and !(i64::MIN / -1)) does zero
 /// memory traffic.
+///
+/// B2.1h signed-div-by-power-of-two peephole. Tries to lower
+/// `OpCode::Divide` whose RHS is a constant power-of-two integer to a
+/// bias-and-shift sequence, replacing Cranelift's ~20-cycle `idiv`
+/// with ~5 cycles of `sshr_imm + band_imm + iadd + sshr_imm`.
+///
+/// Trunc-toward-zero semantics for signed integers require a sign-bias
+/// before the right shift:
+///
+///     q = (x + ((x >> 63) & (|d| - 1))) >> log2(|d|)
+///     if d < 0 { q = -q }
+///
+/// For known non-negative `x`, the cheaper form `q = x >> log2(|d|)`
+/// is correct. v1 doesn't have non-negative facts yet, so we always
+/// emit the bias form. The bias is two extra ops (~2 cycles) — still
+/// far cheaper than `idiv`.
+///
+/// Bailouts (return None, fall through to virt-divmod path's existing
+/// `idiv`-with-guards behavior):
+///
+///   * RHS not a recognized iconst at compile time.
+///   * d == 0   (must preserve div-by-zero error).
+///   * d == -1  (must preserve i64::MIN / -1 overflow trap).
+///   * |d| not a power of two.
+///
+/// Returns `Some(quotient)` on match; the caller pops both operands
+/// from the virt stack and pushes the returned value.
+fn try_emit_sdiv_pow2_peephole(
+    builder: &mut FunctionBuilder<'_>,
+    lhs: cranelift_codegen::ir::Value,
+    rhs: cranelift_codegen::ir::Value,
+) -> Option<cranelift_codegen::ir::Value> {
+    let d = iconst_imm(builder, rhs)?;
+    if d == 0 || d == -1 {
+        return None;
+    }
+    let abs = d.checked_abs()?;
+    if (abs as u64).count_ones() != 1 {
+        return None;
+    }
+    let k = (abs as u64).trailing_zeros() as i64;
+
+    let q = if k == 0 {
+        // |d| == 1: x / 1 == x; x / -1 was rejected above.
+        lhs
+    } else {
+        let sign = builder.ins().sshr_imm(lhs, 63);
+        let bias_mask = (abs - 1) as i64;
+        let bias = builder.ins().band_imm(sign, bias_mask);
+        let adjusted = builder.ins().iadd(lhs, bias);
+        builder.ins().sshr_imm(adjusted, k)
+    };
+
+    let q = if d < 0 {
+        builder.ins().ineg(q)
+    } else {
+        q
+    };
+    Some(q)
+}
+
 fn emit_int_virt_divmod(
     builder: &mut FunctionBuilder<'_>,
     exit_block: Block,

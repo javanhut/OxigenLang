@@ -278,6 +278,7 @@ mod layout_tests {
             methods: RefCell::new(HashMap::new()),
             parent: None,
             layout: std::cell::OnceCell::new(),
+            module_globals: RefCell::new(None),
         });
         let inst = ObjStructInstance::new(
             "Pair".to_string(),
@@ -525,6 +526,13 @@ pub struct ObjStructDef {
     /// (parent fields first, then own) and the HashMap maps name → index.
     /// OnceCell: each struct def resolves its layout exactly once.
     pub layout: std::cell::OnceCell<std::rc::Rc<FieldLayout>>,
+    /// Globals of the module that defined this struct. Set after the
+    /// defining module finishes loading (see `VM::import_module`); read
+    /// in `call_method` so methods called from another module still see
+    /// their own module's top-level functions (e.g. `Parser` in
+    /// stdlib/parse_args.oxi calling its file-local `normalize_array`).
+    /// `None` for structs defined in the main script.
+    pub module_globals: RefCell<Option<std::rc::Rc<HashMap<String, Value>>>>,
 }
 
 /// Flattened field layout for a struct (including inherited fields).

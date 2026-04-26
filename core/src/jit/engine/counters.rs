@@ -182,6 +182,12 @@ pub(crate) struct JitCounters {
     pub virt_divmod_fast: std::cell::Cell<u64>,
     pub virt_divmod_slow_zero: std::cell::Cell<u64>,
     pub virt_divmod_slow_overflow: std::cell::Cell<u64>,
+    /// B2.1h: incremented every time the signed-div-by-power-of-two
+    /// peephole replaces a Cranelift `sdiv x, pow2` with the bias-
+    /// and-shift sequence (`sshr_imm + band_imm + iadd + sshr_imm`),
+    /// avoiding the ~20-cycle `idiv` lowering Cranelift emits at
+    /// `opt_level=none`.
+    pub virt_div_pow2_lowered: std::cell::Cell<u64>,
     /// B2.1f: incremented every time the fused `Equal` / `NotEqual`
     /// + `JumpIf*` path fires with both operands staged as virt Ints.
     /// Measures how often the fast branch-fusion replaces a boxed-Bool
@@ -299,6 +305,7 @@ impl JitCounters {
             virt_divmod_fast: std::cell::Cell::new(0),
             virt_divmod_slow_zero: std::cell::Cell::new(0),
             virt_divmod_slow_overflow: std::cell::Cell::new(0),
+            virt_div_pow2_lowered: std::cell::Cell::new(0),
             virt_branch_eq_hit: std::cell::Cell::new(0),
             virt_branch_parity_hit: std::cell::Cell::new(0),
             get_upvalue_calls: std::cell::Cell::new(0),
@@ -347,6 +354,7 @@ impl JitCounters {
         eprintln!("  virt_divmod_fast:                  {}", self.virt_divmod_fast.get());
         eprintln!("  virt_divmod_slow_zero:             {}", self.virt_divmod_slow_zero.get());
         eprintln!("  virt_divmod_slow_overflow:         {}", self.virt_divmod_slow_overflow.get());
+        eprintln!("  virt_div_pow2_lowered:             {}", self.virt_div_pow2_lowered.get());
         eprintln!("  virt_branch_eq_hit:                {}", self.virt_branch_eq_hit.get());
         eprintln!("  virt_branch_parity_hit:            {}", self.virt_branch_parity_hit.get());
         eprintln!("  get_upvalue_calls:                 {}", self.get_upvalue_calls.get());
@@ -432,6 +440,8 @@ pub(super) mod counter_offsets {
         offset_of!(JitCounters, virt_divmod_slow_zero) as isize;
     pub const VIRT_DIVMOD_SLOW_OVERFLOW: isize =
         offset_of!(JitCounters, virt_divmod_slow_overflow) as isize;
+    pub const VIRT_DIV_POW2_LOWERED: isize =
+        offset_of!(JitCounters, virt_div_pow2_lowered) as isize;
     pub const VIRT_BRANCH_EQ_HIT: isize =
         offset_of!(JitCounters, virt_branch_eq_hit) as isize;
     pub const VIRT_BRANCH_PARITY_HIT: isize =

@@ -16,20 +16,18 @@
 set -euo pipefail
 
 # ── Configuration ──────────────────────────────────────────────────────
-# Bumped to 8 so CPU frequency / p-state has settled by the time hyperfine
-# starts taking timed measurements. 3 warmups was not enough for short
-# (<20 ms) benches that run immediately after long ones: the first few
-# timed iterations saw a downclocked CPU and poisoned the median.
-WARMUPS="${WARMUPS:-8}"
-# Bumped to 15 for outlier resilience: one hot bench showed 4 of 7 runs
-# degraded by ~5x due to transient system noise (thermal or scheduling),
-# which corrupts a 7-run median. 15 runs make the middle 7 robust.
-RUNS="${RUNS:-15}"
-# Seconds to sleep between variants within a benchmark. Lets the CPU idle
-# down and re-enter a consistent p-state after a previous 200 ms+ variant,
-# so short variants (~10 ms) get a clean measurement baseline rather than
-# starting on a hot/throttled core.
-INTER_VARIANT_SLEEP="${INTER_VARIANT_SLEEP:-30}"
+# Tuned for fast iteration (~2-5 min full run). Override via env vars
+# (WARMUPS=8 RUNS=15 INTER_VARIANT_SLEEP=30) if you need the older,
+# thermally-robust profile for a publishable comparison run.
+#
+# 3 warmups + 5 runs is enough to filter cold-cache noise on the dev
+# loop; min-of-5 tracks steady-state without spending 15 runs per
+# variant. Inter-variant sleep cut to 2s — relies on hyperfine's own
+# warmup phase to absorb p-state transitions instead of explicit
+# idle time.
+WARMUPS="${WARMUPS:-3}"
+RUNS="${RUNS:-5}"
+INTER_VARIANT_SLEEP="${INTER_VARIANT_SLEEP:-2}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BENCH_DIR="$REPO_ROOT/example"

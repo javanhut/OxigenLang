@@ -876,6 +876,7 @@ mod tests {
             methods: RefCell::new(HashMap::new()),
             parent: None,
             layout: std::cell::OnceCell::new(),
+            module_globals: RefCell::new(None),
         });
         let inst = Rc::new(ObjStructInstance::new(
             "Box".to_string(),

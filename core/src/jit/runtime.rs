@@ -573,6 +573,24 @@ pub unsafe extern "C" fn jit_get_global_ic(
     vm.jit.bump_helper(HelperCounter::GetGlobalIc);
     vm.sync_stack_from_view();
     let cache = unsafe { &mut *cache_ptr };
+    // Skip the cache when the active frame has its own module_globals
+    // (struct method called from another module, plain function called
+    // via a module's exported binding). The cache is keyed only on the
+    // main VM's globals_version, so it would return stale main-globals
+    // values for names that resolve out of the per-module dict — and
+    // when a module-scoped name happens to exist as a different value
+    // in main globals, the JIT has previously segfaulted dereferencing
+    // the wrong Closure. Always go through handle_get_global in that
+    // case so active_module_globals is consulted first.
+    if vm.has_active_module_globals() {
+        return match vm.handle_get_global(name_idx as u16) {
+            Ok(()) => 0,
+            Err(e) => {
+                vm.jit.stash_error(e);
+                1
+            }
+        };
+    }
     if cache.version == vm.globals_version {
         vm.push(cache.value.clone());
         return 0;
@@ -956,8 +974,9 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
     {
         if Rc::ptr_eq(cached_def, &struct_def) {
             let closure = Rc::clone(cached_closure);
+            let owning_mg = struct_def.module_globals.borrow().clone();
             let before_depth = vm.frames_len();
-            return match vm.call_struct_method_with_closure(closure, ac) {
+            return match vm.call_struct_method_with_closure(closure, ac, owning_mg) {
                 Ok(()) => {
                     if vm.frames_len() > before_depth {
                         match vm.execute_until(before_depth) {
@@ -1038,8 +1057,9 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
             }
             cache.struct_def = Some(Rc::clone(&struct_def));
             cache.closure = Some(Rc::clone(&closure));
+            let owning_mg = struct_def.module_globals.borrow().clone();
             let before_depth = vm.frames_len();
-            match vm.call_struct_method_with_closure(closure, ac) {
+            match vm.call_struct_method_with_closure(closure, ac, owning_mg) {
                 Ok(()) => {
                     if vm.frames_len() > before_depth {
                         match vm.execute_until(before_depth) {

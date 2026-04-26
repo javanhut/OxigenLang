@@ -841,6 +841,7 @@ impl Compiler {
                         methods: std::cell::RefCell::new(std::collections::HashMap::new()),
                         parent: parent.as_ref().map(|p| p.value.clone()),
                         layout: std::cell::OnceCell::new(),
+                        module_globals: std::cell::RefCell::new(None),
                     }));
                 let const_idx = self.make_constant(struct_def, line);
                 self.emit_op_u16(OpCode::Constant, const_idx, line);

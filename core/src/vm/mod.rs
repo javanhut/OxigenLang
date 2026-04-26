@@ -1124,6 +1124,25 @@ impl VM {
             .and_then(|f| f.module_globals.as_deref())
     }
 
+    /// Cheap presence-only test for `active_module_globals` — the JIT
+    /// global IC uses this to decide whether to bypass its cache. We
+    /// don't need the dict, just to know one exists, so this avoids
+    /// the lifetime juggling on the borrow.
+    #[inline(always)]
+    pub(crate) fn has_active_module_globals(&self) -> bool {
+        if self.jit_executing.get() {
+            if let Some(frame) = self.jit_frame_top() {
+                if !frame.module_globals.is_null() {
+                    return true;
+                }
+            }
+        }
+        self.frames
+            .last()
+            .map(|f| f.module_globals.is_some())
+            .unwrap_or(false)
+    }
+
     fn format_error(&self, message: &str, hint: Option<&str>) -> String {
         let line_num = self.current_line() as usize;
         let mut out = String::new();
@@ -2460,12 +2479,13 @@ impl VM {
         &mut self,
         closure: Rc<ObjClosure>,
         arg_count: usize,
+        module_globals: Option<Rc<HashMap<String, Value>>>,
     ) -> Result<(), VMError> {
         let instance_idx = self.stack.len() - 1 - arg_count;
         let instance = self.stack[instance_idx].clone();
         self.stack[instance_idx] = Value::Closure(Rc::clone(&closure));
         self.stack_insert(instance_idx + 1, instance);
-        self.call_closure(closure, arg_count + 1, &[], None)
+        self.call_closure(closure, arg_count + 1, &[], module_globals)
     }
 
     /// Call a method on an object. Stack: [instance, arg1, ..., argN]
@@ -2495,6 +2515,18 @@ impl VM {
                 // Look up method on struct def (with inheritance)
                 let method = self.find_struct_method(&inst.struct_name, method_name)?;
 
+                // Pull the owning struct def's `module_globals` so the
+                // method call can see its own file-local helpers
+                // (functions defined at the top of the same .oxi file
+                // as the struct). Without this, calling
+                // e.g. `Parser.parse_args()` from another module fails
+                // when the method body references file-local
+                // `normalize_array`.
+                let owning_module_globals = match self.globals.get(&inst.struct_name) {
+                    Some(Value::StructDef(def)) => def.module_globals.borrow().clone(),
+                    _ => None,
+                };
+
                 if let Value::Closure(closure) = method {
                     // Method has implicit `self` as first param.
                     // Rearrange stack: [instance, arg1, ...] → [closure, instance, arg1, ...]
@@ -2502,7 +2534,12 @@ impl VM {
                     self.stack[instance_idx] = Value::Closure(Rc::clone(&closure));
                     // Insert instance as first arg (self) right after the closure
                     self.stack_insert(instance_idx + 1, instance);
-                    return self.call_closure(closure, arg_count + 1, named_args, None);
+                    return self.call_closure(
+                        closure,
+                        arg_count + 1,
+                        named_args,
+                        owning_module_globals,
+                    );
                 }
 
                 Err(self.runtime_error_hint(
@@ -3157,10 +3194,22 @@ impl VM {
 
         self.import_stack.pop();
 
-        // Create module from sub-VM globals (excluding builtins)
+        // Create module from sub-VM globals (excluding builtins). Wire
+        // each StructDef's `module_globals` to point at this module's
+        // globals so methods called on instances of these structs can
+        // reach their file-local helpers (e.g. a Parser method calling
+        // `normalize_array` defined at the top of the same .oxi file).
+        // Done before wrapping in `ObjModule` so the Rc gets shared,
+        // not cloned per-struct.
+        let globals_rc = Rc::new(sub_vm.globals);
+        for value in globals_rc.values() {
+            if let Value::StructDef(def) = value {
+                *def.module_globals.borrow_mut() = Some(Rc::clone(&globals_rc));
+            }
+        }
         let module = Rc::new(ObjModule {
             name: path_str.to_string(),
-            globals: Rc::new(sub_vm.globals),
+            globals: globals_rc,
         });
 
         self.module_cache.insert(module_path, Rc::clone(&module));
