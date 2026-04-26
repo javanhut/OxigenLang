@@ -474,12 +474,41 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
             if depth_after >= 1 && !matches!(op, OpCode::Constant) {
                 let new_pos = depth_after - 1;
                 if new_pos < num_slots {
-                    let ty = next_state
-                        .stack
-                        .last()
+                    // Bugfix: only join the pushed type into
+                    // `slot_types[new_pos]` when that slot has
+                    // ALREADY been initialized on this path. A
+                    // push that lands at `position N` before slot
+                    // N is declared is a transient — e.g., the
+                    // inner-loop comparison `j <= n` in
+                    // `nested_sum` lands a Bool at stack position
+                    // 4 (the eventual `j` slot) BEFORE `j := 1`
+                    // initializes it at a later IP. Joining the
+                    // transient type would poison `slot_types[4]`
+                    // to `Value`, defeating Int64 virtualization.
+                    //
+                    // Once `j` is initialized (state.slot_types[4]
+                    // != Bottom), any subsequent write *at slot
+                    // 4's position* is a real reassignment and
+                    // should be joined — that's how the
+                    // `arr := [10, 20, 30]` case (BuildArray
+                    // overwriting the transient Constants at the
+                    // slot's position) gets the correct type
+                    // join. The pre-init Bottom check leaves
+                    // that case untouched.
+                    let already_init = state
+                        .slot_types
+                        .get(new_pos)
                         .copied()
-                        .unwrap_or(SlotType::Bottom);
-                    next_state.write_slot(new_pos, ty);
+                        .unwrap_or(SlotType::Bottom)
+                        != SlotType::Bottom;
+                    if already_init {
+                        let ty = next_state
+                            .stack
+                            .last()
+                            .copied()
+                            .unwrap_or(SlotType::Bottom);
+                        next_state.write_slot(new_pos, ty);
+                    }
                 }
             }
 
@@ -1120,7 +1149,35 @@ fn transfer(
         }
 
         OpCode::Pop => {
+            // Clear slot_types[N] when Pop destroys position N. This
+            // matters for slots whose lifetime is bounded by a scope
+            // (e.g., `j := 1` inside an outer-loop body). When the
+            // scope-end Pop fires, we want subsequent transient
+            // pushes at the same stack position (intermediate values
+            // of an enclosing expression) to *not* be classified as
+            // slot N's content.
+            //
+            // Without this clear, after `j` is popped at the inner-
+            // loop scope teardown, slot_types[4] stays Int64 forever.
+            // On the back-edge re-entry to the outer loop top, the
+            // outer condition's `i <= n` lands a Bool transient at
+            // stack position 4 — and the "step 0 bugfix" join in
+            // `analyze` would then poison slot_types[4] to Value,
+            // disqualifying `j` from Int64 virtualization.
+            //
+            // Clearing on Pop ensures slot_types[N] reflects only the
+            // type while the slot is alive on this path. Joins across
+            // back-edges still correctly yield the type when alive
+            // (Bottom ∨ Int64 = Int64), but the in-state Bottom gates
+            // the transient-poisoning join in `analyze`.
+            let pos_before = next.stack.len();
             next.stack.pop();
+            if pos_before > 0 {
+                let popped_pos = pos_before - 1;
+                if popped_pos < next.slot_types.len() {
+                    next.slot_types[popped_pos] = SlotType::Bottom;
+                }
+            }
         }
         OpCode::Dup => {
             let top = next.stack.last().copied().unwrap_or(SlotType::Value);

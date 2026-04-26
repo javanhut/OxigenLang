@@ -898,7 +898,20 @@ impl JitInner {
 
                 let op = OpCode::from_byte(code[ip]).ok_or(())?;
                 let line = chunk.lines.get(ip).copied().unwrap_or(0);
-                if last_emitted_line != Some(line) {
+                // Line-store elision: only emit the JitFrame.line write when
+                // the upcoming opcode might surface a runtime error attributed
+                // to *this* IP. Pure stack/arith/control-flow opcodes can't
+                // reach `vm.jit.stash_error()` without first taking a slow
+                // path that emits its own line store. Tight all-Int loops
+                // therefore emit zero line stores per iteration.
+                //
+                // Arith/cmp opcodes are conditionally faulting — they take
+                // the virt-int path (no fault) most of the time, so we
+                // emit per-arm only at slow-path emission. See the helper
+                // `maybe_emit_current_line` below.
+                if opcode_always_needs_line(op)
+                    && last_emitted_line != Some(line)
+                {
                     emit_store_current_line(&mut builder, vm_val, line);
                     last_emitted_line = Some(line);
                 }
@@ -1322,6 +1335,16 @@ impl JitInner {
                             };
                             virt_stack.push_int_ssa(result);
                         } else {
+                            // Slow path can call the fallible helper —
+                            // ensure JitFrame.line reflects this op so
+                            // any `binary_*` type-error reports the
+                            // correct source line.
+                            maybe_emit_current_line(
+                                &mut builder,
+                                vm_val,
+                                line,
+                                &mut last_emitted_line,
+                            );
                             if !virt_stack.is_empty() {
                                 virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
@@ -1405,6 +1428,16 @@ impl JitInner {
                                     continue;
                                 }
                             }
+                            // Both virt-int and helper paths can raise
+                            // (zero divisor, INT_MIN/-1 overflow). Stamp
+                            // the line so the resulting VMError reports
+                            // the correct source line.
+                            maybe_emit_current_line(
+                                &mut builder,
+                                vm_val,
+                                line,
+                                &mut last_emitted_line,
+                            );
                             let slow_helper = if is_mod { refs.modu } else { refs.div };
                             let result = emit_int_virt_divmod(
                                 &mut builder,
@@ -1418,6 +1451,12 @@ impl JitInner {
                             );
                             virt_stack.push_int_ssa(result);
                         } else {
+                            maybe_emit_current_line(
+                                &mut builder,
+                                vm_val,
+                                line,
+                                &mut last_emitted_line,
+                            );
                             if !virt_stack.is_empty() {
                                 virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
@@ -1545,6 +1584,13 @@ impl JitInner {
                                     virt_branch_elided_pops.insert(target_ip);
                                 }
                             } else {
+                                // Slow path: helper may type-error.
+                                maybe_emit_current_line(
+                                    &mut builder,
+                                    vm_val,
+                                    line,
+                                    &mut last_emitted_line,
+                                );
                                 if !virt_stack.is_empty() {
                                     virt_stack.flush_to_memory(&mut builder, vm_val);
                                 }
@@ -1564,6 +1610,15 @@ impl JitInner {
                             terminated = true;
                             ip = branch_ip + 3;
                         } else {
+                            // Standalone (non-fused) comparison path —
+                            // always touches the helper for the slow
+                            // case, so stamp the line.
+                            maybe_emit_current_line(
+                                &mut builder,
+                                vm_val,
+                                line,
+                                &mut last_emitted_line,
+                            );
                             if !virt_stack.is_empty() {
                                 virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
@@ -3997,6 +4052,73 @@ fn emit_store_current_line(
         .store(MemFlags::trusted(), line_val, frame_ptr, JitFrame::OFFSET_LINE);
 }
 
+/// Conditional line-store helper used by per-opcode arms whose fault
+/// path needs the line written, but whose fast path doesn't. Updates
+/// the `last_emitted_line` cache so subsequent same-line ops (within
+/// the same block) skip the store.
+#[inline]
+fn maybe_emit_current_line(
+    builder: &mut FunctionBuilder<'_>,
+    vm_val: cranelift_codegen::ir::Value,
+    line: u32,
+    last_emitted_line: &mut Option<u32>,
+) {
+    if *last_emitted_line != Some(line) {
+        emit_store_current_line(builder, vm_val, line);
+        *last_emitted_line = Some(line);
+    }
+}
+
+/// True iff this opcode's emission path always reaches a runtime
+/// helper that may stash an error attributed to *this* IP. Arms that
+/// return `false` here are responsible for calling
+/// `maybe_emit_current_line` themselves at any internal slow-path
+/// emission point that can fault.
+///
+/// The classification mirrors what `runtime.rs` actually does:
+/// helpers that call `vm.jit.stash_error()` (or that re-enter the
+/// interpreter via `execute_until`) need a line; helpers that are
+/// infallible (`jit_get_local`, `jit_set_local`, `jit_pop`, the
+/// stack-len shrink helpers, the truthy-check helpers) do not.
+///
+/// `OpCode::Add | Subtract | Multiply | Divide | Modulo | Less |
+/// LessEqual | Greater | GreaterEqual | Equal | NotEqual` are
+/// **conditionally** faulting — when both operands are virt-int the
+/// emitted IR is purely register arithmetic with no helper call.
+/// Returning `false` here lets the all-Int hot path (the common case
+/// for typed loops) skip the line store entirely; the slow-path emit
+/// sites inside each arm are responsible for re-emitting.
+fn opcode_always_needs_line(op: OpCode) -> bool {
+    use OpCode::*;
+    match op {
+        // Pure stack/arith/control-flow with no fault path.
+        Constant | None | True | False | Pop | Dup
+        | GetLocal | SetLocal
+        | GetUpvalue | SetUpvalue | CloseUpvalue
+        | StructDef
+        | Jump | Loop | JumpIfFalse | JumpIfTrue | PopJumpIfFalse
+        | Not
+        // Conditionally-faulting — slow path emits its own line store.
+        | Add | Subtract | Multiply | Divide | Modulo
+        | Less | LessEqual | Greater | GreaterEqual
+        | Equal | NotEqual => false,
+        // Always-faulting / always re-enter user code.
+        Negate
+        | Index | TypeWrap
+        | BuildArray
+        | GetGlobal | SetGlobal | DefineGlobal | DefineGlobalTyped
+        | Closure
+        | Call
+        | StructLiteral
+        | GetField | SetField
+        | DefineMethod | MethodCall
+        | Return => true,
+        // Anything not in the JIT allow-list (scan rejects). Default
+        // safe.
+        _ => true,
+    }
+}
+
 // ── Inline int fast path ───────────────────────────────────────────────
 
 #[derive(Clone, Copy)]
@@ -5583,13 +5705,23 @@ fn emit_fused_int_cmp_branch(
     }
 }
 
-/// Inline fast path for `GetLocal(slot)`. Reads the tag byte of the
-/// local directly from stack memory and, for `Value::Integer` /
-/// `Value::Float`, bypasses the generic clone-and-push helper by
-/// calling the primitive-specific push helpers (no Rc, no variant
-/// dispatch). Falls through to `jit_get_local` for any other tag so
-/// correct `Clone` semantics (refcount bumps) keep working for
-/// strings, closures, arrays, etc.
+/// Inline fast path for `GetLocal(slot)`. Reads the slot's 16-byte
+/// `Value` and pushes a clone onto the VM stack, all inline:
+///
+/// * **Primitive tags (0..=6):** the source value's bit pattern is a
+///   valid clone — just memcpy 16 bytes to the new top and bump
+///   `stack_view.len`. No Rc traffic, no variant dispatch.
+/// * **Heap-Rc tags (7..=12, 14..=21):** memcpy + atomic-free
+///   strong-count bump on the `RcBox` at the payload pointer. Mirrors
+///   what `Value::Clone` does for these variants without crossing FFI.
+///   Eliminates the residual `jit_get_local` helper crossings on hot
+///   GetLocal sites whose slot holds a Closure / Array / String /
+///   StructInstance / etc.
+/// * **`Value::Builtin` (tag 13):** the payload is a function pointer,
+///   not an `Rc`. Memcpy is sufficient (it's `Copy`); no bump.
+///
+/// The whole path is a single straight-line `tag-load + memcpy +
+/// optional Rc bump + len bump`. No helper call.
 fn emit_inline_get_local(
     builder: &mut FunctionBuilder<'_>,
     refs: &HelperRefs,
@@ -5600,56 +5732,75 @@ fn emit_inline_get_local(
     use cranelift_codegen::ir::MemFlags;
     use cranelift_codegen::ir::condcodes::IntCC;
 
+    let _ = refs; // helper-table no longer consulted on the hot path
+
     let stack_ptr = emit_load_stack_ptr(builder, vm_val);
 
     let slot_const = builder.ins().iconst(types::I64, slot as i64);
     let abs_slot = builder.ins().iadd(slot_offset_val, slot_const);
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
     let byte_off = builder.ins().imul(abs_slot, value_size);
-    let addr = builder.ins().iadd(stack_ptr, byte_off);
+    let src_addr = builder.ins().iadd(stack_ptr, byte_off);
 
     let flags = MemFlags::trusted();
-    let tag = builder.ins().load(types::I8, flags, addr, 0);
-    let int_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
-    let float_tag = builder.ins().iconst(types::I8, VALUE_TAG_FLOAT as i64);
+    let tag = builder.ins().load(types::I8, flags, src_addr, 0);
 
-    let int_block = builder.create_block();
-    let check_float_block = builder.create_block();
-    let float_block = builder.create_block();
-    let slow_block = builder.create_block();
-    let cont_block = builder.create_block();
+    // Compute destination address (stack[len] before increment).
+    let stack_len = emit_load_stack_len(builder, vm_val);
+    let dst_off = builder.ins().imul(stack_len, value_size);
+    let dst_addr = builder.ins().iadd(stack_ptr, dst_off);
 
-    let is_int = builder.ins().icmp(IntCC::Equal, tag, int_tag);
+    // Memcpy 16 bytes from src to dst.
+    emit_copy_value(builder, src_addr, dst_addr);
+
+    // Conditionally bump the Rc strong count: tag > 6 && tag != 13.
+    // The two checks together can be expressed as
+    // `(tag - 7) <= (21 - 7)` excluding tag == 13, but a simple
+    // sequence of two icmps + a branch tree is shorter and Cranelift
+    // handles it cleanly.
+    let six = builder.ins().iconst(types::I8, 6);
+    let is_heap = builder.ins().icmp(IntCC::UnsignedGreaterThan, tag, six);
+
+    let check_builtin_block = builder.create_block();
+    let post_bump_block = builder.create_block();
     builder
         .ins()
-        .brif(is_int, int_block, &[], check_float_block, &[]);
+        .brif(is_heap, check_builtin_block, &[], post_bump_block, &[]);
 
-    builder.switch_to_block(int_block);
-    let payload = builder
-        .ins()
-        .load(types::I64, flags, addr, VALUE_INT_PAYLOAD_OFFSET as i32);
-    emit_inline_push_integer(builder, vm_val, payload);
-    builder.ins().jump(cont_block, &[]);
-
-    builder.switch_to_block(check_float_block);
-    let is_float = builder.ins().icmp(IntCC::Equal, tag, float_tag);
+    builder.switch_to_block(check_builtin_block);
+    // Tag 13 = `Value::Builtin(fn)`. The payload is a function pointer,
+    // not an Rc, so we must skip the bump (treating it as Rc would
+    // dereference into code memory).
+    let builtin_tag = builder.ins().iconst(types::I8, 13);
+    let is_builtin = builder.ins().icmp(IntCC::Equal, tag, builtin_tag);
+    let bump_block = builder.create_block();
     builder
         .ins()
-        .brif(is_float, float_block, &[], slow_block, &[]);
+        .brif(is_builtin, post_bump_block, &[], bump_block, &[]);
 
-    builder.switch_to_block(float_block);
-    let bits = builder
+    builder.switch_to_block(bump_block);
+    // Load the `RcBox<T>` raw pointer from the payload (offset 8 of
+    // the Value). The strong count is at RcBox offset 0 — pinned by
+    // `rc_strong_count_lives_at_rcbox_offset_zero` in vm/value.rs.
+    // Single-threaded VM: non-atomic load+inc+store is correct.
+    let rc_ptr = builder.ins().load(
+        types::I64,
+        flags,
+        src_addr,
+        VALUE_INT_PAYLOAD_OFFSET as i32,
+    );
+    let strong = builder.ins().load(types::I64, flags, rc_ptr, 0);
+    let strong_new = builder.ins().iadd_imm(strong, 1);
+    builder.ins().store(flags, strong_new, rc_ptr, 0);
+    builder.ins().jump(post_bump_block, &[]);
+
+    builder.switch_to_block(post_bump_block);
+    // Bump stack_view.len.
+    let one = builder.ins().iconst(types::I64, 1);
+    let new_len = builder.ins().iadd(stack_len, one);
+    builder
         .ins()
-        .load(types::I64, flags, addr, VALUE_INT_PAYLOAD_OFFSET as i32);
-    emit_inline_push_float(builder, vm_val, bits);
-    builder.ins().jump(cont_block, &[]);
-
-    builder.switch_to_block(slow_block);
-    let slot_val = builder.ins().iconst(types::I32, slot as i64);
-    builder.ins().call(refs.get_local, &[vm_val, slot_val]);
-    builder.ins().jump(cont_block, &[]);
-
-    builder.switch_to_block(cont_block);
+        .store(flags, new_len, vm_val, vm_stack_view_len_offset());
 }
 
 /// Inline fast path for `SetLocal(slot)`. Mirrors the interpreter's

@@ -41,6 +41,35 @@ fn run_result(source: &str, jit_threshold: Option<u32>) -> Result<String, String
         .map_err(|e| e.message)
 }
 
+/// Like `run_result` but expects an Err and returns both the message
+/// and the source line the VMError carries. Used by line-store elision
+/// tests that need to verify the JIT writes `JitFrame.line` correctly
+/// at every fault site.
+fn run_expect_err(
+    source: &str,
+    jit_threshold: Option<u32>,
+) -> (String, u32) {
+    let lexer = Lexer::new(source);
+    let mut parser = Parser::new(lexer, source);
+    let program = parser.parse_program();
+    assert!(
+        parser.errors().is_empty(),
+        "parser errors:\n{}",
+        parser.format_errors()
+    );
+    let function = Compiler::new()
+        .compile(&program)
+        .expect("compile should succeed");
+    let mut vm = VM::new();
+    if let Some(t) = jit_threshold {
+        vm.jit.set_threshold(t);
+    }
+    match vm.run(function) {
+        Ok(v) => panic!("expected runtime error, got Ok({})", v),
+        Err(e) => (e.message, e.line),
+    }
+}
+
 fn run_with_thresholds(
     source: &str,
     jit_threshold: Option<u32>,
@@ -855,4 +884,148 @@ run(5000)
         j_ok >= 2,
         "run + add + get should JIT (ok={j_ok}, failed={j_failed})"
     );
+}
+
+// ── Line-store elision regression tests ──────────────────────────────
+//
+// These cover the `opcode_always_needs_line` / `maybe_emit_current_line`
+// path in `core/src/jit/engine/mod.rs`. The JIT now elides writes to
+// `JitFrame.line` for opcodes whose emission cannot reach a runtime
+// helper that calls `vm.jit.stash_error()` from this IP. The slow
+// paths of arithmetic/comparison opcodes (and every always-fault op)
+// still write the line. These tests confirm that runtime errors raised
+// by either path report the correct source line.
+
+#[test]
+fn jit_line_store_correct_for_modulo_by_zero_in_hot_loop() {
+    // `total % 0` triggers `binary_mod` → "modulo by zero" on the
+    // first iteration. The Modulo opcode is on the source line written
+    // below; the line-elision change must still stamp the line at the
+    // virt-int divmod emit site.
+    let source = "
+fun bad(n <int>) {
+    total <int> := 0
+    i <int> := 0
+    repeat when i < n {
+        total = total + (i % 0)
+        i = i + 1
+    }
+    total
+}
+bad(5)
+";
+    let (msg, line) = run_expect_err(source, Some(1));
+    assert!(msg.contains("modulo by zero"), "msg = {msg:?}");
+    // The `i % 0` expression spans line 6 in the source above (line 1
+    // is empty, line 2 is `fun bad...`, etc.). 1-indexed.
+    assert_eq!(line, 6, "expected line 6, got {} (msg: {msg})", line);
+}
+
+#[test]
+fn jit_line_store_correct_for_type_mismatch_in_arith() {
+    // Hot int loop suddenly hits a string addition — the slow-path
+    // helper raises a type-mismatch error from inside the JIT-emitted
+    // arith fast path's fallback. The line must point at the offending
+    // `+`, not at any preceding GetLocal/Constant.
+    let source = "
+fun trigger() {
+    a := 1
+    b := \"hello\"
+    a + b
+}
+trigger()
+";
+    let (msg, line) = run_expect_err(source, Some(1));
+    assert!(
+        msg.contains("type mismatch") || msg.contains("operands must"),
+        "msg = {msg:?}"
+    );
+    // `a + b` is on source line 5.
+    assert_eq!(line, 5, "expected line 5, got {} (msg: {msg})", line);
+}
+
+#[test]
+fn jit_line_store_correct_for_undefined_global_call() {
+    // A `Call` opcode is in the always-need-line set. When the callee
+    // is undefined, `handle_get_global` raises with the current line.
+    let source = "
+fun outer() {
+    1 + 2
+    not_a_real_fn()
+}
+outer()
+";
+    let (msg, line) = run_expect_err(source, Some(1));
+    assert!(
+        msg.contains("undefined") || msg.contains("not_a_real_fn"),
+        "msg = {msg:?}"
+    );
+    // The undefined call is on source line 4.
+    assert_eq!(line, 4, "expected line 4, got {} (msg: {msg})", line);
+}
+
+#[test]
+fn jit_line_store_correct_for_int_divide_by_zero() {
+    // The proven-int Divide path emits its own zero / overflow guards
+    // that exit through `exit_block` with a stashed error. Make sure
+    // the line is written before that emission so the resulting
+    // VMError points at the divide.
+    let source = "
+fun zero_div() {
+    a <int> := 10
+    b <int> := 0
+    a / b
+}
+zero_div()
+";
+    let (msg, line) = run_expect_err(source, Some(1));
+    assert!(msg.contains("zero") || msg.contains("division"), "msg = {msg:?}");
+    // `a / b` is on source line 5.
+    assert_eq!(line, 5, "expected line 5, got {} (msg: {msg})", line);
+}
+
+#[test]
+fn jit_line_store_correct_for_typed_negate_on_non_numeric() {
+    // Negate is in the always-need-line set. Negating a string
+    // surfaces a type error attributed to the unary minus.
+    let source = "
+fun neg_bad() {
+    s := \"text\"
+    -s
+}
+neg_bad()
+";
+    let (msg, line) = run_expect_err(source, Some(1));
+    assert!(
+        msg.contains("negation") || msg.contains("number"),
+        "msg = {msg:?}"
+    );
+    assert_eq!(line, 4, "expected line 4, got {} (msg: {msg})", line);
+}
+
+#[test]
+fn jit_line_store_correct_for_index_on_non_collection() {
+    // `Index` is in the always-need-line set. Indexing a non-
+    // collection value (here, an integer) surfaces a type error
+    // from `eval_index`. (Out-of-range indices on real arrays return
+    // `None` in Oxigen; only structurally invalid indexing errors,
+    // so we use a non-collection target to trigger the helper-stash
+    // path.)
+    let source = "
+fun bad_index() {
+    a := 5
+    a[0]
+}
+bad_index()
+";
+    let (msg, line) = run_expect_err(source, Some(1));
+    assert!(
+        msg.contains("Index")
+            || msg.contains("index")
+            || msg.contains("not indexable")
+            || msg.contains("subscript"),
+        "msg = {msg:?}"
+    );
+    // The indexing expression `a[0]` is on line 4.
+    assert_eq!(line, 4, "expected line 4, got {} (msg: {msg})", line);
 }
