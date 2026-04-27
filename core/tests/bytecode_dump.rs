@@ -188,3 +188,10 @@ fn dump_closure() {
     let f = parse_compile(&src);
     walk("closure", &f);
 }
+
+#[test]
+fn dump_collatz() {
+    let src = std::fs::read_to_string("../example/bench_collatz.oxi").unwrap();
+    let f = parse_compile(&src);
+    walk("collatz", &f);
+}
