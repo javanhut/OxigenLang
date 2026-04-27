@@ -1,33 +1,45 @@
 #!/usr/bin/env bash
-# Benchmark Oxigen vs CPython using hyperfine (no Python in the
-# measurement harness, unlike scripts/bench.py).
+# Benchmark Oxigen vs CPython, Bun, and Node using a thermal-fair
+# interleaved A/B/A/B/... harness. No Python in the measurement
+# harness — pure bash + awk + jq.
 #
 # Usage:
 #   scripts/bench.sh                        # full paired suite
 #   scripts/bench.sh bench_arith bench_fib  # specific benchmarks
-#   WARMUPS=3 RUNS=10 scripts/bench.sh      # tune warmups/runs
+#   WARMUPS=3 RUNS=15 scripts/bench.sh      # tune warmups/runs
 #   OXIGEN_BENCH_CPU=3 scripts/bench.sh     # pin to a specific CPU
 #
-# Each paired benchmark runs four variants — oxigen --no-jit,
-# oxigen default, oxigen --jit, and python3 — with hyperfine doing
-# warmups, N timed runs, and stats. Results go to benchmark_reports/
-# as JSON (per-bench) and a consolidated Markdown summary.
+# For each benchmark we run V variants (oxigen --jit, oxigen
+# default, oxigen --no-jit, python3, optional bun (ts), optional
+# node (ts)). Each measurement ROUND runs every variant once in
+# fixed order before the next round starts — so every variant
+# observes the same thermal state per round, and any thermal drift
+# affects all variants equally. WARMUPS rounds run untimed first to
+# fill caches and prime the JIT.
+#
+# This is strictly stronger than the previous "run all of variant
+# A's RUNS samples, then sleep, then all of variant B's" layout
+# (which gave the first variant a cold-CPU advantage and the last
+# variant a hot-CPU disadvantage). Min and median are now directly
+# comparable across variants.
+#
+# Output: per-bench JSON (hyperfine-shape, so legacy tooling keeps
+# working) plus a consolidated Markdown report under
+# benchmark_reports/.
 
 set -euo pipefail
 
 # ── Configuration ──────────────────────────────────────────────────────
-# Tuned for fast iteration (~2-5 min full run). Override via env vars
-# (WARMUPS=8 RUNS=15 INTER_VARIANT_SLEEP=30) if you need the older,
-# thermally-robust profile for a publishable comparison run.
+# Tuned for fast iteration (~2-5 min full run). Bump RUNS for a more
+# stable median on noisy systems.
 #
-# 3 warmups + 5 runs is enough to filter cold-cache noise on the dev
-# loop; min-of-5 tracks steady-state without spending 15 runs per
-# variant. Inter-variant sleep cut to 2s — relies on hyperfine's own
-# warmup phase to absorb p-state transitions instead of explicit
-# idle time.
+# 3 warmups + 5 measure rounds, with all variants interleaved per
+# round, is enough to filter cold-cache noise on the dev loop. RUNS
+# is the number of times each variant is timed — total per-bench
+# work is `(WARMUPS + RUNS) * V` invocations, where V is the variant
+# count.
 WARMUPS="${WARMUPS:-3}"
 RUNS="${RUNS:-5}"
-INTER_VARIANT_SLEEP="${INTER_VARIANT_SLEEP:-2}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BENCH_DIR="$REPO_ROOT/example"
@@ -60,10 +72,10 @@ fi
 
 die() { echo "error: $*" >&2; exit 1; }
 
-command -v hyperfine >/dev/null 2>&1 \
-    || die "hyperfine not found in PATH — install it (e.g. pacman -S hyperfine)"
 command -v jq >/dev/null 2>&1 \
     || die "jq not found in PATH"
+command -v awk >/dev/null 2>&1 \
+    || die "awk not found in PATH"
 
 [[ -x "$OXIGEN_BIN" ]] \
     || die "Oxigen binary not found at $OXIGEN_BIN. Build with 'cargo build --release --features jit -p oxigen' first."
@@ -110,13 +122,25 @@ has_node_ts() {
     has_ts_peer "$stem" && [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]]
 }
 
-# Run each variant in its own hyperfine invocation and merge the
-# per-variant JSONs into the combined results file the summarizer
-# expects. This avoids the interleaving that caused short variants
-# (e.g. oxigen --jit on bench_loop at ~8 ms) to start on a CPU whose
-# frequency/thermal state was still carrying over from a preceding
-# long variant (e.g. oxigen --no-jit at ~250 ms), producing bimodal
-# distributions where the median was pulled off the fast cluster.
+# Time a single command-line invocation. Returns elapsed seconds as a
+# decimal, printed to stdout. Stderr/stdout from the command are
+# silenced so they don't leak into the parent script's output.
+time_one() {
+    local cmd_str="$*"
+    # Use bash's $EPOCHREALTIME (decimal seconds, microsecond
+    # precision) so we don't fork `date` per call.
+    local s e
+    s=$EPOCHREALTIME
+    eval "$cmd_str" >/dev/null 2>&1
+    e=$EPOCHREALTIME
+    awk -v s="$s" -v e="$e" 'BEGIN { printf "%.6f", e - s }'
+}
+
+# A/B/A/B/... interleaved runner. Every variant runs ONCE per round;
+# WARMUPS rounds are untimed, RUNS rounds are timed. Per-variant
+# samples accumulate in a per-variant samples file; at the end we
+# emit a hyperfine-shaped JSON so the existing summarizer keeps
+# working without changes.
 run_one_benchmark() {
     local stem=$1
     local oxi_file="$BENCH_DIR/$stem.oxi"
@@ -126,16 +150,13 @@ run_one_benchmark() {
 
     echo "=== $stem ==="
 
-    # Each element: "<display name>\t<command string>". Tab-separated so
-    # names can contain spaces (they do: "oxigen --no-jit", "bun (ts)").
+    # Each element: "<display name>\t<command string>". Tab-separated
+    # so names can contain spaces ("oxigen --no-jit", "bun (ts)").
     #
-    # Variants are ordered to give the CPU the coolest thermal state to
-    # the measurements we care most about. `oxigen --jit` runs first
-    # (the headline JIT number), then `oxigen default`, then the
-    # external comparison runtimes, then `oxigen --no-jit` last — its
-    # ~6s of full-CPU work would heat-saturate the chip and pollute
-    # everything that ran after it (which is what produced the bench_fib
-    # 156ms median artifact pre-fix).
+    # Order is fixed but no longer carries the same correctness weight
+    # — every variant runs once per round so all share the same
+    # thermal state per round. Order here just controls how variants
+    # are reported.
     local specs=()
     specs+=("oxigen --jit"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN --jit $oxi_file")
     specs+=("oxigen default"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN $oxi_file")
@@ -148,38 +169,121 @@ run_one_benchmark() {
     specs+=("python3"$'\t'"${TASKSET_PREFIX[*]} $PYTHON_BIN $py_file")
     specs+=("oxigen --no-jit"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN --no-jit $oxi_file")
 
+    local n_variants=${#specs[@]}
     local tmp_dir
     tmp_dir="$(mktemp -d)"
-    local per_variant_jsons=()
-    local idx=0
-    local first=1
-    for spec in "${specs[@]}"; do
-        local name="${spec%%$'\t'*}"
-        local cmd="${spec#*$'\t'}"
-        local vjson="$tmp_dir/variant-$idx.json"
-        per_variant_jsons+=("$vjson")
-        idx=$((idx + 1))
 
-        if [[ $first -eq 0 ]]; then
-            # Let the CPU idle down between variants so the next one
-            # starts from a consistent p-state.
-            sleep "$INTER_VARIANT_SLEEP"
-        fi
-        first=0
+    # ── Warmup rounds ──
+    if [[ $WARMUPS -gt 0 ]]; then
+        printf "  warmup:"
+        for ((round=1; round<=WARMUPS; round++)); do
+            for spec in "${specs[@]}"; do
+                local cmd="${spec#*$'\t'}"
+                eval "$cmd" >/dev/null 2>&1 || true
+            done
+            printf " %d" "$round"
+        done
+        echo
+    fi
 
-        hyperfine \
-            --warmup "$WARMUPS" \
-            --runs "$RUNS" \
-            --shell=none \
-            --export-json "$vjson" \
-            --style=basic \
-            -n "$name" "$cmd"
+    # ── Measure rounds ──
+    local sample_files=()
+    for i in $(seq 0 $((n_variants - 1))); do
+        sample_files+=("$tmp_dir/var-$i.txt")
+        : > "${sample_files[$i]}"
     done
 
-    # Stitch all variants' `results` arrays into a single JSON document
-    # matching the shape hyperfine produces when given multiple commands.
-    # Downstream `summarize_one` relies on this format.
-    jq -s '{results: (map(.results) | add)}' "${per_variant_jsons[@]}" > "$out_json"
+    printf "  measure:"
+    for ((round=1; round<=RUNS; round++)); do
+        for i in $(seq 0 $((n_variants - 1))); do
+            local cmd="${specs[$i]#*$'\t'}"
+            local t
+            t="$(time_one "$cmd")"
+            printf "%s\n" "$t" >> "${sample_files[$i]}"
+        done
+        printf " %d" "$round"
+    done
+    echo
+
+    # ── Per-variant stats + hyperfine-shape JSON ──
+    {
+        echo '{'
+        echo '  "results": ['
+        for i in $(seq 0 $((n_variants - 1))); do
+            local name="${specs[$i]%%$'\t'*}"
+            local cmd_str="${specs[$i]#*$'\t'}"
+            # Compute min, max, mean, median, stddev with awk, plus
+            # the times array as a JSON list. One pass over the
+            # samples file.
+            local stats
+            stats="$(awk '
+                {
+                    n++
+                    a[n] = $1 + 0
+                    sum += a[n]
+                    if (n == 1 || a[n] < min) min = a[n]
+                    if (n == 1 || a[n] > max) max = a[n]
+                }
+                END {
+                    if (n == 0) { print "0,0,0,0,0,[]"; exit }
+                    mean = sum / n
+                    # insertion sort (n is small, ≤ a few dozen)
+                    for (i = 2; i <= n; i++) {
+                        v = a[i]; j = i - 1
+                        while (j > 0 && a[j] > v) { a[j+1] = a[j]; j-- }
+                        a[j+1] = v
+                    }
+                    if (n % 2 == 1) median = a[(n+1)/2]
+                    else median = (a[n/2] + a[n/2+1]) / 2
+                    if (n > 1) {
+                        ssq = 0
+                        for (i = 1; i <= n; i++) ssq += (a[i] - mean) * (a[i] - mean)
+                        sd = sqrt(ssq / (n - 1))
+                    } else { sd = 0 }
+                    printf "%.6f,%.6f,%.6f,%.6f,%.6f,[", min, max, mean, median, sd
+                    for (i = 1; i <= n; i++) {
+                        if (i > 1) printf ","
+                        printf "%.6f", a[i]
+                    }
+                    printf "]"
+                }
+            ' "${sample_files[$i]}")"
+            local min_v="${stats%%,*}"; stats="${stats#*,}"
+            local max_v="${stats%%,*}"; stats="${stats#*,}"
+            local mean_v="${stats%%,*}"; stats="${stats#*,}"
+            local median_v="${stats%%,*}"; stats="${stats#*,}"
+            local sd_v="${stats%%,[*}"; stats="${stats#*,[}"
+            local times_v="[${stats}"
+            local trailing_comma=","
+            [[ $i -eq $((n_variants - 1)) ]] && trailing_comma=""
+            # Escape command string for JSON (quotes only — paths
+            # don't contain backslashes in our setup).
+            local cmd_json="${cmd_str//\"/\\\"}"
+            cat <<EOF
+    {
+      "command": "${name}",
+      "command_full": "${cmd_json}",
+      "mean": ${mean_v},
+      "stddev": ${sd_v},
+      "median": ${median_v},
+      "min": ${min_v},
+      "max": ${max_v},
+      "times": ${times_v}
+    }${trailing_comma}
+EOF
+            # One-line summary to stdout so the user sees per-bench
+            # progress.
+            awk -v name="$name" -v min="$min_v" -v med="$median_v" -v mean="$mean_v" '
+                BEGIN {
+                    printf "  %-20s min=%6.1fms  med=%6.1fms  mean=%6.1fms\n",
+                        name, min*1000, med*1000, mean*1000
+                }
+            ' >&2
+        done
+        echo '  ]'
+        echo '}'
+    } > "$out_json"
+
     rm -rf "$tmp_dir"
     echo
 }
@@ -283,7 +387,7 @@ md="$REPORT_DIR/oxigen-vs-python-native-$timestamp.md"
 latest_md="$REPORT_DIR/latest-native.md"
 
 {
-    echo "# Oxigen vs Python — native harness (hyperfine)"
+    echo "# Oxigen vs Python — native harness (interleaved A/B)"
     echo
     echo "- Generated: \`$(date -u -Iseconds)\`"
     echo "- Host:      \`${HOSTNAME:-$(uname -n)}\`"
@@ -311,10 +415,13 @@ latest_md="$REPORT_DIR/latest-native.md"
     echo
     echo "## Min times (ms)"
     echo
-    echo "Each cell is the fastest single timed run across \`$RUNS\` runs"
-    echo "after \`$WARMUPS\` warmups. Min is more thermally stable than"
-    echo "median on a desktop CPU that may throttle after sustained"
-    echo "full-CPU work. See \`bench_*.native.json\` for full samples."
+    echo "Each cell is the fastest single timed run across \`$RUNS\` rounds"
+    echo "after \`$WARMUPS\` warmup rounds. Variants are interleaved A/B/A/B"
+    echo "per round so every variant observes the same thermal state, and"
+    echo "any thermal drift across the run affects them equally. Min is"
+    echo "the most reproducible single number on a desktop CPU that may"
+    echo "throttle after sustained full-CPU work. See"
+    echo "\`bench_*.native.json\` for full per-round samples."
     echo
     echo "| benchmark | no-jit | default | jit | python | bun (ts) | node (ts) | jit vs py | jit vs bun | jit vs node |"
     echo "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
@@ -335,7 +442,7 @@ latest_md="$REPORT_DIR/latest-native.md"
             | awk -F'\t' '{printf "| %s | %s | %s |\n", $1,$2,$3}'
     done
     echo
-    echo "Per-benchmark JSON (full samples + hyperfine stats) in \`$REPORT_DIR/\`."
+    echo "Per-benchmark JSON (per-round samples + summary stats) in \`$REPORT_DIR/\`."
 } | tee "$md" > "$latest_md"
 
 cp -f "$md" "$latest_md"
