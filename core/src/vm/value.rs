@@ -172,6 +172,7 @@ mod layout_tests {
         let obj = Rc::new(ObjClosure {
             function: func,
             upvalues: Vec::new(),
+            module_globals: RefCell::new(None),
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
@@ -215,6 +216,7 @@ mod layout_tests {
         let obj = Rc::new(ObjClosure {
             function: func,
             upvalues: Vec::new(),
+            module_globals: RefCell::new(None),
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
@@ -440,6 +442,7 @@ pub struct LocalInfo {
 pub struct ObjClosure {
     pub function: Rc<Function>,
     pub upvalues: Vec<Rc<RefCell<Upvalue>>>,
+    pub module_globals: RefCell<Option<std::rc::Rc<HashMap<String, Value>>>>,
     /// How many times this closure has been called. Used by the JIT engine
     /// for hot-function detection. Interior mutability keeps closures
     /// cheaply shareable through `Rc`.

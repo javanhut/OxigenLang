@@ -1942,6 +1942,7 @@ impl Compiler {
             Value::Closure(std::rc::Rc::new(crate::vm::value::ObjClosure {
                 function: std::rc::Rc::new(function),
                 upvalues: Vec::new(), // placeholder, VM fills real upvalues
+                module_globals: std::cell::RefCell::new(None),
                 call_count: std::cell::Cell::new(0),
                 loop_count: std::cell::Cell::new(0),
                 jit_state: std::cell::Cell::new(0),

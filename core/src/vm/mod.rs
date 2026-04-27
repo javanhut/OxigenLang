@@ -300,6 +300,7 @@ impl VM {
         let closure = Rc::new(ObjClosure {
             function: Rc::new(function),
             upvalues: Vec::new(),
+            module_globals: std::cell::RefCell::new(None),
             call_count: std::cell::Cell::new(0),
             loop_count: std::cell::Cell::new(0),
             jit_state: std::cell::Cell::new(0),
@@ -835,6 +836,13 @@ impl VM {
         let closure = Rc::new(ObjClosure {
             function: Rc::clone(&template.function),
             upvalues,
+            module_globals: std::cell::RefCell::new(
+                template
+                    .module_globals
+                    .borrow()
+                    .clone()
+                    .or_else(|| self.active_module_globals().map(|mg| Rc::new(mg.clone()))),
+            ),
             call_count: std::cell::Cell::new(0),
             loop_count: std::cell::Cell::new(0),
             jit_state: std::cell::Cell::new(0),
@@ -2400,7 +2408,10 @@ impl VM {
         let callee = self.stack[callee_idx].clone();
 
         match callee {
-            Value::Closure(closure) => self.call_closure(closure, arg_count, named_args, None),
+            Value::Closure(closure) => {
+                let module_globals = closure.module_globals.borrow().clone();
+                self.call_closure(closure, arg_count, named_args, module_globals)
+            }
             Value::Builtin(func) => {
                 let start = self.stack.len() - arg_count;
                 let args: Vec<Value> = self.stack_drain_from(start);
@@ -3169,16 +3180,21 @@ impl VM {
         self.import_stack.pop();
 
         // Create module from sub-VM globals (excluding builtins). Wire
-        // each StructDef's `module_globals` to point at this module's
-        // globals so methods called on instances of these structs can
-        // reach their file-local helpers (e.g. a Parser method calling
-        // `normalize_array` defined at the top of the same .oxi file).
+        // module-owned definitions back to this module's globals so
+        // imported functions and methods can reach their file-local
+        // helpers and enum definitions.
         // Done before wrapping in `ObjModule` so the Rc gets shared,
         // not cloned per-struct.
         let globals_rc = Rc::new(sub_vm.globals);
         for value in globals_rc.values() {
-            if let Value::StructDef(def) = value {
-                *def.module_globals.borrow_mut() = Some(Rc::clone(&globals_rc));
+            match value {
+                Value::Closure(closure) => {
+                    *closure.module_globals.borrow_mut() = Some(Rc::clone(&globals_rc));
+                }
+                Value::StructDef(def) => {
+                    *def.module_globals.borrow_mut() = Some(Rc::clone(&globals_rc));
+                }
+                _ => {}
             }
         }
         let module = Rc::new(ObjModule {
