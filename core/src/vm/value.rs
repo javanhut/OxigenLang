@@ -518,6 +518,11 @@ pub fn make_upvalue_int_caches(n: usize) -> (Box<[Cell<u8>]>, Box<[Cell<i64>]>) 
 pub const SPECIALIZED_KIND_NONE: u8 = 0;
 pub const SPECIALIZED_KIND_FORWARD_TRAMPOLINE: u8 = 1;
 pub const SPECIALIZED_KIND_NATIVE_INT_BODY: u8 = 2;
+/// B2.2: closure-aware specialized body. Differs from
+/// `NATIVE_INT_BODY` only in the ABI: the thunk takes
+/// `(*mut VM, *const ObjClosure, i64...)` so `GetUpvalue` can read
+/// through the closure register instead of walking the JitFrame.
+pub const SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE: u8 = 3;
 
 /// An upvalue captures a variable from an enclosing scope.
 #[derive(Debug, Clone)]

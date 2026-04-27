@@ -88,7 +88,6 @@ pub(crate) enum EntryKind {
 /// What kind of specialized entry a `CompiledEntries` carries.
 /// Observable on the VM side (ObjClosure) so call sites can gate A3's
 /// direct-call path on having a real body, not a trampoline.
-#[allow(dead_code)] // NativeIntBody variant lands in a later commit
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SpecializedEntryKind {
     /// A2's adapter: boxes i64 args → calls generic → unboxes result.
@@ -98,6 +97,18 @@ pub(crate) enum SpecializedEntryKind {
     /// The real specialized body: runs the function's opcodes with
     /// i64-resident args, no box/unbox round trip. Safe A3 target.
     NativeIntBody,
+    /// B2.2: closure-aware specialized body. ABI passes the
+    /// `*const ObjClosure` as a register arg in addition to the i64
+    /// args, so `GetUpvalue` reads through the register instead of
+    /// walking the JitFrame to find `closure_raw`. Eligibility (per
+    /// `compute_specialized_entry_eligibility` in slot_types.rs):
+    /// body uses `GetUpvalue` only (no `SetUpvalue` / `CloseUpvalue`),
+    /// no nested `Closure` op, all the usual int-typed-param /
+    /// has-Return / has-Call rules. Closure-aware Return inlines the
+    /// stack truncate + multi-return without `jit_op_return`'s FFI
+    /// crossing — the path that pays the most for `bench_closure`'s
+    /// 500k invocations.
+    NativeIntBodyWithClosure,
 }
 
 /// Outcome of invoking a JIT-compiled function. Surfaced to the

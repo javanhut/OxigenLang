@@ -225,6 +225,9 @@ impl JitEngine {
             Some(engine::SpecializedEntryKind::NativeIntBody) => {
                 crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY
             }
+            Some(engine::SpecializedEntryKind::NativeIntBodyWithClosure) => {
+                crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE
+            }
         };
         Some((e.generic, e.specialized, e.specialized_arity, kind_u8))
     }

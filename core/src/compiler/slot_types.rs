@@ -208,6 +208,14 @@ pub struct FunctionSlotTypes {
     /// know the specialized signature arity and which slots to
     /// materialize from register args.
     pub specialized_param_slots: Vec<u16>,
+
+    /// B2.2: true iff the function is `specialized_entry_eligible` AND
+    /// its body contains at least one `GetUpvalue`. The JIT engine
+    /// uses this to pick `SpecializedEntryKind::NativeIntBodyWithClosure`
+    /// (closure pointer in a register) over the plain `NativeIntBody`.
+    /// False for functions that don't read upvalues — those continue
+    /// to use the original int-only specialized ABI.
+    pub wants_closure_arg: bool,
 }
 
 impl FunctionSlotTypes {
@@ -641,7 +649,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         ))
     };
     let eligibility_states = lifted_states.as_ref().unwrap_or(&states);
-    let (specialized_entry_outcome, specialized_param_slots) =
+    let (specialized_entry_outcome, specialized_param_slots, wants_closure_arg) =
         compute_specialized_entry_eligibility(
             code,
             chunk,
@@ -664,6 +672,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         specialized_entry_eligible,
         specialized_entry_outcome,
         specialized_param_slots,
+        wants_closure_arg,
     }
 }
 
@@ -764,9 +773,13 @@ fn compute_specialized_entry_eligibility(
     captured_slots: &HashSet<u16>,
     int_mirror_param_slots: &HashSet<u16>,
     states: &HashMap<usize, AbstractState>,
-) -> (SpecEligibilityOutcome, Vec<u16>) {
+) -> (SpecEligibilityOutcome, Vec<u16>, bool) {
+    // Third return: `wants_closure_arg` — true iff at least one
+    // `GetUpvalue` was observed AND the function is otherwise eligible.
+    // The JIT engine uses this to pick the closure-aware specialized
+    // ABI (`NativeIntBodyWithClosure`) instead of the plain `NativeIntBody`.
     if arity == 0 {
-        return (SpecEligibilityOutcome::RejectedZeroArity, Vec::new());
+        return (SpecEligibilityOutcome::RejectedZeroArity, Vec::new(), false);
     }
 
     // Every param slot must be Int-stable AND not captured.
@@ -780,26 +793,28 @@ fn compute_specialized_entry_eligibility(
         );
         let is_int_demand_mirror = int_mirror_param_slots.contains(&slot);
         if !(is_int_typed || is_int_demand_mirror) {
-            return (SpecEligibilityOutcome::RejectedParamNotInt, Vec::new());
+            return (SpecEligibilityOutcome::RejectedParamNotInt, Vec::new(), false);
         }
         if captured_slots.contains(&slot) {
-            return (SpecEligibilityOutcome::RejectedParamCaptured, Vec::new());
+            return (SpecEligibilityOutcome::RejectedParamCaptured, Vec::new(), false);
         }
     }
 
     // The body must not contain opcodes we don't yet know how to
-    // handle in the specialized entry: closures, upvalues, nonlocal
-    // control flow that might invalidate our frame assumptions.
+    // handle in the specialized entry. Closures (RejectedHasClosureOp)
+    // and SetUpvalue / CloseUpvalue (RejectedHasUpvalueOp) still bail.
+    // GetUpvalue is acceptable when no SetUpvalue / CloseUpvalue is
+    // present (B2.2: closure-aware specialized entry takes the closure
+    // pointer as a register arg and reads upvalues directly).
     //
     // Also require at least one `Call` opcode: A2.5 emits a
     // specialized body ONLY to be directly-called by A3 (from a
-    // self-recursive Call site). A function with no Calls can never
-    // self-recurse, so emitting a specialized body is pure compile-
-    // time overhead. Benches with tight loops-without-calls (e.g.,
-    // bench_nested_loop) would regress from the extra codegen work
-    // without this gate.
+    // self-recursive Call site) or by the IC's hit path (closure
+    // case). A function with no Calls can never self-recurse, so
+    // emitting a specialized body is pure compile-time overhead.
     let mut has_return = false;
     let mut has_call = false;
+    let mut has_get_upvalue = false;
     let mut return_ips: Vec<usize> = Vec::new();
     let mut ip = 0;
     while ip < code.len() {
@@ -811,10 +826,17 @@ fn compute_specialized_entry_eligibility(
 
         match op {
             OpCode::Closure => {
-                return (SpecEligibilityOutcome::RejectedHasClosureOp, Vec::new());
+                return (SpecEligibilityOutcome::RejectedHasClosureOp, Vec::new(), false);
             }
-            OpCode::GetUpvalue | OpCode::SetUpvalue | OpCode::CloseUpvalue => {
-                return (SpecEligibilityOutcome::RejectedHasUpvalueOp, Vec::new());
+            // `SetUpvalue` would require write-through into the live
+            // `Rc<RefCell<Upvalue>>` — out of scope for v1.
+            // `CloseUpvalue` is emitted at scope-end for upvalues that
+            // captured this frame's locals; v1 keeps the helper path.
+            OpCode::SetUpvalue | OpCode::CloseUpvalue => {
+                return (SpecEligibilityOutcome::RejectedHasUpvalueOp, Vec::new(), false);
+            }
+            OpCode::GetUpvalue => {
+                has_get_upvalue = true;
             }
             OpCode::Return => {
                 has_return = true;
@@ -830,10 +852,10 @@ fn compute_specialized_entry_eligibility(
     }
 
     if !has_return {
-        return (SpecEligibilityOutcome::RejectedNoReturn, Vec::new());
+        return (SpecEligibilityOutcome::RejectedNoReturn, Vec::new(), false);
     }
     if !has_call {
-        return (SpecEligibilityOutcome::RejectedNoCall, Vec::new());
+        return (SpecEligibilityOutcome::RejectedNoCall, Vec::new(), false);
     }
 
     // Every Return IP must have a non-Bottom top (reachable) and must
@@ -846,26 +868,20 @@ fn compute_specialized_entry_eligibility(
         let state = match states.get(&rip) {
             Some(s) => s,
             None => {
-                return (
-                    SpecEligibilityOutcome::RejectedReturnUnreachable,
-                    Vec::new(),
-                );
+                return (SpecEligibilityOutcome::RejectedReturnUnreachable, Vec::new(), false);
             }
         };
         let top_ty = state.stack.last().copied().unwrap_or(SlotType::Bottom);
         // Bottom means unreachable → still reject (can't trust).
         if matches!(top_ty, SlotType::Bottom) {
-            return (
-                SpecEligibilityOutcome::RejectedReturnUnreachable,
-                Vec::new(),
-            );
+            return (SpecEligibilityOutcome::RejectedReturnUnreachable, Vec::new(), false);
         }
         // Value and Int64 both ok: the trampoline's runtime tag check
         // takes care of correctness.
     }
 
     let param_slots: Vec<u16> = (1..=arity).collect();
-    (SpecEligibilityOutcome::Eligible, param_slots)
+    (SpecEligibilityOutcome::Eligible, param_slots, has_get_upvalue)
 }
 
 /// Walk the bytecode and pick out param slots that qualify for an
@@ -2597,5 +2613,93 @@ mod tests {
         let r = analyze(&f);
         assert!(r.specialized_entry_eligible);
         assert_eq!(r.specialized_param_slots, vec![1]);
+        // No GetUpvalue → wants_closure_arg false (uses plain
+        // NativeIntBody, not the closure-aware variant).
+        assert!(!r.wants_closure_arg);
     }
+
+    // ── B2.2: closure-aware specialized entry eligibility ──────────────
+
+    #[test]
+    fn specialized_eligible_closure_with_int_upvalue() {
+        // Body: GetUpvalue 0; GetLocal 1; f(0); Pop; GetUpvalue 0;
+        // GetLocal 1; Add; Return. The closure reads `x` (upvalue 0),
+        // adds it to its int param. Eligible AND wants_closure_arg.
+        let mut f = make_fn("closure", 1, vec![], vec![]);
+        f.params[0].type_ann = Some("int".to_string());
+        f.chunk.code = vec![
+            OpCode::GetLocal as u8, 0, 1,    // push self (for synthetic call)
+            OpCode::Constant as u8, 0, 0,
+            OpCode::Call as u8, 1,
+            OpCode::Pop as u8,
+            OpCode::GetUpvalue as u8, 0, 0,  // push upvalue 0 (x)
+            OpCode::GetLocal as u8, 0, 1,    // push y (param)
+            OpCode::Add as u8,
+            OpCode::Return as u8,
+        ];
+        f.chunk.constants = vec![Value::Integer(0)];
+        let r = analyze(&f);
+        assert!(r.specialized_entry_eligible);
+        assert!(r.wants_closure_arg);
+        assert_eq!(r.specialized_param_slots, vec![1]);
+    }
+
+    #[test]
+    fn specialized_ineligible_closure_with_set_upvalue() {
+        // Body has SetUpvalue → still rejected (write-through is out
+        // of scope for v1). wants_closure_arg false.
+        let mut f = make_fn("mut_closure", 1, vec![], vec![]);
+        f.params[0].type_ann = Some("int".to_string());
+        f.chunk.code = vec![
+            OpCode::GetLocal as u8, 0, 1,
+            OpCode::Constant as u8, 0, 0,
+            OpCode::Call as u8, 1,
+            OpCode::Pop as u8,
+            OpCode::GetLocal as u8, 0, 1,
+            OpCode::SetUpvalue as u8, 0, 0,  // mutate upvalue 0
+            OpCode::Pop as u8,
+            OpCode::GetLocal as u8, 0, 1,
+            OpCode::Return as u8,
+        ];
+        f.chunk.constants = vec![Value::Integer(0)];
+        let r = analyze(&f);
+        assert!(!r.specialized_entry_eligible);
+        assert!(matches!(
+            r.specialized_entry_outcome,
+            SpecEligibilityOutcome::RejectedHasUpvalueOp
+        ));
+        assert!(!r.wants_closure_arg);
+    }
+
+    #[test]
+    fn specialized_ineligible_closure_with_close_upvalue() {
+        // Body has CloseUpvalue → rejected. v1 specialized return
+        // path doesn't run close_upvalues; bail to Generic.
+        let mut f = make_fn("closing", 1, vec![], vec![]);
+        f.params[0].type_ann = Some("int".to_string());
+        f.chunk.code = vec![
+            OpCode::GetLocal as u8, 0, 1,
+            OpCode::Constant as u8, 0, 0,
+            OpCode::Call as u8, 1,
+            OpCode::Pop as u8,
+            OpCode::CloseUpvalue as u8,
+            OpCode::GetLocal as u8, 0, 1,
+            OpCode::Return as u8,
+        ];
+        f.chunk.constants = vec![Value::Integer(0)];
+        let r = analyze(&f);
+        assert!(!r.specialized_entry_eligible);
+        assert!(matches!(
+            r.specialized_entry_outcome,
+            SpecEligibilityOutcome::RejectedHasUpvalueOp
+        ));
+        assert!(!r.wants_closure_arg);
+    }
+
+    // (The nested-closure case — body contains both `OpCode::Closure`
+    // and `OpCode::GetUpvalue` — is covered indirectly by the existing
+    // RejectedHasClosureOp test path; `OpCode::Closure` always rejects
+    // first, before the new `has_get_upvalue` flag has any chance to
+    // fire. Skipped here because it would require constructing a real
+    // `ObjClosure` value for the constants pool.)
 }
