@@ -248,7 +248,9 @@ impl VM {
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn sync_stack_from_view(&mut self) {
-        unsafe { self.stack.set_len(self.stack_view.len); }
+        unsafe {
+            self.stack.set_len(self.stack_view.len);
+        }
     }
 
     pub fn set_source(&mut self, source: &str) {
@@ -446,15 +448,14 @@ impl VM {
         let start = self.stack.len() - field_count * 2;
         let flat: Vec<Value> = self.stack_drain_from(start);
 
-        let def = self
-            .get_struct_def(&struct_name_str)
-            .ok_or_else(|| self.runtime_error(&format!(
+        let def = self.get_struct_def(&struct_name_str).ok_or_else(|| {
+            self.runtime_error(&format!(
                 "struct '{}' is not defined in this scope",
                 struct_name_str
-            )))?;
+            ))
+        })?;
         let layout = self.resolve_field_layout(&struct_name_str)?;
-        let mut field_vec: Vec<Value> =
-            layout.slots.iter().map(|_| Value::None).collect();
+        let mut field_vec: Vec<Value> = layout.slots.iter().map(|_| Value::None).collect();
 
         for pair in flat.chunks(2) {
             if let Value::String(fname) = &pair[0] {
@@ -611,40 +612,32 @@ impl VM {
                     .find(|v| v.name.as_str() == fname.as_ref());
                 match variant {
                     Some(v) => match &v.kind {
-                        crate::vm::value::VmEnumVariantKind::Unit(disc) => {
-                            Ok(Value::EnumInstance(Rc::new(
-                                crate::vm::value::ObjEnumInstance {
-                                    enum_name: def.name.clone(),
-                                    variant_name: v.name.clone(),
-                                    payload: crate::vm::value::VmEnumPayload::Unit(
-                                        disc.clone(),
-                                    ),
-                                },
-                            )))
-                        }
-                        crate::vm::value::VmEnumVariantKind::Tuple(_) => {
-                            Err(self.runtime_error_hint(
+                        crate::vm::value::VmEnumVariantKind::Unit(disc) => Ok(Value::EnumInstance(
+                            Rc::new(crate::vm::value::ObjEnumInstance {
+                                enum_name: def.name.clone(),
+                                variant_name: v.name.clone(),
+                                payload: crate::vm::value::VmEnumPayload::Unit(disc.clone()),
+                            }),
+                        )),
+                        crate::vm::value::VmEnumVariantKind::Tuple(_) => Err(self
+                            .runtime_error_hint(
                                 &format!(
                                     "variant '{}' of enum {} requires arguments",
                                     v.name, def.name
                                 ),
                                 "use EnumName.Variant(args) to construct tuple variants",
-                            ))
-                        }
-                        crate::vm::value::VmEnumVariantKind::Struct(_) => {
-                            Err(self.runtime_error_hint(
+                            )),
+                        crate::vm::value::VmEnumVariantKind::Struct(_) => Err(self
+                            .runtime_error_hint(
                                 &format!(
                                     "variant '{}' of enum {} requires struct fields",
                                     v.name, def.name
                                 ),
                                 "use EnumName.Variant { field: value } for struct variants",
-                            ))
-                        }
+                            )),
                     },
-                    None => Err(self.runtime_error(&format!(
-                        "enum {} has no variant '{}'",
-                        def.name, fname
-                    ))),
+                    None => Err(self
+                        .runtime_error(&format!("enum {} has no variant '{}'", def.name, fname))),
                 }
             }
             Value::EnumInstance(inst) => {
@@ -654,8 +647,7 @@ impl VM {
                     "value" => match &inst.payload {
                         crate::vm::value::VmEnumPayload::Unit(Some(v)) => Ok(v.clone()),
                         crate::vm::value::VmEnumPayload::Unit(None) => Ok(Value::None),
-                        _ => Err(self
-                            .runtime_error(".value is only defined on unit variants")),
+                        _ => Err(self.runtime_error(".value is only defined on unit variants")),
                     },
                     other => match &inst.payload {
                         crate::vm::value::VmEnumPayload::Tuple(items) => {
@@ -864,7 +856,9 @@ impl VM {
         // JIT inline paths may have decremented `stack_view.len` without
         // touching `Vec::len`; re-sync before we use Vec's APIs. See
         // `sync_stack_from_view` for the safety invariant.
-        unsafe { self.stack.set_len(self.stack_view.len); }
+        unsafe {
+            self.stack.set_len(self.stack_view.len);
+        }
         if self.stack.len() >= STACK_MAX {
             panic!("stack overflow: exceeded {} slots", STACK_MAX);
         }
@@ -877,7 +871,9 @@ impl VM {
     #[inline(always)]
     pub(crate) fn pop(&mut self) -> Value {
         // See push() above for the rationale.
-        unsafe { self.stack.set_len(self.stack_view.len); }
+        unsafe {
+            self.stack.set_len(self.stack_view.len);
+        }
         let v = self.stack.pop().expect("stack underflow");
         self.stack_view.len = self.stack.len();
         v
@@ -1119,9 +1115,7 @@ impl VM {
                 }
             }
         }
-        self.frames
-            .last()
-            .and_then(|f| f.module_globals.as_deref())
+        self.frames.last().and_then(|f| f.module_globals.as_deref())
     }
 
     /// Cheap presence-only test for `active_module_globals` — the JIT
@@ -1917,9 +1911,7 @@ impl VM {
                     let method_idx = self.frames[frame_idx].read_u16();
                     let arg_count = self.frames[frame_idx].read_byte() as usize;
                     let named_count = self.frames[frame_idx].read_byte() as usize;
-                    let method_name = self.frames[frame_idx]
-                        .read_constant(method_idx)
-                        .clone();
+                    let method_name = self.frames[frame_idx].read_constant(method_idx).clone();
 
                     let mut named_args = Vec::with_capacity(named_count);
                     for _ in 0..named_count {
@@ -2011,8 +2003,12 @@ impl VM {
                     let variant_idx = self.frames[frame_idx].read_u16();
                     let variant_name = self.frames[frame_idx].read_constant(variant_idx).clone();
                     let enum_val = self.pop();
-                    if let (Value::EnumDef(def), Value::String(vname)) = (&enum_val, &variant_name) {
-                        let variant = def.variants.iter().find(|v| v.name.as_str() == vname.as_ref());
+                    if let (Value::EnumDef(def), Value::String(vname)) = (&enum_val, &variant_name)
+                    {
+                        let variant = def
+                            .variants
+                            .iter()
+                            .find(|v| v.name.as_str() == vname.as_ref());
                         match variant {
                             Some(v) => {
                                 if let crate::vm::value::VmEnumVariantKind::Unit(disc) = &v.kind {
@@ -2059,10 +2055,15 @@ impl VM {
                         return Err(self.runtime_error("expected variant name string"));
                     };
                     if let Value::EnumDef(def) = &enum_val {
-                        let variant = def.variants.iter().find(|v| v.name.as_str() == vname.as_ref());
+                        let variant = def
+                            .variants
+                            .iter()
+                            .find(|v| v.name.as_str() == vname.as_ref());
                         match variant {
                             Some(v) => {
-                                if let crate::vm::value::VmEnumVariantKind::Tuple(expected) = &v.kind {
+                                if let crate::vm::value::VmEnumVariantKind::Tuple(expected) =
+                                    &v.kind
+                                {
                                     if expected.len() != args.len() {
                                         return Err(self.runtime_error(&format!(
                                             "tuple variant {}.{} expects {} arguments, got {}",
@@ -2119,10 +2120,15 @@ impl VM {
                         return Err(self.runtime_error("expected variant name string"));
                     };
                     if let Value::EnumDef(def) = &enum_val {
-                        let variant = def.variants.iter().find(|v| v.name.as_str() == vname.as_ref());
+                        let variant = def
+                            .variants
+                            .iter()
+                            .find(|v| v.name.as_str() == vname.as_ref());
                         match variant {
                             Some(v) => {
-                                if let crate::vm::value::VmEnumVariantKind::Struct(expected) = &v.kind {
+                                if let crate::vm::value::VmEnumVariantKind::Struct(expected) =
+                                    &v.kind
+                                {
                                     if expected.len() != fields.len() {
                                         return Err(self.runtime_error(&format!(
                                             "struct variant {}.{} expects {} fields, got {}",
@@ -2599,11 +2605,7 @@ impl VM {
             }
             Value::EnumDef(def) => {
                 // Tuple-variant construction: `EnumName.Variant(args)`.
-                let variant = def
-                    .variants
-                    .iter()
-                    .find(|v| v.name == method_name)
-                    .cloned();
+                let variant = def.variants.iter().find(|v| v.name == method_name).cloned();
                 match variant {
                     Some(v) => match v.kind {
                         crate::vm::value::VmEnumVariantKind::Tuple(expected) => {
@@ -2628,22 +2630,19 @@ impl VM {
                             )));
                             Ok(())
                         }
-                        crate::vm::value::VmEnumVariantKind::Unit(_) => Err(self.runtime_error_hint(
-                            &format!(
-                                "unit variant {}.{} cannot be called",
-                                def.name, v.name
-                            ),
-                            "access unit variants without parentheses",
-                        )),
-                        crate::vm::value::VmEnumVariantKind::Struct(_) => {
-                            Err(self.runtime_error_hint(
+                        crate::vm::value::VmEnumVariantKind::Unit(_) => Err(self
+                            .runtime_error_hint(
+                                &format!("unit variant {}.{} cannot be called", def.name, v.name),
+                                "access unit variants without parentheses",
+                            )),
+                        crate::vm::value::VmEnumVariantKind::Struct(_) => Err(self
+                            .runtime_error_hint(
                                 &format!(
                                     "struct variant {}.{} must be constructed with braces",
                                     def.name, v.name
                                 ),
                                 "use EnumName.Variant { field: value }",
-                            ))
-                        }
+                            )),
                     },
                     None => Err(self.runtime_error(&format!(
                         "enum {} has no variant '{}'",
@@ -2665,10 +2664,7 @@ impl VM {
     /// Resolve a struct def by name (from globals).
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     #[inline(always)]
-    pub(crate) fn get_struct_def(
-        &self,
-        name: &str,
-    ) -> Option<Rc<crate::vm::value::ObjStructDef>> {
+    pub(crate) fn get_struct_def(&self, name: &str) -> Option<Rc<crate::vm::value::ObjStructDef>> {
         match self.globals.get(name) {
             Some(Value::StructDef(def)) => Some(Rc::clone(def)),
             _ => None,
@@ -2728,19 +2724,8 @@ impl VM {
             .active_module_globals()
             .map(|mg| mg as *const HashMap<String, Value>)
             .unwrap_or(std::ptr::null());
-        let entry_line = closure
-            .function
-            .chunk
-            .lines
-            .first()
-            .copied()
-            .unwrap_or(0);
-        self.jit_frame_push_raw(
-            Rc::as_ptr(closure),
-            slot_offset,
-            inherited_mg,
-            entry_line,
-        );
+        let entry_line = closure.function.chunk.lines.first().copied().unwrap_or(0);
+        self.jit_frame_push_raw(Rc::as_ptr(closure), slot_offset, inherited_mg, entry_line);
         let vm_ptr = self as *mut VM;
         let exit = unsafe { self.jit.invoke_thunk(vm_ptr, thunk, stop_depth) };
         Some(match exit {
@@ -2782,10 +2767,7 @@ impl VM {
         // module globals. Every recursive/hot-loop call hits this, so it must
         // be lean — we skip the call_count bump (already tiered up), the
         // named-args block, and the arity-fill loop.
-        if state == 1
-            && named_args.is_empty()
-            && arg_count == expected
-            && module_globals.is_none()
+        if state == 1 && named_args.is_empty() && arg_count == expected && module_globals.is_none()
         {
             if let Some(result) = self.call_closure_fast_path(&closure) {
                 return result;
@@ -2841,10 +2823,8 @@ impl VM {
 
         // Inherit module globals from the current frame if not explicitly provided,
         // so nested calls within a module function retain module scope access.
-        let inherited_mg = module_globals.or_else(|| {
-            self.active_module_globals()
-                .map(|mg| Rc::new(mg.clone()))
-        });
+        let inherited_mg =
+            module_globals.or_else(|| self.active_module_globals().map(|mg| Rc::new(mg.clone())));
 
         // Remember the pre-call depth so the JIT helper (if we enter it)
         // can drive `execute_until` for exactly this one activation.
@@ -2887,13 +2867,7 @@ impl VM {
         };
 
         if let Some(thunk) = thunk {
-            let entry_line = closure
-                .function
-                .chunk
-                .lines
-                .first()
-                .copied()
-                .unwrap_or(0);
+            let entry_line = closure.function.chunk.lines.first().copied().unwrap_or(0);
             let mg_ptr = inherited_mg
                 .as_ref()
                 .map(|mg| Rc::as_ptr(mg))
@@ -3385,9 +3359,10 @@ impl VM {
     /// Extract error info from a value (tag, message).
     fn error_info_from_value(value: &Value) -> Option<(Option<String>, String)> {
         match value {
-            Value::ErrorValue(data) => {
-                Some((data.tag.as_ref().map(|t| t.to_string()), data.msg.to_string()))
-            }
+            Value::ErrorValue(data) => Some((
+                data.tag.as_ref().map(|t| t.to_string()),
+                data.msg.to_string(),
+            )),
             Value::Error(msg) => Some((None, msg.to_string())),
             _ => None,
         }
@@ -3527,13 +3502,13 @@ impl VM {
                 }
             },
             "VALUE" => Ok(Value::Wrapped(Rc::new(value.clone()))),
-            "ENUM" => match value {
-                Value::EnumInstance(_) | Value::EnumDef(_) => Ok(value.clone()),
-                _ => Err(self.runtime_error(&format!(
-                    "cannot convert {} to ENUM",
-                    value.type_name()
-                ))),
-            },
+            "ENUM" => {
+                match value {
+                    Value::EnumInstance(_) | Value::EnumDef(_) => Ok(value.clone()),
+                    _ => Err(self
+                        .runtime_error(&format!("cannot convert {} to ENUM", value.type_name()))),
+                }
+            }
             _ => {
                 // Struct type or unknown — check if value matches
                 if value.effective_type_name() == target {

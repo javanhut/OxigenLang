@@ -35,12 +35,12 @@ pub(super) struct HelperIds {
     pub dup: FuncId, // (vm)
 
     // Collections
-    pub build_array: FuncId,          // (vm, u32)
-    pub index_fast_array_int: FuncId, // (vm) -> u32
-    pub type_wrap: FuncId,            // (vm, u32) -> u32
+    pub build_array: FuncId,               // (vm, u32)
+    pub index_fast_array_int: FuncId,      // (vm) -> u32
+    pub type_wrap: FuncId,                 // (vm, u32) -> u32
     pub local_add_array_mod_index: FuncId, // (vm, u32, u32, u32, i64, u32) -> u32
-    pub struct_field_add_const: FuncId, // (vm, u32, u32, i64) -> u32
-    pub struct_field_add_local: FuncId, // (vm, u32, u32, u32) -> u32
+    pub struct_field_add_const: FuncId,    // (vm, u32, u32, i64) -> u32
+    pub struct_field_add_local: FuncId,    // (vm, u32, u32, u32) -> u32
 
     // Locals
     pub get_local: FuncId, // (vm, u32)
@@ -73,7 +73,7 @@ pub(super) struct HelperIds {
     pub op_return: FuncId, // (vm)
 
     // Call (fallible, takes arg_count)
-    pub op_call: FuncId,    // (vm, u32) -> u32
+    pub op_call: FuncId,      // (vm, u32) -> u32
     pub op_call_hit: FuncId,  // (vm, *mut CallCacheEntry) -> u32
     pub op_call_miss: FuncId, // (vm, u32, *mut CallCacheEntry) -> u32
 
@@ -93,23 +93,23 @@ pub(super) struct HelperIds {
     pub op_closure: FuncId, // (vm, u32, u32) -> u32
 
     // Struct ops
-    pub op_struct_def: FuncId,     // (vm, u32)
-    pub op_struct_literal: FuncId, // (vm, u32, u32) -> u32
+    pub op_struct_def: FuncId,        // (vm, u32)
+    pub op_struct_literal: FuncId,    // (vm, u32, u32) -> u32
     pub op_get_field_ic_miss: FuncId, // (vm, u32, *mut FieldCacheEntry) -> u32
     pub op_set_field_ic_miss: FuncId, // (vm, u32, *mut FieldCacheEntry) -> u32
-    pub op_define_method: FuncId,  // (vm, u32, u32) -> u32
-    pub op_method_call: FuncId,    // (vm, u32, u32) -> u32
-    pub op_method_call_ic: FuncId, // (vm, u32, u32, *mut MethodCacheEntry) -> u32
+    pub op_define_method: FuncId,     // (vm, u32, u32) -> u32
+    pub op_method_call: FuncId,       // (vm, u32, u32) -> u32
+    pub op_method_call_ic: FuncId,    // (vm, u32, u32, *mut MethodCacheEntry) -> u32
 
     // Inline int fast-path support
-    pub stack_as_mut_ptr: FuncId,       // (vm) -> *mut Value (pointer-sized)
-    pub stack_len: FuncId,              // (vm) -> i64
-    pub stack_pop_one: FuncId,          // (vm)
-    pub stack_pop_n: FuncId,            // (vm, u32)
-    pub stack_commit_len: FuncId,       // (vm, u64)
-    pub stack_truncate: FuncId,         // (vm, i64)
+    pub stack_as_mut_ptr: FuncId, // (vm) -> *mut Value (pointer-sized)
+    pub stack_len: FuncId,        // (vm) -> i64
+    pub stack_pop_one: FuncId,    // (vm)
+    pub stack_pop_n: FuncId,      // (vm, u32)
+    pub stack_commit_len: FuncId, // (vm, u64)
+    pub stack_truncate: FuncId,   // (vm, i64)
     pub replace_top2_with_bool: FuncId, // (vm, u32)
-    pub current_slot_offset: FuncId,    // (vm) -> i64
+    pub current_slot_offset: FuncId, // (vm) -> i64
 }
 
 /// FuncRefs for the current function's context — the in-function
@@ -257,8 +257,14 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_op_struct_literal", runtime::jit_op_struct_literal);
     reg!("jit_op_get_field", runtime::jit_op_get_field);
     reg!("jit_op_set_field", runtime::jit_op_set_field);
-    reg!("jit_op_get_field_ic_miss", runtime::jit_op_get_field_ic_miss);
-    reg!("jit_op_set_field_ic_miss", runtime::jit_op_set_field_ic_miss);
+    reg!(
+        "jit_op_get_field_ic_miss",
+        runtime::jit_op_get_field_ic_miss
+    );
+    reg!(
+        "jit_op_set_field_ic_miss",
+        runtime::jit_op_set_field_ic_miss
+    );
     reg!("jit_op_define_method", runtime::jit_op_define_method);
     reg!("jit_op_method_call", runtime::jit_op_method_call);
     reg!("jit_op_method_call_ic", runtime::jit_op_method_call_ic);
@@ -340,9 +346,15 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
     // jit_struct_field_add_local: fn(*mut VM, u32, u32, u32, *mut FieldCacheEntry) -> u32
     let mut sig_vm_3u32_ptr_to_u32 = module.make_signature();
     sig_vm_3u32_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
-    sig_vm_3u32_ptr_to_u32.params.push(AbiParam::new(types::I32));
-    sig_vm_3u32_ptr_to_u32.params.push(AbiParam::new(types::I32));
-    sig_vm_3u32_ptr_to_u32.params.push(AbiParam::new(types::I32));
+    sig_vm_3u32_ptr_to_u32
+        .params
+        .push(AbiParam::new(types::I32));
+    sig_vm_3u32_ptr_to_u32
+        .params
+        .push(AbiParam::new(types::I32));
+    sig_vm_3u32_ptr_to_u32
+        .params
+        .push(AbiParam::new(types::I32));
     sig_vm_3u32_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
     sig_vm_3u32_ptr_to_u32
         .returns
@@ -351,8 +363,12 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
     // jit_op_method_call_ic: fn(*mut VM, u32, u32, *mut MethodCacheEntry) -> u32
     let mut sig_vm_u32_u32_ptr_to_u32 = module.make_signature();
     sig_vm_u32_u32_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
-    sig_vm_u32_u32_ptr_to_u32.params.push(AbiParam::new(types::I32));
-    sig_vm_u32_u32_ptr_to_u32.params.push(AbiParam::new(types::I32));
+    sig_vm_u32_u32_ptr_to_u32
+        .params
+        .push(AbiParam::new(types::I32));
+    sig_vm_u32_u32_ptr_to_u32
+        .params
+        .push(AbiParam::new(types::I32));
     sig_vm_u32_u32_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
     sig_vm_u32_u32_ptr_to_u32
         .returns
@@ -485,11 +501,7 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         op_set_field_ic_miss: decl(module, "jit_op_set_field_ic_miss", &sig_vm_u32_ptr_to_u32),
         op_define_method: decl(module, "jit_op_define_method", &sig_vm_u32_u32_to_u32),
         op_method_call: decl(module, "jit_op_method_call", &sig_vm_u32_u32_to_u32),
-        op_method_call_ic: decl(
-            module,
-            "jit_op_method_call_ic",
-            &sig_vm_u32_u32_ptr_to_u32,
-        ),
+        op_method_call_ic: decl(module, "jit_op_method_call_ic", &sig_vm_u32_u32_ptr_to_u32),
         stack_as_mut_ptr: decl(module, "jit_stack_as_mut_ptr", &sig_vm_to_ptr),
         stack_len: decl(module, "jit_stack_len", &sig_vm_to_i64),
         stack_pop_one: decl(module, "jit_stack_pop_one", &sig_vm_only),

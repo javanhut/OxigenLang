@@ -49,10 +49,10 @@ pub const STRUCT_INSTANCE_DEF_OFFSET: usize = core::mem::offset_of!(ObjStructIns
 /// The JIT loads this as `ptr_ty` to reach the start of the `Value` buffer
 /// owned by the instance without going through a `RefCell`/`Vec`
 /// indirection. Pinned by `layout_tests::struct_instance_fields_layout_is_pinned`.
-pub const STRUCT_INSTANCE_FIELDS_PTR_OFFSET: usize = core::mem::offset_of!(ObjStructInstance, fields)
-    + core::mem::offset_of!(InstanceFields, ptr);
-pub const STRUCT_INSTANCE_FIELDS_LEN_OFFSET: usize = core::mem::offset_of!(ObjStructInstance, fields)
-    + core::mem::offset_of!(InstanceFields, len);
+pub const STRUCT_INSTANCE_FIELDS_PTR_OFFSET: usize =
+    core::mem::offset_of!(ObjStructInstance, fields) + core::mem::offset_of!(InstanceFields, ptr);
+pub const STRUCT_INSTANCE_FIELDS_LEN_OFFSET: usize =
+    core::mem::offset_of!(ObjStructInstance, fields) + core::mem::offset_of!(InstanceFields, len);
 
 #[cfg(test)]
 mod layout_tests {
@@ -183,9 +183,7 @@ mod layout_tests {
             upvalue_int_values: values,
         });
         // Read the Rc's raw bit pattern the same way the JIT does.
-        let expected_raw: usize = unsafe {
-            *(&obj as *const Rc<ObjClosure> as *const usize)
-        };
+        let expected_raw: usize = unsafe { *(&obj as *const Rc<ObjClosure> as *const usize) };
         let v = Value::Closure(Rc::clone(&obj));
         let ptr = &v as *const Value as *const u8;
         let tag = unsafe { *ptr };
@@ -255,9 +253,9 @@ mod layout_tests {
     #[test]
     fn struct_instance_fields_layout_is_pinned() {
         use crate::vm::value::{
-            FieldLayout, ObjStructDef, ObjStructInstance, Value, STRUCT_INSTANCE_DEF_OFFSET,
+            FieldLayout, ObjStructDef, ObjStructInstance, STRUCT_INSTANCE_DEF_OFFSET,
             STRUCT_INSTANCE_FIELDS_LEN_OFFSET, STRUCT_INSTANCE_FIELDS_PTR_OFFSET,
-            VALUE_INT_PAYLOAD_OFFSET, VALUE_SIZE,
+            VALUE_INT_PAYLOAD_OFFSET, VALUE_SIZE, Value,
         };
         let mut indices = HashMap::new();
         indices.insert("a".to_string(), 0);
@@ -288,13 +286,20 @@ mod layout_tests {
         );
         let base = &inst as *const ObjStructInstance as *const u8;
         // Reading through the pinned offset must reach the raw fields ptr.
-        let ptr_read =
-            unsafe { base.add(STRUCT_INSTANCE_FIELDS_PTR_OFFSET).cast::<*mut Value>().read() };
+        let ptr_read = unsafe {
+            base.add(STRUCT_INSTANCE_FIELDS_PTR_OFFSET)
+                .cast::<*mut Value>()
+                .read()
+        };
         assert_eq!(
             ptr_read, inst.fields.ptr,
             "STRUCT_INSTANCE_FIELDS_PTR_OFFSET must reach ObjStructInstance.fields.ptr",
         );
-        let len_read = unsafe { base.add(STRUCT_INSTANCE_FIELDS_LEN_OFFSET).cast::<u32>().read() };
+        let len_read = unsafe {
+            base.add(STRUCT_INSTANCE_FIELDS_LEN_OFFSET)
+                .cast::<u32>()
+                .read()
+        };
         assert_eq!(
             len_read, inst.fields.len,
             "STRUCT_INSTANCE_FIELDS_LEN_OFFSET must reach ObjStructInstance.fields.len",
@@ -493,8 +498,14 @@ pub struct ObjClosure {
 /// helper observes `Closed(Integer)` and populates the cache.
 #[inline]
 pub fn make_upvalue_int_caches(n: usize) -> (Box<[Cell<u8>]>, Box<[Cell<i64>]>) {
-    let kinds = (0..n).map(|_| Cell::new(0u8)).collect::<Vec<_>>().into_boxed_slice();
-    let values = (0..n).map(|_| Cell::new(0i64)).collect::<Vec<_>>().into_boxed_slice();
+    let kinds = (0..n)
+        .map(|_| Cell::new(0u8))
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let values = (0..n)
+        .map(|_| Cell::new(0i64))
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
     (kinds, values)
 }
 
@@ -841,7 +852,13 @@ impl fmt::Display for Value {
                         .iter()
                         .map(|(k, v)| format!("{}: {}", k, v))
                         .collect();
-                    write!(f, "{}.{} {{ {} }}", i.enum_name, i.variant_name, s.join(", "))
+                    write!(
+                        f,
+                        "{}.{} {{ {} }}",
+                        i.enum_name,
+                        i.variant_name,
+                        s.join(", ")
+                    )
                 }
             },
         }
@@ -911,9 +928,7 @@ impl PartialEq for Value {
                 let b = b.borrow();
                 a.len() == b.len() && a.iter().all(|item| b.iter().any(|bitem| item == bitem))
             }
-            (Value::ErrorValue(a), Value::ErrorValue(b)) => {
-                a.msg == b.msg && a.tag == b.tag
-            }
+            (Value::ErrorValue(a), Value::ErrorValue(b)) => a.msg == b.msg && a.tag == b.tag,
             (Value::Wrapped(a), Value::Wrapped(b)) => a == b,
             (Value::StructInstance(a), Value::StructInstance(b)) => {
                 a.struct_name == b.struct_name && a.field_slice() == b.field_slice()

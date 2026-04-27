@@ -45,10 +45,7 @@ fn run_result(source: &str, jit_threshold: Option<u32>) -> Result<String, String
 /// and the source line the VMError carries. Used by line-store elision
 /// tests that need to verify the JIT writes `JitFrame.line` correctly
 /// at every fault site.
-fn run_expect_err(
-    source: &str,
-    jit_threshold: Option<u32>,
-) -> (String, u32) {
+fn run_expect_err(source: &str, jit_threshold: Option<u32>) -> (String, u32) {
     let lexer = Lexer::new(source);
     let mut parser = Parser::new(lexer, source);
     let program = parser.parse_program();
@@ -483,7 +480,11 @@ run()
 
     assert_eq!(baseline, jitted);
     assert_eq!(jitted, "60");
-    assert!(j_ok >= 2, "expected linked-list methods to compile; got {}", j_ok);
+    assert!(
+        j_ok >= 2,
+        "expected linked-list methods to compile; got {}",
+        j_ok
+    );
 }
 
 #[test]
@@ -979,7 +980,10 @@ fun zero_div() {
 zero_div()
 ";
     let (msg, line) = run_expect_err(source, Some(1));
-    assert!(msg.contains("zero") || msg.contains("division"), "msg = {msg:?}");
+    assert!(
+        msg.contains("zero") || msg.contains("division"),
+        "msg = {msg:?}"
+    );
     // `a / b` is on source line 5.
     assert_eq!(line, 5, "expected line 5, got {} (msg: {msg})", line);
 }

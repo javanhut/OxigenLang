@@ -216,3 +216,24 @@ fn test_span_column_tracking() {
     assert_eq!(tokens[2].literal, "42");
     assert_eq!(tokens[2].span.column, 8);
 }
+
+#[test]
+fn test_string_escape_sequences_include_ansi_escape() {
+    let tokens = collect_tokens(r#""\e[31mred\e[0m" "\x1b[32mgreen\x1B[0m""#);
+
+    assert_eq!(tokens[0].token_type, TokenType::String);
+    assert_eq!(tokens[0].literal, "\x1b[31mred\x1b[0m");
+    assert_eq!(tokens[1].token_type, TokenType::String);
+    assert_eq!(tokens[1].literal, "\x1b[32mgreen\x1b[0m");
+}
+
+#[test]
+fn test_interpolated_string_escape_sequences_include_ansi_escape() {
+    let tokens = collect_tokens(r#""\e[31m{name}\x1b[0m""#);
+
+    assert_eq!(tokens[0].token_type, TokenType::InterpStart);
+    assert_eq!(tokens[1].token_type, TokenType::String);
+    assert_eq!(tokens[1].literal, "\x1b[31m");
+    assert_eq!(tokens[5].token_type, TokenType::String);
+    assert_eq!(tokens[5].literal, "\x1b[0m");
+}

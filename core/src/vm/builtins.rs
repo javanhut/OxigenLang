@@ -1,4 +1,4 @@
-use crate::vm::value::{rc_str, ErrorValueData, Value};
+use crate::vm::value::{ErrorValueData, Value, rc_str};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -193,7 +193,10 @@ fn builtin_len(args: Vec<Value>) -> Value {
         Value::Tuple(t) => Value::Integer(t.len() as i64),
         Value::Map(m) => Value::Integer(m.borrow().len() as i64),
         Value::Set(s) => Value::Integer(s.borrow().len() as i64),
-        _ => Value::Error(rc_str(format!("len() not supported for {}", args[0].type_name()))),
+        _ => Value::Error(rc_str(format!(
+            "len() not supported for {}",
+            args[0].type_name()
+        ))),
     }
 }
 
@@ -279,7 +282,10 @@ fn builtin_int(args: Vec<Value>) -> Value {
         Value::Byte(b) => Value::Integer(*b as i64),
         Value::Uint(u) => Value::Integer(*u as i64),
         Value::Char(c) => Value::Integer(*c as i64),
-        _ => Value::Error(rc_str(format!("cannot convert {} to int", args[0].type_name()))),
+        _ => Value::Error(rc_str(format!(
+            "cannot convert {} to int",
+            args[0].type_name()
+        ))),
     }
 }
 
@@ -296,7 +302,10 @@ fn builtin_float(args: Vec<Value>) -> Value {
         },
         Value::Byte(b) => Value::Float(*b as f64),
         Value::Uint(u) => Value::Float(*u as f64),
-        _ => Value::Error(rc_str(format!("cannot convert {} to float", args[0].type_name()))),
+        _ => Value::Error(rc_str(format!(
+            "cannot convert {} to float",
+            args[0].type_name()
+        ))),
     }
 }
 
@@ -476,7 +485,10 @@ fn builtin_byte(args: Vec<Value>) -> Value {
     match &args[0] {
         Value::Integer(n) => Value::Byte(*n as u8),
         Value::Uint(n) => Value::Byte(*n as u8),
-        _ => Value::Error(rc_str(format!("cannot convert {} to byte", args[0].type_name()))),
+        _ => Value::Error(rc_str(format!(
+            "cannot convert {} to byte",
+            args[0].type_name()
+        ))),
     }
 }
 
@@ -492,7 +504,10 @@ fn builtin_uint(args: Vec<Value>) -> Value {
             Ok(n) => Value::Uint(n),
             Err(_) => Value::Error(rc_str(format!("cannot convert '{}' to uint", s))),
         },
-        _ => Value::Error(rc_str(format!("cannot convert {} to uint", args[0].type_name()))),
+        _ => Value::Error(rc_str(format!(
+            "cannot convert {} to uint",
+            args[0].type_name()
+        ))),
     }
 }
 
@@ -867,8 +882,14 @@ fn builtin_exec(args: Vec<Value>) -> Value {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let code = output.status.code().unwrap_or(-1);
             let entries: Vec<(Value, Value)> = vec![
-                (Value::String(rc_str("stdout")), Value::String(rc_str(stdout))),
-                (Value::String(rc_str("stderr")), Value::String(rc_str(stderr))),
+                (
+                    Value::String(rc_str("stdout")),
+                    Value::String(rc_str(stdout)),
+                ),
+                (
+                    Value::String(rc_str("stderr")),
+                    Value::String(rc_str(stderr)),
+                ),
                 (Value::String(rc_str("code")), Value::Integer(code as i64)),
             ];
             Value::Map(Rc::new(RefCell::new(entries)))
@@ -1727,7 +1748,10 @@ fn builtin_http_request(args: Vec<Value>) -> Value {
                             Value::String(rc_str("status")),
                             Value::Integer(status as i64),
                         ),
-                        (Value::String(rc_str("body")), Value::String(rc_str(body_str))),
+                        (
+                            Value::String(rc_str("body")),
+                            Value::String(rc_str(body_str)),
+                        ),
                     ];
                     Value::Map(Rc::new(RefCell::new(entries)))
                 }
@@ -1761,6 +1785,9 @@ fn builtin_http_request(args: Vec<Value>) -> Value {
                 None => req.send_empty(),
             })
         }
-        _ => Value::Error(rc_str(format!("__http_request: unsupported method '{}'", method))),
+        _ => Value::Error(rc_str(format!(
+            "__http_request: unsupported method '{}'",
+            method
+        ))),
     }
 }
