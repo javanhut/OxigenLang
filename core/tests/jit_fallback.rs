@@ -1199,6 +1199,171 @@ fn fallback_shift_edge_shr_negative_one_arithmetic() {
 // inits like `n := 0`. The shifts-through-arg test below avoids the
 // pattern by passing the shift result as a parameter.
 
+// ── Type-contract audit (Tier 2.1) ────────────────────────────────────
+//
+// These probes ask: does the JIT honor the explicit type annotation as
+// a guarantee, or does it still speculate? If a typed `<int>` slot is
+// non-negotiable, multi-op init RHS should compute correctly because
+// the slot's type is fixed by contract. If these tests fail the same
+// way the untyped form did, the JIT is downgrading despite the
+// annotation — that's the bug to fix.
+
+#[test]
+fn type_contract_form3_walrus_multiop_init() {
+    // Form 3: typed walrus. `c <int> := 1 + 5` — the type annotation
+    // means c's slot is locked to Int64. Multi-op RHS should work.
+    check_match("fun f() {\n    c <int> := 1 + 5\n    c + 1\n}\nf()");
+}
+
+#[test]
+fn type_contract_form2_strict_multiop_init() {
+    // Form 2: strict typed. `c <int> = 1 + 5` — value AND type frozen.
+    // Foldable to a single Constant in principle.
+    check_match("fun f() {\n    c <int> = 1 + 5\n    c + 1\n}\nf()");
+}
+
+#[test]
+fn type_contract_form4_zero_init_then_assign() {
+    // Form 4: zero-init, then explicit assign. Forces the typed slot
+    // path through a separate code path (no init expression).
+    check_match("fun f() {\n    c <int>\n    c = 6\n    c + 1\n}\nf()");
+}
+
+#[test]
+fn type_contract_form3_walrus_int_min() {
+    // Form 3 with INT_MIN init. The typed contract says c is i64,
+    // and 1 << 63 fits — should not require any speculation.
+    check_match("fun f() {\n    c <int> := 1 << 63\n    c + 1\n}\nf()");
+}
+
+// Tier 2.1 (iii) — compile-time literal folding for walrus init RHS.
+// Pure-literal RHS expressions are folded to a single Constant at
+// compile time, so the JIT init-slot path sees a single push (no
+// multi-op-init mishap). Applies to all four init forms.
+
+#[test]
+fn fold_form1_untyped_multiop_init() {
+    // Pre-fold: `c := 1 + 5` emitted Constant 1, Constant 5, Add. The
+    // JIT's init-slot path primed c_var = 1 and never overrode it.
+    // Post-fold: `c := 6` — single Constant init, works correctly.
+    check_match("fun f() {\n    c := 1 + 5\n    c + 1\n}\nf()");
+}
+
+#[test]
+fn fold_form1_untyped_shift_int_min() {
+    check_match("fun f() {\n    c := 1 << 63\n    c + 1\n}\nf()");
+}
+
+#[test]
+fn fold_form1_two_locals_sum() {
+    let source = r#"
+fun f() {
+    a := 1 << 4
+    b := 1 << 5
+    a + b
+}
+f()
+"#;
+    check_match(source);
+}
+
+#[test]
+fn fold_form1_three_locals_sum() {
+    // The cascade case (3+ sequential walrus inits with multi-op RHS)
+    // was the smallest deferred bug from Tier 1. With folding, each
+    // RHS becomes a single Constant — no cascade, no bug.
+    let source = r#"
+fun f() {
+    a := 1 << 4
+    b := 1 << 5
+    c := 1 << 6
+    a + b + c
+}
+f()
+"#;
+    check_match(source);
+}
+
+#[test]
+fn fold_form1_six_locals_sum() {
+    let source = r#"
+fun shift_table() {
+    a := 1 << 0
+    b := 1 << 1
+    c := 1 << 63
+    d := 1 << 64
+    e := 256 >> 3
+    f := -1 >> 1
+    a + b + c + d + e + f
+}
+shift_table()
+"#;
+    check_match(source);
+}
+
+#[test]
+fn fold_form3_typed_three_locals_sum() {
+    // Same cascade shape, typed. Folding makes each RHS a single
+    // Constant; the subsequent TypeWrap still validates the type.
+    let source = r#"
+fun f() {
+    a <int> := 1 << 4
+    b <int> := 1 << 5
+    c <int> := 1 << 6
+    a + b + c
+}
+f()
+"#;
+    check_match(source);
+}
+
+#[test]
+fn fold_form2_immutable_init() {
+    // Form 2: immutable typed. Pure-literal RHS folds to single
+    // Constant; the slot is forever the folded value.
+    check_match("fun f() {\n    c <int> = 1 + 5\n    c + 1\n}\nf()");
+}
+
+#[test]
+fn fold_arith_chain() {
+    // Mixed operators — exercises that the folder handles ordering
+    // and precedence correctly (matches the parser's tree shape).
+    check_match("fun f() {\n    c := (1 + 2) * 3 - 4\n    c\n}\nf()");
+}
+
+#[test]
+fn fold_bitwise_chain() {
+    check_match("fun f() {\n    c := (12 & 10) | (4 ^ 1)\n    c\n}\nf()");
+}
+
+#[test]
+fn fold_division_by_zero_falls_through() {
+    // `1 / 0` MUST NOT fold — would lose the runtime error. Folder
+    // returns None for div-by-zero; compiler falls through to
+    // compile_expression, which emits the Divide opcode and the
+    // interpreter / JIT raise the same runtime error.
+    let source = "fun f() {\n    c := 1 / 0\n    c\n}\nf()";
+    let baseline_err = run_result(source, None).expect_err("interpreter must error");
+    let jitted_err = run_result(source, Some(1)).expect_err("JIT must error");
+    assert_eq!(baseline_err, jitted_err);
+}
+
+#[test]
+fn fold_non_literal_rhs_uses_runtime() {
+    // Non-foldable RHS (contains a function call) compiles unchanged.
+    // The fold returns None for `f()` so the original Add opcode is
+    // emitted at runtime. No behavior change vs pre-folding.
+    let source = r#"
+fun get_five() { 5 }
+fun caller() {
+    c := get_five() + 1
+    c + 1
+}
+caller()
+"#;
+    check_match(source);
+}
+
 #[test]
 fn fallback_shift_int_min_through_param() {
     // INT_MIN = 1 << 63 produced at the call site (function value, not a

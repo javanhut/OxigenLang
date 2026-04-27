@@ -15,6 +15,108 @@ fn unwrap_grouped(expr: &Expression) -> &Expression {
     }
 }
 
+/// Compile-time literal fold for walrus init RHS expressions. Recursively
+/// evaluates pure-literal expression trees (Int / Float / Bool / None /
+/// Char / Str leaves combined via Prefix / Infix / Grouped) and returns
+/// `Some(Value)` when the entire tree is constant, otherwise `None`.
+///
+/// Falling back to `None` on failure (rather than partial folding) keeps
+/// the contract simple: the caller emits a single `Constant` opcode iff
+/// fold succeeds, otherwise compiles the original expression. Operators
+/// that can fail at runtime (division/modulo by zero) intentionally
+/// return `None` so the runtime error is preserved at the interpreter
+/// level, matching `--no-jit` behaviour.
+///
+/// Shift semantics match `vm::binary_shl/shr` (count masked to low 6
+/// bits via `wrapping_shl/shr` on i64). Integer arith uses wrapping
+/// ops to match the runtime, which never panics on overflow in release.
+fn fold_constant_expression(expr: &Expression) -> Option<Value> {
+    match expr {
+        Expression::Int { value, .. } => Some(Value::Integer(*value)),
+        Expression::Float { value, .. } => Some(Value::Float(*value)),
+        Expression::Boolean { value, .. } => Some(Value::Boolean(*value)),
+        Expression::NoneExpr { .. } => Some(Value::None),
+        Expression::Char { value, .. } => Some(Value::Char(*value)),
+        Expression::Str { value, .. } => Some(Value::String(rc_str(value.as_str()))),
+        Expression::Grouped(inner) => fold_constant_expression(inner),
+
+        Expression::Prefix {
+            operator, right, ..
+        } => {
+            let r = fold_constant_expression(right)?;
+            match (operator.as_str(), r) {
+                ("-", Value::Integer(n)) => Some(Value::Integer(n.wrapping_neg())),
+                ("-", Value::Float(f)) => Some(Value::Float(-f)),
+                ("!" | "not", Value::Boolean(b)) => Some(Value::Boolean(!b)),
+                ("~", Value::Integer(n)) => Some(Value::Integer(!n)),
+                _ => None,
+            }
+        }
+
+        Expression::Infix {
+            operator,
+            left,
+            right,
+            ..
+        } => {
+            let l = fold_constant_expression(left)?;
+            let r = fold_constant_expression(right)?;
+            match (operator.as_str(), &l, &r) {
+                // Integer arithmetic
+                ("+", Value::Integer(a), Value::Integer(b)) => {
+                    Some(Value::Integer(a.wrapping_add(*b)))
+                }
+                ("-", Value::Integer(a), Value::Integer(b)) => {
+                    Some(Value::Integer(a.wrapping_sub(*b)))
+                }
+                ("*", Value::Integer(a), Value::Integer(b)) => {
+                    Some(Value::Integer(a.wrapping_mul(*b)))
+                }
+                ("/", Value::Integer(a), Value::Integer(b)) if *b != 0 => {
+                    Some(Value::Integer(a.wrapping_div(*b)))
+                }
+                ("%", Value::Integer(a), Value::Integer(b)) if *b != 0 => {
+                    Some(Value::Integer(a.wrapping_rem(*b)))
+                }
+                // Integer bitwise / shift (same semantics as vm::binary_b*)
+                ("&", Value::Integer(a), Value::Integer(b)) => Some(Value::Integer(a & b)),
+                ("|", Value::Integer(a), Value::Integer(b)) => Some(Value::Integer(a | b)),
+                ("^", Value::Integer(a), Value::Integer(b)) => Some(Value::Integer(a ^ b)),
+                ("<<", Value::Integer(a), Value::Integer(b)) => {
+                    Some(Value::Integer(a.wrapping_shl(*b as u32)))
+                }
+                (">>", Value::Integer(a), Value::Integer(b)) => {
+                    Some(Value::Integer(a.wrapping_shr(*b as u32)))
+                }
+                // Integer comparison
+                ("==", Value::Integer(a), Value::Integer(b)) => Some(Value::Boolean(a == b)),
+                ("!=", Value::Integer(a), Value::Integer(b)) => Some(Value::Boolean(a != b)),
+                ("<", Value::Integer(a), Value::Integer(b)) => Some(Value::Boolean(a < b)),
+                ("<=", Value::Integer(a), Value::Integer(b)) => Some(Value::Boolean(a <= b)),
+                (">", Value::Integer(a), Value::Integer(b)) => Some(Value::Boolean(a > b)),
+                (">=", Value::Integer(a), Value::Integer(b)) => Some(Value::Boolean(a >= b)),
+                // Float arithmetic + comparison
+                ("+", Value::Float(a), Value::Float(b)) => Some(Value::Float(a + b)),
+                ("-", Value::Float(a), Value::Float(b)) => Some(Value::Float(a - b)),
+                ("*", Value::Float(a), Value::Float(b)) => Some(Value::Float(a * b)),
+                ("/", Value::Float(a), Value::Float(b)) if *b != 0.0 => Some(Value::Float(a / b)),
+                ("==", Value::Float(a), Value::Float(b)) => Some(Value::Boolean(a == b)),
+                ("!=", Value::Float(a), Value::Float(b)) => Some(Value::Boolean(a != b)),
+                ("<", Value::Float(a), Value::Float(b)) => Some(Value::Boolean(a < b)),
+                ("<=", Value::Float(a), Value::Float(b)) => Some(Value::Boolean(a <= b)),
+                (">", Value::Float(a), Value::Float(b)) => Some(Value::Boolean(a > b)),
+                (">=", Value::Float(a), Value::Float(b)) => Some(Value::Boolean(a >= b)),
+                // Boolean short-circuit (eager since both sides folded)
+                ("and", Value::Boolean(a), Value::Boolean(b)) => Some(Value::Boolean(*a && *b)),
+                ("or", Value::Boolean(a), Value::Boolean(b)) => Some(Value::Boolean(*a || *b)),
+                _ => None,
+            }
+        }
+
+        _ => None,
+    }
+}
+
 /// Compilation error with source location.
 #[derive(Debug)]
 pub struct CompileError {
@@ -447,6 +549,15 @@ impl Compiler {
                 } = value
                 {
                     self.compile_function(Some(&name.value), parameters, body, line);
+                } else if let Some(folded) = fold_constant_expression(value) {
+                    // Tier 2.1 (iii): pure-literal init RHS folds to a
+                    // single Constant. Matches Oxigen's design intent —
+                    // each init is specific so the JIT can fold and
+                    // virtualize cleanly. Side effect: the multi-op-init
+                    // mishap (`c := 1 + 5; c + 1` returning 2 in JIT)
+                    // disappears for foldable RHS because the init-slot
+                    // path now sees a single Constant.
+                    self.emit_constant(folded, line);
                 } else {
                     self.compile_expression(value);
                 }
@@ -491,7 +602,18 @@ impl Compiler {
                         line,
                     );
                 }
-                self.compile_expression(value);
+                // Tier 2.1 (iii): same fold as Statement::Let. The
+                // subsequent TypeWrap still fires (runtime contract) for
+                // non-Generic/None annotations, so the conversion
+                // semantics for Form 3 (e.g., `x <int> := 3.9` → 3) are
+                // preserved when the RHS is non-foldable. For pure-
+                // literal RHS that already matches the target type the
+                // wrap is a no-op.
+                if let Some(folded) = fold_constant_expression(value) {
+                    self.emit_constant(folded, line);
+                } else {
+                    self.compile_expression(value);
+                }
                 let type_name = type_ann.type_name();
                 let mutable = *walrus; // walrus (:=) means mutable
                 // Walrus := converts the value to the target type.
