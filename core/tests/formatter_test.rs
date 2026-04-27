@@ -111,7 +111,10 @@ fn test_format_array_with_prefix_column() {
     let input = "long_variable_name_here := [100000, 200000, 300000, 400000, 500000, 600000]";
     let result = format_source(input);
     // The array should fold because prefix + inline width > 80
-    assert!(result.contains('\n'), "Array after long prefix should fold to multi-line");
+    assert!(
+        result.contains('\n'),
+        "Array after long prefix should fold to multi-line"
+    );
 }
 
 #[test]

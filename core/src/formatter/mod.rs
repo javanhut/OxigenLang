@@ -439,7 +439,12 @@ impl Formatter {
                     self.push(&path.segments.join("."));
                 }
             }
-            Statement::Unpack { names, value, values, reassign } => {
+            Statement::Unpack {
+                names,
+                value,
+                values,
+                reassign,
+            } => {
                 for (i, name) in names.iter().enumerate() {
                     if i > 0 {
                         self.push(", ");

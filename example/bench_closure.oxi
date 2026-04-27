@@ -1,0 +1,18 @@
+// Closure hot loop — `add5` captures `x` as an upvalue, then we call it
+// many times. Exercises Closure/GetUpvalue ops inside the JIT.
+fun make_adder(x) {
+    fun(y) { x + y }
+}
+
+fun run(n <int>) {
+    add5 := make_adder(5)
+    total <int> := 0
+    i <int> := 0
+    repeat when i < n {
+        total = total + add5(i)
+        i = i + 1
+    }
+    total
+}
+
+run(500000)

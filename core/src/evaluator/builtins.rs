@@ -2258,7 +2258,12 @@ fn object_to_toml_value(obj: &Object) -> Result<TomlValue, String> {
             for (k, v) in entries {
                 let key = match k.as_ref() {
                     Object::String(s) => s.clone(),
-                    _ => return Err(format!("TOML table keys must be strings, got {}", k.type_name())),
+                    _ => {
+                        return Err(format!(
+                            "TOML table keys must be strings, got {}",
+                            k.type_name()
+                        ));
+                    }
                 };
                 table.insert(key, object_to_toml_value(v)?);
             }

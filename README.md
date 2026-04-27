@@ -56,7 +56,9 @@ Removes the oxigen binary and stdlib from `/usr/local/`.
 
 ```bash
 sudo make install                # installs to /usr/local/
+sudo make install-with-jit       # installs a JIT-enabled build to /usr/local/
 sudo make install PREFIX=/opt    # custom prefix
+sudo make install-with-jit PREFIX=/opt
 sudo make uninstall              # removes it
 ```
 
@@ -72,6 +74,60 @@ cargo run -p oxigen --              # starts the REPL
 cargo run -p oxigen -- --version    # print version
 cargo run -p oxigen -- fmt file.oxi # format a file
 cargo run -p oxigen -- check file.oxi # parse and report errors as JSON
+```
+
+### Optional JIT (experimental)
+
+OxigenLang ships with a baseline Cranelift-backed JIT that's off by
+default. It already beats CPython 3.14 on tight numeric loops, nested
+loops, and closure hot paths, and it's kept experimental until it wins
+across *every* bench in the suite (recursion and method dispatch are
+still behind). Build it in with the `jit` feature and opt in at run
+time with `--jit`:
+
+```bash
+cargo build --release --features jit -p oxigen
+make build-with-jit
+sudo make install-with-jit
+./target/release/oxigen --jit path/to/script.oxi   # eager (threshold=1)
+./target/release/oxigen       path/to/script.oxi   # default tiering
+./target/release/oxigen --no-jit path/to/script.oxi # interpreter only
+```
+
+Without `--features jit` the `--jit` flag is silently ignored and the
+binary stays pure interpreter. Full architecture, supported opcodes,
+safety invariants, and benchmark methodology are in
+[docs/JIT_ARCHITECTURE.md](docs/JIT_ARCHITECTURE.md).
+
+### Benchmark Against Python
+
+Run the benchmark harness from the repo root:
+
+```bash
+python3 scripts/bench.py
+```
+
+That uses `target/release/oxigen` if it already exists, otherwise it
+builds it, then runs every paired `example/bench_*.oxi` /
+`example/bench_*.py` benchmark and writes both JSON and Markdown reports
+to `benchmark_reports/`. The report stores raw samples, median/mean/
+stdev/min/max per benchmark, and suite-level geometric-mean speedups vs
+Python so you can track JIT performance over time. To run a single
+benchmark:
+
+```bash
+python3 scripts/bench.py bench_loop
+python3 scripts/bench.py example/bench_fib.oxi
+```
+
+Useful flags:
+
+```bash
+python3 scripts/bench.py --rebuild
+python3 scripts/bench.py --oxigen-only
+python3 scripts/bench.py --plain-build
+python3 scripts/bench.py --runs 10 --warmups 3
+python3 scripts/bench.py --report-name nightly --report-dir reports/benchmarks
 ```
 
 ## Editor Support
@@ -215,6 +271,7 @@ For detailed information, see the [docs](docs/) directory:
 | [Imports and Modules](docs/imports.md) | The `introduce` keyword and module system |
 | [Built-in Functions](docs/builtins.md) | Complete reference for all built-ins |
 | [Standard Library](docs/stdlib.md) | Full reference for all 11 stdlib modules |
+| [JIT Architecture](docs/JIT_ARCHITECTURE.md) | **Experimental** — baseline Cranelift JIT: how to build it in, runtime flags, supported opcodes, safety invariants, benchmark status vs CPython |
 
 ## License
 

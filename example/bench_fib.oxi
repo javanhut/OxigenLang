@@ -1,0 +1,7 @@
+// Recursive Fibonacci — exercises Call / Return / arithmetic / branch.
+// Stays inside the JIT allow-list (no println, no collections).
+fun fib(n) {
+    option { n < 2 -> n, fib(n - 1) + fib(n - 2) }
+}
+
+fib(30)

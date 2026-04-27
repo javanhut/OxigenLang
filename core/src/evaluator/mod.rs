@@ -1264,7 +1264,12 @@ impl Evaluator {
                 path,
                 selective,
             } => self.eval_introduce(token.span, path, selective, Rc::clone(&env)),
-            Statement::Unpack { names, value, values, reassign } => {
+            Statement::Unpack {
+                names,
+                value,
+                values,
+                reassign,
+            } => {
                 // Collect the values to assign
                 let elements = if let Some(exprs) = values {
                     // Multi-expression: a, b := expr1, expr2
@@ -1302,7 +1307,10 @@ impl Evaluator {
                             let span = names.first().map(|n| n.token.span).unwrap_or_default();
                             return self.runtime_error(
                                 span,
-                                &format!("cannot unpack {}, expected array or tuple", val.type_name()),
+                                &format!(
+                                    "cannot unpack {}, expected array or tuple",
+                                    val.type_name()
+                                ),
                                 None,
                             );
                         }

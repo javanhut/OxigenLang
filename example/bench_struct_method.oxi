@@ -1,0 +1,28 @@
+// Struct with methods in a hot loop — exercises MethodCall / GetField /
+// SetField in the JIT allow-list.
+struct Counter {
+    val <int>
+}
+
+Counter contains {
+    fun inc() {
+        self.val = self.val + 1
+    }
+    fun add(amount <int>) {
+        self.val = self.val + amount
+    }
+    fun get() { self.val }
+}
+
+fun run(n <int>) {
+    c <Counter> := Counter(0)
+    i <int> := 0
+    repeat when i < n {
+        c.inc()
+        c.add(i)
+        i = i + 1
+    }
+    c.get()
+}
+
+run(500000)

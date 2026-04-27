@@ -1,4 +1,4 @@
-use crate::vm::value::Value;
+use crate::vm::value::{rc_str, ErrorValueData, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -40,12 +40,24 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("__upper".to_string(), Value::Builtin(builtin_upper));
     globals.insert("__lower".to_string(), Value::Builtin(builtin_lower));
     globals.insert("__replace".to_string(), Value::Builtin(builtin_replace));
-    globals.insert("__starts_with".to_string(), Value::Builtin(builtin_starts_with));
+    globals.insert(
+        "__starts_with".to_string(),
+        Value::Builtin(builtin_starts_with),
+    );
     globals.insert("__ends_with".to_string(), Value::Builtin(builtin_ends_with));
-    globals.insert("__contains_str".to_string(), Value::Builtin(builtin_contains_str));
+    globals.insert(
+        "__contains_str".to_string(),
+        Value::Builtin(builtin_contains_str),
+    );
     globals.insert("__strip".to_string(), Value::Builtin(builtin_strip));
-    globals.insert("__strip_left".to_string(), Value::Builtin(builtin_strip_left));
-    globals.insert("__strip_right".to_string(), Value::Builtin(builtin_strip_right));
+    globals.insert(
+        "__strip_left".to_string(),
+        Value::Builtin(builtin_strip_left),
+    );
+    globals.insert(
+        "__strip_right".to_string(),
+        Value::Builtin(builtin_strip_right),
+    );
     globals.insert("__sort".to_string(), Value::Builtin(builtin_sort));
 
     // Math builtins
@@ -60,9 +72,18 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
 
     // File I/O
     globals.insert("__read_file".to_string(), Value::Builtin(builtin_read_file));
-    globals.insert("__write_file".to_string(), Value::Builtin(builtin_write_file));
-    globals.insert("__append_file".to_string(), Value::Builtin(builtin_append_file));
-    globals.insert("__file_exists".to_string(), Value::Builtin(builtin_file_exists));
+    globals.insert(
+        "__write_file".to_string(),
+        Value::Builtin(builtin_write_file),
+    );
+    globals.insert(
+        "__append_file".to_string(),
+        Value::Builtin(builtin_append_file),
+    );
+    globals.insert(
+        "__file_exists".to_string(),
+        Value::Builtin(builtin_file_exists),
+    );
 
     // OS builtins
     globals.insert("__exec".to_string(), Value::Builtin(builtin_exec));
@@ -85,31 +106,67 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
 
     // Time builtins
     globals.insert("__time_now".to_string(), Value::Builtin(builtin_time_now));
-    globals.insert("__time_now_ms".to_string(), Value::Builtin(builtin_time_now_ms));
-    globals.insert("__time_sleep".to_string(), Value::Builtin(builtin_time_sleep));
-    globals.insert("__time_monotonic".to_string(), Value::Builtin(builtin_time_monotonic));
+    globals.insert(
+        "__time_now_ms".to_string(),
+        Value::Builtin(builtin_time_now_ms),
+    );
+    globals.insert(
+        "__time_sleep".to_string(),
+        Value::Builtin(builtin_time_sleep),
+    );
+    globals.insert(
+        "__time_monotonic".to_string(),
+        Value::Builtin(builtin_time_monotonic),
+    );
 
     // Random builtins
     globals.insert("__rand_seed".to_string(), Value::Builtin(builtin_rand_seed));
     globals.insert("__rand_int".to_string(), Value::Builtin(builtin_rand_int));
-    globals.insert("__rand_float".to_string(), Value::Builtin(builtin_rand_float));
+    globals.insert(
+        "__rand_float".to_string(),
+        Value::Builtin(builtin_rand_float),
+    );
 
     // Path builtins
     globals.insert("__path_join".to_string(), Value::Builtin(builtin_path_join));
     globals.insert("__path_ext".to_string(), Value::Builtin(builtin_path_ext));
-    globals.insert("__path_filename".to_string(), Value::Builtin(builtin_path_filename));
-    globals.insert("__path_parent".to_string(), Value::Builtin(builtin_path_parent));
+    globals.insert(
+        "__path_filename".to_string(),
+        Value::Builtin(builtin_path_filename),
+    );
+    globals.insert(
+        "__path_parent".to_string(),
+        Value::Builtin(builtin_path_parent),
+    );
     globals.insert("__path_stem".to_string(), Value::Builtin(builtin_path_stem));
-    globals.insert("__path_is_absolute".to_string(), Value::Builtin(builtin_path_is_absolute));
+    globals.insert(
+        "__path_is_absolute".to_string(),
+        Value::Builtin(builtin_path_is_absolute),
+    );
 
     // JSON / TOML
-    globals.insert("__json_parse".to_string(), Value::Builtin(builtin_json_parse));
-    globals.insert("__json_stringify".to_string(), Value::Builtin(builtin_json_stringify));
-    globals.insert("__toml_parse".to_string(), Value::Builtin(builtin_toml_parse));
-    globals.insert("__toml_stringify".to_string(), Value::Builtin(builtin_toml_stringify));
+    globals.insert(
+        "__json_parse".to_string(),
+        Value::Builtin(builtin_json_parse),
+    );
+    globals.insert(
+        "__json_stringify".to_string(),
+        Value::Builtin(builtin_json_stringify),
+    );
+    globals.insert(
+        "__toml_parse".to_string(),
+        Value::Builtin(builtin_toml_parse),
+    );
+    globals.insert(
+        "__toml_stringify".to_string(),
+        Value::Builtin(builtin_toml_stringify),
+    );
 
     // Network
-    globals.insert("__http_request".to_string(), Value::Builtin(builtin_http_request));
+    globals.insert(
+        "__http_request".to_string(),
+        Value::Builtin(builtin_http_request),
+    );
 }
 
 // ── Core builtins ──────────────────────────────────────────────────────
@@ -128,7 +185,7 @@ fn builtin_println(args: Vec<Value>) -> Value {
 
 fn builtin_len(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("len() takes exactly 1 argument".into());
+        return Value::Error(rc_str("len() takes exactly 1 argument"));
     }
     match &args[0] {
         Value::String(s) => Value::Integer(s.len() as i64),
@@ -136,46 +193,46 @@ fn builtin_len(args: Vec<Value>) -> Value {
         Value::Tuple(t) => Value::Integer(t.len() as i64),
         Value::Map(m) => Value::Integer(m.borrow().len() as i64),
         Value::Set(s) => Value::Integer(s.borrow().len() as i64),
-        _ => Value::Error(format!("len() not supported for {}", args[0].type_name()).into()),
+        _ => Value::Error(rc_str(format!("len() not supported for {}", args[0].type_name()))),
     }
 }
 
 fn builtin_push(args: Vec<Value>) -> Value {
     if args.len() != 2 {
-        return Value::Error("push() takes exactly 2 arguments".into());
+        return Value::Error(rc_str("push() takes exactly 2 arguments"));
     }
     match &args[0] {
         Value::Array(arr) => {
             arr.borrow_mut().push(args[1].clone());
             args[0].clone() // return the array (same behavior as tree-walker)
         }
-        _ => Value::Error("push() requires an array as first argument".into()),
+        _ => Value::Error(rc_str("push() requires an array as first argument")),
     }
 }
 
 fn builtin_first(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("first() takes exactly 1 argument".into());
+        return Value::Error(rc_str("first() takes exactly 1 argument"));
     }
     match &args[0] {
         Value::Array(arr) => arr.borrow().first().cloned().unwrap_or(Value::None),
-        _ => Value::Error("first() requires an array".into()),
+        _ => Value::Error(rc_str("first() requires an array")),
     }
 }
 
 fn builtin_last(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("last() takes exactly 1 argument".into());
+        return Value::Error(rc_str("last() takes exactly 1 argument"));
     }
     match &args[0] {
         Value::Array(arr) => arr.borrow().last().cloned().unwrap_or(Value::None),
-        _ => Value::Error("last() requires an array".into()),
+        _ => Value::Error(rc_str("last() requires an array")),
     }
 }
 
 fn builtin_rest(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("rest() takes exactly 1 argument".into());
+        return Value::Error(rc_str("rest() takes exactly 1 argument"));
     }
     match &args[0] {
         Value::Array(arr) => {
@@ -186,27 +243,27 @@ fn builtin_rest(args: Vec<Value>) -> Value {
                 Value::Array(Rc::new(RefCell::new(borrowed[1..].to_vec())))
             }
         }
-        _ => Value::Error("rest() requires an array".into()),
+        _ => Value::Error(rc_str("rest() requires an array")),
     }
 }
 
 fn builtin_type(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("type() takes exactly 1 argument".into());
+        return Value::Error(rc_str("type() takes exactly 1 argument"));
     }
-    Value::String(args[0].effective_type_name().into())
+    Value::String(rc_str(args[0].effective_type_name()))
 }
 
 fn builtin_str(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("str() takes exactly 1 argument".into());
+        return Value::Error(rc_str("str() takes exactly 1 argument"));
     }
-    Value::String(format!("{}", args[0]).into())
+    Value::String(rc_str(format!("{}", args[0])))
 }
 
 fn builtin_int(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("int() takes exactly 1 argument".into());
+        return Value::Error(rc_str("int() takes exactly 1 argument"));
     }
     match &args[0] {
         Value::Integer(n) => Value::Integer(*n),
@@ -215,31 +272,31 @@ fn builtin_int(args: Vec<Value>) -> Value {
             Ok(n) => Value::Integer(n),
             Err(_) => match s.parse::<f64>() {
                 Ok(f) => Value::Integer(f as i64),
-                Err(_) => Value::Error(format!("cannot convert '{}' to int", s).into()),
+                Err(_) => Value::Error(rc_str(format!("cannot convert '{}' to int", s))),
             },
         },
         Value::Boolean(b) => Value::Integer(if *b { 1 } else { 0 }),
         Value::Byte(b) => Value::Integer(*b as i64),
         Value::Uint(u) => Value::Integer(*u as i64),
         Value::Char(c) => Value::Integer(*c as i64),
-        _ => Value::Error(format!("cannot convert {} to int", args[0].type_name()).into()),
+        _ => Value::Error(rc_str(format!("cannot convert {} to int", args[0].type_name()))),
     }
 }
 
 fn builtin_float(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("float() takes exactly 1 argument".into());
+        return Value::Error(rc_str("float() takes exactly 1 argument"));
     }
     match &args[0] {
         Value::Float(f) => Value::Float(*f),
         Value::Integer(n) => Value::Float(*n as f64),
         Value::String(s) => match s.parse::<f64>() {
             Ok(f) => Value::Float(f),
-            Err(_) => Value::Error(format!("cannot convert '{}' to float", s).into()),
+            Err(_) => Value::Error(rc_str(format!("cannot convert '{}' to float", s))),
         },
         Value::Byte(b) => Value::Float(*b as f64),
         Value::Uint(u) => Value::Float(*u as f64),
-        _ => Value::Error(format!("cannot convert {} to float", args[0].type_name()).into()),
+        _ => Value::Error(rc_str(format!("cannot convert {} to float", args[0].type_name()))),
     }
 }
 
@@ -247,13 +304,13 @@ fn builtin_range(args: Vec<Value>) -> Value {
     let (start, end) = match args.len() {
         1 => match &args[0] {
             Value::Integer(n) => (0i64, *n),
-            _ => return Value::Error("range() requires integer arguments".into()),
+            _ => return Value::Error(rc_str("range() requires integer arguments")),
         },
         2 => match (&args[0], &args[1]) {
             (Value::Integer(s), Value::Integer(e)) => (*s, *e),
-            _ => return Value::Error("range() requires integer arguments".into()),
+            _ => return Value::Error(rc_str("range() requires integer arguments")),
         },
-        _ => return Value::Error("range() takes 1 or 2 arguments".into()),
+        _ => return Value::Error(rc_str("range() takes 1 or 2 arguments")),
     };
     let arr: Vec<Value> = (start..end).map(Value::Integer).collect();
     Value::Array(Rc::new(RefCell::new(arr)))
@@ -261,14 +318,14 @@ fn builtin_range(args: Vec<Value>) -> Value {
 
 fn builtin_chars(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("chars() takes exactly 1 argument".into());
+        return Value::Error(rc_str("chars() takes exactly 1 argument"));
     }
     match &args[0] {
         Value::String(s) => {
             let arr: Vec<Value> = s.chars().map(Value::Char).collect();
             Value::Array(Rc::new(RefCell::new(arr)))
         }
-        _ => Value::Error("chars() requires a string".into()),
+        _ => Value::Error(rc_str("chars() requires a string")),
     }
 }
 
@@ -276,66 +333,66 @@ fn builtin_error(args: Vec<Value>) -> Value {
     match args.len() {
         1 => {
             let msg = format!("{}", args[0]);
-            Value::ErrorValue {
-                msg: msg.into(),
+            Value::ErrorValue(Rc::new(ErrorValueData {
+                msg: rc_str(msg),
                 tag: None,
-            }
+            }))
         }
         2 => {
             let msg = format!("{}", args[0]);
             let tag = format!("{}", args[1]);
-            Value::ErrorValue {
-                msg: msg.into(),
-                tag: Some(tag.into()),
-            }
+            Value::ErrorValue(Rc::new(ErrorValueData {
+                msg: rc_str(msg),
+                tag: Some(rc_str(tag)),
+            }))
         }
-        _ => Value::Error("error() takes 1 or 2 arguments".into()),
+        _ => Value::Error(rc_str("error() takes 1 or 2 arguments")),
     }
 }
 
 fn builtin_is_value(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("is_value() takes exactly 1 argument".into());
+        return Value::Error(rc_str("is_value() takes exactly 1 argument"));
     }
     Value::Boolean(matches!(args[0], Value::Wrapped(_)))
 }
 
 fn builtin_is_error(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("is_error() takes exactly 1 argument".into());
+        return Value::Error(rc_str("is_error() takes exactly 1 argument"));
     }
-    Value::Boolean(matches!(args[0], Value::ErrorValue { .. }))
+    Value::Boolean(matches!(args[0], Value::ErrorValue(_)))
 }
 
 fn builtin_keys(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("keys() takes exactly 1 argument".into());
+        return Value::Error(rc_str("keys() takes exactly 1 argument"));
     }
     match &args[0] {
         Value::Map(m) => {
             let keys: Vec<Value> = m.borrow().iter().map(|(k, _)| k.clone()).collect();
             Value::Array(Rc::new(RefCell::new(keys)))
         }
-        _ => Value::Error("keys() requires a map".into()),
+        _ => Value::Error(rc_str("keys() requires a map")),
     }
 }
 
 fn builtin_values(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("values() takes exactly 1 argument".into());
+        return Value::Error(rc_str("values() takes exactly 1 argument"));
     }
     match &args[0] {
         Value::Map(m) => {
             let vals: Vec<Value> = m.borrow().iter().map(|(_, v)| v.clone()).collect();
             Value::Array(Rc::new(RefCell::new(vals)))
         }
-        _ => Value::Error("values() requires a map".into()),
+        _ => Value::Error(rc_str("values() requires a map")),
     }
 }
 
 fn builtin_insert(args: Vec<Value>) -> Value {
     if args.len() != 3 {
-        return Value::Error("insert() takes exactly 3 arguments".into());
+        return Value::Error(rc_str("insert() takes exactly 3 arguments"));
     }
     match &args[0] {
         Value::Map(m) => {
@@ -357,13 +414,13 @@ fn builtin_insert(args: Vec<Value>) -> Value {
             }
             Value::None
         }
-        _ => Value::Error("insert() requires a map or set".into()),
+        _ => Value::Error(rc_str("insert() requires a map or set")),
     }
 }
 
 fn builtin_remove(args: Vec<Value>) -> Value {
     if args.len() != 2 {
-        return Value::Error("remove() takes exactly 2 arguments".into());
+        return Value::Error(rc_str("remove() takes exactly 2 arguments"));
     }
     match &args[0] {
         Value::Map(m) => {
@@ -376,13 +433,13 @@ fn builtin_remove(args: Vec<Value>) -> Value {
             set.retain(|item| item != &args[1]);
             Value::None
         }
-        _ => Value::Error("remove() requires a map or set".into()),
+        _ => Value::Error(rc_str("remove() requires a map or set")),
     }
 }
 
 fn builtin_has(args: Vec<Value>) -> Value {
     if args.len() != 2 {
-        return Value::Error("has() takes exactly 2 arguments".into());
+        return Value::Error(rc_str("has() takes exactly 2 arguments"));
     }
     match &args[0] {
         Value::Map(m) => {
@@ -393,7 +450,7 @@ fn builtin_has(args: Vec<Value>) -> Value {
             let set = s.borrow();
             Value::Boolean(set.iter().any(|item| item == &args[1]))
         }
-        _ => Value::Error("has() requires a map or set".into()),
+        _ => Value::Error(rc_str("has() requires a map or set")),
     }
 }
 
@@ -414,18 +471,18 @@ fn builtin_set(args: Vec<Value>) -> Value {
 
 fn builtin_byte(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("byte() takes exactly 1 argument".into());
+        return Value::Error(rc_str("byte() takes exactly 1 argument"));
     }
     match &args[0] {
         Value::Integer(n) => Value::Byte(*n as u8),
         Value::Uint(n) => Value::Byte(*n as u8),
-        _ => Value::Error(format!("cannot convert {} to byte", args[0].type_name()).into()),
+        _ => Value::Error(rc_str(format!("cannot convert {} to byte", args[0].type_name()))),
     }
 }
 
 fn builtin_uint(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("uint() takes exactly 1 argument".into());
+        return Value::Error(rc_str("uint() takes exactly 1 argument"));
     }
     match &args[0] {
         Value::Integer(n) => Value::Uint(*n as u64),
@@ -433,32 +490,32 @@ fn builtin_uint(args: Vec<Value>) -> Value {
         Value::Byte(b) => Value::Uint(*b as u64),
         Value::String(s) => match s.parse::<u64>() {
             Ok(n) => Value::Uint(n),
-            Err(_) => Value::Error(format!("cannot convert '{}' to uint", s).into()),
+            Err(_) => Value::Error(rc_str(format!("cannot convert '{}' to uint", s))),
         },
-        _ => Value::Error(format!("cannot convert {} to uint", args[0].type_name()).into()),
+        _ => Value::Error(rc_str(format!("cannot convert {} to uint", args[0].type_name()))),
     }
 }
 
 fn builtin_chr(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("chr() takes exactly 1 argument".into());
+        return Value::Error(rc_str("chr() takes exactly 1 argument"));
     }
     match &args[0] {
         Value::Integer(n) => match char::from_u32(*n as u32) {
             Some(c) => Value::Char(c),
-            None => Value::Error(format!("invalid char code: {}", n).into()),
+            None => Value::Error(rc_str(format!("invalid char code: {}", n))),
         },
-        _ => Value::Error("chr() requires an integer".into()),
+        _ => Value::Error(rc_str("chr() requires an integer")),
     }
 }
 
 fn builtin_ord(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("ord() takes exactly 1 argument".into());
+        return Value::Error(rc_str("ord() takes exactly 1 argument"));
     }
     match &args[0] {
         Value::Char(c) => Value::Integer(*c as i64),
-        _ => Value::Error("ord() requires a char".into()),
+        _ => Value::Error(rc_str("ord() requires a char")),
     }
 }
 
@@ -466,207 +523,211 @@ fn builtin_ord(args: Vec<Value>) -> Value {
 
 fn builtin_split(args: Vec<Value>) -> Value {
     if args.len() != 2 {
-        return Value::Error("__split() takes 2 arguments".into());
+        return Value::Error(rc_str("__split() takes 2 arguments"));
     }
     match (&args[0], &args[1]) {
         (Value::String(s), Value::String(sep)) => {
             let parts: Vec<Value> = s
                 .split(sep.as_ref())
-                .map(|p| Value::String(p.into()))
+                .map(|p| Value::String(rc_str(p)))
                 .collect();
             Value::Array(Rc::new(RefCell::new(parts)))
         }
-        _ => Value::Error("__split() requires string arguments".into()),
+        _ => Value::Error(rc_str("__split() requires string arguments")),
     }
 }
 
 fn builtin_join(args: Vec<Value>) -> Value {
     if args.len() != 2 {
-        return Value::Error("__join() takes 2 arguments".into());
+        return Value::Error(rc_str("__join() takes 2 arguments"));
     }
     match (&args[0], &args[1]) {
         (Value::Array(arr), Value::String(sep)) => {
             let parts: Vec<String> = arr.borrow().iter().map(|v| format!("{}", v)).collect();
-            Value::String(parts.join(sep.as_ref()).into())
+            Value::String(rc_str(parts.join(sep.as_ref())))
         }
-        _ => Value::Error("__join() requires (array, string)".into()),
+        _ => Value::Error(rc_str("__join() requires (array, string)")),
     }
 }
 
 fn builtin_trim(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("__trim() takes 1 argument".into());
+        return Value::Error(rc_str("__trim() takes 1 argument"));
     }
     match &args[0] {
-        Value::String(s) => Value::String(s.trim().into()),
-        _ => Value::Error("__trim() requires a string".into()),
+        Value::String(s) => Value::String(rc_str(s.trim())),
+        _ => Value::Error(rc_str("__trim() requires a string")),
     }
 }
 
 fn builtin_upper(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("__upper() takes 1 argument".into());
+        return Value::Error(rc_str("__upper() takes 1 argument"));
     }
     match &args[0] {
-        Value::String(s) => Value::String(s.to_uppercase().into()),
-        _ => Value::Error("__upper() requires a string".into()),
+        Value::String(s) => Value::String(rc_str(s.to_uppercase())),
+        _ => Value::Error(rc_str("__upper() requires a string")),
     }
 }
 
 fn builtin_lower(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("__lower() takes 1 argument".into());
+        return Value::Error(rc_str("__lower() takes 1 argument"));
     }
     match &args[0] {
-        Value::String(s) => Value::String(s.to_lowercase().into()),
-        _ => Value::Error("__lower() requires a string".into()),
+        Value::String(s) => Value::String(rc_str(s.to_lowercase())),
+        _ => Value::Error(rc_str("__lower() requires a string")),
     }
 }
 
 fn builtin_replace(args: Vec<Value>) -> Value {
     if args.len() != 3 {
-        return Value::Error("__replace() takes 3 arguments".into());
+        return Value::Error(rc_str("__replace() takes 3 arguments"));
     }
     match (&args[0], &args[1], &args[2]) {
         (Value::String(s), Value::String(from), Value::String(to)) => {
-            Value::String(s.replace(from.as_ref(), to.as_ref()).into())
+            Value::String(rc_str(s.replace(from.as_ref(), to.as_ref())))
         }
-        _ => Value::Error("__replace() requires string arguments".into()),
+        _ => Value::Error(rc_str("__replace() requires string arguments")),
     }
 }
 
 fn builtin_starts_with(args: Vec<Value>) -> Value {
     if args.len() != 2 {
-        return Value::Error("__starts_with() takes 2 arguments".into());
+        return Value::Error(rc_str("__starts_with() takes 2 arguments"));
     }
     match (&args[0], &args[1]) {
-        (Value::String(s), Value::String(prefix)) => {
-            Value::Boolean(s.starts_with(prefix.as_ref()))
-        }
-        _ => Value::Error("__starts_with() requires string arguments".into()),
+        (Value::String(s), Value::String(prefix)) => Value::Boolean(s.starts_with(prefix.as_ref())),
+        _ => Value::Error(rc_str("__starts_with() requires string arguments")),
     }
 }
 
 fn builtin_ends_with(args: Vec<Value>) -> Value {
     if args.len() != 2 {
-        return Value::Error("__ends_with() takes 2 arguments".into());
+        return Value::Error(rc_str("__ends_with() takes 2 arguments"));
     }
     match (&args[0], &args[1]) {
-        (Value::String(s), Value::String(suffix)) => {
-            Value::Boolean(s.ends_with(suffix.as_ref()))
-        }
-        _ => Value::Error("__ends_with() requires string arguments".into()),
+        (Value::String(s), Value::String(suffix)) => Value::Boolean(s.ends_with(suffix.as_ref())),
+        _ => Value::Error(rc_str("__ends_with() requires string arguments")),
     }
 }
 
 fn builtin_contains_str(args: Vec<Value>) -> Value {
     if args.len() != 2 {
-        return Value::Error("__contains_str() takes 2 arguments".into());
+        return Value::Error(rc_str("__contains_str() takes 2 arguments"));
     }
     match (&args[0], &args[1]) {
         (Value::String(s), Value::String(sub)) => Value::Boolean(s.contains(sub.as_ref())),
-        _ => Value::Error("__contains_str() requires string arguments".into()),
+        _ => Value::Error(rc_str("__contains_str() requires string arguments")),
     }
 }
 
 fn builtin_strip(args: Vec<Value>) -> Value {
     if args.len() != 2 {
-        return Value::Error("__strip() takes 2 arguments".into());
+        return Value::Error(rc_str("__strip() takes 2 arguments"));
     }
     match (&args[0], &args[1]) {
         (Value::String(s), Value::String(chars)) => {
             let chars_vec: Vec<char> = chars.chars().collect();
             let result: String = s.trim_matches(chars_vec.as_slice()).to_string();
-            Value::String(result.into())
+            Value::String(rc_str(result))
         }
-        _ => Value::Error("__strip() requires string arguments".into()),
+        _ => Value::Error(rc_str("__strip() requires string arguments")),
     }
 }
 
 fn builtin_strip_left(args: Vec<Value>) -> Value {
     if args.len() != 2 {
-        return Value::Error("__strip_left() takes 2 arguments".into());
+        return Value::Error(rc_str("__strip_left() takes 2 arguments"));
     }
     match (&args[0], &args[1]) {
         (Value::String(s), Value::String(chars)) => {
             let chars_vec: Vec<char> = chars.chars().collect();
             let result: String = s.trim_start_matches(chars_vec.as_slice()).to_string();
-            Value::String(result.into())
+            Value::String(rc_str(result))
         }
-        _ => Value::Error("__strip_left() requires string arguments".into()),
+        _ => Value::Error(rc_str("__strip_left() requires string arguments")),
     }
 }
 
 fn builtin_strip_right(args: Vec<Value>) -> Value {
     if args.len() != 2 {
-        return Value::Error("__strip_right() takes 2 arguments".into());
+        return Value::Error(rc_str("__strip_right() takes 2 arguments"));
     }
     match (&args[0], &args[1]) {
         (Value::String(s), Value::String(chars)) => {
             let chars_vec: Vec<char> = chars.chars().collect();
             let result: String = s.trim_end_matches(chars_vec.as_slice()).to_string();
-            Value::String(result.into())
+            Value::String(rc_str(result))
         }
-        _ => Value::Error("__strip_right() requires string arguments".into()),
+        _ => Value::Error(rc_str("__strip_right() requires string arguments")),
     }
 }
 
 fn builtin_sort(args: Vec<Value>) -> Value {
     if args.len() != 1 {
-        return Value::Error("__sort() takes 1 argument".into());
+        return Value::Error(rc_str("__sort() takes 1 argument"));
     }
     match &args[0] {
         Value::Array(arr) => {
             let mut sorted = arr.borrow().clone();
-            sorted.sort_by(|a, b| {
-                match (a, b) {
-                    (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
-                    (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-                    (Value::String(x), Value::String(y)) => x.cmp(y),
-                    _ => std::cmp::Ordering::Equal,
+            sorted.sort_by(|a, b| match (a, b) {
+                (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
+                (Value::Float(x), Value::Float(y)) => {
+                    x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
                 }
+                (Value::String(x), Value::String(y)) => x.cmp(y),
+                _ => std::cmp::Ordering::Equal,
             });
             Value::Array(Rc::new(RefCell::new(sorted)))
         }
-        _ => Value::Error("__sort() requires an array".into()),
+        _ => Value::Error(rc_str("__sort() requires an array")),
     }
 }
 
 // ── Math builtins ──────────────────────────────────────────────────────
 
 fn builtin_sqrt(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__sqrt() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__sqrt() takes 1 argument"));
+    }
     match &args[0] {
         Value::Float(f) => Value::Float(f.sqrt()),
         Value::Integer(n) => Value::Float((*n as f64).sqrt()),
-        _ => Value::Error("__sqrt() requires a number".into()),
+        _ => Value::Error(rc_str("__sqrt() requires a number")),
     }
 }
 
 fn builtin_floor(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__floor() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__floor() takes 1 argument"));
+    }
     match &args[0] {
         Value::Float(f) => Value::Integer(f.floor() as i64),
         Value::Integer(n) => Value::Integer(*n),
-        _ => Value::Error("__floor() requires a number".into()),
+        _ => Value::Error(rc_str("__floor() requires a number")),
     }
 }
 
 fn builtin_ceil(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__ceil() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__ceil() takes 1 argument"));
+    }
     match &args[0] {
         Value::Float(f) => Value::Integer(f.ceil() as i64),
         Value::Integer(n) => Value::Integer(*n),
-        _ => Value::Error("__ceil() requires a number".into()),
+        _ => Value::Error(rc_str("__ceil() requires a number")),
     }
 }
 
 fn builtin_round(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__round() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__round() takes 1 argument"));
+    }
     match &args[0] {
         Value::Float(f) => Value::Integer(f.round() as i64),
         Value::Integer(n) => Value::Integer(*n),
-        _ => Value::Error("__round() requires a number".into()),
+        _ => Value::Error(rc_str("__round() requires a number")),
     }
 }
 
@@ -680,77 +741,103 @@ fn builtin_input(args: Vec<Value>) -> Value {
     }
     let mut line = String::new();
     match std::io::stdin().read_line(&mut line) {
-        Ok(_) => Value::String(line.trim_end_matches('\n').trim_end_matches('\r').into()),
-        Err(e) => Value::Error(format!("input error: {}", e).into()),
+        Ok(_) => Value::String(rc_str(line.trim_end_matches('\n').trim_end_matches('\r'))),
+        Err(e) => Value::Error(rc_str(format!("input error: {}", e))),
     }
 }
 
 fn builtin_read_line(_args: Vec<Value>) -> Value {
     let mut line = String::new();
     match std::io::stdin().read_line(&mut line) {
-        Ok(_) => Value::String(line.trim_end_matches('\n').trim_end_matches('\r').into()),
-        Err(e) => Value::Error(format!("read_line error: {}", e).into()),
+        Ok(_) => Value::String(rc_str(line.trim_end_matches('\n').trim_end_matches('\r'))),
+        Err(e) => Value::Error(rc_str(format!("read_line error: {}", e))),
     }
 }
 
 // ── File I/O ───────────────────────────────────────────────────────────
 
 fn builtin_read_file(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__read_file() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__read_file() takes 1 argument"));
+    }
     match &args[0] {
         Value::String(path) => match std::fs::read_to_string(path.as_ref()) {
-            Ok(contents) => Value::String(contents.into()),
-            Err(e) => Value::ErrorValue { msg: format!("{}", e).into(), tag: Some("IO".into()) },
+            Ok(contents) => Value::String(rc_str(contents)),
+            Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
+                msg: rc_str(format!("{}", e)),
+                tag: Some(rc_str("IO")),
+            })),
         },
-        _ => Value::Error("__read_file() requires a string path".into()),
+        _ => Value::Error(rc_str("__read_file() requires a string path")),
     }
 }
 
 fn builtin_write_file(args: Vec<Value>) -> Value {
-    if args.len() != 2 { return Value::Error("__write_file() takes 2 arguments".into()); }
+    if args.len() != 2 {
+        return Value::Error(rc_str("__write_file() takes 2 arguments"));
+    }
     match (&args[0], &args[1]) {
         (Value::String(path), Value::String(content)) => {
             match std::fs::write(path.as_ref(), content.as_ref()) {
                 Ok(_) => Value::None,
-                Err(e) => Value::ErrorValue { msg: format!("{}", e).into(), tag: Some("IO".into()) },
+                Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
+                    msg: rc_str(format!("{}", e)),
+                    tag: Some(rc_str("IO")),
+                })),
             }
         }
-        _ => Value::Error("__write_file() requires (string, string)".into()),
+        _ => Value::Error(rc_str("__write_file() requires (string, string)")),
     }
 }
 
 fn builtin_append_file(args: Vec<Value>) -> Value {
-    if args.len() != 2 { return Value::Error("__append_file() takes 2 arguments".into()); }
+    if args.len() != 2 {
+        return Value::Error(rc_str("__append_file() takes 2 arguments"));
+    }
     match (&args[0], &args[1]) {
         (Value::String(path), Value::String(content)) => {
             use std::io::Write;
-            match std::fs::OpenOptions::new().append(true).create(true).open(path.as_ref()) {
+            match std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(path.as_ref())
+            {
                 Ok(mut f) => match f.write_all(content.as_bytes()) {
                     Ok(_) => Value::None,
-                    Err(e) => Value::ErrorValue { msg: format!("{}", e).into(), tag: Some("IO".into()) },
+                    Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
+                        msg: rc_str(format!("{}", e)),
+                        tag: Some(rc_str("IO")),
+                    })),
                 },
-                Err(e) => Value::ErrorValue { msg: format!("{}", e).into(), tag: Some("IO".into()) },
+                Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
+                    msg: rc_str(format!("{}", e)),
+                    tag: Some(rc_str("IO")),
+                })),
             }
         }
-        _ => Value::Error("__append_file() requires (string, string)".into()),
+        _ => Value::Error(rc_str("__append_file() requires (string, string)")),
     }
 }
 
 fn builtin_file_exists(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__file_exists() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__file_exists() takes 1 argument"));
+    }
     match &args[0] {
         Value::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).exists()),
-        _ => Value::Error("__file_exists() requires a string".into()),
+        _ => Value::Error(rc_str("__file_exists() requires a string")),
     }
 }
 
 // ── OS builtins ────────────────────────────────────────────────────────
 
 fn builtin_exec(args: Vec<Value>) -> Value {
-    if args.is_empty() { return Value::Error("__exec() takes at least 1 argument".into()); }
+    if args.is_empty() {
+        return Value::Error(rc_str("__exec() takes at least 1 argument"));
+    }
     let cmd = match &args[0] {
         Value::String(s) => s.to_string(),
-        _ => return Value::Error("__exec() requires a string command".into()),
+        _ => return Value::Error(rc_str("__exec() requires a string command")),
     };
     let extra_args: Vec<String> = args[1..].iter().map(|a| format!("{}", a)).collect();
     let full_cmd = if extra_args.is_empty() {
@@ -759,80 +846,98 @@ fn builtin_exec(args: Vec<Value>) -> Value {
         format!("{} {}", cmd, extra_args.join(" "))
     };
 
-    let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
-    let flag = if cfg!(target_os = "windows") { "/C" } else { "-c" };
+    let shell = if cfg!(target_os = "windows") {
+        "cmd"
+    } else {
+        "sh"
+    };
+    let flag = if cfg!(target_os = "windows") {
+        "/C"
+    } else {
+        "-c"
+    };
 
-    match std::process::Command::new(shell).arg(flag).arg(&full_cmd).output() {
+    match std::process::Command::new(shell)
+        .arg(flag)
+        .arg(&full_cmd)
+        .output()
+    {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let code = output.status.code().unwrap_or(-1);
             let entries: Vec<(Value, Value)> = vec![
-                (Value::String("stdout".into()), Value::String(stdout.into())),
-                (Value::String("stderr".into()), Value::String(stderr.into())),
-                (Value::String("code".into()), Value::Integer(code as i64)),
+                (Value::String(rc_str("stdout")), Value::String(rc_str(stdout))),
+                (Value::String(rc_str("stderr")), Value::String(rc_str(stderr))),
+                (Value::String(rc_str("code")), Value::Integer(code as i64)),
             ];
             Value::Map(Rc::new(RefCell::new(entries)))
         }
-        Err(e) => Value::Error(format!("__exec: {}", e).into()),
+        Err(e) => Value::Error(rc_str(format!("__exec: {}", e))),
     }
 }
 
 fn builtin_os_name(_args: Vec<Value>) -> Value {
-    Value::String(std::env::consts::OS.into())
+    Value::String(rc_str(std::env::consts::OS))
 }
 
 fn builtin_os_arch(_args: Vec<Value>) -> Value {
-    Value::String(std::env::consts::ARCH.into())
+    Value::String(rc_str(std::env::consts::ARCH))
 }
 
 fn builtin_env_get(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__env_get() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__env_get() takes 1 argument"));
+    }
     match &args[0] {
         Value::String(name) => match std::env::var(name.as_ref()) {
-            Ok(val) => Value::String(val.into()),
+            Ok(val) => Value::String(rc_str(val)),
             Err(_) => Value::None,
         },
-        _ => Value::Error("__env_get() requires a string".into()),
+        _ => Value::Error(rc_str("__env_get() requires a string")),
     }
 }
 
 fn builtin_env_set(args: Vec<Value>) -> Value {
-    if args.len() != 2 { return Value::Error("__env_set() takes 2 arguments".into()); }
+    if args.len() != 2 {
+        return Value::Error(rc_str("__env_set() takes 2 arguments"));
+    }
     match (&args[0], &args[1]) {
         (Value::String(name), Value::String(val)) => {
             // SAFETY: We don't access env vars concurrently from other threads.
-            unsafe { std::env::set_var(name.as_ref(), val.as_ref()); }
+            unsafe {
+                std::env::set_var(name.as_ref(), val.as_ref());
+            }
             Value::None
         }
-        _ => Value::Error("__env_set() requires (string, string)".into()),
+        _ => Value::Error(rc_str("__env_set() requires (string, string)")),
     }
 }
 
 fn builtin_env_vars(_args: Vec<Value>) -> Value {
     let entries: Vec<(Value, Value)> = std::env::vars()
-        .map(|(k, v)| (Value::String(k.into()), Value::String(v.into())))
+        .map(|(k, v)| (Value::String(rc_str(k)), Value::String(rc_str(v))))
         .collect();
     Value::Map(Rc::new(RefCell::new(entries)))
 }
 
 fn builtin_cwd(_args: Vec<Value>) -> Value {
     match std::env::current_dir() {
-        Ok(path) => Value::String(path.display().to_string().into()),
-        Err(e) => Value::Error(format!("cwd error: {}", e).into()),
+        Ok(path) => Value::String(rc_str(path.display().to_string())),
+        Err(e) => Value::Error(rc_str(format!("cwd error: {}", e))),
     }
 }
 
 fn builtin_chdir(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__chdir() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__chdir() takes 1 argument"));
+    }
     match &args[0] {
-        Value::String(path) => {
-            match std::env::set_current_dir(path.as_ref()) {
-                Ok(_) => Value::None,
-                Err(e) => Value::Error(format!("chdir error: {}", e).into()),
-            }
-        }
-        _ => Value::Error("__chdir() requires a string".into()),
+        Value::String(path) => match std::env::set_current_dir(path.as_ref()) {
+            Ok(_) => Value::None,
+            Err(e) => Value::Error(rc_str(format!("chdir error: {}", e))),
+        },
+        _ => Value::Error(rc_str("__chdir() requires a string")),
     }
 }
 
@@ -853,24 +958,31 @@ fn builtin_pid(_args: Vec<Value>) -> Value {
 }
 
 fn builtin_list_dir(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__list_dir() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__list_dir() takes 1 argument"));
+    }
     match &args[0] {
         Value::String(path) => match std::fs::read_dir(path.as_ref()) {
             Ok(entries) => {
                 let items: Vec<Value> = entries
                     .filter_map(|e| e.ok())
-                    .map(|e| Value::String(e.path().to_string_lossy().into()))
+                    .map(|e| Value::String(rc_str(e.path().to_string_lossy())))
                     .collect();
                 Value::Array(Rc::new(RefCell::new(items)))
             }
-            Err(e) => Value::ErrorValue { msg: format!("{}", e).into(), tag: Some("IO".into()) },
+            Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
+                msg: rc_str(format!("{}", e)),
+                tag: Some(rc_str("IO")),
+            })),
         },
-        _ => Value::Error("__list_dir() requires a string".into()),
+        _ => Value::Error(rc_str("__list_dir() requires a string")),
     }
 }
 
 fn builtin_walk_dir(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__walk_dir() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__walk_dir() takes 1 argument"));
+    }
     match &args[0] {
         Value::String(path) => {
             let mut items = Vec::new();
@@ -878,7 +990,7 @@ fn builtin_walk_dir(args: Vec<Value>) -> Value {
                 if let Ok(entries) = std::fs::read_dir(dir) {
                     for entry in entries.filter_map(|e| e.ok()) {
                         let path = entry.path();
-                        items.push(Value::String(path.display().to_string().into()));
+                        items.push(Value::String(rc_str(path.display().to_string())));
                         if path.is_dir() {
                             walk(&path, items);
                         }
@@ -888,56 +1000,75 @@ fn builtin_walk_dir(args: Vec<Value>) -> Value {
             walk(std::path::Path::new(path.as_ref()), &mut items);
             Value::Array(Rc::new(RefCell::new(items)))
         }
-        _ => Value::Error("__walk_dir() requires a string".into()),
+        _ => Value::Error(rc_str("__walk_dir() requires a string")),
     }
 }
 
 fn builtin_mkdir(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__mkdir() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__mkdir() takes 1 argument"));
+    }
     match &args[0] {
         Value::String(path) => match std::fs::create_dir_all(path.as_ref()) {
             Ok(_) => Value::None,
-            Err(e) => Value::ErrorValue { msg: format!("{}", e).into(), tag: Some("IO".into()) },
+            Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
+                msg: rc_str(format!("{}", e)),
+                tag: Some(rc_str("IO")),
+            })),
         },
-        _ => Value::Error("__mkdir() requires a string".into()),
+        _ => Value::Error(rc_str("__mkdir() requires a string")),
     }
 }
 
 fn builtin_rmdir(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__rmdir() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__rmdir() takes 1 argument"));
+    }
     match &args[0] {
         Value::String(path) => match std::fs::remove_dir_all(path.as_ref()) {
             Ok(_) => Value::None,
-            Err(e) => Value::ErrorValue { msg: format!("{}", e).into(), tag: Some("IO".into()) },
+            Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
+                msg: rc_str(format!("{}", e)),
+                tag: Some(rc_str("IO")),
+            })),
         },
-        _ => Value::Error("__rmdir() requires a string".into()),
+        _ => Value::Error(rc_str("__rmdir() requires a string")),
     }
 }
 
 fn builtin_remove_file(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__remove() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__remove() takes 1 argument"));
+    }
     match &args[0] {
         Value::String(path) => match std::fs::remove_file(path.as_ref()) {
             Ok(_) => Value::None,
-            Err(e) => Value::ErrorValue { msg: format!("{}", e).into(), tag: Some("IO".into()) },
+            Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
+                msg: rc_str(format!("{}", e)),
+                tag: Some(rc_str("IO")),
+            })),
         },
-        _ => Value::Error("__remove() requires a string".into()),
+        _ => Value::Error(rc_str("__remove() requires a string")),
     }
 }
 
 fn builtin_is_dir(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__is_dir() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__is_dir() takes 1 argument"));
+    }
     match &args[0] {
         Value::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).is_dir()),
-        _ => Value::Error("__is_dir() requires a string".into()),
+        _ => Value::Error(rc_str("__is_dir() requires a string")),
     }
 }
 
 fn builtin_is_file(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__is_file() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__is_file() takes 1 argument"));
+    }
     match &args[0] {
         Value::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).is_file()),
-        _ => Value::Error("__is_file() requires a string".into()),
+        _ => Value::Error(rc_str("__is_file() requires a string")),
     }
 }
 
@@ -947,7 +1078,7 @@ fn builtin_time_now(_args: Vec<Value>) -> Value {
     use std::time::{SystemTime, UNIX_EPOCH};
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(d) => Value::Float(d.as_secs_f64()),
-        Err(_) => Value::Error("time error".into()),
+        Err(_) => Value::Error(rc_str("time error")),
     }
 }
 
@@ -955,18 +1086,20 @@ fn builtin_time_now_ms(_args: Vec<Value>) -> Value {
     use std::time::{SystemTime, UNIX_EPOCH};
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(d) => Value::Integer(d.as_millis() as i64),
-        Err(_) => Value::Error("time error".into()),
+        Err(_) => Value::Error(rc_str("time error")),
     }
 }
 
 fn builtin_time_sleep(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__time_sleep() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__time_sleep() takes 1 argument"));
+    }
     match &args[0] {
         Value::Integer(ms) => {
             std::thread::sleep(std::time::Duration::from_millis(*ms as u64));
             Value::None
         }
-        _ => Value::Error("__time_sleep() requires an integer (ms)".into()),
+        _ => Value::Error(rc_str("__time_sleep() requires an integer (ms)")),
     }
 }
 
@@ -1011,27 +1144,33 @@ fn next_rand() -> u64 {
 }
 
 fn builtin_rand_seed(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__rand_seed() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__rand_seed() takes 1 argument"));
+    }
     match &args[0] {
         Value::Integer(n) => {
             let seed = if *n == 0 { 1u64 } else { *n as u64 };
             RNG_STATE.with(|state| state.set(seed));
             Value::None
         }
-        _ => Value::Error("__rand_seed() requires an integer".into()),
+        _ => Value::Error(rc_str("__rand_seed() requires an integer")),
     }
 }
 
 fn builtin_rand_int(args: Vec<Value>) -> Value {
-    if args.len() != 2 { return Value::Error("__rand_int() takes 2 arguments".into()); }
+    if args.len() != 2 {
+        return Value::Error(rc_str("__rand_int() takes 2 arguments"));
+    }
     match (&args[0], &args[1]) {
         (Value::Integer(min), Value::Integer(max)) => {
             let range = max - min;
-            if range <= 0 { return Value::Integer(*min); }
+            if range <= 0 {
+                return Value::Integer(*min);
+            }
             let r = next_rand();
             Value::Integer(min + (r as i64).unsigned_abs() as i64 % range)
         }
-        _ => Value::Error("__rand_int() requires integer arguments".into()),
+        _ => Value::Error(rc_str("__rand_int() requires integer arguments")),
     }
 }
 
@@ -1043,7 +1182,9 @@ fn builtin_rand_float(_args: Vec<Value>) -> Value {
 // ── Path builtins ──────────────────────────────────────────────────────
 
 fn builtin_path_join(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__path_join() takes 1 argument (array)".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__path_join() takes 1 argument (array)"));
+    }
     match &args[0] {
         Value::Array(parts) => {
             let borrowed = parts.borrow();
@@ -1051,90 +1192,102 @@ fn builtin_path_join(args: Vec<Value>) -> Value {
             for part in borrowed.iter() {
                 path.push(format!("{}", part));
             }
-            Value::String(path.display().to_string().into())
+            Value::String(rc_str(path.display().to_string()))
         }
-        _ => Value::Error("__path_join() requires an array".into()),
+        _ => Value::Error(rc_str("__path_join() requires an array")),
     }
 }
 
 fn builtin_path_ext(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__path_ext() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__path_ext() takes 1 argument"));
+    }
     match &args[0] {
         Value::String(path) => {
             let p = std::path::Path::new(path.as_ref());
             match p.extension() {
-                Some(ext) => Value::String(ext.to_string_lossy().into()),
-                None => Value::String("".into()),
+                Some(ext) => Value::String(rc_str(ext.to_string_lossy())),
+                None => Value::String(rc_str("")),
             }
         }
-        _ => Value::Error("__path_ext() requires a string".into()),
+        _ => Value::Error(rc_str("__path_ext() requires a string")),
     }
 }
 
 fn builtin_path_filename(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__path_filename() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__path_filename() takes 1 argument"));
+    }
     match &args[0] {
         Value::String(path) => {
             let p = std::path::Path::new(path.as_ref());
             match p.file_name() {
-                Some(name) => Value::String(name.to_string_lossy().into()),
-                None => Value::String("".into()),
+                Some(name) => Value::String(rc_str(name.to_string_lossy())),
+                None => Value::String(rc_str("")),
             }
         }
-        _ => Value::Error("__path_filename() requires a string".into()),
+        _ => Value::Error(rc_str("__path_filename() requires a string")),
     }
 }
 
 fn builtin_path_parent(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__path_parent() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__path_parent() takes 1 argument"));
+    }
     match &args[0] {
         Value::String(path) => {
             let p = std::path::Path::new(path.as_ref());
             match p.parent() {
-                Some(parent) => Value::String(parent.display().to_string().into()),
-                None => Value::String("".into()),
+                Some(parent) => Value::String(rc_str(parent.display().to_string())),
+                None => Value::String(rc_str("")),
             }
         }
-        _ => Value::Error("__path_parent() requires a string".into()),
+        _ => Value::Error(rc_str("__path_parent() requires a string")),
     }
 }
 
 fn builtin_path_stem(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__path_stem() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__path_stem() takes 1 argument"));
+    }
     match &args[0] {
         Value::String(path) => {
             let p = std::path::Path::new(path.as_ref());
             match p.file_stem() {
-                Some(stem) => Value::String(stem.to_string_lossy().into()),
-                None => Value::String("".into()),
+                Some(stem) => Value::String(rc_str(stem.to_string_lossy())),
+                None => Value::String(rc_str("")),
             }
         }
-        _ => Value::Error("__path_stem() requires a string".into()),
+        _ => Value::Error(rc_str("__path_stem() requires a string")),
     }
 }
 
 fn builtin_path_is_absolute(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__path_is_absolute() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__path_is_absolute() takes 1 argument"));
+    }
     match &args[0] {
         Value::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).is_absolute()),
-        _ => Value::Error("__path_is_absolute() requires a string".into()),
+        _ => Value::Error(rc_str("__path_is_absolute() requires a string")),
     }
 }
 
 // ── JSON builtins ──────────────────────────────────────────────────────
 
 fn builtin_json_parse(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__json_parse() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__json_parse() takes 1 argument"));
+    }
     match &args[0] {
         Value::String(s) => {
             let chars: Vec<char> = s.chars().collect();
             let mut pos = 0;
             match json_parse_value(&chars, &mut pos) {
                 Ok(val) => val,
-                Err(e) => Value::Error(format!("json parse error: {}", e).into()),
+                Err(e) => Value::Error(rc_str(format!("json parse error: {}", e))),
             }
         }
-        _ => Value::Error("__json_parse() requires a string".into()),
+        _ => Value::Error(rc_str("__json_parse() requires a string")),
     }
 }
 
@@ -1202,30 +1355,46 @@ fn json_parse_string(chars: &[char], pos: &mut usize) -> Result<Value, String> {
         return Err("unterminated string".to_string());
     }
     *pos += 1; // skip closing "
-    Ok(Value::String(s.into()))
+    Ok(Value::String(rc_str(s)))
 }
 
 fn json_parse_number(chars: &[char], pos: &mut usize) -> Result<Value, String> {
     let start = *pos;
     let mut is_float = false;
-    if chars[*pos] == '-' { *pos += 1; }
-    while *pos < chars.len() && chars[*pos].is_ascii_digit() { *pos += 1; }
+    if chars[*pos] == '-' {
+        *pos += 1;
+    }
+    while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+        *pos += 1;
+    }
     if *pos < chars.len() && chars[*pos] == '.' {
         is_float = true;
         *pos += 1;
-        while *pos < chars.len() && chars[*pos].is_ascii_digit() { *pos += 1; }
+        while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+            *pos += 1;
+        }
     }
     if *pos < chars.len() && (chars[*pos] == 'e' || chars[*pos] == 'E') {
         is_float = true;
         *pos += 1;
-        if *pos < chars.len() && (chars[*pos] == '+' || chars[*pos] == '-') { *pos += 1; }
-        while *pos < chars.len() && chars[*pos].is_ascii_digit() { *pos += 1; }
+        if *pos < chars.len() && (chars[*pos] == '+' || chars[*pos] == '-') {
+            *pos += 1;
+        }
+        while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+            *pos += 1;
+        }
     }
     let num_str: String = chars[start..*pos].iter().collect();
     if is_float {
-        num_str.parse::<f64>().map(Value::Float).map_err(|e| format!("invalid number: {}", e))
+        num_str
+            .parse::<f64>()
+            .map(Value::Float)
+            .map_err(|e| format!("invalid number: {}", e))
     } else {
-        num_str.parse::<i64>().map(Value::Integer).map_err(|e| format!("invalid number: {}", e))
+        num_str
+            .parse::<i64>()
+            .map(Value::Integer)
+            .map_err(|e| format!("invalid number: {}", e))
     }
 }
 
@@ -1261,9 +1430,16 @@ fn json_parse_array(chars: &[char], pos: &mut usize) -> Result<Value, String> {
     loop {
         elements.push(json_parse_value(chars, pos)?);
         json_skip_ws(chars, pos);
-        if *pos >= chars.len() { return Err("unterminated array".to_string()); }
-        if chars[*pos] == ']' { *pos += 1; break; }
-        if chars[*pos] != ',' { return Err(format!("expected ',' or ']' at {}", pos)); }
+        if *pos >= chars.len() {
+            return Err("unterminated array".to_string());
+        }
+        if chars[*pos] == ']' {
+            *pos += 1;
+            break;
+        }
+        if chars[*pos] != ',' {
+            return Err(format!("expected ',' or ']' at {}", pos));
+        }
         *pos += 1;
     }
     Ok(Value::Array(Rc::new(RefCell::new(elements))))
@@ -1288,19 +1464,28 @@ fn json_parse_object(chars: &[char], pos: &mut usize) -> Result<Value, String> {
         let value = json_parse_value(chars, pos)?;
         entries.push((key, value));
         json_skip_ws(chars, pos);
-        if *pos >= chars.len() { return Err("unterminated object".to_string()); }
-        if chars[*pos] == '}' { *pos += 1; break; }
-        if chars[*pos] != ',' { return Err(format!("expected ',' or '}}' at {}", pos)); }
+        if *pos >= chars.len() {
+            return Err("unterminated object".to_string());
+        }
+        if chars[*pos] == '}' {
+            *pos += 1;
+            break;
+        }
+        if chars[*pos] != ',' {
+            return Err(format!("expected ',' or '}}' at {}", pos));
+        }
         *pos += 1;
     }
     Ok(Value::Map(Rc::new(RefCell::new(entries))))
 }
 
 fn builtin_json_stringify(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__json_stringify() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__json_stringify() takes 1 argument"));
+    }
     match value_to_json(&args[0]) {
-        Ok(s) => Value::String(s.into()),
-        Err(e) => Value::Error(format!("json stringify error: {}", e).into()),
+        Ok(s) => Value::String(rc_str(s)),
+        Err(e) => Value::Error(rc_str(format!("json stringify error: {}", e))),
     }
 }
 
@@ -1310,7 +1495,11 @@ fn value_to_json(val: &Value) -> Result<String, String> {
         Value::Boolean(b) => Ok(if *b { "true" } else { "false" }.to_string()),
         Value::Integer(n) => Ok(n.to_string()),
         Value::Float(f) => {
-            if f.is_nan() || f.is_infinite() { Ok("null".to_string()) } else { Ok(f.to_string()) }
+            if f.is_nan() || f.is_infinite() {
+                Ok("null".to_string())
+            } else {
+                Ok(f.to_string())
+            }
         }
         Value::String(s) => {
             let mut out = String::from('"');
@@ -1359,25 +1548,25 @@ fn value_to_json(val: &Value) -> Result<String, String> {
 // ── TOML builtins ──────────────────────────────────────────────────────
 
 fn builtin_toml_parse(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__toml_parse() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__toml_parse() takes 1 argument"));
+    }
     match &args[0] {
-        Value::String(s) => {
-            match toml::from_str::<toml::Value>(s.as_ref()) {
-                Ok(value) => toml_value_to_value(value),
-                Err(e) => Value::Error(format!("toml parse error: {}", e).into()),
-            }
-        }
-        _ => Value::Error("__toml_parse() requires a string".into()),
+        Value::String(s) => match toml::from_str::<toml::Value>(s.as_ref()) {
+            Ok(value) => toml_value_to_value(value),
+            Err(e) => Value::Error(rc_str(format!("toml parse error: {}", e))),
+        },
+        _ => Value::Error(rc_str("__toml_parse() requires a string")),
     }
 }
 
 fn toml_value_to_value(tv: toml::Value) -> Value {
     match tv {
-        toml::Value::String(s) => Value::String(s.into()),
+        toml::Value::String(s) => Value::String(rc_str(s)),
         toml::Value::Integer(i) => Value::Integer(i),
         toml::Value::Float(f) => Value::Float(f),
         toml::Value::Boolean(b) => Value::Boolean(b),
-        toml::Value::Datetime(dt) => Value::String(dt.to_string().into()),
+        toml::Value::Datetime(dt) => Value::String(rc_str(dt.to_string())),
         toml::Value::Array(values) => {
             let items: Vec<Value> = values.into_iter().map(toml_value_to_value).collect();
             Value::Array(Rc::new(RefCell::new(items)))
@@ -1385,7 +1574,7 @@ fn toml_value_to_value(tv: toml::Value) -> Value {
         toml::Value::Table(entries) => {
             let items: Vec<(Value, Value)> = entries
                 .into_iter()
-                .map(|(k, v)| (Value::String(k.into()), toml_value_to_value(v)))
+                .map(|(k, v)| (Value::String(rc_str(k)), toml_value_to_value(v)))
                 .collect();
             Value::Map(Rc::new(RefCell::new(items)))
         }
@@ -1393,13 +1582,15 @@ fn toml_value_to_value(tv: toml::Value) -> Value {
 }
 
 fn builtin_toml_stringify(args: Vec<Value>) -> Value {
-    if args.len() != 1 { return Value::Error("__toml_stringify() takes 1 argument".into()); }
+    if args.len() != 1 {
+        return Value::Error(rc_str("__toml_stringify() takes 1 argument"));
+    }
     match value_to_toml(&args[0]) {
         Ok(tv) => match toml::to_string_pretty(&tv) {
-            Ok(s) => Value::String(s.into()),
-            Err(e) => Value::Error(format!("toml stringify error: {}", e).into()),
+            Ok(s) => Value::String(rc_str(s)),
+            Err(e) => Value::Error(rc_str(format!("toml stringify error: {}", e))),
         },
-        Err(e) => Value::Error(format!("toml stringify error: {}", e).into()),
+        Err(e) => Value::Error(rc_str(format!("toml stringify error: {}", e))),
     }
 }
 
@@ -1448,39 +1639,78 @@ fn value_to_toml(val: &Value) -> Result<toml::Value, String> {
 
 fn builtin_http_request(args: Vec<Value>) -> Value {
     if args.len() < 2 || args.len() > 4 {
-        return Value::Error("__http_request: expected 2-4 arguments (method, url, headers?, body?)".into());
+        return Value::Error(rc_str(
+            "__http_request: expected 2-4 arguments (method, url, headers?, body?)",
+        ));
     }
     let method = match &args[0] {
         Value::String(s) => s.to_uppercase(),
-        _ => return Value::Error(format!("__http_request: method must be STRING, got {}", args[0].type_name()).into()),
+        _ => {
+            return Value::Error(
+                format!(
+                    "__http_request: method must be STRING, got {}",
+                    args[0].type_name()
+                )
+                .into(),
+            );
+        }
     };
     let url = match &args[1] {
         Value::String(s) => s.to_string(),
-        _ => return Value::Error(format!("__http_request: url must be STRING, got {}", args[1].type_name()).into()),
+        _ => {
+            return Value::Error(
+                format!(
+                    "__http_request: url must be STRING, got {}",
+                    args[1].type_name()
+                )
+                .into(),
+            );
+        }
     };
 
     let headers: Vec<(String, String)> = if args.len() >= 3 {
         if let Value::Map(m) = &args[2] {
-            m.borrow().iter().filter_map(|(k, v)| {
-                if let (Value::String(key), Value::String(val)) = (k, v) {
-                    Some((key.to_string(), val.to_string()))
-                } else { None }
-            }).collect()
-        } else { Vec::new() }
-    } else { Vec::new() };
+            m.borrow()
+                .iter()
+                .filter_map(|(k, v)| {
+                    if let (Value::String(key), Value::String(val)) = (k, v) {
+                        Some((key.to_string(), val.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
 
     let body: Option<String> = if args.len() >= 4 {
         match &args[3] {
             Value::String(s) => Some(s.to_string()),
             Value::None => None,
-            _ => return Value::Error(format!("__http_request: body must be STRING, got {}", args[3].type_name()).into()),
+            _ => {
+                return Value::Error(
+                    format!(
+                        "__http_request: body must be STRING, got {}",
+                        args[3].type_name()
+                    )
+                    .into(),
+                );
+            }
         }
-    } else { None };
+    } else {
+        None
+    };
 
     macro_rules! apply_headers {
         ($req:expr) => {{
             let mut r = $req;
-            for (k, v) in &headers { r = r.header(k.as_str(), v.as_str()); }
+            for (k, v) in &headers {
+                r = r.header(k.as_str(), v.as_str());
+            }
             r
         }};
     }
@@ -1493,12 +1723,15 @@ fn builtin_http_request(args: Vec<Value>) -> Value {
                     let (_, mut resp_body) = resp.into_parts();
                     let body_str = resp_body.read_to_string().unwrap_or_default();
                     let entries: Vec<(Value, Value)> = vec![
-                        (Value::String("status".into()), Value::Integer(status as i64)),
-                        (Value::String("body".into()), Value::String(body_str.into())),
+                        (
+                            Value::String(rc_str("status")),
+                            Value::Integer(status as i64),
+                        ),
+                        (Value::String(rc_str("body")), Value::String(rc_str(body_str))),
                     ];
                     Value::Map(Rc::new(RefCell::new(entries)))
                 }
-                Err(e) => Value::Error(format!("http error: {}", e).into()),
+                Err(e) => Value::Error(rc_str(format!("http error: {}", e))),
             }
         };
     }
@@ -1528,6 +1761,6 @@ fn builtin_http_request(args: Vec<Value>) -> Value {
                 None => req.send_empty(),
             })
         }
-        _ => Value::Error(format!("__http_request: unsupported method '{}'", method).into()),
+        _ => Value::Error(rc_str(format!("__http_request: unsupported method '{}'", method))),
     }
 }
