@@ -62,26 +62,9 @@ pub unsafe extern "C" fn jit_push_float_inline(vm: *mut VM, bits: u64) {
     vm.push(Value::Float(f64::from_bits(bits)));
 }
 
-pub unsafe extern "C" fn jit_push_none(vm: *mut VM) {
-    let vm = unsafe { &mut *vm };
-    vm.jit.bump_helper(HelperCounter::PushNone);
-    vm.sync_stack_from_view();
-    vm.push(Value::None);
-}
-
-pub unsafe extern "C" fn jit_push_true(vm: *mut VM) {
-    let vm = unsafe { &mut *vm };
-    vm.jit.bump_helper(HelperCounter::PushTrue);
-    vm.sync_stack_from_view();
-    vm.push(Value::Boolean(true));
-}
-
-pub unsafe extern "C" fn jit_push_false(vm: *mut VM) {
-    let vm = unsafe { &mut *vm };
-    vm.jit.bump_helper(HelperCounter::PushFalse);
-    vm.sync_stack_from_view();
-    vm.push(Value::Boolean(false));
-}
+// `jit_push_none/true/false` were removed once the virt-stack layer
+// (virt_stack.rs::emit_inline_push_const) absorbed every push site for
+// these zero-payload primitives. The historical helpers had no callers.
 
 // ── Stack manipulation ─────────────────────────────────────────────────
 
@@ -461,6 +444,36 @@ binop_fallible!(jit_op_lt, compare_less, Lt);
 binop_fallible!(jit_op_le, compare_less_equal, Le);
 binop_fallible!(jit_op_gt, compare_greater, Gt);
 binop_fallible!(jit_op_ge, compare_greater_equal, Ge);
+binop_fallible!(jit_op_band, binary_band, OpBand);
+binop_fallible!(jit_op_bor, binary_bor, OpBor);
+binop_fallible!(jit_op_bxor, binary_bxor, OpBxor);
+binop_fallible!(jit_op_shl, binary_shl, OpShl);
+binop_fallible!(jit_op_shr, binary_shr, OpShr);
+
+pub unsafe extern "C" fn jit_op_bnot(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpBnot);
+    vm.sync_stack_from_view();
+    let v = vm.pop();
+    match vm.unary_bnot(v) {
+        Ok(result) => {
+            vm.push(result);
+            0
+        }
+        Err(e) => {
+            vm.jit.stash_error(e);
+            1
+        }
+    }
+}
+
+pub unsafe extern "C" fn jit_op_log(vm: *mut VM, flags: u32) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpLog);
+    vm.sync_stack_from_view();
+    vm.handle_log(flags as u8);
+    0
+}
 
 // ── Comparison that can't fail (PartialEq over Value) ─────────────────
 

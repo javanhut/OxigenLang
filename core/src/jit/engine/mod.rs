@@ -1358,6 +1358,57 @@ impl JitInner {
                             }
                             ip += 1;
                         }
+                        OpCode::BitAnd
+                        | OpCode::BitOr
+                        | OpCode::BitXor
+                        | OpCode::ShiftLeft
+                        | OpCode::ShiftRight => {
+                            // Virtual Int bitwise: if both operands are staged
+                            // as Int in the virt stack, fold into a register
+                            // band/bor/bxor/ishl/sshr. No stack memory ops.
+                            // Shift count masked to low 6 bits — matches
+                            // i64::wrapping_shl/shr in vm::binary_shl/shr.
+                            if virt_stack.top_n_are_int_ssa(2) {
+                                let rhs = virt_stack.pop_int_ssa().unwrap();
+                                let lhs = virt_stack.pop_int_ssa().unwrap();
+                                let result = match op {
+                                    OpCode::BitAnd => builder.ins().band(lhs, rhs),
+                                    OpCode::BitOr => builder.ins().bor(lhs, rhs),
+                                    OpCode::BitXor => builder.ins().bxor(lhs, rhs),
+                                    OpCode::ShiftLeft => builder.ins().ishl(lhs, rhs),
+                                    OpCode::ShiftRight => builder.ins().sshr(lhs, rhs),
+                                    _ => unreachable!(),
+                                };
+                                virt_stack.push_int_ssa(result);
+                            } else {
+                                maybe_emit_current_line(
+                                    &mut builder,
+                                    vm_val,
+                                    line,
+                                    &mut last_emitted_line,
+                                );
+                                if !virt_stack.is_empty() {
+                                    virt_stack.flush_to_memory(&mut builder, vm_val);
+                                }
+                                let (arith_op, slow) = match op {
+                                    OpCode::BitAnd => (IntArithOp::BitAnd, refs.op_band),
+                                    OpCode::BitOr => (IntArithOp::BitOr, refs.op_bor),
+                                    OpCode::BitXor => (IntArithOp::BitXor, refs.op_bxor),
+                                    OpCode::ShiftLeft => (IntArithOp::Shl, refs.op_shl),
+                                    OpCode::ShiftRight => (IntArithOp::Shr, refs.op_shr),
+                                    _ => unreachable!(),
+                                };
+                                emit_int_fast_arith(
+                                    &mut builder,
+                                    exit_block,
+                                    &refs,
+                                    vm_val,
+                                    arith_op,
+                                    slow,
+                                );
+                            }
+                            ip += 1;
+                        }
                         OpCode::Divide | OpCode::Modulo => {
                             let is_mod = matches!(op, OpCode::Modulo);
 
@@ -1662,6 +1713,46 @@ impl JitInner {
                         OpCode::Negate => {
                             emit_fallible(&mut builder, exit_block, refs.negate, vm_val);
                             ip += 1;
+                        }
+
+                        OpCode::BitNot => {
+                            // BitNot is monomorphic on Int (interpreter rejects
+                            // every other type), so the virt-int fast path is
+                            // safe whenever the top is an IntSsa.
+                            if let Some(payload) = virt_stack.pop_int_ssa() {
+                                let result = builder.ins().bnot(payload);
+                                virt_stack.push_int_ssa(result);
+                            } else {
+                                maybe_emit_current_line(
+                                    &mut builder,
+                                    vm_val,
+                                    line,
+                                    &mut last_emitted_line,
+                                );
+                                if !virt_stack.is_empty() {
+                                    virt_stack.flush_to_memory(&mut builder, vm_val);
+                                }
+                                emit_fallible(&mut builder, exit_block, refs.op_bnot, vm_val);
+                            }
+                            ip += 1;
+                        }
+
+                        OpCode::Log => {
+                            maybe_emit_current_line(
+                                &mut builder,
+                                vm_val,
+                                line,
+                                &mut last_emitted_line,
+                            );
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
+                            }
+                            let flags = code[ip + 1];
+                            let flags_val = builder.ins().iconst(types::I32, flags as i64);
+                            let call = builder.ins().call(refs.op_log, &[vm_val, flags_val]);
+                            let status = builder.inst_results(call)[0];
+                            emit_early_exit_on_err(&mut builder, exit_block, status);
+                            ip += 2;
                         }
 
                         // Infallible
@@ -3434,11 +3525,17 @@ fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usiz
             | OpCode::GreaterEqual
             | OpCode::Not
             | OpCode::Negate
+            | OpCode::BitAnd
+            | OpCode::BitOr
+            | OpCode::BitXor
+            | OpCode::BitNot
+            | OpCode::ShiftLeft
+            | OpCode::ShiftRight
             | OpCode::Index
             | OpCode::CloseUpvalue
             | OpCode::Return => 1,
             // u8 operand
-            OpCode::Call => 2,
+            OpCode::Call | OpCode::Log => 2,
             // u16 operand
             OpCode::Constant
             | OpCode::BuildArray
@@ -4175,6 +4272,11 @@ enum IntArithOp {
     Add,
     Sub,
     Mul,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
 }
 
 /// Emit IR for an arithmetic opcode that has an inline int+int fast
@@ -4249,6 +4351,14 @@ fn emit_int_fast_arith(
         IntArithOp::Add => builder.ins().iadd(payload_a, payload_b),
         IntArithOp::Sub => builder.ins().isub(payload_a, payload_b),
         IntArithOp::Mul => builder.ins().imul(payload_a, payload_b),
+        IntArithOp::BitAnd => builder.ins().band(payload_a, payload_b),
+        IntArithOp::BitOr => builder.ins().bor(payload_a, payload_b),
+        IntArithOp::BitXor => builder.ins().bxor(payload_a, payload_b),
+        // Shift count is masked to low 6 bits by both x86 SHL/SAR and
+        // Cranelift ishl/sshr — matches `i64::wrapping_shl/shr` in the
+        // interpreter (see vm::binary_shl/shr).
+        IntArithOp::Shl => builder.ins().ishl(payload_a, payload_b),
+        IntArithOp::Shr => builder.ins().sshr(payload_a, payload_b),
     };
     // Write result back into val_a's payload slot. Its tag is already
     // `VALUE_TAG_INTEGER`, so we don't need to touch it.
@@ -5302,6 +5412,11 @@ fn emit_inline_local_const_arith_update(
         IntArithOp::Add => builder.ins().iadd(old_payload, rhs),
         IntArithOp::Sub => builder.ins().isub(old_payload, rhs),
         IntArithOp::Mul => builder.ins().imul(old_payload, rhs),
+        IntArithOp::BitAnd
+        | IntArithOp::BitOr
+        | IntArithOp::BitXor
+        | IntArithOp::Shl
+        | IntArithOp::Shr => unreachable!("local-const peephole only emitted for Add/Sub/Mul"),
     };
     builder
         .ins()
@@ -5320,6 +5435,11 @@ fn emit_inline_local_const_arith_update(
         IntArithOp::Add => refs.add,
         IntArithOp::Sub => refs.sub,
         IntArithOp::Mul => refs.mul,
+        IntArithOp::BitAnd
+        | IntArithOp::BitOr
+        | IntArithOp::BitXor
+        | IntArithOp::Shl
+        | IntArithOp::Shr => unreachable!("local-const peephole only emitted for Add/Sub/Mul"),
     };
     let call = builder.ins().call(slow_helper, &[vm_val]);
     let status = builder.inst_results(call)[0];
@@ -5405,7 +5525,12 @@ fn emit_inline_local_scaled_arith_update(
     let result = match op {
         IntArithOp::Add => builder.ins().iadd(dst_payload, scaled_rhs),
         IntArithOp::Sub => builder.ins().isub(dst_payload, scaled_rhs),
-        IntArithOp::Mul => unreachable!("scaled update only supports Add/Subtract"),
+        IntArithOp::Mul
+        | IntArithOp::BitAnd
+        | IntArithOp::BitOr
+        | IntArithOp::BitXor
+        | IntArithOp::Shl
+        | IntArithOp::Shr => unreachable!("scaled update only supports Add/Sub"),
     };
     builder
         .ins()
@@ -5440,7 +5565,12 @@ fn emit_inline_local_scaled_arith_update(
     let slow_helper = match op {
         IntArithOp::Add => refs.add,
         IntArithOp::Sub => refs.sub,
-        IntArithOp::Mul => unreachable!("scaled update only supports Add/Subtract"),
+        IntArithOp::Mul
+        | IntArithOp::BitAnd
+        | IntArithOp::BitOr
+        | IntArithOp::BitXor
+        | IntArithOp::Shl
+        | IntArithOp::Shr => unreachable!("scaled update only supports Add/Sub"),
     };
     let arith_call = builder.ins().call(slow_helper, &[vm_val]);
     let arith_status = builder.inst_results(arith_call)[0];

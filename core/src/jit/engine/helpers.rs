@@ -26,10 +26,6 @@ pub(super) struct HelperIds {
     pub push_constant: FuncId,       // (vm, u32)
     pub push_integer_inline: FuncId, // (vm, i64)
     pub push_float_inline: FuncId,   // (vm, i64 bits-of-f64)
-    pub push_none: FuncId,           // (vm)
-    pub push_true: FuncId,           // (vm)
-    pub push_false: FuncId,          // (vm)
-
     // Stack manip
     pub pop: FuncId, // (vm)
     pub dup: FuncId, // (vm)
@@ -64,6 +60,17 @@ pub(super) struct HelperIds {
     // Logical / unary
     pub not: FuncId,    // infallible
     pub negate: FuncId, // fallible
+
+    // Bitwise (all fallible: type-error on non-int operands)
+    pub op_band: FuncId,
+    pub op_bor: FuncId,
+    pub op_bxor: FuncId,
+    pub op_bnot: FuncId,
+    pub op_shl: FuncId,
+    pub op_shr: FuncId,
+
+    // Logging
+    pub op_log: FuncId, // (vm, u32 flags) -> u32
 
     // Branching truthy checks
     pub peek_truthy: FuncId, // (vm) -> u32
@@ -120,9 +127,6 @@ pub(super) struct HelperRefs {
     pub push_integer_inline: FuncRef,
     #[allow(dead_code)]
     pub push_float_inline: FuncRef,
-    pub push_none: FuncRef,
-    pub push_true: FuncRef,
-    pub push_false: FuncRef,
     pub pop: FuncRef,
     pub dup: FuncRef,
     pub build_array: FuncRef,
@@ -146,6 +150,13 @@ pub(super) struct HelperRefs {
     pub ge: FuncRef,
     pub not: FuncRef,
     pub negate: FuncRef,
+    pub op_band: FuncRef,
+    pub op_bor: FuncRef,
+    pub op_bxor: FuncRef,
+    pub op_bnot: FuncRef,
+    pub op_shl: FuncRef,
+    pub op_shr: FuncRef,
+    pub op_log: FuncRef,
     pub peek_truthy: FuncRef,
     pub pop_truthy: FuncRef,
     pub op_return: FuncRef,
@@ -201,9 +212,6 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_push_constant", runtime::jit_push_constant);
     reg!("jit_push_integer_inline", runtime::jit_push_integer_inline);
     reg!("jit_push_float_inline", runtime::jit_push_float_inline);
-    reg!("jit_push_none", runtime::jit_push_none);
-    reg!("jit_push_true", runtime::jit_push_true);
-    reg!("jit_push_false", runtime::jit_push_false);
     reg!("jit_pop", runtime::jit_pop);
     reg!("jit_dup", runtime::jit_dup);
     reg!("jit_build_array", runtime::jit_build_array);
@@ -239,6 +247,13 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_op_ge", runtime::jit_op_ge);
     reg!("jit_op_not", runtime::jit_op_not);
     reg!("jit_op_negate", runtime::jit_op_negate);
+    reg!("jit_op_band", runtime::jit_op_band);
+    reg!("jit_op_bor", runtime::jit_op_bor);
+    reg!("jit_op_bxor", runtime::jit_op_bxor);
+    reg!("jit_op_bnot", runtime::jit_op_bnot);
+    reg!("jit_op_shl", runtime::jit_op_shl);
+    reg!("jit_op_shr", runtime::jit_op_shr);
+    reg!("jit_op_log", runtime::jit_op_log);
     reg!("jit_peek_truthy", runtime::jit_peek_truthy);
     reg!("jit_pop_truthy", runtime::jit_pop_truthy);
     reg!("jit_op_return", runtime::jit_op_return);
@@ -442,9 +457,6 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         push_constant: decl(module, "jit_push_constant", &sig_vm_u32),
         push_integer_inline: decl(module, "jit_push_integer_inline", &sig_vm_i64),
         push_float_inline: decl(module, "jit_push_float_inline", &sig_vm_i64),
-        push_none: decl(module, "jit_push_none", &sig_vm_only),
-        push_true: decl(module, "jit_push_true", &sig_vm_only),
-        push_false: decl(module, "jit_push_false", &sig_vm_only),
         pop: decl(module, "jit_pop", &sig_vm_only),
         dup: decl(module, "jit_dup", &sig_vm_only),
         build_array: decl(module, "jit_build_array", &sig_vm_u32),
@@ -480,6 +492,13 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         ge: decl(module, "jit_op_ge", &sig_vm_to_u32),
         not: decl(module, "jit_op_not", &sig_vm_only),
         negate: decl(module, "jit_op_negate", &sig_vm_to_u32),
+        op_band: decl(module, "jit_op_band", &sig_vm_to_u32),
+        op_bor: decl(module, "jit_op_bor", &sig_vm_to_u32),
+        op_bxor: decl(module, "jit_op_bxor", &sig_vm_to_u32),
+        op_bnot: decl(module, "jit_op_bnot", &sig_vm_to_u32),
+        op_shl: decl(module, "jit_op_shl", &sig_vm_to_u32),
+        op_shr: decl(module, "jit_op_shr", &sig_vm_to_u32),
+        op_log: decl(module, "jit_op_log", &sig_vm_u32_to_u32),
         peek_truthy: decl(module, "jit_peek_truthy", &sig_vm_to_u32),
         pop_truthy: decl(module, "jit_pop_truthy", &sig_vm_to_u32),
         op_return: decl(module, "jit_op_return", &sig_vm_only),
@@ -523,9 +542,6 @@ pub(super) fn declare_helper_refs(
         push_constant: r(ids.push_constant),
         push_integer_inline: r(ids.push_integer_inline),
         push_float_inline: r(ids.push_float_inline),
-        push_none: r(ids.push_none),
-        push_true: r(ids.push_true),
-        push_false: r(ids.push_false),
         pop: r(ids.pop),
         dup: r(ids.dup),
         build_array: r(ids.build_array),
@@ -549,6 +565,13 @@ pub(super) fn declare_helper_refs(
         ge: r(ids.ge),
         not: r(ids.not),
         negate: r(ids.negate),
+        op_band: r(ids.op_band),
+        op_bor: r(ids.op_bor),
+        op_bxor: r(ids.op_bxor),
+        op_bnot: r(ids.op_bnot),
+        op_shl: r(ids.op_shl),
+        op_shr: r(ids.op_shr),
+        op_log: r(ids.op_log),
         peek_truthy: r(ids.peek_truthy),
         pop_truthy: r(ids.pop_truthy),
         op_return: r(ids.op_return),

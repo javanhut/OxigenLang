@@ -1480,14 +1480,18 @@ fn transfer(
             next.stack.push(SlotType::Value);
         }
         OpCode::Log => {
+            // Log pops one slot per set flag (tag/sub/msg, all pushed
+            // by the compiler before this opcode) and pushes Value::None
+            // as its result. See vm::handle_log.
             let flags = code[ip + 1];
             let has_tag = flags & 1 != 0;
             let has_sub = flags & 2 != 0;
             let has_msg = flags & 4 != 0;
-            let pops = has_tag as usize + has_sub as usize + has_msg as usize + 1; /* the expression */
+            let pops = has_tag as usize + has_sub as usize + has_msg as usize;
             for _ in 0..pops {
                 next.stack.pop();
             }
+            next.stack.push(SlotType::Value);
         }
         OpCode::Unpack => {
             let count = code[ip + 1] as usize;

@@ -435,6 +435,58 @@ impl VM {
         self.pop();
     }
 
+    pub(crate) fn handle_log(&mut self, flags: u8) {
+        let has_msg = flags & 0x04 != 0;
+        let has_sub = flags & 0x02 != 0;
+        let has_tag = flags & 0x01 != 0;
+
+        let msg = if has_msg { Some(self.pop()) } else { None };
+        let sub = if has_sub { Some(self.pop()) } else { None };
+        let tag = if has_tag { Some(self.pop()) } else { None };
+
+        let tag_str = match (&tag, &sub) {
+            (Some(t), Some(s)) => format!(
+                "[{}:{}]",
+                format!("{}", t).to_uppercase(),
+                format!("{}", s).to_uppercase()
+            ),
+            (Some(t), None) => format!("[{}]", format!("{}", t).to_uppercase()),
+            _ => String::new(),
+        };
+        let msg_str = msg.map(|m| format!("{}", m));
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = now.as_secs();
+        let (hours, mins, seconds) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
+        let days = secs / 86400;
+        let z = days + 719468;
+        let era = z / 146097;
+        let doe = z - era * 146097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = if m <= 2 { y + 1 } else { y };
+        let timestamp = format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            year, m, d, hours, mins, seconds
+        );
+
+        let output = match (tag_str.is_empty(), &msg_str) {
+            (true, Some(msg)) => format!("{}: {}", timestamp, msg),
+            (false, Some(msg)) => format!("{}: {} {}", timestamp, tag_str, msg),
+            (false, None) => format!("{}: {}", timestamp, tag_str),
+            (true, None) => format!("{}: <empty log>", timestamp),
+        };
+
+        println!("{}", output);
+        self.push(Value::None);
+    }
+
     pub(crate) fn handle_struct_literal(
         &mut self,
         name_idx: u16,
@@ -1326,49 +1378,37 @@ impl VM {
                 OpCode::BitAnd => {
                     let b = self.pop();
                     let a = self.pop();
-                    match (&a, &b) {
-                        (Value::Integer(l), Value::Integer(r)) => self.push(Value::Integer(l & r)),
-                        _ => return Err(self.runtime_error("bitwise & requires integers")),
-                    }
+                    let v = self.binary_band(a, b)?;
+                    self.push(v);
                 }
                 OpCode::BitOr => {
                     let b = self.pop();
                     let a = self.pop();
-                    match (&a, &b) {
-                        (Value::Integer(l), Value::Integer(r)) => self.push(Value::Integer(l | r)),
-                        _ => return Err(self.runtime_error("bitwise | requires integers")),
-                    }
+                    let v = self.binary_bor(a, b)?;
+                    self.push(v);
                 }
                 OpCode::BitXor => {
                     let b = self.pop();
                     let a = self.pop();
-                    match (&a, &b) {
-                        (Value::Integer(l), Value::Integer(r)) => self.push(Value::Integer(l ^ r)),
-                        _ => return Err(self.runtime_error("bitwise ^ requires integers")),
-                    }
+                    let v = self.binary_bxor(a, b)?;
+                    self.push(v);
                 }
                 OpCode::BitNot => {
                     let val = self.pop();
-                    match &val {
-                        Value::Integer(n) => self.push(Value::Integer(!n)),
-                        _ => return Err(self.runtime_error("bitwise ~ requires an integer")),
-                    }
+                    let v = self.unary_bnot(val)?;
+                    self.push(v);
                 }
                 OpCode::ShiftLeft => {
                     let b = self.pop();
                     let a = self.pop();
-                    match (&a, &b) {
-                        (Value::Integer(l), Value::Integer(r)) => self.push(Value::Integer(l << r)),
-                        _ => return Err(self.runtime_error("<< requires integers")),
-                    }
+                    let v = self.binary_shl(a, b)?;
+                    self.push(v);
                 }
                 OpCode::ShiftRight => {
                     let b = self.pop();
                     let a = self.pop();
-                    match (&a, &b) {
-                        (Value::Integer(l), Value::Integer(r)) => self.push(Value::Integer(l >> r)),
-                        _ => return Err(self.runtime_error(">> requires integers")),
-                    }
+                    let v = self.binary_shr(a, b)?;
+                    self.push(v);
                 }
 
                 // ── Unary ───────────────────────────────────────────
@@ -1746,58 +1786,7 @@ impl VM {
                 // ── Misc ────────────────────────────────────────────
                 OpCode::Log => {
                     let flags = self.frames[frame_idx].read_byte();
-                    let has_msg = flags & 0x04 != 0;
-                    let has_sub = flags & 0x02 != 0;
-                    let has_tag = flags & 0x01 != 0;
-
-                    let msg = if has_msg { Some(self.pop()) } else { None };
-                    let sub = if has_sub { Some(self.pop()) } else { None };
-                    let tag = if has_tag { Some(self.pop()) } else { None };
-
-                    let tag_str = match (&tag, &sub) {
-                        (Some(t), Some(s)) => {
-                            format!(
-                                "[{}:{}]",
-                                format!("{}", t).to_uppercase(),
-                                format!("{}", s).to_uppercase()
-                            )
-                        }
-                        (Some(t), None) => format!("[{}]", format!("{}", t).to_uppercase()),
-                        _ => String::new(),
-                    };
-                    let msg_str = msg.map(|m| format!("{}", m));
-
-                    // Timestamp (same algorithm as tree-walker evaluator)
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default();
-                    let secs = now.as_secs();
-                    let (hours, mins, seconds) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
-                    let days = secs / 86400;
-                    let z = days + 719468;
-                    let era = z / 146097;
-                    let doe = z - era * 146097;
-                    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-                    let y = yoe + era * 400;
-                    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-                    let mp = (5 * doy + 2) / 153;
-                    let d = doy - (153 * mp + 2) / 5 + 1;
-                    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-                    let year = if m <= 2 { y + 1 } else { y };
-                    let timestamp = format!(
-                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                        year, m, d, hours, mins, seconds
-                    );
-
-                    let output = match (tag_str.is_empty(), &msg_str) {
-                        (true, Some(msg)) => format!("{}: {}", timestamp, msg),
-                        (false, Some(msg)) => format!("{}: {} {}", timestamp, tag_str, msg),
-                        (false, None) => format!("{}: {}", timestamp, tag_str),
-                        (true, None) => format!("{}: <empty log>", timestamp),
-                    };
-
-                    println!("{}", output);
-                    self.push(Value::None);
+                    self.handle_log(flags);
                 }
 
                 OpCode::Unpack => {
@@ -2330,6 +2319,59 @@ impl VM {
                 &format!("type mismatch: {} % {}", a.type_name(), b.type_name()),
                 "operands must be compatible numeric types",
             )),
+        }
+    }
+
+    // ── Bitwise Helpers ─────────────────────────────────────────────────
+    //
+    // Shift semantics are pinned: the shift count is masked to the low 6
+    // bits via `as u32` + `wrapping_shl/shr`. This matches x86 `shl/shr`
+    // and Cranelift `ishl/sshr` so debug, release, --jit, and --no-jit all
+    // agree on `1 << 64`, `1 << -1`, etc.
+
+    pub(crate) fn binary_band(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        match (&a, &b) {
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l & r)),
+            _ => Err(self.runtime_error("bitwise & requires integers")),
+        }
+    }
+
+    pub(crate) fn binary_bor(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        match (&a, &b) {
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l | r)),
+            _ => Err(self.runtime_error("bitwise | requires integers")),
+        }
+    }
+
+    pub(crate) fn binary_bxor(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        match (&a, &b) {
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l ^ r)),
+            _ => Err(self.runtime_error("bitwise ^ requires integers")),
+        }
+    }
+
+    pub(crate) fn unary_bnot(&self, a: Value) -> Result<Value, VMError> {
+        match &a {
+            Value::Integer(n) => Ok(Value::Integer(!n)),
+            _ => Err(self.runtime_error("bitwise ~ requires an integer")),
+        }
+    }
+
+    pub(crate) fn binary_shl(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        match (&a, &b) {
+            (Value::Integer(l), Value::Integer(r)) => {
+                Ok(Value::Integer(l.wrapping_shl(*r as u32)))
+            }
+            _ => Err(self.runtime_error("<< requires integers")),
+        }
+    }
+
+    pub(crate) fn binary_shr(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        match (&a, &b) {
+            (Value::Integer(l), Value::Integer(r)) => {
+                Ok(Value::Integer(l.wrapping_shr(*r as u32)))
+            }
+            _ => Err(self.runtime_error(">> requires integers")),
         }
     }
 

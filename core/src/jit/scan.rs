@@ -72,6 +72,15 @@ fn is_supported(op: OpCode) -> bool {
             // Logical / unary
             | OpCode::Not
             | OpCode::Negate
+            // Bitwise
+            | OpCode::BitAnd
+            | OpCode::BitOr
+            | OpCode::BitXor
+            | OpCode::BitNot
+            | OpCode::ShiftLeft
+            | OpCode::ShiftRight
+            // Logging
+            | OpCode::Log
             // Locals
             | OpCode::GetLocal
             | OpCode::SetLocal
@@ -128,12 +137,18 @@ fn instr_fixed_len(op: OpCode) -> usize {
         | OpCode::GreaterEqual
         | OpCode::Not
         | OpCode::Negate
+        | OpCode::BitAnd
+        | OpCode::BitOr
+        | OpCode::BitXor
+        | OpCode::BitNot
+        | OpCode::ShiftLeft
+        | OpCode::ShiftRight
         | OpCode::Index
         | OpCode::CloseUpvalue
         | OpCode::Return => 1,
 
         // u8 operand (2 bytes)
-        OpCode::Call => 2,
+        OpCode::Call | OpCode::Log => 2,
 
         // u16 operand (3 bytes)
         OpCode::Constant
