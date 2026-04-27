@@ -4,10 +4,17 @@
 # harness — pure bash + awk + jq.
 #
 # Usage:
-#   scripts/bench.sh                        # full paired suite
-#   scripts/bench.sh bench_arith bench_fib  # specific benchmarks
-#   WARMUPS=3 RUNS=15 scripts/bench.sh      # tune warmups/runs
-#   OXIGEN_BENCH_CPU=3 scripts/bench.sh     # pin to a specific CPU
+#   scripts/bench.sh                                # full paired suite
+#   scripts/bench.sh bench_arith bench_fib          # specific benchmarks
+#   scripts/bench.sh --warmup=8 --runs=15           # tune warmups/runs
+#   WARMUPS=3 RUNS=15 scripts/bench.sh              # legacy env-var form
+#   OXIGEN_BENCH_CPU=3 scripts/bench.sh             # pin to a specific CPU
+#
+# Flags (override env vars):
+#   --warmup=N | --warmups=N | --warmup N   untimed rounds per variant
+#   --runs=N                                timed rounds per variant
+#   --                                      stop flag parsing
+# Anything else is treated as a positional benchmark name.
 #
 # For each benchmark we run V variants (oxigen --jit, oxigen
 # default, oxigen --no-jit, python3, optional bun (ts), optional
@@ -40,6 +47,33 @@ set -euo pipefail
 # count.
 WARMUPS="${WARMUPS:-3}"
 RUNS="${RUNS:-5}"
+
+# Flag parsing — `--warmup=8 --runs=15` overrides the env-var defaults
+# above. Unrecognised non-flag args drop through as positional benchmark
+# names (consumed by `discover_benchmarks` below).
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --warmup=*|--warmups=*) WARMUPS="${1#*=}"; shift ;;
+        --warmup|--warmups)
+            [[ $# -ge 2 ]] || { echo "error: $1 needs a value" >&2; exit 1; }
+            WARMUPS="$2"; shift 2 ;;
+        --runs=*) RUNS="${1#*=}"; shift ;;
+        --runs)
+            [[ $# -ge 2 ]] || { echo "error: --runs needs a value" >&2; exit 1; }
+            RUNS="$2"; shift 2 ;;
+        --) shift; POSITIONAL+=("$@"); break ;;
+        --*) echo "error: unknown flag: $1" >&2; exit 1 ;;
+        *) POSITIONAL+=("$1"); shift ;;
+    esac
+done
+set -- "${POSITIONAL[@]}"
+
+# Validate numeric.
+[[ "$WARMUPS" =~ ^[0-9]+$ ]] || { echo "error: --warmup must be a non-negative integer (got: $WARMUPS)" >&2; exit 1; }
+[[ "$RUNS"    =~ ^[0-9]+$ ]] || { echo "error: --runs must be a non-negative integer (got: $RUNS)" >&2; exit 1; }
+[[ "$RUNS" -ge 1 ]] || { echo "error: --runs must be >= 1 (got: $RUNS)" >&2; exit 1; }
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BENCH_DIR="$REPO_ROOT/example"
