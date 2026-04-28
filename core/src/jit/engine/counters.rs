@@ -258,6 +258,21 @@ pub(crate) struct JitCounters {
     /// from IR inside the IC hit block — does NOT change behavior;
     /// the call still dispatches to the generic thunk.
     pub ic_callee_has_spec_entry: std::cell::Cell<u64>,
+    /// B2.2.f probe: subset of `call_ic_hit` where the callee closure
+    /// has `specialized_kind == NATIVE_INT_BODY_WITH_CLOSURE`.
+    /// Measures the upper bound on closure-aware spec dispatch
+    /// coverage. Bumped at the runtime check site, before the
+    /// dispatch commits — counts callees that *could* be reached via
+    /// the new ABI for this call site.
+    pub ic_callee_has_closure_aware_spec: std::cell::Cell<u64>,
+    /// B2.2.f: closure-aware specialized call dispatched. Args passed
+    /// in registers, closure pointer in a register, no JitFrame walk
+    /// for upvalue access, inline Return without `jit_op_return` FFI.
+    /// Bumped from emitted IR at the call_indirect site, on the
+    /// success branch (after the all-checks-passed gate). Strict
+    /// subset of `ic_callee_has_closure_aware_spec` — the gap is
+    /// arity / thunk-non-null / RC fail tail.
+    pub closure_aware_call_dispatch: std::cell::Cell<u64>,
 
     /// Step 0 attribution: per-helper FFI call counts. Indexed by
     /// `HelperCounter`; bumped from each helper's entry. Tells us
@@ -327,6 +342,8 @@ impl JitCounters {
             call_ic_miss: std::cell::Cell::new(0),
             get_upvalue_inline_hit: std::cell::Cell::new(0),
             ic_callee_has_spec_entry: std::cell::Cell::new(0),
+            ic_callee_has_closure_aware_spec: std::cell::Cell::new(0),
+            closure_aware_call_dispatch: std::cell::Cell::new(0),
             helper_calls,
             spec_entry_eligible: std::cell::Cell::new(0),
             spec_entry_rejected_zero_arity: std::cell::Cell::new(0),
@@ -445,6 +462,14 @@ impl JitCounters {
             "  ic_callee_has_spec_entry:          {}",
             self.ic_callee_has_spec_entry.get()
         );
+        eprintln!(
+            "  ic_callee_has_closure_aware_spec:  {}",
+            self.ic_callee_has_closure_aware_spec.get()
+        );
+        eprintln!(
+            "  closure_aware_call_dispatch:       {}",
+            self.closure_aware_call_dispatch.get()
+        );
 
         // Step 0 spec-entry eligibility outcome breakdown.
         eprintln!("[jit stats] spec-entry eligibility");
@@ -557,4 +582,8 @@ pub(super) mod counter_offsets {
         offset_of!(JitCounters, get_upvalue_inline_hit) as isize;
     pub const IC_CALLEE_HAS_SPEC_ENTRY: isize =
         offset_of!(JitCounters, ic_callee_has_spec_entry) as isize;
+    pub const IC_CALLEE_HAS_CLOSURE_AWARE_SPEC: isize =
+        offset_of!(JitCounters, ic_callee_has_closure_aware_spec) as isize;
+    pub const CLOSURE_AWARE_CALL_DISPATCH: isize =
+        offset_of!(JitCounters, closure_aware_call_dispatch) as isize;
 }
