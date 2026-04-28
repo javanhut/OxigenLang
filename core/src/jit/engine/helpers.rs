@@ -72,6 +72,9 @@ pub(super) struct HelperIds {
     // Logging
     pub op_log: FuncId, // (vm, u32 flags) -> u32
 
+    // B2.2.f debug invariant helper: (vm, *cache, *closure, phase, slot_offset, jit_frame_len, arg_count) -> u32
+    pub dbg_check_spec_call: FuncId,
+
     // Branching truthy checks
     pub peek_truthy: FuncId, // (vm) -> u32
     pub pop_truthy: FuncId,  // (vm) -> u32
@@ -157,6 +160,7 @@ pub(super) struct HelperRefs {
     pub op_shl: FuncRef,
     pub op_shr: FuncRef,
     pub op_log: FuncRef,
+    pub dbg_check_spec_call: FuncRef,
     pub peek_truthy: FuncRef,
     pub pop_truthy: FuncRef,
     pub op_return: FuncRef,
@@ -254,6 +258,7 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_op_shl", runtime::jit_op_shl);
     reg!("jit_op_shr", runtime::jit_op_shr);
     reg!("jit_op_log", runtime::jit_op_log);
+    reg!("jit_dbg_check_spec_call", runtime::jit_dbg_check_spec_call);
     reg!("jit_peek_truthy", runtime::jit_peek_truthy);
     reg!("jit_pop_truthy", runtime::jit_pop_truthy);
     reg!("jit_op_return", runtime::jit_op_return);
@@ -321,6 +326,19 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
     sig_vm_u32_to_u32.params.push(AbiParam::new(ptr_ty));
     sig_vm_u32_to_u32.params.push(AbiParam::new(types::I32));
     sig_vm_u32_to_u32.returns.push(AbiParam::new(types::I32));
+
+    // B2.2.f debug helper: (vm, cache_ptr, closure_ptr, phase: u32,
+    // expected_slot_offset: i64, expected_jit_frame_len: i64,
+    // arg_count: u32) -> u32
+    let mut sig_dbg_spec_call = module.make_signature();
+    sig_dbg_spec_call.params.push(AbiParam::new(ptr_ty));
+    sig_dbg_spec_call.params.push(AbiParam::new(ptr_ty));
+    sig_dbg_spec_call.params.push(AbiParam::new(ptr_ty));
+    sig_dbg_spec_call.params.push(AbiParam::new(types::I32));
+    sig_dbg_spec_call.params.push(AbiParam::new(types::I64));
+    sig_dbg_spec_call.params.push(AbiParam::new(types::I64));
+    sig_dbg_spec_call.params.push(AbiParam::new(types::I32));
+    sig_dbg_spec_call.returns.push(AbiParam::new(types::I32));
 
     let mut sig_vm_u32_u32_to_u32 = module.make_signature();
     sig_vm_u32_u32_to_u32.params.push(AbiParam::new(ptr_ty));
@@ -499,6 +517,7 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         op_shl: decl(module, "jit_op_shl", &sig_vm_to_u32),
         op_shr: decl(module, "jit_op_shr", &sig_vm_to_u32),
         op_log: decl(module, "jit_op_log", &sig_vm_u32_to_u32),
+        dbg_check_spec_call: decl(module, "jit_dbg_check_spec_call", &sig_dbg_spec_call),
         peek_truthy: decl(module, "jit_peek_truthy", &sig_vm_to_u32),
         pop_truthy: decl(module, "jit_pop_truthy", &sig_vm_to_u32),
         op_return: decl(module, "jit_op_return", &sig_vm_only),
@@ -572,6 +591,7 @@ pub(super) fn declare_helper_refs(
         op_shl: r(ids.op_shl),
         op_shr: r(ids.op_shr),
         op_log: r(ids.op_log),
+        dbg_check_spec_call: r(ids.dbg_check_spec_call),
         peek_truthy: r(ids.peek_truthy),
         pop_truthy: r(ids.pop_truthy),
         op_return: r(ids.op_return),

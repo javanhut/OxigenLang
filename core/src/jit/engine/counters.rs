@@ -92,6 +92,7 @@ pub(crate) enum HelperCounter {
     OpShl,
     OpShr,
     OpLog,
+    DbgCheckSpecCall,
     RunViaInterpreter,
 }
 
@@ -165,6 +166,7 @@ pub(crate) const HELPER_NAMES: [&str; HelperCounter::COUNT] = [
     "op_shl",
     "op_shr",
     "op_log",
+    "dbg_check_spec_call",
     "run_via_interpreter",
 ];
 

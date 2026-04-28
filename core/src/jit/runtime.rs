@@ -19,6 +19,162 @@ use std::rc::Rc;
 
 use super::engine::HelperCounter;
 
+// ── B2.2.f debug invariant helper ──────────────────────────────────────
+//
+// Validates the runtime state surrounding a closure-aware specialized
+// call. Called from JIT IR before the call (phase=0) and after a status==0
+// return (phase=1). On any invariant violation: prints a precise
+// diagnostic to stderr and returns 1; the JIT inserts `trapnz` so the
+// failure aborts cleanly with the diagnostic instead of segfaulting in
+// downstream code. Returns 0 when all invariants hold.
+///
+/// Args:
+/// - `cache_ptr`: the per-call-site `CallCacheEntry` raw pointer.
+/// - `closure_ptr`: the `*const ObjClosure` we're about to pass as the
+///   spec entry's closure register arg (= `cache.closure_raw + RC_VALUE_OFFSET`).
+/// - `phase`: 0 = pre-call, 1 = post-success.
+/// - `expected_slot_offset`: the JitFrame slot_offset the spec body
+///   should observe (= `callee_slot` in caller's IR).
+/// - `expected_jit_frame_len`: phase 0 — caller's `jit_frame_view.len`
+///   AFTER pushing the callee frame; phase 1 — what it should be after
+///   the callee popped its own frame (caller's pre-call value).
+/// - `arg_count`: number of i64 args the caller passed in registers.
+pub unsafe extern "C" fn jit_dbg_check_spec_call(
+    vm: *mut VM,
+    cache_ptr: *const super::engine::CallCacheEntry,
+    closure_ptr: *const crate::vm::value::ObjClosure,
+    phase: u32,
+    expected_slot_offset: i64,
+    expected_jit_frame_len: i64,
+    arg_count: u32,
+) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::DbgCheckSpecCall);
+
+    macro_rules! fail {
+        ($($arg:tt)*) => {{
+            eprintln!("[spec_call_dbg phase={}] {}", phase, format!($($arg)*));
+            return 1;
+        }};
+    }
+
+    if cache_ptr.is_null() {
+        fail!("cache_ptr is null");
+    }
+    if closure_ptr.is_null() {
+        fail!("closure_ptr is null");
+    }
+
+    let cache = unsafe { &*cache_ptr };
+    let cache_closure_raw = cache.closure_raw as *const u8;
+    let derived = closure_ptr as *const u8;
+    let expected_obj = unsafe {
+        cache_closure_raw.add(crate::vm::value::RC_VALUE_OFFSET)
+    } as *const crate::vm::value::ObjClosure;
+    if derived != expected_obj as *const u8 {
+        fail!(
+            "closure_ptr ({:p}) != cache.closure_raw + RC_VALUE_OFFSET ({:p})",
+            derived,
+            expected_obj
+        );
+    }
+
+    let closure = unsafe { &*closure_ptr };
+
+    if phase == 0 {
+        // Pre-call invariants.
+        let kind = closure.specialized_kind.get();
+        if kind != crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE {
+            fail!(
+                "closure.specialized_kind = {} (expected {} = NATIVE_INT_BODY_WITH_CLOSURE)",
+                kind,
+                crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE
+            );
+        }
+        if closure.specialized_thunk.get().is_none() {
+            fail!("closure.specialized_thunk is None despite kind=3");
+        }
+        let cached_arity = closure.specialized_arity.get();
+        if cached_arity as u32 != arg_count {
+            fail!(
+                "closure.specialized_arity = {} but caller arg_count = {}",
+                cached_arity, arg_count
+            );
+        }
+
+        // stack_view.len should be expected_slot_offset + 1 (closure on top, args truncated).
+        let stack_len = vm.stack_view.len as i64;
+        if stack_len != expected_slot_offset + 1 {
+            fail!(
+                "stack_view.len = {} but expected slot_offset + 1 = {}",
+                stack_len,
+                expected_slot_offset + 1
+            );
+        }
+
+        // stack[expected_slot_offset] should be Value::Closure pointing to this closure.
+        let slot_idx = expected_slot_offset as usize;
+        // sync_stack_from_view first so Vec::len matches stack_view.len.
+        vm.sync_stack_from_view();
+        if slot_idx >= vm.stack_len() {
+            fail!(
+                "expected_slot_offset {} out of bounds (stack_view.len {})",
+                slot_idx,
+                vm.stack_view.len
+            );
+        }
+        match vm.stack_at(slot_idx) {
+            crate::vm::value::Value::Closure(c) => {
+                let c_ref: *const Rc<crate::vm::value::ObjClosure> = c;
+                let raw_rc = unsafe {
+                    *(c_ref as *const *const crate::vm::value::ObjClosure)
+                };
+                if raw_rc != cache.closure_raw {
+                    fail!(
+                        "stack[{}] closure raw ({:p}) != cache.closure_raw ({:p})",
+                        slot_idx, raw_rc, cache.closure_raw
+                    );
+                }
+            }
+            other => fail!(
+                "stack[{}] is not Value::Closure: tag={:?}",
+                slot_idx,
+                std::mem::discriminant(other)
+            ),
+        }
+
+        // jit_frame_view.len: caller pushed the callee frame; should equal expected.
+        let jit_len = vm.jit_frame_view.len as i64;
+        if jit_len != expected_jit_frame_len {
+            fail!(
+                "jit_frame_view.len = {} but expected {}",
+                jit_len, expected_jit_frame_len
+            );
+        }
+    } else if phase == 1 {
+        // Post-success invariants. Callee's IntSpecialized Return path has
+        // already truncated stack to slot_offset and popped the JitFrame.
+        let stack_len = vm.stack_view.len as i64;
+        if stack_len != expected_slot_offset {
+            fail!(
+                "post-call stack_view.len = {} but expected slot_offset = {} (callee Return should truncate to slot_offset)",
+                stack_len, expected_slot_offset
+            );
+        }
+        let jit_len = vm.jit_frame_view.len as i64;
+        if jit_len != expected_jit_frame_len {
+            fail!(
+                "post-call jit_frame_view.len = {} but expected {} (callee Return should pop the frame I pushed)",
+                jit_len, expected_jit_frame_len
+            );
+        }
+    } else {
+        fail!("unknown phase {}", phase);
+    }
+
+    0
+}
+
 // ── Fallback harness (Step 2, still used for functions the translator
 //    itself rejects — currently none, but kept as a safety valve) ────────
 
