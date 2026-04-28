@@ -484,6 +484,13 @@ impl JitInner {
         //   fn(*mut VM, i64, ..., i64) -> (u32, i64)
         // Multi-return: status in result 0, payload in result 1.
         // Caller reads payload only when status == 0.
+        //
+        // B2.2: when `slot_types.wants_closure_arg`, the specialized
+        // signature carries the caller's `*const ObjClosure` as a
+        // register arg between `vm` and the i64 args. Body's
+        // `GetUpvalue` reads through that register instead of walking
+        // the JitFrame for `closure_raw`.
+        let spec_wants_closure_arg = slot_types.wants_closure_arg;
         let (spec_thunk_id, spec_seq_id, spec_sig_opt): (
             Option<FuncId>,
             Option<u32>,
@@ -492,6 +499,9 @@ impl JitInner {
             let arity = func.arity as usize;
             let mut spec_sig = self.module.make_signature();
             spec_sig.params.push(AbiParam::new(ptr_ty));
+            if spec_wants_closure_arg {
+                spec_sig.params.push(AbiParam::new(ptr_ty));
+            }
             for _ in 0..arity {
                 spec_sig.params.push(AbiParam::new(types::I64));
             }
@@ -600,6 +610,19 @@ impl JitInner {
                 // SetLocal / Pop to actually use the virtualized path.
                 let mut int_locals: HashMap<u16, Variable> = HashMap::new();
                 let mut live_int_slots: HashSet<u16> = HashSet::new();
+                // B2.2: closure pointer Variable for the closure-aware
+                // specialized entry. Some only when this is the
+                // IntSpecialized job AND `spec_wants_closure_arg` was set
+                // by the analyzer. The IntSpecialized prologue def_var's
+                // block_params[1] (the *const ObjClosure register arg)
+                // here; the OpCode::GetUpvalue arm later use_var's it to
+                // read the kind/value caches without walking the JitFrame.
+                let closure_arg_var: Option<Variable> =
+                    if matches!(kind, EntryKind::IntSpecialized) && spec_wants_closure_arg {
+                        Some(builder.declare_var(ptr_ty))
+                    } else {
+                        None
+                    };
                 // Compile-time virt stack. Each slot is either a pending
                 // Cranelift SSA value (Int / Float) or a zero-payload
                 // const (None / True / False), staged above the
@@ -726,11 +749,26 @@ impl JitInner {
                         let flags = MemFlags::trusted();
                         let arity = func.arity as usize;
 
+                        // B2.2: when the closure-aware specialized signature
+                        // is in use, block_params layout is
+                        // `[vm, closure_ptr, arg1, ..., argN]`. Otherwise
+                        // it's `[vm, arg1, ..., argN]`. The closure ptr is
+                        // stashed in `closure_arg_var` so the inline
+                        // GetUpvalue path can read upvalue caches through
+                        // it without a JitFrame walk.
+                        let arg_block_param_offset =
+                            if spec_wants_closure_arg { 2 } else { 1 };
+                        if let Some(var) = closure_arg_var {
+                            let closure_ptr_val = builder.block_params(entry_block)[1];
+                            builder.def_var(var, closure_ptr_val);
+                        }
+
                         // Write each i64 param to its backing slot and
                         // def_var the mirror. Stack position of slot `i`
                         // is `slot_offset + i`.
                         for slot in 1..=arity as u16 {
-                            let arg_val = builder.block_params(entry_block)[slot as usize];
+                            let arg_val = builder.block_params(entry_block)
+                                [arg_block_param_offset + (slot as usize - 1)];
                             emit_store_stack_slot_integer(
                                 &mut builder,
                                 vm_val,
@@ -1968,19 +2006,30 @@ impl JitInner {
                             // are wide pointers `(data: *const T, len:
                             // usize)`; we read just the data pointer at
                             // struct-relative offset.
+                            //
+                            // B2.2 closure-aware specialized entry: when the
+                            // thunk received the closure pointer as a
+                            // register arg, read `closure_arg_var` directly
+                            // — saves a load from the JitFrame plus the
+                            // emit_load_top_jit_frame_ptr arithmetic.
                             use cranelift_codegen::ir::MemFlags;
                             use cranelift_codegen::ir::condcodes::IntCC;
                             let idx = read_u16(code, ip + 1);
                             let idx_val = builder.ins().iconst(types::I32, idx as i64);
                             let flags = MemFlags::trusted();
 
-                            let frame_ptr = emit_load_top_jit_frame_ptr(&mut builder, vm_val);
-                            let closure_ptr = builder.ins().load(
-                                ptr_ty,
-                                flags,
-                                frame_ptr,
-                                JitFrame::OFFSET_CLOSURE_RAW,
-                            );
+                            let closure_ptr = if let Some(var) = closure_arg_var {
+                                builder.use_var(var)
+                            } else {
+                                let frame_ptr =
+                                    emit_load_top_jit_frame_ptr(&mut builder, vm_val);
+                                builder.ins().load(
+                                    ptr_ty,
+                                    flags,
+                                    frame_ptr,
+                                    JitFrame::OFFSET_CLOSURE_RAW,
+                                )
+                            };
                             // Pinned by `obj_closure_upvalue_caches_layout`
                             // test: the kinds/values fields sit at known
                             // offsets, each a `Box<[T]>` whose first usize
@@ -3402,15 +3451,17 @@ impl JitInner {
 
         let (specialized, specialized_arity, specialized_kind) = if let Some(sid) = spec_thunk_id {
             let raw = self.module.get_finalized_function(sid);
-            // Commit 4: specialized body is now a native int body
-            // — runs the function's opcodes with i64-resident args
-            // and returns payload through the out-param. No
-            // trampoline indirection, no box/unbox round trip.
-            (
-                Some(raw as SpecializedThunkRaw),
-                func.arity,
-                Some(SpecializedEntryKind::NativeIntBody),
-            )
+            // B2.2: pick the closure-aware variant when the analyzer
+            // saw a `GetUpvalue` (and the function was otherwise
+            // eligible). The caller IC routing in OpCode::Call
+            // gates on this kind to dispatch with the closure
+            // pointer in the second register arg.
+            let kind = if spec_wants_closure_arg {
+                SpecializedEntryKind::NativeIntBodyWithClosure
+            } else {
+                SpecializedEntryKind::NativeIntBody
+            };
+            (Some(raw as SpecializedThunkRaw), func.arity, Some(kind))
         } else {
             (None, 0, None)
         };
