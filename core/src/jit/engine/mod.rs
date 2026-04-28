@@ -2555,6 +2555,30 @@ impl JitInner {
                                 && arg_count as usize == func.arity as usize
                                 && virt_stack.top_n_are_int_ssa(arg_count as usize);
 
+                            // B2.2.f: snapshot virt_stack before A3
+                            // emission. A3's direct_call_block pops args
+                            // from virt_stack as Cranelift call_args, but
+                            // the runtime fallback path (RC mismatch)
+                            // never executes those pops — its flush
+                            // would otherwise see an empty virt_stack at
+                            // compile time and emit no IR to push the
+                            // args onto the VM stack. The existing IC
+                            // that emits next then reads garbage at the
+                            // arg positions. Restoring after A3
+                            // emission lets the existing IC's pre-flush
+                            // see the same virt_stack as if A3 hadn't
+                            // run, repairing the fallback path.
+                            //
+                            // Without this fix, fixing the slot_types
+                            // init-detection (which used to mask this
+                            // bug by keeping virt_stack empty at run's
+                            // call sites) would surface the latent bug.
+                            let virt_snap_pre_a3: Option<Vec<VirtSlot>> = if a3_eligible {
+                                Some(virt_stack.snapshot())
+                            } else {
+                                None
+                            };
+
                             let a3_post_call_block: Option<Block> = if a3_eligible {
                                 use cranelift_codegen::ir::MemFlags;
                                 use cranelift_codegen::ir::condcodes::IntCC;
@@ -2785,6 +2809,20 @@ impl JitInner {
                                 // Fallback block — will be switched-to below
                                 // so the existing IC code emits into it.
                                 builder.switch_to_block(fallback_block);
+                                // B2.2.f: restore virt_stack to the
+                                // pre-A3 snapshot. direct_call_block
+                                // popped at compile time; the runtime
+                                // path through fallback_block doesn't
+                                // execute those pops, so the args still
+                                // need to be flushed onto the VM stack
+                                // for the existing IC. Without the
+                                // restore, virt_stack is empty here and
+                                // the flush is a no-op — leaving the
+                                // existing IC's `stack[stack_len -
+                                // arg_count - 1]` reading garbage.
+                                if let Some(snap) = virt_snap_pre_a3.clone() {
+                                    virt_stack.restore(snap);
+                                }
                                 // Flush expr_stack so the existing IC code
                                 // sees args boxed on the VM stack. This
                                 // matches what the pre-match flush WOULD

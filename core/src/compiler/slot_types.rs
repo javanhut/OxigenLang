@@ -436,13 +436,6 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                 if new_pos < num_slots {
                     let ty = next_state.stack.last().copied().unwrap_or(SlotType::Bottom);
                     next_state.write_slot(new_pos, ty);
-                    // B2.1a metadata: record the earliest IP at which
-                    // this slot appears to be initialized. Ordering by
-                    // IP value isn't dominator-correct in general, but
-                    // for Oxigen's locals (declared/initialized before
-                    // use on every reaching path) it matches the
-                    // declaration site. The certifier below verifies
-                    // use-after-init.
                     let slot = new_pos as u16;
                     let prev = first_init_ip.get(&slot).copied();
                     if prev.map_or(true, |p| cursor < p) {
@@ -854,7 +847,20 @@ fn compute_specialized_entry_eligibility(
     if !has_return {
         return (SpecEligibilityOutcome::RejectedNoReturn, Vec::new(), false);
     }
-    if !has_call {
+    // B2.2.f: relax `RejectedNoCall` for closures with `GetUpvalue`.
+    // The original rule's rationale was that a function with no Call
+    // can never self-recurse (A3 has no work) and the IC has no other
+    // way to dispatch through a specialized entry — so emitting a spec
+    // body was pure compile-time overhead. With the closure-aware Call
+    // IC dispatch landed in the previous commit, no-Call closures CAN
+    // be invoked through a specialized entry: their caller's IC reads
+    // `closure.specialized_kind == NATIVE_INT_BODY_WITH_CLOSURE` and
+    // dispatches with the closure pointer in a register. So accept
+    // them here when at least one `GetUpvalue` is present (any closure
+    // body that does upvalue work — the only payoff case for the new
+    // ABI). Functions that also lack `GetUpvalue` are still rejected
+    // — they have no way to be reached by either A3 or CA.
+    if !has_call && !has_get_upvalue {
         return (SpecEligibilityOutcome::RejectedNoCall, Vec::new(), false);
     }
 
@@ -2692,6 +2698,53 @@ mod tests {
         assert!(matches!(
             r.specialized_entry_outcome,
             SpecEligibilityOutcome::RejectedHasUpvalueOp
+        ));
+        assert!(!r.wants_closure_arg);
+    }
+
+    #[test]
+    fn specialized_eligible_closure_no_call_with_upvalue() {
+        // Body: GetUpvalue 0; GetLocal 1; Add; Return. No Call op —
+        // exactly the bench_closure inner closure shape. Pre-B2.2.f
+        // the `!has_call` rule rejected this as RejectedNoCall, killing
+        // the closure-aware spec entry. After the relax, the rule
+        // accepts no-Call bodies that have at least one GetUpvalue,
+        // because the closure-aware Call IC dispatch can now reach
+        // them via the caller's IC.
+        let mut f = make_fn("inner_closure", 1, vec![], vec![]);
+        f.params[0].type_ann = Some("int".to_string());
+        f.chunk.code = vec![
+            OpCode::GetUpvalue as u8, 0, 0,  // push upvalue 0 (x)
+            OpCode::GetLocal as u8, 0, 1,    // push y (param)
+            OpCode::Add as u8,
+            OpCode::Return as u8,
+        ];
+        f.chunk.constants = vec![];
+        let r = analyze(&f);
+        assert!(r.specialized_entry_eligible);
+        assert!(r.wants_closure_arg);
+        assert_eq!(r.specialized_param_slots, vec![1]);
+    }
+
+    #[test]
+    fn specialized_ineligible_no_call_no_upvalue() {
+        // Body: GetLocal 1; Return. No Call AND no GetUpvalue — there
+        // is no way to reach a specialized entry for this function (A3
+        // needs self-recursion, CA needs closure-aware spec callee
+        // identity). Still reject as RejectedNoCall to avoid emitting
+        // a useless second entry point.
+        let mut f = make_fn("identity", 1, vec![], vec![]);
+        f.params[0].type_ann = Some("int".to_string());
+        f.chunk.code = vec![
+            OpCode::GetLocal as u8, 0, 1,
+            OpCode::Return as u8,
+        ];
+        f.chunk.constants = vec![];
+        let r = analyze(&f);
+        assert!(!r.specialized_entry_eligible);
+        assert!(matches!(
+            r.specialized_entry_outcome,
+            SpecEligibilityOutcome::RejectedNoCall
         ));
         assert!(!r.wants_closure_arg);
     }
