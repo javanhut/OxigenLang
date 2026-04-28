@@ -343,41 +343,137 @@ impl JitCounters {
 
     pub(super) fn dump(&self) {
         eprintln!("[jit stats]");
-        eprintln!("  specialized_entry_compiled:        {}", self.specialized_entry_compiled.get());
-        eprintln!("  specialized_entry_called:          {}", self.specialized_entry_called.get());
-        eprintln!("  specialized_call_ic_hit:           {}", self.specialized_call_ic_hit.get());
-        eprintln!("  specialized_call_ic_miss:          {}", self.specialized_call_ic_miss.get());
-        eprintln!("  specialized_call_no_entry:         {}", self.specialized_call_no_entry.get());
-        eprintln!("  specialized_call_arity_mismatch:   {}", self.specialized_call_arity_mismatch.get());
-        eprintln!("  specialized_call_bailout:          {}", self.specialized_call_bailout.get());
-        eprintln!("  self_recursion_direct_call:        {}", self.self_recursion_direct_call.get());
-        eprintln!("  virt_divmod_fast:                  {}", self.virt_divmod_fast.get());
-        eprintln!("  virt_divmod_slow_zero:             {}", self.virt_divmod_slow_zero.get());
-        eprintln!("  virt_divmod_slow_overflow:         {}", self.virt_divmod_slow_overflow.get());
-        eprintln!("  virt_div_pow2_lowered:             {}", self.virt_div_pow2_lowered.get());
-        eprintln!("  virt_branch_eq_hit:                {}", self.virt_branch_eq_hit.get());
-        eprintln!("  virt_branch_parity_hit:            {}", self.virt_branch_parity_hit.get());
-        eprintln!("  get_upvalue_calls:                 {}", self.get_upvalue_calls.get());
-        eprintln!("  get_upvalue_closed_integer_hit:    {}", self.get_upvalue_closed_integer_hit.get());
-        eprintln!("  get_upvalue_fallback:              {}", self.get_upvalue_fallback.get());
-        eprintln!("  set_upvalue_calls:                 {}", self.set_upvalue_calls.get());
-        eprintln!("  jit_op_return_calls:               {}", self.jit_op_return_calls.get());
-        eprintln!("  call_ic_hit:                       {}", self.call_ic_hit.get());
-        eprintln!("  call_ic_miss:                      {}", self.call_ic_miss.get());
-        eprintln!("  get_upvalue_inline_hit:            {}", self.get_upvalue_inline_hit.get());
-        eprintln!("  ic_callee_has_spec_entry:          {}", self.ic_callee_has_spec_entry.get());
+        eprintln!(
+            "  specialized_entry_compiled:        {}",
+            self.specialized_entry_compiled.get()
+        );
+        eprintln!(
+            "  specialized_entry_called:          {}",
+            self.specialized_entry_called.get()
+        );
+        eprintln!(
+            "  specialized_call_ic_hit:           {}",
+            self.specialized_call_ic_hit.get()
+        );
+        eprintln!(
+            "  specialized_call_ic_miss:          {}",
+            self.specialized_call_ic_miss.get()
+        );
+        eprintln!(
+            "  specialized_call_no_entry:         {}",
+            self.specialized_call_no_entry.get()
+        );
+        eprintln!(
+            "  specialized_call_arity_mismatch:   {}",
+            self.specialized_call_arity_mismatch.get()
+        );
+        eprintln!(
+            "  specialized_call_bailout:          {}",
+            self.specialized_call_bailout.get()
+        );
+        eprintln!(
+            "  self_recursion_direct_call:        {}",
+            self.self_recursion_direct_call.get()
+        );
+        eprintln!(
+            "  virt_divmod_fast:                  {}",
+            self.virt_divmod_fast.get()
+        );
+        eprintln!(
+            "  virt_divmod_slow_zero:             {}",
+            self.virt_divmod_slow_zero.get()
+        );
+        eprintln!(
+            "  virt_divmod_slow_overflow:         {}",
+            self.virt_divmod_slow_overflow.get()
+        );
+        eprintln!(
+            "  virt_div_pow2_lowered:             {}",
+            self.virt_div_pow2_lowered.get()
+        );
+        eprintln!(
+            "  virt_branch_eq_hit:                {}",
+            self.virt_branch_eq_hit.get()
+        );
+        eprintln!(
+            "  virt_branch_parity_hit:            {}",
+            self.virt_branch_parity_hit.get()
+        );
+        eprintln!(
+            "  get_upvalue_calls:                 {}",
+            self.get_upvalue_calls.get()
+        );
+        eprintln!(
+            "  get_upvalue_closed_integer_hit:    {}",
+            self.get_upvalue_closed_integer_hit.get()
+        );
+        eprintln!(
+            "  get_upvalue_fallback:              {}",
+            self.get_upvalue_fallback.get()
+        );
+        eprintln!(
+            "  set_upvalue_calls:                 {}",
+            self.set_upvalue_calls.get()
+        );
+        eprintln!(
+            "  jit_op_return_calls:               {}",
+            self.jit_op_return_calls.get()
+        );
+        eprintln!(
+            "  call_ic_hit:                       {}",
+            self.call_ic_hit.get()
+        );
+        eprintln!(
+            "  call_ic_miss:                      {}",
+            self.call_ic_miss.get()
+        );
+        eprintln!(
+            "  get_upvalue_inline_hit:            {}",
+            self.get_upvalue_inline_hit.get()
+        );
+        eprintln!(
+            "  ic_callee_has_spec_entry:          {}",
+            self.ic_callee_has_spec_entry.get()
+        );
 
         // Step 0 spec-entry eligibility outcome breakdown.
         eprintln!("[jit stats] spec-entry eligibility");
-        eprintln!("  spec_entry_eligible:                       {}", self.spec_entry_eligible.get());
-        eprintln!("  spec_entry_rejected_zero_arity:            {}", self.spec_entry_rejected_zero_arity.get());
-        eprintln!("  spec_entry_rejected_param_not_int:         {}", self.spec_entry_rejected_param_not_int.get());
-        eprintln!("  spec_entry_rejected_param_captured:        {}", self.spec_entry_rejected_param_captured.get());
-        eprintln!("  spec_entry_rejected_has_closure_op:        {}", self.spec_entry_rejected_has_closure_op.get());
-        eprintln!("  spec_entry_rejected_has_upvalue_op:        {}", self.spec_entry_rejected_has_upvalue_op.get());
-        eprintln!("  spec_entry_rejected_no_return:             {}", self.spec_entry_rejected_no_return.get());
-        eprintln!("  spec_entry_rejected_no_call:               {}", self.spec_entry_rejected_no_call.get());
-        eprintln!("  spec_entry_rejected_return_unreachable:    {}", self.spec_entry_rejected_return_unreachable.get());
+        eprintln!(
+            "  spec_entry_eligible:                       {}",
+            self.spec_entry_eligible.get()
+        );
+        eprintln!(
+            "  spec_entry_rejected_zero_arity:            {}",
+            self.spec_entry_rejected_zero_arity.get()
+        );
+        eprintln!(
+            "  spec_entry_rejected_param_not_int:         {}",
+            self.spec_entry_rejected_param_not_int.get()
+        );
+        eprintln!(
+            "  spec_entry_rejected_param_captured:        {}",
+            self.spec_entry_rejected_param_captured.get()
+        );
+        eprintln!(
+            "  spec_entry_rejected_has_closure_op:        {}",
+            self.spec_entry_rejected_has_closure_op.get()
+        );
+        eprintln!(
+            "  spec_entry_rejected_has_upvalue_op:        {}",
+            self.spec_entry_rejected_has_upvalue_op.get()
+        );
+        eprintln!(
+            "  spec_entry_rejected_no_return:             {}",
+            self.spec_entry_rejected_no_return.get()
+        );
+        eprintln!(
+            "  spec_entry_rejected_no_call:               {}",
+            self.spec_entry_rejected_no_call.get()
+        );
+        eprintln!(
+            "  spec_entry_rejected_return_unreachable:    {}",
+            self.spec_entry_rejected_return_unreachable.get()
+        );
 
         // Step 0 helper-call counts. Print only non-zero entries to
         // keep the dump signal-dense; widths are aligned with the
@@ -442,8 +538,7 @@ pub(super) mod counter_offsets {
         offset_of!(JitCounters, virt_divmod_slow_overflow) as isize;
     pub const VIRT_DIV_POW2_LOWERED: isize =
         offset_of!(JitCounters, virt_div_pow2_lowered) as isize;
-    pub const VIRT_BRANCH_EQ_HIT: isize =
-        offset_of!(JitCounters, virt_branch_eq_hit) as isize;
+    pub const VIRT_BRANCH_EQ_HIT: isize = offset_of!(JitCounters, virt_branch_eq_hit) as isize;
     pub const VIRT_BRANCH_PARITY_HIT: isize =
         offset_of!(JitCounters, virt_branch_parity_hit) as isize;
     pub const CALL_IC_HIT: isize = offset_of!(JitCounters, call_ic_hit) as isize;

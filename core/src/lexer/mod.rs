@@ -464,23 +464,11 @@ impl Lexer {
             let mut literal = std::string::String::new();
             while self.ch != delimiter && self.ch != '\0' {
                 if self.ch == '\\' {
-                    self.read_char(); // consume '\'
-                    match self.ch {
-                        'n' => literal.push('\n'),
-                        't' => literal.push('\t'),
-                        'r' => literal.push('\r'),
-                        '\\' => literal.push('\\'),
-                        '0' => literal.push('\0'),
-                        c if c == delimiter => literal.push(c),
-                        other => {
-                            literal.push('\\');
-                            literal.push(other);
-                        }
-                    }
+                    self.push_escape_sequence(&mut literal, delimiter);
                 } else {
                     literal.push(self.ch);
+                    self.read_char();
                 }
-                self.read_char();
             }
             self.read_char(); // closing quote
             return Token {
@@ -574,20 +562,7 @@ impl Lexer {
 
                 self.read_char(); // skip closing '}'
             } else if self.ch == '\\' {
-                self.read_char(); // consume '\'
-                match self.ch {
-                    'n' => literal_buf.push('\n'),
-                    't' => literal_buf.push('\t'),
-                    'r' => literal_buf.push('\r'),
-                    '\\' => literal_buf.push('\\'),
-                    '0' => literal_buf.push('\0'),
-                    c if c == delimiter => literal_buf.push(c),
-                    other => {
-                        literal_buf.push('\\');
-                        literal_buf.push(other);
-                    }
-                }
-                self.read_char();
+                self.push_escape_sequence(&mut literal_buf, delimiter);
             } else {
                 literal_buf.push(self.ch);
                 self.read_char();
@@ -618,6 +593,60 @@ impl Lexer {
             literal: "".into(),
             span,
         }
+    }
+
+    fn push_escape_sequence(&mut self, literal: &mut std::string::String, delimiter: char) {
+        self.read_char(); // consume '\'
+        match self.ch {
+            'n' => {
+                literal.push('\n');
+                self.read_char();
+            }
+            't' => {
+                literal.push('\t');
+                self.read_char();
+            }
+            'r' => {
+                literal.push('\r');
+                self.read_char();
+            }
+            'e' => {
+                literal.push('\x1b');
+                self.read_char();
+            }
+            'x' if self.peek_hex_byte().is_some() => {
+                let value = self.peek_hex_byte().unwrap();
+                literal.push(value as char);
+                self.read_char(); // consume 'x'
+                self.read_char(); // consume first hex digit
+                self.read_char(); // consume second hex digit
+            }
+            '\\' => {
+                literal.push('\\');
+                self.read_char();
+            }
+            '0' => {
+                literal.push('\0');
+                self.read_char();
+            }
+            c if c == delimiter => {
+                literal.push(c);
+                self.read_char();
+            }
+            other => {
+                literal.push('\\');
+                literal.push(other);
+                self.read_char();
+            }
+        }
+    }
+
+    fn peek_hex_byte(&self) -> Option<u8> {
+        let first = *self.input.get(self.position + 1)?;
+        let second = *self.input.get(self.position + 2)?;
+        let high = first.to_digit(16)?;
+        let low = second.to_digit(16)?;
+        Some(((high << 4) | low) as u8)
     }
 
     /// Look ahead to check if a string contains `{` before its closing delimiter

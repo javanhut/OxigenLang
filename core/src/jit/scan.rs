@@ -138,10 +138,10 @@ fn instr_fixed_len(op: OpCode) -> usize {
         // u16 operand (3 bytes)
         OpCode::Constant
         | OpCode::GetLocal
-            | OpCode::SetLocal
-            | OpCode::BuildArray
-            | OpCode::TypeWrap
-            | OpCode::GetGlobal
+        | OpCode::SetLocal
+        | OpCode::BuildArray
+        | OpCode::TypeWrap
+        | OpCode::GetGlobal
         | OpCode::SetGlobal
         | OpCode::DefineGlobal
         | OpCode::GetUpvalue
@@ -255,8 +255,8 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
                 info.touches_heap_values = true;
             }
             OpCode::Constant => {
-                let idx = read_u16(code, ip + 1)
-                    .ok_or(ScanError::InvalidBytecode { offset: ip })?;
+                let idx =
+                    read_u16(code, ip + 1).ok_or(ScanError::InvalidBytecode { offset: ip })?;
                 if let Some(v) = chunk.constants.get(idx as usize) {
                     if !matches!(
                         v,

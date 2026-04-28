@@ -5,8 +5,8 @@ use crate::ast::{
     TypedParam, VariantKind,
 };
 use crate::lexer::Lexer;
-use crate::object::{EnumPayload, EnumVariantDef, EnumVariantKind, Object};
 use crate::object::environment::{Environment, PatternRegistry};
+use crate::object::{EnumPayload, EnumVariantDef, EnumVariantKind, Object};
 use crate::parser::Parser;
 use crate::token::Span;
 use builtins::get_builtins;
@@ -1737,8 +1737,7 @@ impl Evaluator {
                                         }
                                         let mut resolved: Vec<Rc<Object>> = Vec::new();
                                         for arg in args {
-                                            let val =
-                                                self.eval_expression(arg, Rc::clone(&env));
+                                            let val = self.eval_expression(arg, Rc::clone(&env));
                                             if val.is_error() {
                                                 return val;
                                             }
@@ -2232,10 +2231,7 @@ impl Evaluator {
                     None => {
                         return self.runtime_error(
                             token.span,
-                            &format!(
-                                "enum {} has no variant '{}'",
-                                enum_name, variant_name
-                            ),
+                            &format!("enum {} has no variant '{}'", enum_name, variant_name),
                             None,
                         );
                     }

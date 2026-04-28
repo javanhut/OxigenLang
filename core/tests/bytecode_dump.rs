@@ -64,11 +64,26 @@ fn dump_chunk(name: &str, chunk: &Chunk) {
         let prefix = format!("  {:>4} L{:<3}", ip, line);
         let len = match op {
             // 1-byte
-            OpCode::None | OpCode::True | OpCode::False | OpCode::Pop | OpCode::Dup
-            | OpCode::Add | OpCode::Subtract | OpCode::Multiply | OpCode::Divide
-            | OpCode::Modulo | OpCode::Equal | OpCode::NotEqual | OpCode::Less
-            | OpCode::LessEqual | OpCode::Greater | OpCode::GreaterEqual
-            | OpCode::Not | OpCode::Negate | OpCode::Index | OpCode::CloseUpvalue
+            OpCode::None
+            | OpCode::True
+            | OpCode::False
+            | OpCode::Pop
+            | OpCode::Dup
+            | OpCode::Add
+            | OpCode::Subtract
+            | OpCode::Multiply
+            | OpCode::Divide
+            | OpCode::Modulo
+            | OpCode::Equal
+            | OpCode::NotEqual
+            | OpCode::Less
+            | OpCode::LessEqual
+            | OpCode::Greater
+            | OpCode::GreaterEqual
+            | OpCode::Not
+            | OpCode::Negate
+            | OpCode::Index
+            | OpCode::CloseUpvalue
             | OpCode::Return => {
                 println!("{} {:?}", prefix, op);
                 1
@@ -80,19 +95,40 @@ fn dump_chunk(name: &str, chunk: &Chunk) {
                 2
             }
             // u16
-            OpCode::Constant | OpCode::BuildArray | OpCode::TypeWrap | OpCode::GetLocal
-            | OpCode::SetLocal | OpCode::GetGlobal | OpCode::SetGlobal | OpCode::DefineGlobal
-            | OpCode::GetUpvalue | OpCode::SetUpvalue | OpCode::Jump | OpCode::JumpIfFalse
-            | OpCode::JumpIfTrue | OpCode::Loop | OpCode::PopJumpIfFalse | OpCode::StructDef
-            | OpCode::GetField | OpCode::SetField => {
+            OpCode::Constant
+            | OpCode::BuildArray
+            | OpCode::TypeWrap
+            | OpCode::GetLocal
+            | OpCode::SetLocal
+            | OpCode::GetGlobal
+            | OpCode::SetGlobal
+            | OpCode::DefineGlobal
+            | OpCode::GetUpvalue
+            | OpCode::SetUpvalue
+            | OpCode::Jump
+            | OpCode::JumpIfFalse
+            | OpCode::JumpIfTrue
+            | OpCode::Loop
+            | OpCode::PopJumpIfFalse
+            | OpCode::StructDef
+            | OpCode::GetField
+            | OpCode::SetField => {
                 let v = r16(code, ip + 1);
                 let extra = match op {
-                    OpCode::Constant | OpCode::GetGlobal | OpCode::SetGlobal
-                    | OpCode::DefineGlobal | OpCode::GetField | OpCode::SetField
-                    | OpCode::TypeWrap => {
-                        chunk.constants.get(v as usize).map(|c| format!(" → {}", fmt_const(c))).unwrap_or_default()
-                    }
-                    OpCode::Jump | OpCode::JumpIfFalse | OpCode::JumpIfTrue
+                    OpCode::Constant
+                    | OpCode::GetGlobal
+                    | OpCode::SetGlobal
+                    | OpCode::DefineGlobal
+                    | OpCode::GetField
+                    | OpCode::SetField
+                    | OpCode::TypeWrap => chunk
+                        .constants
+                        .get(v as usize)
+                        .map(|c| format!(" → {}", fmt_const(c)))
+                        .unwrap_or_default(),
+                    OpCode::Jump
+                    | OpCode::JumpIfFalse
+                    | OpCode::JumpIfTrue
                     | OpCode::PopJumpIfFalse => format!(" → ip={}", ip + 3 + v as usize),
                     OpCode::Loop => format!(" → ip={}", (ip + 3).saturating_sub(v as usize)),
                     _ => String::new(),
@@ -112,7 +148,10 @@ fn dump_chunk(name: &str, chunk: &Chunk) {
                 let v = r16(code, ip + 1);
                 let m = code[ip + 3];
                 let t = r16(code, ip + 4);
-                println!("{} {:?} name_idx={} mut={} type_idx={}", prefix, op, v, m, t);
+                println!(
+                    "{} {:?} name_idx={} mut={} type_idx={}",
+                    prefix, op, v, m, t
+                );
                 6
             }
             OpCode::Closure => {

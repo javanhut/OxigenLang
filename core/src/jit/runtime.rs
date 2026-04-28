@@ -155,7 +155,8 @@ pub unsafe extern "C" fn jit_type_wrap(vm: *mut VM, type_idx: u32) -> u32 {
     let value = vm.pop();
 
     let Value::String(target) = type_name else {
-        vm.jit.stash_error(vm.runtime_error("invalid type name in TypeWrap"));
+        vm.jit
+            .stash_error(vm.runtime_error("invalid type name in TypeWrap"));
         return 1;
     };
 
@@ -273,9 +274,9 @@ pub unsafe extern "C" fn jit_struct_field_add_const(
                     let slot = inst.fields.ptr.add(idx);
                     if let Value::Integer(n) = &*slot {
                         let new = n.wrapping_add(addend);
-                        let payload_ptr =
-                            (slot as *mut u8).add(crate::vm::value::VALUE_INT_PAYLOAD_OFFSET)
-                                as *mut i64;
+                        let payload_ptr = (slot as *mut u8)
+                            .add(crate::vm::value::VALUE_INT_PAYLOAD_OFFSET)
+                            as *mut i64;
                         *payload_ptr = new;
                         populate_field_cache(cache_ptr, inst, idx);
                         return 0;
@@ -363,9 +364,9 @@ pub unsafe extern "C" fn jit_struct_field_add_local(
                     let slot = inst.fields.ptr.add(idx);
                     if let Value::Integer(n) = &*slot {
                         let new = n.wrapping_add(*rhs);
-                        let payload_ptr =
-                            (slot as *mut u8).add(crate::vm::value::VALUE_INT_PAYLOAD_OFFSET)
-                                as *mut i64;
+                        let payload_ptr = (slot as *mut u8)
+                            .add(crate::vm::value::VALUE_INT_PAYLOAD_OFFSET)
+                            as *mut i64;
                         *payload_ptr = new;
                         populate_field_cache(cache_ptr, inst, idx);
                         return 0;
@@ -1310,8 +1311,7 @@ pub unsafe extern "C" fn jit_op_return(vm: *mut VM) {
     vm.sync_stack_from_view();
     if let Some(c) = vm.jit.counters_ptr_opt() {
         let c = unsafe { &*c };
-        c.jit_op_return_calls
-            .set(c.jit_op_return_calls.get() + 1);
+        c.jit_op_return_calls.set(c.jit_op_return_calls.get() + 1);
     }
     let result = vm.pop();
     let frame = vm

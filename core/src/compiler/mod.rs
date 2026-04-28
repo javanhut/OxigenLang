@@ -3,7 +3,7 @@ pub mod slot_types;
 
 use crate::ast::*;
 use crate::vm::value::{
-    rc_str, Function, LocalInfo, ObjEnumDef, ParamInfo, Value, VmEnumVariantDef, VmEnumVariantKind,
+    Function, LocalInfo, ObjEnumDef, ParamInfo, Value, VmEnumVariantDef, VmEnumVariantKind, rc_str,
 };
 use opcode::{Chunk, OpCode};
 
@@ -991,8 +991,8 @@ impl Compiler {
                             params.iter().map(|p| p.value.clone()).collect();
                         self.compile_pattern_function(&param_names, condition, line);
                         let pattern_global = format!("__pattern_{}", arm.pattern_name);
-                        let nc =
-                            self.make_constant(Value::String(rc_str(pattern_global.as_str())), line);
+                        let nc = self
+                            .make_constant(Value::String(rc_str(pattern_global.as_str())), line);
                         self.emit_op_u16(OpCode::DefineGlobal, nc, line);
                     }
 
@@ -1942,6 +1942,7 @@ impl Compiler {
             Value::Closure(std::rc::Rc::new(crate::vm::value::ObjClosure {
                 function: std::rc::Rc::new(function),
                 upvalues: Vec::new(), // placeholder, VM fills real upvalues
+                module_globals: std::cell::RefCell::new(None),
                 call_count: std::cell::Cell::new(0),
                 loop_count: std::cell::Cell::new(0),
                 jit_state: std::cell::Cell::new(0),

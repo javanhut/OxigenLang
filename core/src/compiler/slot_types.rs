@@ -426,11 +426,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
             if matches!(op, OpCode::Constant) && depth_after == depth_before + 1 {
                 let new_pos = depth_after - 1;
                 if new_pos < num_slots {
-                    let ty = next_state
-                        .stack
-                        .last()
-                        .copied()
-                        .unwrap_or(SlotType::Bottom);
+                    let ty = next_state.stack.last().copied().unwrap_or(SlotType::Bottom);
                     next_state.write_slot(new_pos, ty);
                     // B2.1a metadata: record the earliest IP at which
                     // this slot appears to be initialized. Ordering by
@@ -502,11 +498,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                         .unwrap_or(SlotType::Bottom)
                         != SlotType::Bottom;
                     if already_init {
-                        let ty = next_state
-                            .stack
-                            .last()
-                            .copied()
-                            .unwrap_or(SlotType::Bottom);
+                        let ty = next_state.stack.last().copied().unwrap_or(SlotType::Bottom);
                         next_state.write_slot(new_pos, ty);
                     }
                 }
@@ -588,11 +580,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
     let mut result = vec![SlotType::Bottom; num_slots];
     for state in states.values() {
         for i in 0..num_slots {
-            let ty = state
-                .slot_types
-                .get(i)
-                .copied()
-                .unwrap_or(SlotType::Bottom);
+            let ty = state.slot_types.get(i).copied().unwrap_or(SlotType::Bottom);
             result[i] = result[i].join(ty);
         }
     }
@@ -653,15 +641,16 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         ))
     };
     let eligibility_states = lifted_states.as_ref().unwrap_or(&states);
-    let (specialized_entry_outcome, specialized_param_slots) = compute_specialized_entry_eligibility(
-        code,
-        chunk,
-        func.arity as u16,
-        &result,
-        &captured_slots,
-        &int_mirror_param_slots,
-        eligibility_states,
-    );
+    let (specialized_entry_outcome, specialized_param_slots) =
+        compute_specialized_entry_eligibility(
+            code,
+            chunk,
+            func.arity as u16,
+            &result,
+            &captured_slots,
+            &int_mirror_param_slots,
+            eligibility_states,
+        );
     let specialized_entry_eligible = specialized_entry_outcome.is_eligible();
 
     FunctionSlotTypes {
@@ -783,7 +772,10 @@ fn compute_specialized_entry_eligibility(
     // Every param slot must be Int-stable AND not captured.
     for slot in 1..=arity {
         let is_int_typed = matches!(
-            slot_types.get(slot as usize).copied().unwrap_or(SlotType::Value),
+            slot_types
+                .get(slot as usize)
+                .copied()
+                .unwrap_or(SlotType::Value),
             SlotType::Int64
         );
         let is_int_demand_mirror = int_mirror_param_slots.contains(&slot);
@@ -854,13 +846,19 @@ fn compute_specialized_entry_eligibility(
         let state = match states.get(&rip) {
             Some(s) => s,
             None => {
-                return (SpecEligibilityOutcome::RejectedReturnUnreachable, Vec::new());
+                return (
+                    SpecEligibilityOutcome::RejectedReturnUnreachable,
+                    Vec::new(),
+                );
             }
         };
         let top_ty = state.stack.last().copied().unwrap_or(SlotType::Bottom);
         // Bottom means unreachable → still reject (can't trust).
         if matches!(top_ty, SlotType::Bottom) {
-            return (SpecEligibilityOutcome::RejectedReturnUnreachable, Vec::new());
+            return (
+                SpecEligibilityOutcome::RejectedReturnUnreachable,
+                Vec::new(),
+            );
         }
         // Value and Int64 both ok: the trampoline's runtime tag check
         // takes care of correctness.
@@ -1040,10 +1038,10 @@ fn collect_condition_cleanup_pops(code: &[u8], chunk: &Chunk) -> HashSet<usize> 
                 let off = read_u16(code, ip + 1) as usize;
                 let fall_ip = ip + op_len;
                 let target_ip = ip + op_len + off;
-                let fall_is_pop = code.get(fall_ip).and_then(|&b| OpCode::from_byte(b))
-                    == Some(OpCode::Pop);
-                let target_is_pop = code.get(target_ip).and_then(|&b| OpCode::from_byte(b))
-                    == Some(OpCode::Pop);
+                let fall_is_pop =
+                    code.get(fall_ip).and_then(|&b| OpCode::from_byte(b)) == Some(OpCode::Pop);
+                let target_is_pop =
+                    code.get(target_ip).and_then(|&b| OpCode::from_byte(b)) == Some(OpCode::Pop);
                 if fall_is_pop && target_is_pop {
                     out.insert(fall_ip);
                     out.insert(target_ip);
@@ -1242,11 +1240,7 @@ fn transfer(
                     _ => SlotType::Value,
                 };
             }
-            let cur = next
-                .stack
-                .get(slot)
-                .copied()
-                .unwrap_or(SlotType::Value);
+            let cur = next.stack.get(slot).copied().unwrap_or(SlotType::Value);
             next.write_slot(slot, cur);
         }
 
@@ -1490,8 +1484,7 @@ fn transfer(
             let has_tag = flags & 1 != 0;
             let has_sub = flags & 2 != 0;
             let has_msg = flags & 4 != 0;
-            let pops =
-                has_tag as usize + has_sub as usize + has_msg as usize + 1; /* the expression */
+            let pops = has_tag as usize + has_sub as usize + has_msg as usize + 1; /* the expression */
             for _ in 0..pops {
                 next.stack.pop();
             }
@@ -1732,8 +1725,8 @@ pub fn certify(func: &Function, types: &FunctionSlotTypes) -> CertifyResult {
             let slot = read_u16(code, ip + 1);
             if types.is_virtualizable(slot) {
                 let after = ip + 3;
-                let next_is_pop = code.get(after).and_then(|&b| OpCode::from_byte(b))
-                    == Some(OpCode::Pop);
+                let next_is_pop =
+                    code.get(after).and_then(|&b| OpCode::from_byte(b)) == Some(OpCode::Pop);
                 if !next_is_pop {
                     return Err(format!(
                         "SetLocal on virtualizable slot {} at ip {} is not followed by Pop \
@@ -1832,8 +1825,12 @@ mod tests {
         );
         // slot 0 is the closure marker; we use slot 1 to stash a value.
         f.chunk.code = vec![
-            OpCode::Constant as u8, 0, 0,
-            OpCode::SetLocal as u8, 0, 1,
+            OpCode::Constant as u8,
+            0,
+            0,
+            OpCode::SetLocal as u8,
+            0,
+            1,
             OpCode::None as u8,
             OpCode::Return as u8,
         ];
@@ -1850,8 +1847,12 @@ mod tests {
             vec![Value::String(crate::vm::value::rc_str("hi"))],
         );
         f.chunk.code = vec![
-            OpCode::Constant as u8, 0, 0,
-            OpCode::SetLocal as u8, 0, 1,
+            OpCode::Constant as u8,
+            0,
+            0,
+            OpCode::SetLocal as u8,
+            0,
+            1,
             OpCode::None as u8,
             OpCode::Return as u8,
         ];
@@ -1862,17 +1863,18 @@ mod tests {
     #[test]
     fn int_plus_int_is_int() {
         // locals[1] = 3 + 5  → int + int → int
-        let mut f = make_fn(
-            "f",
-            0,
-            vec![],
-            vec![Value::Integer(3), Value::Integer(5)],
-        );
+        let mut f = make_fn("f", 0, vec![], vec![Value::Integer(3), Value::Integer(5)]);
         f.chunk.code = vec![
-            OpCode::Constant as u8, 0, 0,
-            OpCode::Constant as u8, 0, 1,
+            OpCode::Constant as u8,
+            0,
+            0,
+            OpCode::Constant as u8,
+            0,
+            1,
             OpCode::Add as u8,
-            OpCode::SetLocal as u8, 0, 1,
+            OpCode::SetLocal as u8,
+            0,
+            1,
             OpCode::None as u8,
             OpCode::Return as u8,
         ];
@@ -1892,10 +1894,16 @@ mod tests {
             ],
         );
         f.chunk.code = vec![
-            OpCode::Constant as u8, 0, 0,
-            OpCode::Constant as u8, 0, 1,
+            OpCode::Constant as u8,
+            0,
+            0,
+            OpCode::Constant as u8,
+            0,
+            1,
             OpCode::Add as u8,
-            OpCode::SetLocal as u8, 0, 1,
+            OpCode::SetLocal as u8,
+            0,
+            1,
             OpCode::None as u8,
             OpCode::Return as u8,
         ];
@@ -1907,10 +1915,7 @@ mod tests {
     fn typed_int_param_is_int_on_entry() {
         let mut f = make_fn("f", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
-        f.chunk.code = vec![
-            OpCode::GetLocal as u8, 0, 1,
-            OpCode::Return as u8,
-        ];
+        f.chunk.code = vec![OpCode::GetLocal as u8, 0, 1, OpCode::Return as u8];
         let r = analyze(&f);
         assert_eq!(r.get(1), SlotType::Int64);
     }
@@ -1920,10 +1925,16 @@ mod tests {
         // slot 1 set first to Int, then to Value → merge Value.
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(7)]);
         f.chunk.code = vec![
-            OpCode::Constant as u8, 0, 0,
-            OpCode::SetLocal as u8, 0, 1,
+            OpCode::Constant as u8,
+            0,
+            0,
+            OpCode::SetLocal as u8,
+            0,
+            1,
             OpCode::None as u8,
-            OpCode::SetLocal as u8, 0, 1,
+            OpCode::SetLocal as u8,
+            0,
+            1,
             OpCode::None as u8,
             OpCode::Return as u8,
         ];
@@ -1938,13 +1949,19 @@ mod tests {
         // slot 1 = 1; jump to end; at end slot 1 still int.
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(1)]);
         f.chunk.code = vec![
-            OpCode::Constant as u8, 0, 0,     // ip=0  push 1
-            OpCode::SetLocal as u8, 0, 1,     // ip=3  set slot 1
-            OpCode::Jump as u8, 0, 2,         // ip=6  jump +2 → ip=11
-            OpCode::None as u8,               // ip=9  (dead)
-            OpCode::None as u8,               // ip=10 (dead)
-            OpCode::None as u8,               // ip=11
-            OpCode::Return as u8,             // ip=12
+            OpCode::Constant as u8,
+            0,
+            0, // ip=0  push 1
+            OpCode::SetLocal as u8,
+            0,
+            1, // ip=3  set slot 1
+            OpCode::Jump as u8,
+            0,
+            2,                    // ip=6  jump +2 → ip=11
+            OpCode::None as u8,   // ip=9  (dead)
+            OpCode::None as u8,   // ip=10 (dead)
+            OpCode::None as u8,   // ip=11
+            OpCode::Return as u8, // ip=12
         ];
         let r = analyze(&f);
         assert_eq!(r.get(1), SlotType::Int64);
@@ -1956,33 +1973,62 @@ mod tests {
     fn loop_counter_stays_int() {
         // loop_sum(n): total := 0; i := 1; while i <= n: total += i*2; i += 1; return total
         // Slots: 0=closure, 1=n, 2=total, 3=i
-        let mut f = make_fn("loop_sum", 1, vec![], vec![Value::Integer(0), Value::Integer(1), Value::Integer(2)]);
+        let mut f = make_fn(
+            "loop_sum",
+            1,
+            vec![],
+            vec![Value::Integer(0), Value::Integer(1), Value::Integer(2)],
+        );
         f.params[0].type_ann = Some("int".to_string());
         // Hand-assembled bytecode. Offsets are approximate — this test
         // is about the fixed-point converging on Int64 for slots 2/3.
         f.chunk.code = vec![
             // total := 0
-            OpCode::Constant as u8, 0, 0,    // 0..=2 push 0
-            OpCode::SetLocal as u8, 0, 2,    // 3..=5 slot 2 := 0
+            OpCode::Constant as u8,
+            0,
+            0, // 0..=2 push 0
+            OpCode::SetLocal as u8,
+            0,
+            2, // 3..=5 slot 2 := 0
             // i := 1
-            OpCode::Constant as u8, 0, 1,    // 6..=8 push 1
-            OpCode::SetLocal as u8, 0, 3,    // 9..=11 slot 3 := 1
+            OpCode::Constant as u8,
+            0,
+            1, // 6..=8 push 1
+            OpCode::SetLocal as u8,
+            0,
+            3, // 9..=11 slot 3 := 1
             // loop_start: (ip=12)
             // total := total + i * 2
-            OpCode::GetLocal as u8, 0, 2,    // 12..=14 push total
-            OpCode::GetLocal as u8, 0, 3,    // 15..=17 push i
-            OpCode::Constant as u8, 0, 2,    // 18..=20 push 2
-            OpCode::Multiply as u8,          // 21 i*2
-            OpCode::Add as u8,               // 22 total+(i*2)
-            OpCode::SetLocal as u8, 0, 2,    // 23..=25 slot 2 := result
+            OpCode::GetLocal as u8,
+            0,
+            2, // 12..=14 push total
+            OpCode::GetLocal as u8,
+            0,
+            3, // 15..=17 push i
+            OpCode::Constant as u8,
+            0,
+            2,                      // 18..=20 push 2
+            OpCode::Multiply as u8, // 21 i*2
+            OpCode::Add as u8,      // 22 total+(i*2)
+            OpCode::SetLocal as u8,
+            0,
+            2, // 23..=25 slot 2 := result
             // i := i + 1
-            OpCode::GetLocal as u8, 0, 3,    // 26..=28
-            OpCode::Constant as u8, 0, 1,    // 29..=31 push 1
-            OpCode::Add as u8,               // 32
-            OpCode::SetLocal as u8, 0, 3,    // 33..=35
+            OpCode::GetLocal as u8,
+            0,
+            3, // 26..=28
+            OpCode::Constant as u8,
+            0,
+            1,                 // 29..=31 push 1
+            OpCode::Add as u8, // 32
+            OpCode::SetLocal as u8,
+            0,
+            3, // 33..=35
             // Return total
-            OpCode::GetLocal as u8, 0, 2,    // 36..=38
-            OpCode::Return as u8,            // 39
+            OpCode::GetLocal as u8,
+            0,
+            2,                    // 36..=38
+            OpCode::Return as u8, // 39
         ];
         let r = analyze(&f);
         assert_eq!(r.get(2), SlotType::Int64, "total should stay Int64");
@@ -2206,10 +2252,15 @@ mod tests {
         // slot 1 = f(int_arg) → Value (callee return type unknown)
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(1)]);
         f.chunk.code = vec![
-            OpCode::None as u8,                  // closure
-            OpCode::Constant as u8, 0, 0,        // int arg
-            OpCode::Call as u8, 1,               // call with 1 arg
-            OpCode::SetLocal as u8, 0, 1,        // slot 1 := result
+            OpCode::None as u8, // closure
+            OpCode::Constant as u8,
+            0,
+            0, // int arg
+            OpCode::Call as u8,
+            1, // call with 1 arg
+            OpCode::SetLocal as u8,
+            0,
+            1, // slot 1 := result
             OpCode::None as u8,
             OpCode::Return as u8,
         ];
@@ -2225,9 +2276,11 @@ mod tests {
         // and the first Constant push at ip=0 initializes it.
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(42)]);
         f.chunk.code = vec![
-            OpCode::Constant as u8, 0, 0,        // ip=0 push 42 → slot 1 init
-            OpCode::None as u8,                  // ip=3 push None
-            OpCode::Return as u8,                // ip=4
+            OpCode::Constant as u8,
+            0,
+            0,                    // ip=0 push 42 → slot 1 init
+            OpCode::None as u8,   // ip=3 push None
+            OpCode::Return as u8, // ip=4
         ];
         let r = analyze(&f);
         assert_eq!(r.local_init_result_ip.get(&0), Some(&1));
@@ -2241,10 +2294,16 @@ mod tests {
         // SetLocal which only rewrites the slot.
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(1), Value::Integer(2)]);
         f.chunk.code = vec![
-            OpCode::Constant as u8, 0, 0,        // ip=0 push 1 → slot 1 init
-            OpCode::Constant as u8, 0, 1,        // ip=3 push 2 (temp at slot 2)
-            OpCode::SetLocal as u8, 0, 1,        // ip=6 slot 1 := 2
-            OpCode::Pop as u8,                   // ip=9
+            OpCode::Constant as u8,
+            0,
+            0, // ip=0 push 1 → slot 1 init
+            OpCode::Constant as u8,
+            0,
+            1, // ip=3 push 2 (temp at slot 2)
+            OpCode::SetLocal as u8,
+            0,
+            1,                 // ip=6 slot 1 := 2
+            OpCode::Pop as u8, // ip=9
             OpCode::None as u8,
             OpCode::Return as u8,
         ];
@@ -2353,7 +2412,9 @@ mod tests {
         // Int64 slot with an initializer that isn't captured: OK.
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(0)]);
         f.chunk.code = vec![
-            OpCode::Constant as u8, 0, 0,        // ip=0: slot 1 init
+            OpCode::Constant as u8,
+            0,
+            0, // ip=0: slot 1 init
             OpCode::None as u8,
             OpCode::Return as u8,
         ];
@@ -2378,9 +2439,11 @@ mod tests {
         // the opcode is None (non-Constant). Certifier rule 5 catches.
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(7)]);
         f.chunk.code = vec![
-            OpCode::Constant as u8, 0, 0,       // ip=0
-            OpCode::None as u8,                 // ip=3 (not a Constant)
-            OpCode::Return as u8,               // ip=4
+            OpCode::Constant as u8,
+            0,
+            0,                    // ip=0
+            OpCode::None as u8,   // ip=3 (not a Constant)
+            OpCode::Return as u8, // ip=4
         ];
         let mut r = analyze(&f);
         // Point slot 1's initializer at the None at ip=3.
@@ -2402,10 +2465,7 @@ mod tests {
         // before any bytecode runs).
         let mut f = make_fn("f", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
-        f.chunk.code = vec![
-            OpCode::GetLocal as u8, 0, 1,
-            OpCode::Return as u8,
-        ];
+        f.chunk.code = vec![OpCode::GetLocal as u8, 0, 1, OpCode::Return as u8];
         let r = analyze(&f);
         assert_eq!(r.get(1), SlotType::Int64);
         assert!(r.init_sites.contains(&1));
@@ -2427,11 +2487,18 @@ mod tests {
         let mut f = make_fn("f", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
-            OpCode::GetLocal as u8, 0, 1, // push f (self)
-            OpCode::Constant as u8, 0, 0, // push 0
-            OpCode::Call as u8, 1,        // call (synthetic arity 1)
-            OpCode::Pop as u8,            // discard result
-            OpCode::GetLocal as u8, 0, 1, // push n
+            OpCode::GetLocal as u8,
+            0,
+            1, // push f (self)
+            OpCode::Constant as u8,
+            0,
+            0, // push 0
+            OpCode::Call as u8,
+            1,                 // call (synthetic arity 1)
+            OpCode::Pop as u8, // discard result
+            OpCode::GetLocal as u8,
+            0,
+            1, // push n
             OpCode::Return as u8,
         ];
         f.chunk.constants = vec![Value::Integer(0)];
@@ -2443,10 +2510,12 @@ mod tests {
     #[test]
     fn specialized_ineligible_zero_arity() {
         // fun f() { 42 } — nothing to unbox, not worth a second entry.
-        let f = make_fn("f", 0, vec![
-            OpCode::Constant as u8, 0, 0,
-            OpCode::Return as u8,
-        ], vec![Value::Integer(42)]);
+        let f = make_fn(
+            "f",
+            0,
+            vec![OpCode::Constant as u8, 0, 0, OpCode::Return as u8],
+            vec![Value::Integer(42)],
+        );
         let r = analyze(&f);
         assert!(!r.specialized_entry_eligible);
         assert!(r.specialized_param_slots.is_empty());
@@ -2461,11 +2530,18 @@ mod tests {
         let mut f = make_fn("f", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
-            OpCode::GetLocal as u8, 0, 1,
-            OpCode::Constant as u8, 0, 0,
-            OpCode::Call as u8, 1,
+            OpCode::GetLocal as u8,
+            0,
+            1,
+            OpCode::Constant as u8,
+            0,
+            0,
+            OpCode::Call as u8,
+            1,
             OpCode::Pop as u8,
-            OpCode::Constant as u8, 0, 1,   // push "hello"
+            OpCode::Constant as u8,
+            0,
+            1, // push "hello"
             OpCode::Return as u8,
         ];
         f.chunk.constants = vec![
@@ -2483,10 +2559,7 @@ mod tests {
         // pick it up. So the param isn't Int-stable → ineligible.
         let mut f = make_fn("f", 1, vec![], vec![]);
         // no type_ann — defaults to Value
-        f.chunk.code = vec![
-            OpCode::GetLocal as u8, 0, 1,
-            OpCode::Return as u8,
-        ];
+        f.chunk.code = vec![OpCode::GetLocal as u8, 0, 1, OpCode::Return as u8];
         let r = analyze(&f);
         assert!(!r.specialized_entry_eligible);
     }
@@ -2498,12 +2571,21 @@ mod tests {
         let mut f = make_fn("f", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
-            OpCode::GetLocal as u8, 0, 1,
-            OpCode::Constant as u8, 0, 0,
-            OpCode::Call as u8, 1,
+            OpCode::GetLocal as u8,
+            0,
+            1,
+            OpCode::Constant as u8,
+            0,
+            0,
+            OpCode::Call as u8,
+            1,
             OpCode::Pop as u8,
-            OpCode::GetLocal as u8, 0, 1,
-            OpCode::Constant as u8, 0, 1,
+            OpCode::GetLocal as u8,
+            0,
+            1,
+            OpCode::Constant as u8,
+            0,
+            1,
             OpCode::Add as u8,
             OpCode::Return as u8,
         ];

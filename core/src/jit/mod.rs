@@ -50,6 +50,7 @@ pub(crate) type SpecializedThunkRaw = *const ();
 /// `specialized_kind` discriminates WHICH specialized body the pointer
 /// points at (forward trampoline vs. native int body) so callers can
 /// gate direct-call optimizations on a real body being present.
+#[cfg(feature = "jit")]
 pub(crate) struct CompiledEntries {
     pub generic: CompiledThunk,
     pub specialized: Option<SpecializedThunkRaw>,
@@ -226,6 +227,16 @@ impl JitEngine {
             }
         };
         Some((e.generic, e.specialized, e.specialized_arity, kind_u8))
+    }
+
+    #[cfg(not(feature = "jit"))]
+    pub(crate) fn maybe_compile_entries_for(
+        &mut self,
+        func: &Rc<Function>,
+        call_count: u32,
+    ) -> Option<(CompiledThunk, Option<SpecializedThunkRaw>, u8, u8)> {
+        let _ = (func, call_count);
+        None
     }
 
     /// Compile if loop-hot and return the compiled thunk, if one is

@@ -202,11 +202,7 @@ impl VirtStack {
     /// `stack_view.len` accordingly. After this call the virt stack
     /// is empty and `vm.stack` reflects the full logical depth.
     /// Idempotent — safe to call when already empty.
-    pub(crate) fn flush_to_memory(
-        &mut self,
-        builder: &mut FunctionBuilder<'_>,
-        vm_val: ir::Value,
-    ) {
+    pub(crate) fn flush_to_memory(&mut self, builder: &mut FunctionBuilder<'_>, vm_val: ir::Value) {
         if self.slots.is_empty() {
             return;
         }
@@ -256,11 +252,7 @@ fn emit_inline_push_integer(
 }
 
 /// Inline `jit_push_float_inline`.
-fn emit_inline_push_float(
-    builder: &mut FunctionBuilder<'_>,
-    vm_val: ir::Value,
-    bits: ir::Value,
-) {
+fn emit_inline_push_float(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value, bits: ir::Value) {
     let flags = ir::MemFlags::trusted();
     let stack_ptr = load_stack_ptr(builder, vm_val);
     let top = load_stack_len(builder, vm_val);
@@ -282,11 +274,7 @@ fn emit_inline_push_float(
 /// Inline push of a zero-payload constant. Layout invariants pinned
 /// by `value_bool_tag_and_payload_are_pinned` and
 /// `value_none_layout_is_pinned` tests in `vm/value.rs`.
-fn emit_inline_push_const(
-    builder: &mut FunctionBuilder<'_>,
-    vm_val: ir::Value,
-    k: VirtConst,
-) {
+fn emit_inline_push_const(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value, k: VirtConst) {
     let flags = ir::MemFlags::trusted();
     let stack_ptr = load_stack_ptr(builder, vm_val);
     let top = load_stack_len(builder, vm_val);

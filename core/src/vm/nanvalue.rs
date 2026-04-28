@@ -98,8 +98,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::value::{
-    BuiltinFn, ObjClosure, ObjEnumDef, ObjEnumInstance, ObjModule, ObjStructDef,
-    ObjStructInstance, Value as OldValue,
+    BuiltinFn, ObjClosure, ObjEnumDef, ObjEnumInstance, ObjModule, ObjStructDef, ObjStructInstance,
+    Value as OldValue,
 };
 
 // ── Bit-level constants ────────────────────────────────────────────────
@@ -621,14 +621,20 @@ impl Clone for NanValue {
                         std::mem::forget(rc);
                         let _ = Rc::into_raw(bumped);
                     }
-                    s if s == PointerKindA::Array as u8 => clone_and_forget::<RefCell<Vec<NanValue>>>(addr),
+                    s if s == PointerKindA::Array as u8 => {
+                        clone_and_forget::<RefCell<Vec<NanValue>>>(addr)
+                    }
                     s if s == PointerKindA::Tuple as u8 => clone_and_forget::<Vec<NanValue>>(addr),
                     s if s == PointerKindA::Map as u8 => {
                         clone_and_forget::<RefCell<Vec<(NanValue, NanValue)>>>(addr)
                     }
-                    s if s == PointerKindA::Set as u8 => clone_and_forget::<RefCell<Vec<NanValue>>>(addr),
+                    s if s == PointerKindA::Set as u8 => {
+                        clone_and_forget::<RefCell<Vec<NanValue>>>(addr)
+                    }
                     s if s == PointerKindA::Closure as u8 => clone_and_forget::<ObjClosure>(addr),
-                    s if s == PointerKindA::StructDef as u8 => clone_and_forget::<ObjStructDef>(addr),
+                    s if s == PointerKindA::StructDef as u8 => {
+                        clone_and_forget::<ObjStructDef>(addr)
+                    }
                     s if s == PointerKindA::StructInstance as u8 => {
                         clone_and_forget::<ObjStructInstance>(addr)
                     }
@@ -636,10 +642,16 @@ impl Clone for NanValue {
                 },
                 m if m == TAG_POINTER_B => match sub {
                     s if s == PointerKindB::EnumDef as u8 => clone_and_forget::<ObjEnumDef>(addr),
-                    s if s == PointerKindB::EnumInstance as u8 => clone_and_forget::<ObjEnumInstance>(addr),
+                    s if s == PointerKindB::EnumInstance as u8 => {
+                        clone_and_forget::<ObjEnumInstance>(addr)
+                    }
                     s if s == PointerKindB::Module as u8 => clone_and_forget::<ObjModule>(addr),
-                    s if s == PointerKindB::ErrorValue as u8 => clone_and_forget::<ErrorValueStorage>(addr),
-                    s if s == PointerKindB::Wrapped as u8 => clone_and_forget::<WrappedStorage>(addr),
+                    s if s == PointerKindB::ErrorValue as u8 => {
+                        clone_and_forget::<ErrorValueStorage>(addr)
+                    }
+                    s if s == PointerKindB::Wrapped as u8 => {
+                        clone_and_forget::<WrappedStorage>(addr)
+                    }
                     s if s == PointerKindB::Error as u8 => clone_and_forget::<String>(addr),
                     s if s == PointerKindB::BoxedInt as u8 => clone_and_forget::<i64>(addr),
                     s if s == PointerKindB::BoxedUint as u8 => clone_and_forget::<u64>(addr),
@@ -666,11 +678,15 @@ impl Drop for NanValue {
                     s if s == PointerKindA::String as u8 => drop_rc::<String>(addr),
                     s if s == PointerKindA::Array as u8 => drop_rc::<RefCell<Vec<NanValue>>>(addr),
                     s if s == PointerKindA::Tuple as u8 => drop_rc::<Vec<NanValue>>(addr),
-                    s if s == PointerKindA::Map as u8 => drop_rc::<RefCell<Vec<(NanValue, NanValue)>>>(addr),
+                    s if s == PointerKindA::Map as u8 => {
+                        drop_rc::<RefCell<Vec<(NanValue, NanValue)>>>(addr)
+                    }
                     s if s == PointerKindA::Set as u8 => drop_rc::<RefCell<Vec<NanValue>>>(addr),
                     s if s == PointerKindA::Closure as u8 => drop_rc::<ObjClosure>(addr),
                     s if s == PointerKindA::StructDef as u8 => drop_rc::<ObjStructDef>(addr),
-                    s if s == PointerKindA::StructInstance as u8 => drop_rc::<ObjStructInstance>(addr),
+                    s if s == PointerKindA::StructInstance as u8 => {
+                        drop_rc::<ObjStructInstance>(addr)
+                    }
                     _ => unreachable_subkind(sub),
                 },
                 m if m == TAG_POINTER_B => match sub {
@@ -768,7 +784,17 @@ mod tests {
 
     #[test]
     fn smi_roundtrips_common_values() {
-        for n in [0i64, 1, -1, 42, -42, i32::MAX as i64, i32::MIN as i64, SMI_MAX, SMI_MIN] {
+        for n in [
+            0i64,
+            1,
+            -1,
+            42,
+            -42,
+            i32::MAX as i64,
+            i32::MIN as i64,
+            SMI_MAX,
+            SMI_MIN,
+        ] {
             let v = NanValue::from_i64(n);
             assert_eq!(v.as_i64(), Some(n), "round-trip failed for {}", n);
         }

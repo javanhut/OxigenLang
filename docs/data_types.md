@@ -80,6 +80,8 @@ Type keyword: `str`. Zero value: `""` (empty string).
   | `\n` | Newline |
   | `\t` | Tab |
   | `\r` | Carriage return |
+  | `\e` | Escape (`ESC`, useful for ANSI terminal sequences) |
+  | `\xHH` | Character by two hexadecimal digits, such as `\x1b` for `ESC` |
   | `\\` | Backslash |
   | `\"` | Double quote (inside `"..."`) |
   | `\'` | Single quote (inside `'...'`) |
@@ -90,6 +92,7 @@ Type keyword: `str`. Zero value: `""` (empty string).
   println("col1\tcol2")
   println("she said \"hello\"")
   println('it\'s fine')
+  println("\e[31mred\e[0m")
   ```
 
   Escape sequences work in both plain strings and interpolated strings.
