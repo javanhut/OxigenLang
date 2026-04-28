@@ -223,7 +223,7 @@ impl OpCode {
     }
 }
 
-/// A chunk of bytecode with its associated constant pool and line information.
+/// A chunk of bytecode with its associated constant pool and source location info.
 #[derive(Debug, Clone)]
 pub struct Chunk {
     /// Raw bytecode.
@@ -232,6 +232,14 @@ pub struct Chunk {
     pub constants: Vec<crate::vm::value::Value>,
     /// Line number for each byte of code (for error reporting).
     pub lines: Vec<u32>,
+    /// Column for each byte of code, paired with `lines`. 0 means unknown
+    /// (the writer never set a column before emitting).
+    pub columns: Vec<u32>,
+    /// The column to attach to the next byte written. Set by the compiler
+    /// before each emit batch via `set_loc_column`. Lives on the chunk
+    /// (rather than threaded through every `emit_*` signature) so the
+    /// existing line-only emit API stays unchanged.
+    cur_column: u32,
 }
 
 impl Chunk {
@@ -240,13 +248,24 @@ impl Chunk {
             code: Vec::new(),
             constants: Vec::new(),
             lines: Vec::new(),
+            columns: Vec::new(),
+            cur_column: 0,
         }
     }
 
-    /// Write a single byte with line information.
+    /// Set the column to attach to subsequently written bytes. Call before
+    /// emitting each opcode whose source location you know; bytes written
+    /// without a prior `set_loc_column` get column 0 (unknown).
+    pub fn set_loc_column(&mut self, col: u32) {
+        self.cur_column = col;
+    }
+
+    /// Write a single byte with line information. Column comes from the
+    /// most recent `set_loc_column` call.
     pub fn write(&mut self, byte: u8, line: u32) {
         self.code.push(byte);
         self.lines.push(line);
+        self.columns.push(self.cur_column);
     }
 
     /// Write a u16 value as two bytes (big-endian).

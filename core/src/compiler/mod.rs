@@ -192,6 +192,14 @@ pub struct Compiler {
     /// When true, Choose/If won't pop their result value (used when they're
     /// the last statement of a block that needs to produce a value).
     suppress_statement_pop: bool,
+    /// Column stack for source-location tracking. Pushed at the start of
+    /// `compile_expression`/`compile_statement` with the current node's
+    /// column, popped at exit. `emit_byte` reads the top before each
+    /// write so opcodes emitted by a parent *between* two child compiles
+    /// (e.g., the `Add` in `compile_left; compile_right; emit Add`) get
+    /// the parent's column, not whatever column the last child left
+    /// behind on the chunk.
+    loc_column_stack: Vec<u32>,
 }
 
 impl Compiler {
@@ -201,6 +209,7 @@ impl Compiler {
             errors: Vec::new(),
             dup_next_define: false,
             suppress_statement_pop: false,
+            loc_column_stack: Vec::new(),
         };
         // Push the top-level script frame.
         compiler.frames.push(CompilerFrame::new(None, 0));
@@ -277,6 +286,13 @@ impl Compiler {
     }
 
     fn emit_byte(&mut self, byte: u8, line: u32) {
+        // Re-establish the column from the active scope's top, in case a
+        // recursive child compile updated the chunk's `cur_column` to its
+        // own and then returned. Without this the parent's emit_op-after-
+        // child-compile would inherit the child's column.
+        if let Some(&col) = self.loc_column_stack.last() {
+            self.current_chunk().set_loc_column(col);
+        }
         self.current_chunk().write(byte, line);
     }
 
@@ -531,10 +547,82 @@ impl Compiler {
         }
     }
 
+    /// Column number (1-based; 0 = unknown) for the token that anchors
+    /// this expression. Mirrors `expr_line` exactly. Used to attach
+    /// caret columns to emitted bytecode for error reporting.
+    fn expr_column(expr: &Expression) -> u32 {
+        match expr {
+            Expression::Int { token, .. }
+            | Expression::Float { token, .. }
+            | Expression::Str { token, .. }
+            | Expression::Char { token, .. }
+            | Expression::Boolean { token, .. }
+            | Expression::NoneExpr { token }
+            | Expression::Array { token, .. }
+            | Expression::Prefix { token, .. }
+            | Expression::Infix { token, .. }
+            | Expression::Postfix { token, .. }
+            | Expression::Call { token, .. }
+            | Expression::Index { token, .. }
+            | Expression::FunctionLiteral { token, .. }
+            | Expression::StructLiteral { token, .. }
+            | Expression::DotAccess { token, .. }
+            | Expression::Slice { token, .. }
+            | Expression::TupleLiteral { token, .. }
+            | Expression::MapLiteral { token, .. }
+            | Expression::Option { token, .. }
+            | Expression::Guard { token, .. }
+            | Expression::Log { token, .. }
+            | Expression::ErrorConstruct { token, .. }
+            | Expression::ValueConstruct { token, .. }
+            | Expression::TypeWrap { token, .. }
+            | Expression::Fail { token, .. }
+            | Expression::Unless { token, .. }
+            | Expression::StringInterp { token, .. }
+            | Expression::EnumVariantConstruct { token, .. } => token.span.column as u32,
+            Expression::Ident(ident) => ident.token.span.column as u32,
+            Expression::Grouped(inner) => Self::expr_column(inner),
+        }
+    }
+
+    fn stmt_column(stmt: &Statement) -> u32 {
+        match stmt {
+            Statement::Let { name, .. } => name.token.span.column as u32,
+            Statement::Expr(expr) => Self::expr_column(expr),
+            Statement::Each { token, .. }
+            | Statement::Repeat { token, .. }
+            | Statement::Pattern { token, .. }
+            | Statement::Choose { token, .. }
+            | Statement::If { token, .. }
+            | Statement::Give { token, .. }
+            | Statement::StructDef { token, .. }
+            | Statement::EnumDef { token, .. }
+            | Statement::ContainsDef { token, .. }
+            | Statement::DotAssign { token, .. }
+            | Statement::Introduce { token, .. }
+            | Statement::IndexAssign { token, .. }
+            | Statement::Main { token, .. } => token.span.column as u32,
+            Statement::TypedLet { name, .. }
+            | Statement::TypedDeclare { name, .. }
+            | Statement::Assign { name, .. } => name.token.span.column as u32,
+            Statement::Unpack { names, .. } => {
+                names.first().map_or(0, |n| n.token.span.column as u32)
+            }
+            Statement::Skip | Statement::Stop => 0,
+        }
+    }
+
     // ── Statement Compilation ──────────────────────────────────────────
 
     fn compile_statement(&mut self, stmt: &Statement) {
         let line = Self::stmt_line(stmt);
+        let col = Self::stmt_column(stmt);
+        self.loc_column_stack.push(col);
+        let _r = self.compile_statement_inner(stmt, line);
+        self.loc_column_stack.pop();
+    }
+
+    fn compile_statement_inner(&mut self, stmt: &Statement, line: u32) {
         match stmt {
             Statement::Expr(expr) => {
                 self.compile_expression(expr);
@@ -1195,6 +1283,13 @@ impl Compiler {
 
     fn compile_expression(&mut self, expr: &Expression) {
         let line = Self::expr_line(expr);
+        let col = Self::expr_column(expr);
+        self.loc_column_stack.push(col);
+        self.compile_expression_inner(expr, line);
+        self.loc_column_stack.pop();
+    }
+
+    fn compile_expression_inner(&mut self, expr: &Expression, line: u32) {
         match expr {
             Expression::Int { value, .. } => {
                 self.emit_constant(Value::Integer(*value), line);
@@ -1968,6 +2063,14 @@ impl Compiler {
 
     fn compile_identifier(&mut self, ident: &Identifier) {
         let line = ident.token.span.line as u32;
+        let col = ident.token.span.column as u32;
+        self.loc_column_stack.push(col);
+        let result = self.compile_identifier_inner(ident, line);
+        self.loc_column_stack.pop();
+        result
+    }
+
+    fn compile_identifier_inner(&mut self, ident: &Identifier, line: u32) {
         // Try local first
         if let Some(slot) = self.resolve_local(&ident.value) {
             self.emit_op_u16(OpCode::GetLocal, slot, line);

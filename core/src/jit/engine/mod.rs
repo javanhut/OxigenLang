@@ -894,7 +894,7 @@ impl JitInner {
                 // messages from a foreign block's first op see the right
                 // line. We use `Option` so the very first opcode of the
                 // body always writes (initial state == "no line known").
-                let mut last_emitted_line: Option<u32> = None;
+                let mut last_emitted_loc: Option<(u32, u32)> = None;
                 // Counter for handing out the pre-allocated inline-cache
                 // slots as we emit GetGlobal opcodes.
                 let mut ic_ix: usize = 0;
@@ -920,26 +920,27 @@ impl JitInner {
                             // line to JitFrame.line. The first opcode of
                             // this block must re-emit so error messages
                             // see the right line.
-                            last_emitted_line = None;
+                            last_emitted_loc = None;
                         }
                     }
 
                     let op = OpCode::from_byte(code[ip]).ok_or(())?;
                     let line = chunk.lines.get(ip).copied().unwrap_or(0);
-                    // Line-store elision: only emit the JitFrame.line write when
-                    // the upcoming opcode might surface a runtime error attributed
-                    // to *this* IP. Pure stack/arith/control-flow opcodes can't
-                    // reach `vm.jit.stash_error()` without first taking a slow
-                    // path that emits its own line store. Tight all-Int loops
-                    // therefore emit zero line stores per iteration.
+                    let col = chunk.columns.get(ip).copied().unwrap_or(0);
+                    // Loc-store elision: only emit the JitFrame.line/column writes
+                    // when the upcoming opcode might surface a runtime error
+                    // attributed to *this* IP. Pure stack/arith/control-flow
+                    // opcodes can't reach `vm.jit.stash_error()` without first
+                    // taking a slow path that emits its own loc store. Tight
+                    // all-Int loops therefore emit zero loc stores per iteration.
                     //
                     // Arith/cmp opcodes are conditionally faulting — they take
                     // the virt-int path (no fault) most of the time, so we
                     // emit per-arm only at slow-path emission. See the helper
                     // `maybe_emit_current_line` below.
-                    if opcode_always_needs_line(op) && last_emitted_line != Some(line) {
-                        emit_store_current_line(&mut builder, vm_val, line);
-                        last_emitted_line = Some(line);
+                    if opcode_always_needs_line(op) && last_emitted_loc != Some((line, col)) {
+                        emit_store_current_loc(&mut builder, vm_val, line, col);
+                        last_emitted_loc = Some((line, col));
                     }
 
                     // B2.1c: light flush before any op we aren't
@@ -1374,7 +1375,8 @@ impl JitInner {
                                     &mut builder,
                                     vm_val,
                                     line,
-                                    &mut last_emitted_line,
+                                    col,
+                                    &mut last_emitted_loc,
                                 );
                                 if !virt_stack.is_empty() {
                                     virt_stack.flush_to_memory(&mut builder, vm_val);
@@ -1423,7 +1425,8 @@ impl JitInner {
                                     &mut builder,
                                     vm_val,
                                     line,
-                                    &mut last_emitted_line,
+                                    col,
+                                    &mut last_emitted_loc,
                                 );
                                 if !virt_stack.is_empty() {
                                     virt_stack.flush_to_memory(&mut builder, vm_val);
@@ -1527,7 +1530,8 @@ impl JitInner {
                                     &mut builder,
                                     vm_val,
                                     line,
-                                    &mut last_emitted_line,
+                                    col,
+                                    &mut last_emitted_loc,
                                 );
                                 let slow_helper = if is_mod { refs.modu } else { refs.div };
                                 let result = emit_int_virt_divmod(
@@ -1546,7 +1550,8 @@ impl JitInner {
                                     &mut builder,
                                     vm_val,
                                     line,
-                                    &mut last_emitted_line,
+                                    col,
+                                    &mut last_emitted_loc,
                                 );
                                 if !virt_stack.is_empty() {
                                     virt_stack.flush_to_memory(&mut builder, vm_val);
@@ -1688,7 +1693,8 @@ impl JitInner {
                                         &mut builder,
                                         vm_val,
                                         line,
-                                        &mut last_emitted_line,
+                                        col,
+                                    &mut last_emitted_loc,
                                     );
                                     if !virt_stack.is_empty() {
                                         virt_stack.flush_to_memory(&mut builder, vm_val);
@@ -1716,7 +1722,8 @@ impl JitInner {
                                     &mut builder,
                                     vm_val,
                                     line,
-                                    &mut last_emitted_line,
+                                    col,
+                                    &mut last_emitted_loc,
                                 );
                                 if !virt_stack.is_empty() {
                                     virt_stack.flush_to_memory(&mut builder, vm_val);
@@ -1765,7 +1772,8 @@ impl JitInner {
                                     &mut builder,
                                     vm_val,
                                     line,
-                                    &mut last_emitted_line,
+                                    col,
+                                    &mut last_emitted_loc,
                                 );
                                 if !virt_stack.is_empty() {
                                     virt_stack.flush_to_memory(&mut builder, vm_val);
@@ -1780,7 +1788,8 @@ impl JitInner {
                                 &mut builder,
                                 vm_val,
                                 line,
-                                &mut last_emitted_line,
+                                col,
+                                    &mut last_emitted_loc,
                             );
                             if !virt_stack.is_empty() {
                                 virt_stack.flush_to_memory(&mut builder, vm_val);
@@ -4232,10 +4241,11 @@ fn emit_write_closure_value(
 
 #[allow(dead_code)]
 #[inline]
-fn emit_store_current_line(
+fn emit_store_current_loc(
     builder: &mut FunctionBuilder<'_>,
     vm_val: cranelift_codegen::ir::Value,
     line: u32,
+    col: u32,
 ) {
     use cranelift_codegen::ir::MemFlags;
 
@@ -4246,6 +4256,13 @@ fn emit_store_current_line(
         line_val,
         frame_ptr,
         JitFrame::OFFSET_LINE,
+    );
+    let col_val = builder.ins().iconst(types::I32, col as i64);
+    builder.ins().store(
+        MemFlags::trusted(),
+        col_val,
+        frame_ptr,
+        JitFrame::OFFSET_COLUMN,
     );
 }
 
@@ -4258,11 +4275,12 @@ fn maybe_emit_current_line(
     builder: &mut FunctionBuilder<'_>,
     vm_val: cranelift_codegen::ir::Value,
     line: u32,
-    last_emitted_line: &mut Option<u32>,
+    col: u32,
+    last_emitted_loc: &mut Option<(u32, u32)>,
 ) {
-    if *last_emitted_line != Some(line) {
-        emit_store_current_line(builder, vm_val, line);
-        *last_emitted_line = Some(line);
+    if *last_emitted_loc != Some((line, col)) {
+        emit_store_current_loc(builder, vm_val, line, col);
+        *last_emitted_loc = Some((line, col));
     }
 }
 

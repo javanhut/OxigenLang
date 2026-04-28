@@ -57,6 +57,7 @@ pub(crate) struct JitFrame {
     pub(crate) slot_offset: usize,
     pub(crate) module_globals: *const HashMap<String, Value>,
     pub(crate) line: u32,
+    pub(crate) column: u32,
 }
 
 #[allow(dead_code)]
@@ -65,6 +66,7 @@ impl JitFrame {
     pub(crate) const OFFSET_SLOT_OFFSET: i32 = 8;
     pub(crate) const OFFSET_MODULE_GLOBALS: i32 = 16;
     pub(crate) const OFFSET_LINE: i32 = 24;
+    pub(crate) const OFFSET_COLUMN: i32 = 28;
 }
 
 #[repr(C)]
@@ -996,6 +998,7 @@ impl VM {
                 slot_offset,
                 module_globals,
                 line,
+                column: 0,
             });
         }
         self.jit_frame_view.len = len + 1;
@@ -1149,6 +1152,30 @@ impl VM {
         }
     }
 
+    /// Source column (1-based) of the opcode that just executed, paired
+    /// with `current_line()`. Returns 0 when the chunk has no column
+    /// metadata for this IP (e.g., older bytecode or synthetic opcodes
+    /// emitted without a `set_loc_column` call). The JIT path returns 0
+    /// since `JitFrame` only carries the line — the caret-rendering code
+    /// in `format_error` falls back to no caret when col is 0.
+    fn current_column(&self) -> u32 {
+        if self.jit_executing.get() {
+            if let Some(frame) = self.jit_frame_top() {
+                return frame.column;
+            }
+        }
+        let frame = self.frames.last().unwrap();
+        let ip = if frame.ip > 0 { frame.ip - 1 } else { 0 };
+        frame
+            .closure
+            .function
+            .chunk
+            .columns
+            .get(ip)
+            .copied()
+            .unwrap_or(0)
+    }
+
     #[inline(always)]
     pub(crate) fn active_closure(&self) -> &ObjClosure {
         if self.jit_executing.get() {
@@ -1199,18 +1226,31 @@ impl VM {
 
     fn format_error(&self, message: &str, hint: Option<&str>) -> String {
         let line_num = self.current_line() as usize;
+        let col = self.current_column() as usize;
         let mut out = String::new();
 
         out.push_str(&format!("error: {}\n", message));
-        out.push_str(&format!("  --> line {}\n", line_num));
+        let frame_name = self.innermost_frame_name();
+        let location = if col > 0 {
+            format!("line {}:{}", line_num, col)
+        } else {
+            format!("line {}", line_num)
+        };
+        match &frame_name {
+            Some(name) => out.push_str(&format!("  --> {} (in `{}`)\n", location, name)),
+            None => out.push_str(&format!("  --> {}\n", location)),
+        }
 
         if !self.source.is_empty() {
             if let Some(source_line) = self.source.lines().nth(line_num.saturating_sub(1)) {
                 let line_str = format!("{}", line_num);
                 let padding = " ".repeat(line_str.len());
                 out.push_str(&format!("{} |\n", padding));
-                out.push_str(&format!("{} | {}\n", line_str, source_line));
-                out.push_str(&format!("{} |", padding));
+                out.push_str(&format!("{} | {}", line_str, source_line));
+                if col > 0 {
+                    let caret_padding = " ".repeat(col.saturating_sub(1));
+                    out.push_str(&format!("\n{} | {}^", padding, caret_padding));
+                }
             }
         }
 
@@ -1218,7 +1258,61 @@ impl VM {
             out.push_str(&format!("\n  = hint: {}", hint));
         }
 
+        let trace = self.stack_trace();
+        if trace.len() >= 2 {
+            out.push_str("\nstack trace (innermost first):");
+            for (name, line) in &trace {
+                let label = name.as_deref().unwrap_or("<top-level>");
+                out.push_str(&format!("\n   at `{}` (line {})", label, line));
+            }
+        }
+
         out
+    }
+
+    /// Name of the function active at the innermost frame. `None` means
+    /// the error fired at the top-level script body. Used to annotate
+    /// the location header so a deep failure says which function it was
+    /// in instead of just a line number.
+    fn innermost_frame_name(&self) -> Option<String> {
+        if self.jit_executing.get() {
+            if let Some(frame) = self.jit_frame_top() {
+                let closure = unsafe { &*frame.closure_raw };
+                return closure.function.name.clone();
+            }
+        }
+        self.frames
+            .last()
+            .and_then(|f| f.closure.function.name.clone())
+    }
+
+    /// Walk the active call frames from innermost to outermost, returning
+    /// `(function_name, line)` per frame. The top-level script body has
+    /// `name == None`. When the JIT is executing, all of its frames are
+    /// included innermost-first, ahead of any interpreter frames below.
+    fn stack_trace(&self) -> Vec<(Option<String>, u32)> {
+        let mut trace: Vec<(Option<String>, u32)> = Vec::new();
+        if self.jit_executing.get() {
+            let len = self.jit_frame_view.len;
+            for i in (0..len).rev() {
+                let frame = unsafe { &*self.jit_frame_view.ptr.add(i) };
+                let closure = unsafe { &*frame.closure_raw };
+                trace.push((closure.function.name.clone(), frame.line));
+            }
+        }
+        for frame in self.frames.iter().rev() {
+            let ip = if frame.ip > 0 { frame.ip - 1 } else { 0 };
+            let line = frame
+                .closure
+                .function
+                .chunk
+                .lines
+                .get(ip)
+                .copied()
+                .unwrap_or(0);
+            trace.push((frame.closure.function.name.clone(), line));
+        }
+        trace
     }
 
     pub(crate) fn runtime_error(&self, message: &str) -> VMError {
