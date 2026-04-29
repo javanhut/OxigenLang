@@ -98,8 +98,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::value::{
-    BuiltinFn, ObjClosure, ObjEnumDef, ObjEnumInstance, ObjModule, ObjStructDef, ObjStructInstance,
-    Value as OldValue,
+    BuiltinFn, ErrorValueData, ObjClosure, ObjEnumDef, ObjEnumInstance, ObjModule, ObjStructDef,
+    ObjStructInstance, Value as OldValue,
 };
 
 // ── Bit-level constants ────────────────────────────────────────────────
@@ -406,6 +406,12 @@ impl NanValue {
             Rc::into_raw(Rc::new(s_owned)) as *const (),
             PointerKindB::Error,
         )
+    }
+
+    /// Zero-copy variant of [`from_error`] when the caller already owns
+    /// an `Rc<String>` (e.g. the bridge layer from `Value::Error`).
+    pub fn from_error_rc_string(msg: Rc<String>) -> Self {
+        Self::from_rc_pointer_b(Rc::into_raw(msg) as *const (), PointerKindB::Error)
     }
 
     pub fn from_builtin(f: BuiltinFn) -> Self {
@@ -741,6 +747,254 @@ fn unreachable_subkind(sub: u8) -> ! {
 const _: Option<&HashMap<String, OldValue>> = None;
 
 // ──────────────────────────────────────────────────────────────────────
+// Bridge layer: `Value` ↔ `NanValue` (A1.2.1)
+//
+// Until the flag-day migration replaces `Value` with `NanValue`
+// throughout the VM, the two representations coexist. This bridge lets
+// us:
+//   1. Verify the encoding round-trips faithfully (conformance test).
+//   2. Migrate consumers incrementally — a subsystem can switch its
+//      internal representation while still exchanging `Value`s at its
+//      boundary.
+//
+// Limitations: container variants (`Array`, `Tuple`, `Map`, `Set`)
+// store `NanValue` interiors in NaN-box land but `Value` interiors in
+// the legacy enum. Bridging therefore allocates a fresh container with
+// converted elements — aliasing is **not** preserved across the bridge
+// for containers. This is acceptable for testing the encoding; the
+// real migration changes the inner storage uniformly so the bridge
+// goes away.
+// ──────────────────────────────────────────────────────────────────────
+
+impl From<&OldValue> for NanValue {
+    fn from(v: &OldValue) -> Self {
+        match v {
+            OldValue::Integer(n) => NanValue::from_i64(*n),
+            OldValue::Float(x) => NanValue::from_f64(*x),
+            OldValue::Char(c) => NanValue::from_char(*c),
+            OldValue::Boolean(b) => NanValue::from_bool(*b),
+            OldValue::Byte(b) => NanValue::from_byte(*b),
+            OldValue::Uint(n) => NanValue::from_u64(*n),
+            OldValue::None => NanValue::none(),
+            OldValue::String(s) => NanValue::from_rc_string(Rc::clone(s)),
+            OldValue::Error(s) => NanValue::from_error_rc_string(Rc::clone(s)),
+            OldValue::Builtin(f) => NanValue::from_builtin(*f),
+            OldValue::Closure(c) => NanValue::from_closure(Rc::clone(c)),
+            OldValue::StructDef(d) => NanValue::from_struct_def(Rc::clone(d)),
+            OldValue::StructInstance(i) => NanValue::from_struct_instance(Rc::clone(i)),
+            OldValue::EnumDef(d) => NanValue::from_enum_def(Rc::clone(d)),
+            OldValue::EnumInstance(i) => NanValue::from_enum_instance(Rc::clone(i)),
+            OldValue::Module(m) => NanValue::from_module(Rc::clone(m)),
+            OldValue::Array(arr) => {
+                let nans: Vec<NanValue> = arr.borrow().iter().map(NanValue::from).collect();
+                NanValue::from_array(Rc::new(RefCell::new(nans)))
+            }
+            OldValue::Tuple(t) => {
+                let nans: Vec<NanValue> = t.iter().map(NanValue::from).collect();
+                NanValue::from_tuple(Rc::new(nans))
+            }
+            OldValue::Map(m) => {
+                let nans: Vec<(NanValue, NanValue)> = m
+                    .borrow()
+                    .iter()
+                    .map(|(k, v)| (NanValue::from(k), NanValue::from(v)))
+                    .collect();
+                NanValue::from_map(Rc::new(RefCell::new(nans)))
+            }
+            OldValue::Set(s) => {
+                let nans: Vec<NanValue> = s.borrow().iter().map(NanValue::from).collect();
+                NanValue::from_set(Rc::new(RefCell::new(nans)))
+            }
+            OldValue::ErrorValue(data) => {
+                // ErrorValueStorage uses Rc<str>; ErrorValueData uses
+                // Rc<String> (post-A1.1b). Convert each component.
+                let storage = ErrorValueStorage {
+                    msg: Rc::from(data.msg.as_str()),
+                    tag: data.tag.as_ref().map(|t| Rc::from(t.as_str())),
+                };
+                NanValue::from_error_value(Rc::new(storage))
+            }
+            OldValue::Wrapped(inner) => NanValue::from_wrapped(NanValue::from(&**inner)),
+        }
+    }
+}
+
+impl NanValue {
+    /// Bridge back into the legacy `Value` enum, consuming `self`.
+    /// Pointer-bearing kinds transfer their strong-count to the resulting
+    /// `Value` (or, for container kinds, decrement and reallocate). The
+    /// caller is responsible for ensuring `self` is in a well-formed
+    /// state — every constructor in this module produces well-formed
+    /// values, so this is just `from_*` round-trip plus `From<&Value>`.
+    pub fn into_value(self) -> OldValue {
+        let masked = self.raw & TAG_MASK;
+        if masked < TAG_SMI {
+            // f64 — no Drop needed (no Rc payload).
+            let v = OldValue::Float(f64::from_bits(self.raw));
+            std::mem::forget(self);
+            return v;
+        }
+        match masked {
+            TAG_SMI => {
+                let v = OldValue::Integer(self.as_i64().unwrap());
+                std::mem::forget(self);
+                v
+            }
+            TAG_SMI_UINT => {
+                let v = OldValue::Uint(self.as_u64().unwrap());
+                std::mem::forget(self);
+                v
+            }
+            TAG_PRIMITIVE => {
+                let kind_byte = (self.raw >> 40) & 0xFF;
+                let v = if kind_byte == PrimitiveKind::Bool as u64 {
+                    OldValue::Boolean((self.raw & 1) != 0)
+                } else if kind_byte == PrimitiveKind::None as u64 {
+                    OldValue::None
+                } else if kind_byte == PrimitiveKind::Char as u64 {
+                    let cp = (self.raw & 0xFFFF_FFFF) as u32;
+                    OldValue::Char(char::from_u32(cp).expect("valid char codepoint"))
+                } else if kind_byte == PrimitiveKind::Byte as u64 {
+                    OldValue::Byte((self.raw & 0xFF) as u8)
+                } else {
+                    panic!("NanValue: unknown primitive subkind {}", kind_byte)
+                };
+                std::mem::forget(self);
+                v
+            }
+            TAG_BUILTIN => {
+                let addr = (self.raw & PAYLOAD_MASK) as usize;
+                // SAFETY: addr was produced by `from_builtin` from a live
+                // `BuiltinFn`; the function pointer is reproducible from
+                // the same address bits.
+                let f: BuiltinFn = unsafe { std::mem::transmute(addr) };
+                std::mem::forget(self);
+                OldValue::Builtin(f)
+            }
+            TAG_POINTER_A | TAG_POINTER_B => self.into_value_pointer(),
+            other => panic!("NanValue: unknown tag 0x{:x}", other >> 48),
+        }
+    }
+
+    fn into_value_pointer(self) -> OldValue {
+        let masked = self.raw & TAG_MASK;
+        let sub = (self.raw & 0x7) as u8;
+        let addr = self.decode_pointer_addr();
+        // SAFETY: addr/subkind pairs are produced exclusively by the
+        // matching `from_*` constructors in this module, so each pointer
+        // type is recovered through `Rc::from_raw` of the same `T`.
+        let v = unsafe {
+            if masked == TAG_POINTER_A {
+                if sub == PointerKindA::String as u8 {
+                    let rc = Rc::<String>::from_raw(addr as *const String);
+                    OldValue::String(rc)
+                } else if sub == PointerKindA::Array as u8 {
+                    let rc = Rc::<RefCell<Vec<NanValue>>>::from_raw(
+                        addr as *const RefCell<Vec<NanValue>>,
+                    );
+                    let owned: Vec<OldValue> = rc
+                        .borrow()
+                        .iter()
+                        .map(|n| n.clone().into_value())
+                        .collect();
+                    drop(rc);
+                    OldValue::Array(Rc::new(RefCell::new(owned)))
+                } else if sub == PointerKindA::Tuple as u8 {
+                    let rc =
+                        Rc::<Vec<NanValue>>::from_raw(addr as *const Vec<NanValue>);
+                    let owned: Vec<OldValue> =
+                        rc.iter().map(|n| n.clone().into_value()).collect();
+                    drop(rc);
+                    OldValue::Tuple(Rc::new(owned))
+                } else if sub == PointerKindA::Map as u8 {
+                    let rc = Rc::<RefCell<Vec<(NanValue, NanValue)>>>::from_raw(
+                        addr as *const RefCell<Vec<(NanValue, NanValue)>>,
+                    );
+                    let owned: Vec<(OldValue, OldValue)> = rc
+                        .borrow()
+                        .iter()
+                        .map(|(k, v)| (k.clone().into_value(), v.clone().into_value()))
+                        .collect();
+                    drop(rc);
+                    OldValue::Map(Rc::new(RefCell::new(owned)))
+                } else if sub == PointerKindA::Set as u8 {
+                    let rc = Rc::<RefCell<Vec<NanValue>>>::from_raw(
+                        addr as *const RefCell<Vec<NanValue>>,
+                    );
+                    let owned: Vec<OldValue> = rc
+                        .borrow()
+                        .iter()
+                        .map(|n| n.clone().into_value())
+                        .collect();
+                    drop(rc);
+                    OldValue::Set(Rc::new(RefCell::new(owned)))
+                } else if sub == PointerKindA::Closure as u8 {
+                    let rc = Rc::<ObjClosure>::from_raw(addr as *const ObjClosure);
+                    OldValue::Closure(rc)
+                } else if sub == PointerKindA::StructDef as u8 {
+                    let rc = Rc::<ObjStructDef>::from_raw(addr as *const ObjStructDef);
+                    OldValue::StructDef(rc)
+                } else if sub == PointerKindA::StructInstance as u8 {
+                    let rc = Rc::<ObjStructInstance>::from_raw(
+                        addr as *const ObjStructInstance,
+                    );
+                    OldValue::StructInstance(rc)
+                } else {
+                    unreachable_subkind(sub)
+                }
+            } else {
+                debug_assert_eq!(masked, TAG_POINTER_B);
+                if sub == PointerKindB::EnumDef as u8 {
+                    let rc = Rc::<ObjEnumDef>::from_raw(addr as *const ObjEnumDef);
+                    OldValue::EnumDef(rc)
+                } else if sub == PointerKindB::EnumInstance as u8 {
+                    let rc =
+                        Rc::<ObjEnumInstance>::from_raw(addr as *const ObjEnumInstance);
+                    OldValue::EnumInstance(rc)
+                } else if sub == PointerKindB::Module as u8 {
+                    let rc = Rc::<ObjModule>::from_raw(addr as *const ObjModule);
+                    OldValue::Module(rc)
+                } else if sub == PointerKindB::ErrorValue as u8 {
+                    let rc = Rc::<ErrorValueStorage>::from_raw(
+                        addr as *const ErrorValueStorage,
+                    );
+                    let data = ErrorValueData {
+                        msg: Rc::new(rc.msg.to_string()),
+                        tag: rc.tag.as_ref().map(|t| Rc::new(t.to_string())),
+                    };
+                    drop(rc);
+                    OldValue::ErrorValue(Rc::new(data))
+                } else if sub == PointerKindB::Wrapped as u8 {
+                    let rc =
+                        Rc::<WrappedStorage>::from_raw(addr as *const WrappedStorage);
+                    let inner_value = rc.inner.clone().into_value();
+                    drop(rc);
+                    OldValue::Wrapped(Rc::new(inner_value))
+                } else if sub == PointerKindB::Error as u8 {
+                    // `from_error*` always boxes a `Rc<String>`.
+                    let rc = Rc::<String>::from_raw(addr as *const String);
+                    OldValue::Error(rc)
+                } else if sub == PointerKindB::BoxedInt as u8 {
+                    let rc = Rc::<i64>::from_raw(addr as *const i64);
+                    let n = *rc;
+                    drop(rc);
+                    OldValue::Integer(n)
+                } else if sub == PointerKindB::BoxedUint as u8 {
+                    let rc = Rc::<u64>::from_raw(addr as *const u64);
+                    let n = *rc;
+                    drop(rc);
+                    OldValue::Uint(n)
+                } else {
+                    unreachable_subkind(sub)
+                }
+            }
+        };
+        std::mem::forget(self);
+        v
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────
 
@@ -991,5 +1245,261 @@ mod tests {
                 name, hits
             );
         }
+    }
+
+    // ── Bridge: Value ↔ NanValue (A1.2.1) ─────────────────────────────
+
+    /// Construct a representative corpus covering every `Value` variant.
+    /// Used to exercise the bridge round-trip.
+    fn build_value_corpus() -> Vec<OldValue> {
+        use crate::vm::value::{
+            FieldLayout, Function, ObjEnumDef, ObjEnumInstance, ObjModule,
+            ObjStructDef, ObjStructInstance, VmEnumPayload, VmEnumVariantDef,
+            VmEnumVariantKind, make_upvalue_int_caches,
+        };
+        use std::cell::Cell;
+
+        // Struct def + instance for the corpus.
+        let mut indices = HashMap::new();
+        indices.insert("a".to_string(), 0);
+        indices.insert("b".to_string(), 1);
+        let layout = Rc::new(FieldLayout {
+            slots: vec![
+                ("a".to_string(), "int".to_string(), false),
+                ("b".to_string(), "int".to_string(), false),
+            ],
+            indices,
+        });
+        let struct_def = Rc::new(ObjStructDef {
+            name: "Pair".to_string(),
+            fields: vec![
+                ("a".to_string(), "int".to_string(), false),
+                ("b".to_string(), "int".to_string(), false),
+            ],
+            methods: RefCell::new(HashMap::new()),
+            parent: None,
+            layout: std::cell::OnceCell::new(),
+            module_globals: RefCell::new(None),
+        });
+        let struct_inst = Rc::new(ObjStructInstance::new(
+            "Pair".to_string(),
+            vec![OldValue::Integer(1), OldValue::Integer(2)],
+            Rc::clone(&layout),
+            Rc::clone(&struct_def),
+        ));
+
+        // Closure (no upvalues).
+        let func = Rc::new(Function::new(Some("noop".to_string()), 0));
+        let (kinds, values) = make_upvalue_int_caches(0);
+        let closure = Rc::new(ObjClosure {
+            function: func,
+            upvalues: Vec::new(),
+            module_globals: RefCell::new(None),
+            call_count: Cell::new(0),
+            loop_count: Cell::new(0),
+            jit_state: Cell::new(0),
+            jit_thunk: Cell::new(None),
+            specialized_thunk: Cell::new(None),
+            specialized_arity: Cell::new(0),
+            specialized_kind: Cell::new(0),
+            upvalue_int_kinds: kinds,
+            upvalue_int_values: values,
+        });
+
+        // Enum def + instance.
+        let enum_def = Rc::new(ObjEnumDef {
+            name: "Color".to_string(),
+            variants: vec![
+                VmEnumVariantDef {
+                    name: "Red".to_string(),
+                    kind: VmEnumVariantKind::Unit(None),
+                },
+                VmEnumVariantDef {
+                    name: "Pair".to_string(),
+                    kind: VmEnumVariantKind::Tuple(vec!["int".into(), "int".into()]),
+                },
+            ],
+        });
+        let enum_inst = Rc::new(ObjEnumInstance {
+            enum_name: "Color".to_string(),
+            variant_name: "Pair".to_string(),
+            payload: VmEnumPayload::Tuple(vec![OldValue::Integer(7), OldValue::Integer(8)]),
+        });
+
+        // Module.
+        let mut globals = HashMap::new();
+        globals.insert("PI".to_string(), OldValue::Float(3.14));
+        let module = Rc::new(ObjModule {
+            name: "math".to_string(),
+            globals: Rc::new(globals),
+        });
+
+        vec![
+            OldValue::Integer(0),
+            OldValue::Integer(42),
+            OldValue::Integer(-1),
+            OldValue::Integer(i64::MAX),  // forces boxed-int path
+            OldValue::Integer(i64::MIN),  // forces boxed-int path
+            OldValue::Float(0.0),
+            OldValue::Float(-3.14),
+            OldValue::Float(f64::INFINITY),
+            OldValue::Char('a'),
+            OldValue::Char('☃'),
+            OldValue::Boolean(true),
+            OldValue::Boolean(false),
+            OldValue::Byte(0xAB),
+            OldValue::Uint(0),
+            OldValue::Uint(SMI_UINT_MAX),
+            OldValue::Uint(SMI_UINT_MAX + 1), // forces boxed-uint
+            OldValue::None,
+            OldValue::String(Rc::new("hello".into())),
+            OldValue::Error(Rc::new("oops".into())),
+            OldValue::Array(Rc::new(RefCell::new(vec![
+                OldValue::Integer(1),
+                OldValue::Integer(2),
+            ]))),
+            OldValue::Tuple(Rc::new(vec![
+                OldValue::Boolean(true),
+                OldValue::Integer(7),
+            ])),
+            OldValue::Map(Rc::new(RefCell::new(vec![(
+                OldValue::String(Rc::new("k".into())),
+                OldValue::Integer(1),
+            )]))),
+            OldValue::Set(Rc::new(RefCell::new(vec![OldValue::Integer(9)]))),
+            OldValue::ErrorValue(Rc::new(ErrorValueData {
+                msg: Rc::new("bad".into()),
+                tag: Some(Rc::new("ERR".into())),
+            })),
+            OldValue::Wrapped(Rc::new(OldValue::Integer(5))),
+            OldValue::StructInstance(struct_inst),
+            OldValue::StructDef(struct_def),
+            OldValue::EnumDef(enum_def),
+            OldValue::EnumInstance(enum_inst),
+            OldValue::Module(module),
+            OldValue::Closure(closure),
+        ]
+    }
+
+    /// Round-trip every variant through the bridge: the resulting
+    /// `OldValue` must compare equal to the original (where `PartialEq`
+    /// is defined). For `Closure` / `StructDef` / `Builtin`, fall back
+    /// to identity-pointer compare via `Rc::as_ptr`.
+    #[test]
+    fn bridge_round_trips_all_variants() {
+        for (idx, original) in build_value_corpus().into_iter().enumerate() {
+            let label = variant_label(&original);
+            let nan = NanValue::from(&original);
+            let back = nan.into_value();
+            assert!(
+                values_equivalent(&original, &back),
+                "round-trip mismatch at corpus[{}] ({}): nan_bits=...; \
+                 see values_equivalent for which equality the variant uses",
+                idx, label,
+            );
+        }
+    }
+
+    fn variant_label(v: &OldValue) -> &'static str {
+        match v {
+            OldValue::Integer(_) => "Integer",
+            OldValue::Float(_) => "Float",
+            OldValue::Char(_) => "Char",
+            OldValue::Boolean(_) => "Boolean",
+            OldValue::Byte(_) => "Byte",
+            OldValue::Uint(_) => "Uint",
+            OldValue::None => "None",
+            OldValue::String(_) => "String",
+            OldValue::Array(_) => "Array",
+            OldValue::Tuple(_) => "Tuple",
+            OldValue::Map(_) => "Map",
+            OldValue::Set(_) => "Set",
+            OldValue::Closure(_) => "Closure",
+            OldValue::Builtin(_) => "Builtin",
+            OldValue::StructDef(_) => "StructDef",
+            OldValue::StructInstance(_) => "StructInstance",
+            OldValue::EnumDef(_) => "EnumDef",
+            OldValue::EnumInstance(_) => "EnumInstance",
+            OldValue::Module(_) => "Module",
+            OldValue::ErrorValue(_) => "ErrorValue",
+            OldValue::Wrapped(_) => "Wrapped",
+            OldValue::Error(_) => "Error",
+        }
+    }
+
+    fn values_equivalent(a: &OldValue, b: &OldValue) -> bool {
+        match (a, b) {
+            // PartialEq covers most variants. Variants below either lack a
+            // PartialEq case on the legacy enum or carry function pointers
+            // we want to compare by identity.
+            (OldValue::Closure(x), OldValue::Closure(y)) => Rc::ptr_eq(x, y),
+            (OldValue::StructDef(x), OldValue::StructDef(y)) => Rc::ptr_eq(x, y),
+            (OldValue::EnumDef(x), OldValue::EnumDef(y)) => Rc::ptr_eq(x, y),
+            (OldValue::Module(x), OldValue::Module(y)) => Rc::ptr_eq(x, y),
+            (OldValue::Error(x), OldValue::Error(y)) => x == y,
+            (OldValue::Builtin(x), OldValue::Builtin(y)) => {
+                (*x as usize) == (*y as usize)
+            }
+            _ => a == b,
+        }
+    }
+
+    /// Bridging a pointer-bearing value through the bridge must preserve
+    /// the underlying `Rc` strong count (no leak, no double-free).
+    #[test]
+    fn bridge_preserves_struct_instance_refcount() {
+        use crate::vm::value::{FieldLayout, ObjStructDef, ObjStructInstance};
+        let mut indices = HashMap::new();
+        indices.insert("x".to_string(), 0);
+        let layout = Rc::new(FieldLayout {
+            slots: vec![("x".to_string(), "int".to_string(), false)],
+            indices,
+        });
+        let def = Rc::new(ObjStructDef {
+            name: "Box".to_string(),
+            fields: vec![("x".to_string(), "int".to_string(), false)],
+            methods: RefCell::new(HashMap::new()),
+            parent: None,
+            layout: std::cell::OnceCell::new(),
+            module_globals: RefCell::new(None),
+        });
+        let inst = Rc::new(ObjStructInstance::new(
+            "Box".to_string(),
+            vec![OldValue::Integer(1)],
+            layout,
+            def,
+        ));
+        let baseline = Rc::strong_count(&inst);
+
+        let v = OldValue::StructInstance(Rc::clone(&inst));
+        assert_eq!(Rc::strong_count(&inst), baseline + 1);
+
+        let nan = NanValue::from(&v);
+        // From<&OldValue> clones the Rc — both holders alive.
+        assert_eq!(Rc::strong_count(&inst), baseline + 2);
+
+        let v2 = nan.into_value();
+        // into_value transfers the Rc from NanValue to the new OldValue.
+        // Total live Rcs unchanged from the NanValue state.
+        assert_eq!(Rc::strong_count(&inst), baseline + 2);
+
+        drop(v);
+        drop(v2);
+        assert_eq!(Rc::strong_count(&inst), baseline);
+    }
+
+    #[test]
+    fn bridge_preserves_array_contents_with_cycle_free_recursion() {
+        let original = OldValue::Array(Rc::new(RefCell::new(vec![
+            OldValue::Tuple(Rc::new(vec![
+                OldValue::Integer(1),
+                OldValue::Integer(2),
+            ])),
+            OldValue::Boolean(true),
+            OldValue::String(Rc::new("nested".into())),
+        ])));
+        let nan = NanValue::from(&original);
+        let back = nan.into_value();
+        assert_eq!(original, back);
     }
 }
