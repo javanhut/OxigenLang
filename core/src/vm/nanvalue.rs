@@ -747,6 +747,57 @@ fn unreachable_subkind(sub: u8) -> ! {
 const _: Option<&HashMap<String, OldValue>> = None;
 
 // ──────────────────────────────────────────────────────────────────────
+// Display + PartialEq (A1.2.2)
+//
+// Routes through the bridge to leverage `Value`'s existing impls
+// verbatim — both for behavioral parity (e.g., `Value::PartialEq`'s
+// fall-through-to-false on Closure / StructDef / Builtin) and to keep
+// this layer minimal until the flag-day migration writes the parallel
+// implementations directly.
+//
+// Cost: a `clone() + into_value()` per call — allocating for container
+// kinds (Array, Map, Set, Tuple, Wrapped). Acceptable for diagnostic
+// paths (errors, REPL display, panic formatting) where Display/PartialEq
+// already aren't hot. Will be replaced with non-allocating parallel
+// implementations as part of A1.2's flag-day swap.
+// ──────────────────────────────────────────────────────────────────────
+
+impl std::fmt::Display for NanValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.clone().into_value())
+    }
+}
+
+impl PartialEq for NanValue {
+    fn eq(&self, other: &Self) -> bool {
+        // f64 must follow IEEE semantics (NaN ≠ NaN). The canonical-
+        // NaN normalization in `from_f64` would otherwise make every
+        // pair of NaNs bit-equal — diverging from `Value::Float(a) ==
+        // Value::Float(b)`.
+        let a_is_f64 = self.is_f64();
+        let b_is_f64 = other.is_f64();
+        if a_is_f64 || b_is_f64 {
+            if !(a_is_f64 && b_is_f64) {
+                return false;
+            }
+            return f64::from_bits(self.raw) == f64::from_bits(other.raw);
+        }
+        // Fast path: identical encoded payload. Catches primitives,
+        // SMIs, and any heap value cloned from the same source (since
+        // `Clone` keeps the encoded pointer identical).
+        if self.raw == other.raw {
+            return true;
+        }
+        // Slow path: bridge both into the legacy enum and use its
+        // PartialEq. Mirrors `Value::eq` — including the intentional
+        // `_ => false` arm for Closure / StructDef / Builtin.
+        let a = self.clone().into_value();
+        let b = other.clone().into_value();
+        a == b
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────
 // Bridge layer: `Value` ↔ `NanValue` (A1.2.1)
 //
 // Until the flag-day migration replaces `Value` with `NanValue`
@@ -1842,6 +1893,107 @@ mod tests {
         // Last Wrapped drop frees the WrappedStorage, which drops its
         // inner NanValue, which decrements the Module strong.
         assert_eq!(Rc::strong_count(&inner_rc), baseline);
+    }
+
+    // ── Display / PartialEq parity with Value (A1.2.2) ────────────────
+
+    /// Display of a NanValue must produce the same string as
+    /// Display of the corresponding Value, for every variant.
+    #[test]
+    fn display_parity_with_value_for_all_variants() {
+        for v in build_value_corpus() {
+            let value_text = format!("{}", v);
+            let nan_text = format!("{}", NanValue::from(&v));
+            assert_eq!(
+                value_text, nan_text,
+                "Display divergence on {:?}",
+                variant_label(&v)
+            );
+        }
+    }
+
+    /// PartialEq: two NanValues built from equal Values must compare
+    /// equal exactly when the underlying Values would.
+    #[test]
+    fn partial_eq_parity_with_value_for_primitives_and_containers() {
+        // Variants where Value defines structural equality.
+        let pairs: Vec<(OldValue, OldValue)> = vec![
+            (OldValue::Integer(7), OldValue::Integer(7)),
+            (OldValue::Integer(7), OldValue::Integer(8)),
+            (OldValue::Float(1.5), OldValue::Float(1.5)),
+            (OldValue::Float(f64::NAN), OldValue::Float(f64::NAN)),
+            (OldValue::Boolean(true), OldValue::Boolean(true)),
+            (OldValue::None, OldValue::None),
+            (OldValue::Char('x'), OldValue::Char('x')),
+            (OldValue::Byte(42), OldValue::Byte(42)),
+            (
+                OldValue::String(Rc::new("hi".into())),
+                OldValue::String(Rc::new("hi".into())),
+            ),
+            (
+                OldValue::String(Rc::new("hi".into())),
+                OldValue::String(Rc::new("HI".into())),
+            ),
+            (
+                OldValue::Array(Rc::new(RefCell::new(vec![
+                    OldValue::Integer(1),
+                    OldValue::Integer(2),
+                ]))),
+                OldValue::Array(Rc::new(RefCell::new(vec![
+                    OldValue::Integer(1),
+                    OldValue::Integer(2),
+                ]))),
+            ),
+            (
+                OldValue::Tuple(Rc::new(vec![OldValue::Boolean(true)])),
+                OldValue::Tuple(Rc::new(vec![OldValue::Boolean(true)])),
+            ),
+            (
+                OldValue::Wrapped(Rc::new(OldValue::Integer(5))),
+                OldValue::Wrapped(Rc::new(OldValue::Integer(5))),
+            ),
+        ];
+        for (a, b) in pairs {
+            let value_eq = a == b;
+            let nan_eq = NanValue::from(&a) == NanValue::from(&b);
+            assert_eq!(
+                value_eq, nan_eq,
+                "PartialEq divergence: a={:?} b={:?} (Value::eq={}, NanValue::eq={})",
+                variant_label(&a),
+                variant_label(&b),
+                value_eq,
+                nan_eq,
+            );
+        }
+    }
+
+    /// PartialEq fast path: same NanValue bit pattern returns true even
+    /// for Closure (where Value::eq would say false). This is a
+    /// strictly-stronger semantic — same Closure compares equal.
+    #[test]
+    fn partial_eq_bit_equal_fast_path_handles_closures() {
+        use crate::vm::value::{Function, make_upvalue_int_caches};
+        use std::cell::Cell;
+        let func = Rc::new(Function::new(None, 0));
+        let (kinds, values) = make_upvalue_int_caches(0);
+        let rc = Rc::new(ObjClosure {
+            function: func,
+            upvalues: Vec::new(),
+            module_globals: RefCell::new(None),
+            call_count: Cell::new(0),
+            loop_count: Cell::new(0),
+            jit_state: Cell::new(0),
+            jit_thunk: Cell::new(None),
+            specialized_thunk: Cell::new(None),
+            specialized_arity: Cell::new(0),
+            specialized_kind: Cell::new(0),
+            upvalue_int_kinds: kinds,
+            upvalue_int_values: values,
+        });
+        let a = NanValue::from_closure(Rc::clone(&rc));
+        let b = a.clone();
+        // Same encoded pointer → same raw bits → fast-path true.
+        assert!(a == b, "NanValue with same closure pointer must compare equal");
     }
 
     #[test]
