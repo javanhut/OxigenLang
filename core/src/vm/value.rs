@@ -763,6 +763,78 @@ pub struct ObjModule {
 // ── Value methods ──────────────────────────────────────────────────────
 
 impl Value {
+    // ── Variant accessors (A1.2.5 flag-day prep) ─────────────────────
+    // Mirror NanValue's accessor surface so call sites can stop relying
+    // on the enum's pattern shape. Primitives return by value; Rc
+    // variants borrow the existing Rc to stay allocation-free.
+
+    #[inline] pub fn as_integer(&self) -> Option<i64> {
+        if let Value::Integer(n) = self { Some(*n) } else { None }
+    }
+    #[inline] pub fn as_float(&self) -> Option<f64> {
+        if let Value::Float(f) = self { Some(*f) } else { None }
+    }
+    #[inline] pub fn as_char(&self) -> Option<char> {
+        if let Value::Char(c) = self { Some(*c) } else { None }
+    }
+    #[inline] pub fn as_bool(&self) -> Option<bool> {
+        if let Value::Boolean(b) = self { Some(*b) } else { None }
+    }
+    #[inline] pub fn as_byte(&self) -> Option<u8> {
+        if let Value::Byte(b) = self { Some(*b) } else { None }
+    }
+    #[inline] pub fn as_uint(&self) -> Option<u64> {
+        if let Value::Uint(n) = self { Some(*n) } else { None }
+    }
+    #[inline] pub fn is_none(&self) -> bool {
+        matches!(self, Value::None)
+    }
+    #[inline] pub fn as_string(&self) -> Option<&Rc<String>> {
+        if let Value::String(s) = self { Some(s) } else { None }
+    }
+    #[inline] pub fn as_array(&self) -> Option<&Rc<RefCell<Vec<Value>>>> {
+        if let Value::Array(a) = self { Some(a) } else { None }
+    }
+    #[inline] pub fn as_tuple(&self) -> Option<&Rc<Vec<Value>>> {
+        if let Value::Tuple(t) = self { Some(t) } else { None }
+    }
+    #[inline] pub fn as_map(&self) -> Option<&Rc<RefCell<Vec<(Value, Value)>>>> {
+        if let Value::Map(m) = self { Some(m) } else { None }
+    }
+    #[inline] pub fn as_set(&self) -> Option<&Rc<RefCell<Vec<Value>>>> {
+        if let Value::Set(s) = self { Some(s) } else { None }
+    }
+    #[inline] pub fn as_closure(&self) -> Option<&Rc<ObjClosure>> {
+        if let Value::Closure(c) = self { Some(c) } else { None }
+    }
+    #[inline] pub fn as_builtin(&self) -> Option<BuiltinFn> {
+        if let Value::Builtin(f) = self { Some(*f) } else { None }
+    }
+    #[inline] pub fn as_struct_def(&self) -> Option<&Rc<ObjStructDef>> {
+        if let Value::StructDef(d) = self { Some(d) } else { None }
+    }
+    #[inline] pub fn as_struct_instance(&self) -> Option<&Rc<ObjStructInstance>> {
+        if let Value::StructInstance(i) = self { Some(i) } else { None }
+    }
+    #[inline] pub fn as_enum_def(&self) -> Option<&Rc<ObjEnumDef>> {
+        if let Value::EnumDef(d) = self { Some(d) } else { None }
+    }
+    #[inline] pub fn as_enum_instance(&self) -> Option<&Rc<ObjEnumInstance>> {
+        if let Value::EnumInstance(i) = self { Some(i) } else { None }
+    }
+    #[inline] pub fn as_module(&self) -> Option<&Rc<ObjModule>> {
+        if let Value::Module(m) = self { Some(m) } else { None }
+    }
+    #[inline] pub fn as_error_value(&self) -> Option<&Rc<ErrorValueData>> {
+        if let Value::ErrorValue(d) = self { Some(d) } else { None }
+    }
+    #[inline] pub fn as_wrapped(&self) -> Option<&Rc<Value>> {
+        if let Value::Wrapped(v) = self { Some(v) } else { None }
+    }
+    #[inline] pub fn as_error_string(&self) -> Option<&Rc<String>> {
+        if let Value::Error(s) = self { Some(s) } else { None }
+    }
+
     /// Borrow as a [`ValueRepr`] — the migration-friendly view enum.
     /// See `ValueRepr` doc-comment for rationale (A1.2.5 flag-day prep).
     #[inline]
