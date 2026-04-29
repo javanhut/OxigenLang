@@ -979,6 +979,7 @@ impl JitInner {
                             | OpCode::Equal
                             | OpCode::NotEqual
                             | OpCode::Call
+                            | OpCode::TypeWrap
                     );
                     if !handles_own_flush && !virt_stack.is_empty() {
                         virt_stack.flush_to_memory(&mut builder, vm_val);
@@ -1109,6 +1110,23 @@ impl JitInner {
                             ip += 1;
                         }
                         OpCode::TypeWrap => {
+                            // Fast path: slot_types proved this TypeWrap is
+                            // identity (target is "INTEGER", input slot type
+                            // is Int64). The runtime would just clone the
+                            // Value::Integer back to itself; skip the FFI
+                            // entirely and leave virt_stack/memory state
+                            // untouched. ~50k FFI hops eliminated per
+                            // bench_collatz run.
+                            if slot_types.noop_type_wrap_ips.contains(&ip) {
+                                ip += 3;
+                                continue;
+                            }
+                            // Fall-through: real type conversion. Flush
+                            // virt_stack first because the helper reads
+                            // from `vm.stack` via `vm.pop()`.
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
+                            }
                             let idx = read_u16(code, ip + 1);
                             let idx_val = builder.ins().iconst(types::I32, idx as i64);
                             let call = builder.ins().call(refs.type_wrap, &[vm_val, idx_val]);

@@ -216,6 +216,17 @@ pub struct FunctionSlotTypes {
     /// False for functions that don't read upvalues — those continue
     /// to use the original int-only specialized ABI.
     pub wants_closure_arg: bool,
+
+    /// IPs of `OpCode::TypeWrap` whose runtime effect is provably
+    /// identity: target constant is the string `"INTEGER"` AND the
+    /// abstract stack top at entry is `Int64`. The JIT skips the
+    /// `jit_type_wrap` FFI call at these IPs entirely — `convert_to_type`
+    /// for `INTEGER` on a `Value::Integer` is just `value.clone()`,
+    /// which is a bit-copy with no Rc. Eliminates ~50k FFI hops per
+    /// `bench_collatz` run (one per `steps <int> := 0` reinit per
+    /// `collatz_steps` call) plus the auto-flush that the helper-call
+    /// dispatch path would otherwise force.
+    pub noop_type_wrap_ips: std::collections::HashSet<usize>,
 }
 
 impl FunctionSlotTypes {
@@ -728,6 +739,38 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         );
     let specialized_entry_eligible = specialized_entry_outcome.is_eligible();
 
+    // Post-pass 5: collect noop-INTEGER TypeWrap IPs. For each TypeWrap
+    // in the bytecode, if the target constant is `"INTEGER"` AND the
+    // abstract stack top at IP-entry is `Int64`, the runtime conversion
+    // is identity (a `Value::Integer` clone) and the JIT can skip the
+    // FFI helper entirely. Use `eligibility_states` so param mirrors
+    // (lifted Value→Int64) participate.
+    let mut noop_type_wrap_ips: HashSet<usize> = HashSet::new();
+    for (&ip, st) in eligibility_states.iter() {
+        if ip + 2 >= code.len() {
+            continue;
+        }
+        let op = match OpCode::from_byte(code[ip]) {
+            Some(o) => o,
+            None => continue,
+        };
+        if op != OpCode::TypeWrap {
+            continue;
+        }
+        let target_idx = read_u16(code, ip + 1) as usize;
+        let target_is_int = matches!(
+            chunk.constants.get(target_idx),
+            Some(Value::String(s)) if s.as_str() == "INTEGER"
+        );
+        if !target_is_int {
+            continue;
+        }
+        let top = st.stack.last().copied().unwrap_or(SlotType::Value);
+        if top == SlotType::Int64 {
+            noop_type_wrap_ips.insert(ip);
+        }
+    }
+
     FunctionSlotTypes {
         slots: result,
         local_init_result_ip,
@@ -740,6 +783,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         specialized_entry_outcome,
         specialized_param_slots,
         wants_closure_arg,
+        noop_type_wrap_ips,
     }
 }
 
