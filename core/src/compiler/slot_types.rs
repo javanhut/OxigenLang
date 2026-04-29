@@ -758,10 +758,11 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
             continue;
         }
         let target_idx = read_u16(code, ip + 1) as usize;
-        let target_is_int = matches!(
-            chunk.constants.get(target_idx),
-            Some(Value::String(s)) if s.as_str() == "INTEGER"
-        );
+        let target_is_int = chunk
+            .constants
+            .get(target_idx)
+            .and_then(|v| v.as_string())
+            .is_some_and(|s| s.as_str() == "INTEGER");
         if !target_is_int {
             continue;
         }
@@ -1225,8 +1226,8 @@ fn collect_captured_slots(code: &[u8], chunk: &Chunk) -> HashSet<u16> {
                 break;
             }
             let const_idx = read_u16(code, ip + 1) as usize;
-            let upvalue_count = match chunk.constants.get(const_idx) {
-                Some(Value::Closure(cl)) => cl.function.upvalue_count as usize,
+            let upvalue_count = match chunk.constants.get(const_idx).and_then(|v| v.as_closure()) {
+                Some(cl) => cl.function.upvalue_count as usize,
                 _ => {
                     // Malformed — treat as no upvalues and continue.
                     0
@@ -1274,9 +1275,10 @@ fn transfer(
         // Push a constant — type depends on the constant's variant.
         OpCode::Constant => {
             let idx = read_u16(code, ip + 1) as usize;
-            let ty = match chunk.constants.get(idx) {
-                Some(Value::Integer(_)) => SlotType::Int64,
-                _ => SlotType::Value,
+            let ty = if chunk.constants.get(idx).and_then(|v| v.as_integer()).is_some() {
+                SlotType::Int64
+            } else {
+                SlotType::Value
             };
             next.stack.push(ty);
         }
@@ -1664,10 +1666,11 @@ fn transfer(
             // become virtualizable. Other targets stay conservative.
             let top = next.stack.pop().unwrap_or(SlotType::Value);
             let target_idx = read_u16(code, ip + 1) as usize;
-            let target_is_int = matches!(
-                chunk.constants.get(target_idx),
-                Some(Value::String(s)) if s.as_str() == "INTEGER"
-            );
+            let target_is_int = chunk
+                .constants
+                .get(target_idx)
+                .and_then(|v| v.as_string())
+                .is_some_and(|s| s.as_str() == "INTEGER");
             if target_is_int && top == SlotType::Int64 {
                 next.stack.push(SlotType::Int64);
             } else {
@@ -1794,10 +1797,12 @@ fn opcode_len(op: OpCode, code: &[u8], ip: usize, chunk: &Chunk) -> usize {
         // conservatively (everything touched becomes `Value`).
         OpCode::Closure => {
             let idx = read_u16(code, ip + 1) as usize;
-            let upv = match chunk.constants.get(idx) {
-                Some(Value::Closure(cl)) => cl.function.upvalue_count as usize,
-                _ => 0,
-            };
+            let upv = chunk
+                .constants
+                .get(idx)
+                .and_then(|v| v.as_closure())
+                .map(|cl| cl.function.upvalue_count as usize)
+                .unwrap_or(0);
             3 + upv * 3
         }
     }
@@ -2225,7 +2230,7 @@ mod tests {
                 // that we haven't built yet, so the compiler embeds the
                 // raw `Function` as a constant).
                 for c in &top.chunk.constants {
-                    if let Value::Closure(closure) = c {
+                    if let Some(closure) = c.as_closure() {
                         if closure.function.name.as_deref() == Some(want) {
                             return (*closure.function).clone();
                         }
@@ -2235,9 +2240,9 @@ mod tests {
                 // via a different path; recursively look inside nested
                 // functions too.
                 for c in &top.chunk.constants {
-                    if let Value::Closure(closure) = c {
+                    if let Some(closure) = c.as_closure() {
                         for inner in &closure.function.chunk.constants {
-                            if let Value::Closure(ic) = inner {
+                            if let Some(ic) = inner.as_closure() {
                                 if ic.function.name.as_deref() == Some(want) {
                                     return (*ic.function).clone();
                                 }
