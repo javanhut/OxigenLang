@@ -375,6 +375,53 @@ pub enum Value {
     Error(Rc<String>),
 }
 
+/// "Read-only view" enum that mirrors the variant structure of
+/// [`Value`]. Returned from [`Value::repr`].
+///
+/// Why this exists: A1.2.5 (NaN-box flag-day) replaces the storage of
+/// `Value` with an 8-byte NaN-boxed payload. Pattern matching directly
+/// on `Value::Variant(...)` will break at that swap. Migrating call
+/// sites from `match &v { Value::X(p) => ... }` to
+/// `match v.repr() { ValueRepr::X(p) => ... }` decouples consumers
+/// from the storage shape — the swap then becomes a localized change
+/// to `Value::repr()` (re-materializing variants from NaN-box accessors)
+/// without touching every call site.
+///
+/// Encoding choices:
+/// - Primitives are by value (no `&` / `*` indirection at the call
+///   site), matching what NanValue's accessors return after the swap.
+/// - Rc-bearing variants borrow the existing `Rc<T>` from the enum
+///   payload during Phase 1, so this view is allocation-free. After
+///   the swap, the impl will reconstruct typed `Rc` references via
+///   `ManuallyDrop` so consumer code stays unchanged.
+///
+/// Variant names match `Value` exactly so the migration is a
+/// sed-friendly rename: `Value::` → `ValueRepr::` inside match arms.
+pub enum ValueRepr<'a> {
+    Integer(i64),
+    Float(f64),
+    Char(char),
+    Boolean(bool),
+    Byte(u8),
+    Uint(u64),
+    None,
+    String(&'a Rc<String>),
+    Array(&'a Rc<RefCell<Vec<Value>>>),
+    Tuple(&'a Rc<Vec<Value>>),
+    Map(&'a Rc<RefCell<Vec<(Value, Value)>>>),
+    Set(&'a Rc<RefCell<Vec<Value>>>),
+    Closure(&'a Rc<ObjClosure>),
+    Builtin(BuiltinFn),
+    StructDef(&'a Rc<ObjStructDef>),
+    StructInstance(&'a Rc<ObjStructInstance>),
+    EnumDef(&'a Rc<ObjEnumDef>),
+    EnumInstance(&'a Rc<ObjEnumInstance>),
+    Module(&'a Rc<ObjModule>),
+    ErrorValue(&'a Rc<ErrorValueData>),
+    Wrapped(&'a Rc<Value>),
+    Error(&'a Rc<String>),
+}
+
 /// Boxed payload of `Value::ErrorValue`. Kept off the enum so `Value`
 /// stays small; cloned by `Rc::clone` on every enum clone.
 #[derive(Debug, Clone)]
@@ -716,6 +763,36 @@ pub struct ObjModule {
 // ── Value methods ──────────────────────────────────────────────────────
 
 impl Value {
+    /// Borrow as a [`ValueRepr`] — the migration-friendly view enum.
+    /// See `ValueRepr` doc-comment for rationale (A1.2.5 flag-day prep).
+    #[inline]
+    pub fn repr(&self) -> ValueRepr<'_> {
+        match self {
+            Value::Integer(n) => ValueRepr::Integer(*n),
+            Value::Float(f) => ValueRepr::Float(*f),
+            Value::Char(c) => ValueRepr::Char(*c),
+            Value::Boolean(b) => ValueRepr::Boolean(*b),
+            Value::Byte(b) => ValueRepr::Byte(*b),
+            Value::Uint(n) => ValueRepr::Uint(*n),
+            Value::None => ValueRepr::None,
+            Value::String(s) => ValueRepr::String(s),
+            Value::Array(a) => ValueRepr::Array(a),
+            Value::Tuple(t) => ValueRepr::Tuple(t),
+            Value::Map(m) => ValueRepr::Map(m),
+            Value::Set(s) => ValueRepr::Set(s),
+            Value::Closure(c) => ValueRepr::Closure(c),
+            Value::Builtin(f) => ValueRepr::Builtin(*f),
+            Value::StructDef(d) => ValueRepr::StructDef(d),
+            Value::StructInstance(i) => ValueRepr::StructInstance(i),
+            Value::EnumDef(d) => ValueRepr::EnumDef(d),
+            Value::EnumInstance(i) => ValueRepr::EnumInstance(i),
+            Value::Module(m) => ValueRepr::Module(m),
+            Value::ErrorValue(d) => ValueRepr::ErrorValue(d),
+            Value::Wrapped(v) => ValueRepr::Wrapped(v),
+            Value::Error(s) => ValueRepr::Error(s),
+        }
+    }
+
     pub fn is_truthy(&self) -> bool {
         match self {
             Value::Boolean(b) => *b,
