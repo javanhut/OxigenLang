@@ -1010,6 +1010,142 @@ mod tests {
         assert_eq!(std::mem::align_of::<NanValue>(), 8);
     }
 
+    /// The JIT will eventually emit `iconst(TAG_MASK)` + `band` to test
+    /// the top 16 bits, and `iconst(PAYLOAD_MASK)` + `band` to extract
+    /// the 48-bit payload. Pin those constants so a future encoding tweak
+    /// fails fast at `cargo test`.
+    #[test]
+    fn tag_and_payload_masks_are_pinned() {
+        assert_eq!(TAG_MASK, 0xFFFF_0000_0000_0000);
+        assert_eq!(PAYLOAD_MASK, 0x0000_FFFF_FFFF_FFFF);
+        // The two masks must partition u64 exactly.
+        assert_eq!(TAG_MASK | PAYLOAD_MASK, u64::MAX);
+        assert_eq!(TAG_MASK & PAYLOAD_MASK, 0);
+    }
+
+    /// JIT IR will branch on `(raw & TAG_MASK) == TAG_X` for each kind.
+    /// Pin tag values so the JIT-emitted `icmp.eq` constants stay
+    /// in sync with the Rust-side encoding.
+    #[test]
+    fn tag_constants_are_pinned() {
+        assert_eq!(TAG_SMI, 0xFFF8_0000_0000_0000);
+        assert_eq!(TAG_SMI_UINT, 0xFFF9_0000_0000_0000);
+        assert_eq!(TAG_PRIMITIVE, 0xFFFA_0000_0000_0000);
+        assert_eq!(TAG_BUILTIN, 0xFFFB_0000_0000_0000);
+        assert_eq!(TAG_POINTER_A, 0xFFFC_0000_0000_0000);
+        assert_eq!(TAG_POINTER_B, 0xFFFD_0000_0000_0000);
+        // f64 sentinel must sit strictly below the tagged-value range.
+        assert!(CANONICAL_F64_NAN_BITS < TAG_SMI);
+    }
+
+    /// Pointer-group subkind tags ride in the low 3 bits of the 48-bit
+    /// payload. JIT field-access ICs will eventually emit
+    /// `iconst(0x7); band(raw, mask)` to extract subkind, then dispatch.
+    /// Pin the values here so a refactor of `PointerKindA/B` doesn't
+    /// silently shift dispatch.
+    #[test]
+    fn pointer_subkind_layout_is_pinned() {
+        assert_eq!(PointerKindA::String as u8, 0);
+        assert_eq!(PointerKindA::Array as u8, 1);
+        assert_eq!(PointerKindA::Tuple as u8, 2);
+        assert_eq!(PointerKindA::Map as u8, 3);
+        assert_eq!(PointerKindA::Set as u8, 4);
+        assert_eq!(PointerKindA::Closure as u8, 5);
+        assert_eq!(PointerKindA::StructDef as u8, 6);
+        assert_eq!(PointerKindA::StructInstance as u8, 7);
+
+        assert_eq!(PointerKindB::EnumDef as u8, 0);
+        assert_eq!(PointerKindB::EnumInstance as u8, 1);
+        assert_eq!(PointerKindB::Module as u8, 2);
+        assert_eq!(PointerKindB::ErrorValue as u8, 3);
+        assert_eq!(PointerKindB::Wrapped as u8, 4);
+        assert_eq!(PointerKindB::Error as u8, 5);
+        assert_eq!(PointerKindB::BoxedInt as u8, 6);
+        assert_eq!(PointerKindB::BoxedUint as u8, 7);
+
+        // Subkind index must fit in 3 bits.
+        assert!(PointerKindA::StructInstance as u8 <= 0x7);
+        assert!(PointerKindB::BoxedUint as u8 <= 0x7);
+    }
+
+    /// Pin the byte position of the primitive subkind inside the
+    /// payload: byte 5 (= bit 40). The JIT's primitive dispatch will
+    /// shift right 40 and band 0xFF to recover the subkind without going
+    /// through Rust enum pattern matching.
+    #[test]
+    fn primitive_subkind_lives_at_bit_40() {
+        let v = NanValue::from_char('a');
+        let extracted_subkind = ((v.raw_bits() >> 40) & 0xFF) as u8;
+        assert_eq!(extracted_subkind, PrimitiveKind::Char as u8);
+        let v_byte = NanValue::from_byte(0x42);
+        let sk = ((v_byte.raw_bits() >> 40) & 0xFF) as u8;
+        assert_eq!(sk, PrimitiveKind::Byte as u8);
+    }
+
+    /// SMI sign-extension boundary: -1 must encode with all 48 payload
+    /// bits set, since the JIT's eventual SMI inline-decode will do
+    /// `(payload << 16) >> 16` (arithmetic shift) to sign-extend.
+    #[test]
+    fn smi_sign_extension_at_boundary() {
+        let neg = NanValue::from_i64(-1);
+        // Payload is 48 ones — entire low 48 bits set.
+        assert_eq!(neg.raw_bits() & PAYLOAD_MASK, PAYLOAD_MASK);
+        assert_eq!(neg.as_i64(), Some(-1));
+
+        let smi_min = NanValue::from_i64(SMI_MIN);
+        // SMI_MIN payload sets only bit 47 (the sign bit position
+        // within the 48-bit payload). `(payload << 16) >> 16` recovers
+        // the original i64.
+        let recovered = ((smi_min.raw_bits() & PAYLOAD_MASK) as i64) << 16 >> 16;
+        assert_eq!(recovered, SMI_MIN);
+    }
+
+    /// Pointer-bearing values store the raw `Rc::into_raw` pointer in the
+    /// low 48 bits, with the subkind in bits 0..3. The JIT will load the
+    /// pointer via `iconst(!0x7); band(raw, mask)` to reach the typed Rc
+    /// payload. Pin that the round-trip is bit-exact for an aligned Rc.
+    #[test]
+    fn pointer_bits_round_trip_through_payload_mask() {
+        use crate::vm::value::{FieldLayout, ObjStructDef, ObjStructInstance};
+        let layout = Rc::new(FieldLayout {
+            slots: Vec::new(),
+            indices: HashMap::new(),
+        });
+        let def = Rc::new(ObjStructDef {
+            name: "Empty".to_string(),
+            fields: Vec::new(),
+            methods: RefCell::new(HashMap::new()),
+            parent: None,
+            layout: std::cell::OnceCell::new(),
+            module_globals: RefCell::new(None),
+        });
+        let inst = Rc::new(ObjStructInstance::new(
+            "Empty".to_string(),
+            Vec::new(),
+            layout,
+            def,
+        ));
+        // The NaN-box stores `Rc::into_raw(rc)` — a pointer to T inside
+        // the RcBox, not the RcBox header. The eventual JIT loads the
+        // payload bits and casts directly to `*const T`, so the pin
+        // checks that exact value (via the non-consuming `Rc::as_ptr`).
+        let expected_raw = Rc::as_ptr(&inst) as usize;
+        // Sanity: alignment lets us repurpose the low 3 bits.
+        assert_eq!(expected_raw & 0x7, 0, "Rc::into_raw target must be 8-aligned");
+
+        let nan = NanValue::from_struct_instance(Rc::clone(&inst));
+        let extracted = ((nan.raw_bits() & PAYLOAD_MASK) & !0x7) as usize;
+        assert_eq!(
+            extracted, expected_raw,
+            "pointer bits must survive payload-mask + subkind-mask"
+        );
+        // Tag dispatch picks Pointer A.
+        assert_eq!(nan.raw_bits() & TAG_MASK, TAG_POINTER_A);
+        let sub = (nan.raw_bits() & 0x7) as u8;
+        assert_eq!(sub, PointerKindA::StructInstance as u8);
+        drop(nan);
+    }
+
     #[test]
     fn tag_constants_do_not_collide_with_finite_f64() {
         // Every finite f64 has bits < TAG_SMI.
