@@ -989,9 +989,9 @@ impl JitInner {
                         OpCode::Constant => {
                             let idx = read_u16(code, ip + 1);
                             let init_slot = slot_types.local_init_result_ip.get(&ip).copied();
-                            match &chunk.constants[idx as usize] {
-                                crate::vm::value::Value::Integer(n) => {
-                                    let v = builder.ins().iconst(types::I64, *n);
+                            match chunk.constants[idx as usize].repr() {
+                                crate::vm::value::ValueRepr::Integer(n) => {
+                                    let v = builder.ins().iconst(types::I64, n);
 
                                     if let Some(slot) = init_slot {
                                         // Local-initializer Constant: still
@@ -1008,7 +1008,7 @@ impl JitInner {
                                         virt_stack.push_int_ssa(v);
                                     }
                                 }
-                                crate::vm::value::Value::Float(f) => {
+                                crate::vm::value::ValueRepr::Float(f) => {
                                     let bits = f.to_bits() as i64;
                                     let v = builder.ins().iconst(types::I64, bits);
                                     if init_slot.is_some() {
@@ -2148,12 +2148,10 @@ impl JitInner {
                         // ── Closure (variable length) ────────────────────
                         OpCode::Closure => {
                             let fn_idx = read_u16(code, ip + 1);
-                            let upvalue_count = match &chunk.constants[fn_idx as usize] {
-                                crate::vm::value::Value::Closure(t) => {
-                                    t.function.upvalue_count as usize
-                                }
-                                _ => return Err(()),
-                            };
+                            let upvalue_count = chunk.constants[fn_idx as usize]
+                                .as_closure()
+                                .map(|t| t.function.upvalue_count as usize)
+                                .ok_or(())?;
                             let descriptors_offset = ip + 3;
                             let fn_val = builder.ins().iconst(types::I32, fn_idx as i64);
                             let off_val =
@@ -4132,10 +4130,7 @@ pub(crate) fn detect_inline_method_info(func: &Function) -> Option<DetectedInlin
 
     // Resolve the field name from the callee's constant pool.
     let field_name_val = func.chunk.constants.get(m.field_idx as usize)?;
-    let field_name: std::rc::Rc<String> = match field_name_val {
-        Value::String(s) => std::rc::Rc::clone(s),
-        _ => return None,
-    };
+    let field_name: std::rc::Rc<String> = std::rc::Rc::clone(field_name_val.as_string()?);
 
     // `self` is always the first user-visible param (slot 1 — slot 0 is the
     // closure stack-frame marker), so arity must match the shape:

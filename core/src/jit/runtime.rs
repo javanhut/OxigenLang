@@ -13,7 +13,7 @@
 #![cfg(feature = "jit")]
 
 use crate::vm::VM;
-use crate::vm::value::{Upvalue, Value};
+use crate::vm::value::{Upvalue, Value, ValueRepr};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -123,24 +123,24 @@ pub unsafe extern "C" fn jit_dbg_check_spec_call(
                 vm.stack_view.len
             );
         }
-        match vm.stack_at(slot_idx) {
-            crate::vm::value::Value::Closure(c) => {
-                let c_ref: *const Rc<crate::vm::value::ObjClosure> = c;
-                let raw_rc = unsafe {
-                    *(c_ref as *const *const crate::vm::value::ObjClosure)
-                };
-                if raw_rc != cache.closure_raw {
-                    fail!(
-                        "stack[{}] closure raw ({:p}) != cache.closure_raw ({:p})",
-                        slot_idx, raw_rc, cache.closure_raw
-                    );
-                }
+        let stack_val = vm.stack_at(slot_idx);
+        if let Some(c) = stack_val.as_closure() {
+            let c_ref: *const Rc<crate::vm::value::ObjClosure> = c;
+            let raw_rc = unsafe {
+                *(c_ref as *const *const crate::vm::value::ObjClosure)
+            };
+            if raw_rc != cache.closure_raw {
+                fail!(
+                    "stack[{}] closure raw ({:p}) != cache.closure_raw ({:p})",
+                    slot_idx, raw_rc, cache.closure_raw
+                );
             }
-            other => fail!(
+        } else {
+            fail!(
                 "stack[{}] is not Value::Closure: tag={:?}",
                 slot_idx,
-                std::mem::discriminant(other)
-            ),
+                std::mem::discriminant(stack_val)
+            );
         }
 
         // jit_frame_view.len: caller pushed the callee frame; should equal expected.
@@ -293,7 +293,7 @@ pub unsafe extern "C" fn jit_type_wrap(vm: *mut VM, type_idx: u32) -> u32 {
     let type_name = vm.current_constant(type_idx as u16);
     let value = vm.pop();
 
-    let Value::String(target) = type_name else {
+    let Some(target) = type_name.as_string().cloned() else {
         vm.jit
             .stash_error(vm.runtime_error("invalid type name in TypeWrap"));
         return 1;
@@ -402,16 +402,16 @@ pub unsafe extern "C" fn jit_struct_field_add_const(
     let base = vm.current_slot_offset();
     let self_val = vm.stack_slot(base + self_slot as usize).clone();
 
-    if let Value::StructInstance(inst) = &self_val {
+    if let Some(inst) = self_val.as_struct_instance() {
         let field_name = vm.current_constant(field_idx as u16);
-        if let Value::String(fname) = &field_name {
+        if let Some(fname) = field_name.as_string() {
             if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
                 // SAFETY: single-threaded; nothing else borrows inst.fields.
                 // Integer→Integer update: no Drop needed on the old value,
                 // so patch the i64 payload in place.
                 unsafe {
                     let slot = inst.fields.ptr.add(idx);
-                    if let Value::Integer(n) = &*slot {
+                    if let Some(n) = (*slot).as_integer() {
                         let new = n.wrapping_add(addend);
                         let payload_ptr = (slot as *mut u8)
                             .add(crate::vm::value::VALUE_INT_PAYLOAD_OFFSET)
@@ -494,15 +494,15 @@ pub unsafe extern "C" fn jit_struct_field_add_local(
     let self_val = vm.stack_slot(base + self_slot as usize).clone();
     let rhs_val = vm.stack_slot(base + rhs_slot as usize).clone();
 
-    if let (Value::StructInstance(inst), Value::Integer(rhs)) = (&self_val, &rhs_val) {
+    if let (Some(inst), Some(rhs)) = (self_val.as_struct_instance(), rhs_val.as_integer()) {
         let field_name = vm.current_constant(field_idx as u16);
-        if let Value::String(fname) = &field_name {
+        if let Some(fname) = field_name.as_string() {
             if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
                 // SAFETY: same as jit_struct_field_add_const.
                 unsafe {
                     let slot = inst.fields.ptr.add(idx);
-                    if let Value::Integer(n) = &*slot {
-                        let new = n.wrapping_add(*rhs);
+                    if let Some(n) = (*slot).as_integer() {
+                        let new = n.wrapping_add(rhs);
                         let payload_ptr = (slot as *mut u8)
                             .add(crate::vm::value::VALUE_INT_PAYLOAD_OFFSET)
                             as *mut i64;
@@ -666,16 +666,17 @@ pub unsafe extern "C" fn jit_op_negate(vm: *mut VM) -> u32 {
     vm.jit.bump_helper(HelperCounter::Negate);
     vm.sync_stack_from_view();
     let v = vm.pop();
-    match v {
-        Value::Integer(n) => {
+    match v.repr() {
+        ValueRepr::Integer(n) => {
             vm.push(Value::Integer(-n));
             0
         }
-        Value::Float(f) => {
+        ValueRepr::Float(f) => {
             vm.push(Value::Float(-f));
             0
         }
-        other => {
+        _ => {
+            let other = &v;
             let err = vm.runtime_error_hint(
                 &format!(
                     "negation is only supported for numbers, got {}",
@@ -1012,10 +1013,10 @@ pub unsafe extern "C" fn jit_op_get_field_ic_miss(
     cache.struct_def = None;
     cache.closure = None;
 
-    let Value::String(fname) = field_name else {
+    let Some(fname) = field_name.as_string().cloned() else {
         return 0;
     };
-    if let Value::StructInstance(inst) = object {
+    if let Some(inst) = object.as_struct_instance() {
         let def_raw: *const crate::vm::value::ObjStructDef = unsafe {
             *(&inst.def as *const Rc<crate::vm::value::ObjStructDef>
                 as *const *const crate::vm::value::ObjStructDef)
@@ -1025,7 +1026,8 @@ pub unsafe extern "C" fn jit_op_get_field_ic_miss(
         if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
             cache.field_index = idx as u32;
             cache.kind = super::engine::FieldCacheKind::InstanceField;
-        } else if let Ok(Value::Closure(closure)) = vm.find_struct_method(&inst.struct_name, &fname)
+        } else if let Ok(method) = vm.find_struct_method(&inst.struct_name, &fname)
+            && let Some(closure) = method.as_closure().cloned()
         {
             let closure_raw: *const crate::vm::value::ObjClosure = unsafe {
                 *(&closure as *const Rc<crate::vm::value::ObjClosure>
@@ -1070,10 +1072,10 @@ pub unsafe extern "C" fn jit_op_set_field_ic_miss(
     cache.struct_def_raw = std::ptr::null();
     cache.struct_def = None;
 
-    let Value::String(fname) = field_name else {
+    let Some(fname) = field_name.as_string().cloned() else {
         return 0;
     };
-    if let Value::StructInstance(inst) = object {
+    if let Some(inst) = object.as_struct_instance() {
         if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
             let def_raw: *const crate::vm::value::ObjStructDef = unsafe {
                 *(&inst.def as *const Rc<crate::vm::value::ObjStructDef>
@@ -1131,9 +1133,9 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
 
     // Fast-path peek at the instance + def. The `def` lives on the
     // instance directly so there's no globals lookup on hit.
-    let (struct_def, struct_name_owned) = match vm.stack_at(instance_idx) {
-        Value::StructInstance(inst) => (Rc::clone(&inst.def), None::<String>),
-        _ => {
+    let (struct_def, struct_name_owned) = match vm.stack_at(instance_idx).as_struct_instance() {
+        Some(inst) => (Rc::clone(&inst.def), None::<String>),
+        None => {
             return unsafe { jit_op_method_call(vm as *mut VM, method_idx, arg_count) };
         }
     };
@@ -1170,7 +1172,7 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
 
     // Miss: resolve method, populate cache, dispatch.
     let method_name_val = vm.current_constant(method_idx as u16);
-    let Value::String(mname_rc) = method_name_val else {
+    let Some(mname_rc) = method_name_val.as_string().cloned() else {
         return unsafe { jit_op_method_call(vm as *mut VM, method_idx, arg_count) };
     };
     let mname: String = mname_rc.to_string();
@@ -1179,7 +1181,8 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
     // Preserve existing semantic: callable instance field shadows method.
     // Only take the IC path when the method lives on the def.
     match vm.find_struct_method(&struct_name, &mname) {
-        Ok(Value::Closure(closure)) => {
+        Ok(method) if method.as_closure().is_some() => {
+            let closure = method.as_closure().unwrap().clone();
             let Some(thunk) = closure.jit_thunk.get() else {
                 return unsafe { jit_op_method_call(vm as *mut VM, method_idx, arg_count) };
             };
@@ -1213,7 +1216,7 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
                     if closure.function.arity == expected_arity {
                         // Resolve the field name to the instance's layout
                         // index using the current receiver's FieldLayout.
-                        if let Value::StructInstance(inst) = vm.stack_at(instance_idx) {
+                        if let Some(inst) = vm.stack_at(instance_idx).as_struct_instance() {
                             if let Some(&layout_idx) =
                                 inst.layout.indices.get(info.field_name.as_ref())
                             {
@@ -1402,11 +1405,7 @@ pub unsafe extern "C" fn jit_op_call_miss(
 
     let before_depth = vm.frames_len();
     let callee_idx = vm.stack_len() - 1 - ac;
-    let callee_candidate = if let Value::Closure(c) = vm.stack_at(callee_idx) {
-        Some(Rc::clone(c))
-    } else {
-        None
-    };
+    let callee_candidate = vm.stack_at(callee_idx).as_closure().map(Rc::clone);
 
     let call_result = match vm.call_closure_from_stack(ac) {
         Ok(true) => Ok(()),
