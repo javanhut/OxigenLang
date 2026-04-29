@@ -1,6 +1,6 @@
 # Oxigen vs Python — native harness (interleaved A/B)
 
-- Generated: `2026-04-28T06:30:27+00:00`
+- Generated: `2026-04-29T08:02:20+00:00`
 - Host:      `archlinux`
 - Kernel:    `Linux 6.19.11-arch1-1 x86_64`
 - Oxigen:    `oxigen 0.1.2`
@@ -9,8 +9,8 @@
 - Node:      `v25.9.0` (built-in type-stripping)
 - Warmups:   `8`
 - Runs:      `15`
-- Git commit: `3fa77fc`
-- Git branch: `jit-improvements`
+- Git commit: `ce45208`
+- Git branch: `jit_performance_improvements`
 
 ## Min times (ms)
 
@@ -24,26 +24,26 @@ throttle after sustained full-CPU work. See
 
 | benchmark | no-jit | default | jit | python | bun (ts) | node (ts) | jit vs py | jit vs bun | jit vs node |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| bench_arith | 155.7 | 16.8 | 17.1 | 55.3 | 11.8 | 53.3 | 3.24x | 0.69x | 3.12x |
-| bench_closure | 87.2 | 17.6 | 18.5 | 51 | 9.8 | 52.1 | 2.76x | 0.53x | 2.82x |
-| bench_collatz | 830.2 | 28.8 | 29.8 | 315.2 | 25.8 | 61.7 | 10.57x | 0.87x | 2.07x |
-| bench_fib | 360.4 | 29.1 | 30.1 | 102.4 | 14.5 | 58.2 | 3.4x | 0.48x | 1.93x |
-| bench_loop | 132.1 | 2.1 | 2.7 | 73.7 | 10.3 | 53.8 | 27.78x | 3.89x | 20.27x |
-| bench_nested_loop | 34.5 | 1.7 | 2.3 | 24.8 | 8.9 | 56.8 | 11.01x | 3.93x | 25.21x |
-| bench_nested_loop_big | 522.5 | 4.4 | 4.9 | 253.1 | 13.6 | 59.2 | 51.15x | 2.75x | 11.96x |
-| bench_struct_method | 296.3 | 16 | 17.1 | 68 | 11.6 | 56.8 | 3.98x | 0.68x | 3.33x |
+| bench_arith | 159.4 | 17.5 | 18.1 | 56.6 | 17.6 | 67.1 | 3.13x | 0.97x | 3.71x |
+| bench_closure | 88.2 | 16 | 17 | 51.6 | 14.9 | 62.9 | 3.04x | 0.87x | 3.7x |
+| bench_collatz | 845.4 | 17.7 | 18.7 | 319.9 | 36.2 | 73.8 | 17.11x | 1.93x | 3.95x |
+| bench_fib | 365 | 30.5 | 31.3 | 102.6 | 20.3 | 68.7 | 3.28x | 0.65x | 2.2x |
+| bench_loop | 133.7 | 2.3 | 3.2 | 74.3 | 12.9 | 64.4 | 23.5x | 4.08x | 20.39x |
+| bench_nested_loop | 34.2 | 2 | 2.7 | 24.9 | 9.6 | 64.8 | 9.19x | 3.55x | 23.94x |
+| bench_nested_loop_big | 531.9 | 4.7 | 5.4 | 255.2 | 24.7 | 69.3 | 47.22x | 4.57x | 12.82x |
+| bench_struct_method | 1431.5 | 22.8 | 15.8 | 359.9 | 42.2 | 284.5 | 22.79x | 2.67x | 18.02x |
 
 ## JIT min / p50 (ms)
 
 | benchmark | jit min | jit p50 |
 | --- | ---: | ---: |
-| bench_arith | 17.1 | 17.6 |
-| bench_closure | 18.5 | 18.9 |
-| bench_collatz | 29.8 | 30.9 |
-| bench_fib | 30.1 | 30.9 |
-| bench_loop | 2.7 | 2.8 |
-| bench_nested_loop | 2.3 | 11.4 |
-| bench_nested_loop_big | 4.9 | 5.1 |
-| bench_struct_method | 17.1 | 18.3 |
+| bench_arith | 18.1 | 98.4 |
+| bench_closure | 17 | 17.4 |
+| bench_collatz | 18.7 | 19.2 |
+| bench_fib | 31.3 | 165.1 |
+| bench_loop | 3.2 | 3.3 |
+| bench_nested_loop | 2.7 | 13.6 |
+| bench_nested_loop_big | 5.4 | 6.3 |
+| bench_struct_method | 15.8 | 75.4 |
 
 Per-benchmark JSON (per-round samples + summary stats) in `/home/javanstorm/Development/OxigenLang/benchmark_reports/`.

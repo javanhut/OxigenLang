@@ -436,10 +436,84 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                 if new_pos < num_slots {
                     let ty = next_state.stack.last().copied().unwrap_or(SlotType::Bottom);
                     next_state.write_slot(new_pos, ty);
-                    let slot = new_pos as u16;
-                    let prev = first_init_ip.get(&slot).copied();
-                    if prev.map_or(true, |p| cursor < p) {
-                        first_init_ip.insert(slot, cursor);
+                    // Filter: a Constant is a slot's initializer iff the
+                    // NEXT op LEAVES the just-pushed value at that
+                    // position. Reject when the next op consumes the
+                    // top (Call's arg, BuildArray's literal element,
+                    // arith operand, Pop, etc.). Accept the dominant
+                    // patterns: typed walrus `Constant; TypeWrap;`
+                    // (TypeWrap pops 1 + pushes 1, value preserved),
+                    // and untyped walrus `Constant;` followed by any
+                    // non-consumer (next slot's init, Loop, Jump,
+                    // Return through subsequent ops, etc.).
+                    let next_op = code.get(fallthrough).and_then(|&b| OpCode::from_byte(b));
+                    let next_consumes_top = matches!(
+                        next_op,
+                        Some(OpCode::Pop)
+                            | Some(OpCode::Call)
+                            | Some(OpCode::CallNamed)
+                            | Some(OpCode::MethodCall)
+                            | Some(OpCode::Add)
+                            | Some(OpCode::Subtract)
+                            | Some(OpCode::Multiply)
+                            | Some(OpCode::Divide)
+                            | Some(OpCode::Modulo)
+                            | Some(OpCode::Equal)
+                            | Some(OpCode::NotEqual)
+                            | Some(OpCode::Less)
+                            | Some(OpCode::LessEqual)
+                            | Some(OpCode::Greater)
+                            | Some(OpCode::GreaterEqual)
+                            | Some(OpCode::BitAnd)
+                            | Some(OpCode::BitOr)
+                            | Some(OpCode::BitXor)
+                            | Some(OpCode::ShiftLeft)
+                            | Some(OpCode::ShiftRight)
+                            | Some(OpCode::Negate)
+                            | Some(OpCode::Not)
+                            | Some(OpCode::BitNot)
+                            | Some(OpCode::JumpIfFalse)
+                            | Some(OpCode::JumpIfTrue)
+                            | Some(OpCode::PopJumpIfFalse)
+                            | Some(OpCode::Unless)
+                            | Some(OpCode::SetLocal)
+                            | Some(OpCode::SetGlobal)
+                            | Some(OpCode::DefineGlobal)
+                            | Some(OpCode::DefineGlobalTyped)
+                            | Some(OpCode::SetUpvalue)
+                            | Some(OpCode::Increment)
+                            | Some(OpCode::Decrement)
+                            | Some(OpCode::Index)
+                            | Some(OpCode::IndexAssign)
+                            | Some(OpCode::IsType)
+                            | Some(OpCode::IsMut)
+                            | Some(OpCode::IsTypeMut)
+                            | Some(OpCode::BuildArray)
+                            | Some(OpCode::BuildSet)
+                            | Some(OpCode::BuildTuple)
+                            | Some(OpCode::BuildMap)
+                            | Some(OpCode::StructLiteral)
+                            | Some(OpCode::Closure)
+                            | Some(OpCode::Return)
+                    );
+                    if !next_consumes_top {
+                        let slot = new_pos as u16;
+                        let prev = first_init_ip.get(&slot).copied();
+                        // B2.2.f: "latest wins". Earlier Constants at this
+                        // position are typically array-literal elements
+                        // (e.g., `arr := [1, 2, 3, 4]` pushes 4 Constants
+                        // at slot positions 2..5 before BuildArray pops
+                        // them). The REAL init for slot N is the LATEST
+                        // surviving Constant push at position N — which,
+                        // by the linear nature of Oxigen's bytecode, is
+                        // the typed-walrus / untyped-walrus init that
+                        // follows the array literal. Picking earliest
+                        // cursor (the original rule) attributes init to
+                        // the array literal's transient, then int_locals
+                        // gets def_var'd with the wrong value.
+                        if prev.map_or(true, |p| cursor > p) {
+                            first_init_ip.insert(slot, cursor);
+                        }
                     }
                 }
             }
@@ -1540,8 +1614,21 @@ fn transfer(
             }
         }
         OpCode::TypeWrap => {
-            next.stack.pop();
-            next.stack.push(SlotType::Value);
+            // For `<int>` annotations ("INTEGER" target), TypeWrap is
+            // identity at the value level — same Int64 in, same Int64
+            // out. Preserve the slot's Int64 type so typed-int locals
+            // become virtualizable. Other targets stay conservative.
+            let top = next.stack.pop().unwrap_or(SlotType::Value);
+            let target_idx = read_u16(code, ip + 1) as usize;
+            let target_is_int = matches!(
+                chunk.constants.get(target_idx),
+                Some(Value::String(s)) if s.as_str() == "INTEGER"
+            );
+            if target_is_int && top == SlotType::Int64 {
+                next.stack.push(SlotType::Int64);
+            } else {
+                next.stack.push(SlotType::Value);
+            }
         }
         OpCode::IsMut | OpCode::IsType | OpCode::IsTypeMut => {
             if matches!(op, OpCode::IsType) {
@@ -2299,7 +2386,9 @@ mod tests {
     #[test]
     fn local_init_result_ip_recorded_for_constant_int_init() {
         // With arity=0, slot 1 is the first non-closure-marker local,
-        // and the first Constant push at ip=0 initializes it.
+        // and the first Constant push at ip=0 initializes it (next op
+        // is None, which doesn't consume the top — the value stays at
+        // slot 1's stack position).
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(42)]);
         f.chunk.code = vec![
             OpCode::Constant as u8,

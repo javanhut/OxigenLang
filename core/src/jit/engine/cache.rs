@@ -39,9 +39,21 @@ pub(crate) struct CallCacheEntry {
     pub closure_raw: *const ObjClosure,
     pub thunk_raw: *const (),
     pub arity: u8,
+    /// B2.2.f: u8 cache of `closure.specialized_kind` at the time the
+    /// IC was populated. Reading this from the constant cache_ptr is
+    /// faster (and avoids a Cranelift folding issue we hit reading
+    /// `closure.specialized_kind` directly via offset_of!) than going
+    /// through the closure object on every call. Set to 0 when the
+    /// closure has no specialized entry. Stable for the cache's
+    /// lifetime — the closure can't change `specialized_kind` after
+    /// install.
+    pub specialized_kind: u8,
     /// ABI alignment padding — never read; `pub(crate)` so the struct
     /// can be initialized from outside this module.
-    pub(crate) _pad: [u8; 7],
+    pub(crate) _pad: [u8; 6],
+    /// B2.2.f: cache of `closure.specialized_thunk` (or null when
+    /// none). Same rationale as `specialized_kind`.
+    pub specialized_thunk: *const (),
     pub _keeper: Option<std::rc::Rc<ObjClosure>>,
 }
 
@@ -52,6 +64,8 @@ impl CallCacheEntry {
     /// helper's FFI crossing entirely. Not yet wired.
     #[allow(dead_code)]
     pub(crate) const OFFSET_THUNK_RAW: i32 = 8;
+    pub(crate) const OFFSET_SPECIALIZED_KIND: i32 = 17;
+    pub(crate) const OFFSET_SPECIALIZED_THUNK: i32 = 24;
 }
 
 /// Kind tag for inline expansion of a struct-method body at its caller.

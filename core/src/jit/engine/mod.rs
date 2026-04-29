@@ -201,7 +201,9 @@ impl JitInner {
             closure_raw: std::ptr::null(),
             thunk_raw: std::ptr::null(),
             arity: 0,
-            _pad: [0; 7],
+            specialized_kind: 0,
+            _pad: [0; 6],
+            specialized_thunk: std::ptr::null(),
             _keeper: None,
         }));
         let b = self.call_caches.last_mut().unwrap();
@@ -1140,7 +1142,22 @@ impl JitInner {
                                 ip += m.len;
                             } else if let Some(m) =
                                 match_local_array_mod_index_add_update(code, chunk, ip, &blocks)
-                                    .filter(|m| !int_locals.contains_key(&m.dst_slot))
+                                    .filter(|m| {
+                                        // B2.2.f: the helper reads the dst,
+                                        // array, AND index slots from the VM
+                                        // stack via `vm.stack_slot(...)`. If
+                                        // any of them is virtualized into
+                                        // `int_locals`, its VM-stack backing
+                                        // is stale (only initialized once,
+                                        // never updated by the virt SetLocal
+                                        // path). The original filter only
+                                        // checked dst_slot, missing index;
+                                        // typed-int loop counters then read
+                                        // stale 0, producing wrong results.
+                                        !int_locals.contains_key(&m.dst_slot)
+                                            && !int_locals.contains_key(&m.array_slot)
+                                            && !int_locals.contains_key(&m.index_slot)
+                                    })
                             {
                                 if !virt_stack.is_empty() {
                                     virt_stack.flush_to_memory(&mut builder, vm_val);
@@ -2136,13 +2153,18 @@ impl JitInner {
                             let cache_ptr = call_cache_ptrs[call_ic_ix];
                             call_ic_ix += 1;
 
-                            // B2.2.f: closure-aware specialized dispatch for
-                            // monomorphic calls into closures whose body has
-                            // a `NATIVE_INT_BODY_WITH_CLOSURE` specialized
-                            // entry. Sits in front of the A3 self-recursion
-                            // path; CA fires on cross-function calls (run →
-                            // add5 in bench_closure), A3 fires on self-
-                            // recursion (fib → fib).
+                            // B2.2.f: closure-aware specialized dispatch is
+                            // emitted INSIDE the existing IC's hit block
+                            // (see further down), sharing the IC's tag
+                            // and RC checks instead of duplicating them.
+                            // The original separate CA emission (preserved
+                            // in commit history) added 3 runtime checks
+                            // before A3 + IC, which regressed every bench
+                            // that didn't actually dispatch through CA
+                            // (bench_arith ran 254% slower) — the
+                            // dispatch only fires for closures that
+                            // capture upvalues used as Int (currently
+                            // just bench_closure's `add5`).
                             //
                             // Why this is its own path: the IC's generic
                             // `thunk_raw` is `fn(*mut VM) -> u32` and reads
@@ -2175,352 +2197,13 @@ impl JitInner {
                             // the subsequent A3 / IC emissions see the
                             // pre-CA virt-stack state — same as if CA never
                             // emitted.
-                            let ca_eligible = arg_count > 0
-                                && virt_stack.top_n_are_int_ssa(arg_count as usize);
-
-                            let virt_snap_pre_ca: Option<Vec<VirtSlot>> = if ca_eligible {
-                                Some(virt_stack.snapshot())
-                            } else {
-                                None
-                            };
-
-                            // Shared post_call_block: both CA's success and
-                            // A3's success (and the existing IC's success)
-                            // converge here. Allocated lazily by whichever
-                            // path emits first.
+                            // Shared post_call_block: A3's success and the
+                            // existing IC's success (and CA dispatch's
+                            // success, when integrated below) converge
+                            // here. Allocated lazily by whichever path
+                            // emits first.
                             let mut shared_post_call_block: Option<Block> = None;
 
-                            if ca_eligible {
-                                use cranelift_codegen::ir::MemFlags;
-                                use cranelift_codegen::ir::condcodes::IntCC;
-                                let flags = MemFlags::trusted();
-
-                                let pcb = builder.create_block();
-                                shared_post_call_block = Some(pcb);
-
-                                // callee_ptr at stack[stack_len - 1]: closure
-                                // is on top; arg_count int args still live
-                                // only in virt_stack, NOT on VM stack.
-                                let stack_ptr_ca = emit_load_stack_ptr(&mut builder, vm_val);
-                                let stack_len_ca = emit_load_stack_len(&mut builder, vm_val);
-                                let value_size_ca =
-                                    builder.ins().iconst(types::I64, VALUE_SIZE as i64);
-                                let one64_ca = builder.ins().iconst(types::I64, 1);
-                                let callee_slot_ca =
-                                    builder.ins().isub(stack_len_ca, one64_ca);
-                                let callee_off_ca =
-                                    builder.ins().imul(callee_slot_ca, value_size_ca);
-                                let callee_ptr_ca =
-                                    builder.ins().iadd(stack_ptr_ca, callee_off_ca);
-
-                                let cache_val_ca =
-                                    builder.ins().iconst(ptr_ty, cache_ptr as i64);
-
-                                let ca_check_rc_block = builder.create_block();
-                                let ca_check_kind_block = builder.create_block();
-                                let ca_probe_block = builder.create_block();
-                                let ca_check_arity_block = builder.create_block();
-                                let ca_check_thunk_block = builder.create_block();
-                                let ca_call_block = builder.create_block();
-                                let ca_ok_block = builder.create_block();
-                                let ca_err_block = builder.create_block();
-                                builder.append_block_param(ca_err_block, types::I32);
-                                let ca_fallback_block = builder.create_block();
-
-                                // 1. tag == Closure.
-                                let tag_ca =
-                                    builder.ins().load(types::I8, flags, callee_ptr_ca, 0);
-                                let closure_tag_ca = builder
-                                    .ins()
-                                    .iconst(types::I8, VALUE_TAG_CLOSURE as i64);
-                                let is_closure_ca =
-                                    builder.ins().icmp(IntCC::Equal, tag_ca, closure_tag_ca);
-                                builder.ins().brif(
-                                    is_closure_ca,
-                                    ca_check_rc_block,
-                                    &[],
-                                    ca_fallback_block,
-                                    &[],
-                                );
-
-                                // 2. callee Rc == cache.closure_raw.
-                                builder.switch_to_block(ca_check_rc_block);
-                                let curr_rc_ca = builder.ins().load(
-                                    ptr_ty,
-                                    flags,
-                                    callee_ptr_ca,
-                                    VALUE_INT_PAYLOAD_OFFSET as i32,
-                                );
-                                let cached_rc_ca = builder.ins().load(
-                                    ptr_ty,
-                                    flags,
-                                    cache_val_ca,
-                                    CallCacheEntry::OFFSET_CLOSURE_RAW,
-                                );
-                                let rc_match_ca =
-                                    builder.ins().icmp(IntCC::Equal, curr_rc_ca, cached_rc_ca);
-                                builder.ins().brif(
-                                    rc_match_ca,
-                                    ca_check_kind_block,
-                                    &[],
-                                    ca_fallback_block,
-                                    &[],
-                                );
-
-                                // 3. closure.specialized_kind ==
-                                //    NATIVE_INT_BODY_WITH_CLOSURE.
-                                builder.switch_to_block(ca_check_kind_block);
-                                let closure_obj_ptr_ca = builder
-                                    .ins()
-                                    .iadd_imm(curr_rc_ca, RC_VALUE_OFFSET as i64);
-                                let spec_kind_off = std::mem::offset_of!(
-                                    crate::vm::value::ObjClosure,
-                                    specialized_kind
-                                ) as i32;
-                                let kind_byte_ca = builder.ins().load(
-                                    types::I8,
-                                    flags,
-                                    closure_obj_ptr_ca,
-                                    spec_kind_off,
-                                );
-                                let kind_match_ca = builder.ins().icmp_imm(
-                                    IntCC::Equal,
-                                    kind_byte_ca,
-                                    crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE as i64,
-                                );
-                                builder.ins().brif(
-                                    kind_match_ca,
-                                    ca_probe_block,
-                                    &[],
-                                    ca_fallback_block,
-                                    &[],
-                                );
-
-                                // Probe: bumped after the kind check passes
-                                // so we count callees that *would* be
-                                // reachable via the new ABI. Strict superset
-                                // of the actual dispatch counter.
-                                builder.switch_to_block(ca_probe_block);
-                                if let Some(cp) = counters_ptr_opt {
-                                    emit_counter_bump(
-                                        &mut builder,
-                                        cp,
-                                        counter_offsets::IC_CALLEE_HAS_CLOSURE_AWARE_SPEC,
-                                    );
-                                }
-                                builder.ins().jump(ca_check_arity_block, &[]);
-
-                                // 4. closure.specialized_arity == arg_count.
-                                builder.switch_to_block(ca_check_arity_block);
-                                let spec_arity_off = std::mem::offset_of!(
-                                    crate::vm::value::ObjClosure,
-                                    specialized_arity
-                                ) as i32;
-                                let arity_byte_ca = builder.ins().load(
-                                    types::I8,
-                                    flags,
-                                    closure_obj_ptr_ca,
-                                    spec_arity_off,
-                                );
-                                let arity_match_ca = builder.ins().icmp_imm(
-                                    IntCC::Equal,
-                                    arity_byte_ca,
-                                    arg_count as i64,
-                                );
-                                builder.ins().brif(
-                                    arity_match_ca,
-                                    ca_check_thunk_block,
-                                    &[],
-                                    ca_fallback_block,
-                                    &[],
-                                );
-
-                                // 5. closure.specialized_thunk != null.
-                                builder.switch_to_block(ca_check_thunk_block);
-                                let spec_thunk_off = std::mem::offset_of!(
-                                    crate::vm::value::ObjClosure,
-                                    specialized_thunk
-                                ) as i32;
-                                let spec_thunk_ca = builder.ins().load(
-                                    ptr_ty,
-                                    flags,
-                                    closure_obj_ptr_ca,
-                                    spec_thunk_off,
-                                );
-                                let zero_ptr_ca = builder.ins().iconst(ptr_ty, 0);
-                                let thunk_nn_ca = builder.ins().icmp(
-                                    IntCC::NotEqual,
-                                    spec_thunk_ca,
-                                    zero_ptr_ca,
-                                );
-                                builder.ins().brif(
-                                    thunk_nn_ca,
-                                    ca_call_block,
-                                    &[],
-                                    ca_fallback_block,
-                                    &[],
-                                );
-
-                                // ── ca_call_block: commit. Pop virt_stack,
-                                //    push frame, dispatch via spec thunk. ──
-                                builder.switch_to_block(ca_call_block);
-                                let mut popped_ca: Vec<cranelift_codegen::ir::Value> =
-                                    Vec::with_capacity(arg_count as usize);
-                                for _ in 0..arg_count {
-                                    popped_ca.push(virt_stack.pop_int_ssa().unwrap());
-                                }
-                                popped_ca.reverse();
-
-                                // Push JitFrame for the callee. Same shape as
-                                // the existing IC's frame push, but using
-                                // `closure_obj_ptr_ca` from the cache hit
-                                // and `callee_slot_ca = stack_len - 1`
-                                // (closure-on-top, no args on VM stack).
-                                let jit_frames_ptr_ca = builder.ins().load(
-                                    ptr_ty,
-                                    flags,
-                                    vm_val,
-                                    vm_jit_frame_view_ptr_offset(),
-                                );
-                                let jit_frames_len_ca = builder.ins().load(
-                                    types::I64,
-                                    flags,
-                                    vm_val,
-                                    vm_jit_frame_view_len_offset(),
-                                );
-                                let frame_size_ca = builder.ins().iconst(
-                                    types::I64,
-                                    std::mem::size_of::<JitFrame>() as i64,
-                                );
-                                let frame_off_ca =
-                                    builder.ins().imul(jit_frames_len_ca, frame_size_ca);
-                                let new_frame_ptr_ca =
-                                    builder.ins().iadd(jit_frames_ptr_ca, frame_off_ca);
-                                let caller_frame_ptr_ca =
-                                    emit_load_top_jit_frame_ptr(&mut builder, vm_val);
-                                let module_globals_ca = builder.ins().load(
-                                    ptr_ty,
-                                    flags,
-                                    caller_frame_ptr_ca,
-                                    JitFrame::OFFSET_MODULE_GLOBALS,
-                                );
-                                let line_val_ca =
-                                    builder.ins().iconst(types::I32, line as i64);
-                                builder.ins().store(
-                                    flags,
-                                    closure_obj_ptr_ca,
-                                    new_frame_ptr_ca,
-                                    JitFrame::OFFSET_CLOSURE_RAW,
-                                );
-                                builder.ins().store(
-                                    flags,
-                                    callee_slot_ca,
-                                    new_frame_ptr_ca,
-                                    JitFrame::OFFSET_SLOT_OFFSET,
-                                );
-                                builder.ins().store(
-                                    flags,
-                                    module_globals_ca,
-                                    new_frame_ptr_ca,
-                                    JitFrame::OFFSET_MODULE_GLOBALS,
-                                );
-                                builder.ins().store(
-                                    flags,
-                                    line_val_ca,
-                                    new_frame_ptr_ca,
-                                    JitFrame::OFFSET_LINE,
-                                );
-                                let one_inc_ca = builder.ins().iconst(types::I64, 1);
-                                let new_fl_ca =
-                                    builder.ins().iadd(jit_frames_len_ca, one_inc_ca);
-                                builder.ins().store(
-                                    flags,
-                                    new_fl_ca,
-                                    vm_val,
-                                    vm_jit_frame_view_len_offset(),
-                                );
-
-                                // Build the closure-aware spec sig and
-                                // dispatch. Sig matches what
-                                // `compile_function` emits for the callee
-                                // when `wants_closure_arg`:
-                                //   (vm, *const ObjClosure, i64, ..., i64)
-                                //     -> (u32, i64)
-                                let mut ca_sig = self.module.make_signature();
-                                ca_sig.params.push(AbiParam::new(ptr_ty));
-                                ca_sig.params.push(AbiParam::new(ptr_ty));
-                                for _ in 0..arg_count {
-                                    ca_sig.params.push(AbiParam::new(types::I64));
-                                }
-                                ca_sig.returns.push(AbiParam::new(types::I32));
-                                ca_sig.returns.push(AbiParam::new(types::I64));
-                                let ca_sig_ref = builder.import_signature(ca_sig);
-
-                                let mut call_args_ca: Vec<cranelift_codegen::ir::Value> =
-                                    Vec::with_capacity(arg_count as usize + 2);
-                                call_args_ca.push(vm_val);
-                                call_args_ca.push(closure_obj_ptr_ca);
-                                call_args_ca.extend(popped_ca);
-
-                                let ca_call_inst = builder.ins().call_indirect(
-                                    ca_sig_ref,
-                                    spec_thunk_ca,
-                                    &call_args_ca,
-                                );
-                                let ca_results = builder.inst_results(ca_call_inst);
-                                let ca_status = ca_results[0];
-                                let ca_payload = ca_results[1];
-
-                                builder.ins().brif(
-                                    ca_status,
-                                    ca_err_block,
-                                    &[ca_status.into()],
-                                    ca_ok_block,
-                                    &[],
-                                );
-
-                                // ── ca_err_block: rollback frame, propagate ──
-                                builder.switch_to_block(ca_err_block);
-                                let ca_err_status =
-                                    builder.block_params(ca_err_block)[0];
-                                builder.ins().store(
-                                    flags,
-                                    jit_frames_len_ca,
-                                    vm_val,
-                                    vm_jit_frame_view_len_offset(),
-                                );
-                                let zero64_ca = builder.ins().iconst(types::I64, 0);
-                                builder.ins().jump(
-                                    exit_block,
-                                    &[ca_err_status.into(), zero64_ca.into()],
-                                );
-
-                                // ── ca_ok_block: push int payload, jump pcb ──
-                                builder.switch_to_block(ca_ok_block);
-                                if let Some(cp) = counters_ptr_opt {
-                                    emit_counter_bump(
-                                        &mut builder,
-                                        cp,
-                                        counter_offsets::CLOSURE_AWARE_CALL_DISPATCH,
-                                    );
-                                }
-                                emit_inline_push_integer(&mut builder, vm_val, ca_payload);
-                                builder.ins().jump(pcb, &[]);
-
-                                // ── ca_fallback_block: builder lands here ──
-                                builder.switch_to_block(ca_fallback_block);
-                            }
-
-                            // Restore virt_stack to its pre-CA state. The
-                            // popping in ca_call_block was sibling — at
-                            // runtime the only path into ca_fallback_block
-                            // never executed those pops, so virt_stack's
-                            // compile-time view should match the runtime
-                            // view here. A3's emission below pops (as it
-                            // always has); this restore makes that valid.
-                            if let Some(snap) = virt_snap_pre_ca {
-                                virt_stack.restore(snap);
-                            }
 
                             // A2.5 commit 5: A3 direct-specialized-call
                             // fast path for self-recursion.
@@ -2957,6 +2640,305 @@ impl JitInner {
                                 builder.seal_block(probe_bump_block);
                                 builder.seal_block(probe_after_block);
                             }
+
+                            // B2.2.f: closure-aware spec dispatch — fires
+                            // INSIDE the IC hit block, after tag+RC have
+                            // already matched. For arg_count == 1 (the
+                            // bench_closure shape; covers all simple
+                            // 1-arg upvalue-reading closures), check
+                            // closure.specialized_kind and take the CA
+                            // path when it's NATIVE_INT_BODY_WITH_CLOSURE.
+                            // On any failure (kind mismatch, arg tag not
+                            // Integer), fall through to the existing IC
+                            // dispatch via cache.thunk_raw.
+                            //
+                            // Cost in the non-CA case: 1 kind load + 1
+                            // brif. ~6 instructions per call. For
+                            // typed-int self-recursion (bench_arith,
+                            // bench_fib) the kind is NATIVE_INT_BODY (=2),
+                            // not 3, so we skip cheaply.
+                            //
+                            // Cost in the CA case: kind check + 1 tag
+                            // check + load i64 payload + truncate stack
+                            // + push JitFrame + call_indirect via spec
+                            // thunk + push int payload. Saves the
+                            // op_return FFI hop and the
+                            // generic-thunk's interpreter dispatch on
+                            // every iteration.
+                            let post_ca_dispatch_block = if arg_count == 1 {
+                                // Read specialized_kind from the IC's
+                                // cache (populated by op_call_miss). This
+                                // avoids reading it via offset_of! on
+                                // ObjClosure, which we observed Cranelift
+                                // miscompiling on this site.
+                                let kind_byte = builder.ins().load(
+                                    types::I8,
+                                    flags,
+                                    cache_val,
+                                    CallCacheEntry::OFFSET_SPECIALIZED_KIND,
+                                );
+                                let is_ca_kind = builder.ins().icmp_imm(
+                                    IntCC::Equal,
+                                    kind_byte,
+                                    crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE as i64,
+                                );
+                                let closure_obj_ptr = builder
+                                    .ins()
+                                    .iadd_imm(curr_rc, RC_VALUE_OFFSET as i64);
+                                let ca_attempt_block = builder.create_block();
+                                let post_ca_block = builder.create_block();
+                                builder.ins().brif(
+                                    is_ca_kind,
+                                    ca_attempt_block,
+                                    &[],
+                                    post_ca_block,
+                                    &[],
+                                );
+
+                                // ── CA attempt: tag-check arg, dispatch ──
+                                builder.switch_to_block(ca_attempt_block);
+                                // Arg is at stack[stack_len - 1]. callee
+                                // (closure) is at stack[stack_len - 2] in
+                                // the IC's expected layout.
+                                let stack_ptr_ca = emit_load_stack_ptr(&mut builder, vm_val);
+                                let stack_len_ca = emit_load_stack_len(&mut builder, vm_val);
+                                let value_size_ca =
+                                    builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+                                let one64_ca = builder.ins().iconst(types::I64, 1);
+                                let arg_slot_ca = builder.ins().isub(stack_len_ca, one64_ca);
+                                let arg_off_ca = builder.ins().imul(arg_slot_ca, value_size_ca);
+                                let arg_addr_ca = builder.ins().iadd(stack_ptr_ca, arg_off_ca);
+                                let arg_tag = builder.ins().load(types::I8, flags, arg_addr_ca, 0);
+                                let arg_is_int = builder.ins().icmp_imm(
+                                    IntCC::Equal,
+                                    arg_tag,
+                                    VALUE_TAG_INTEGER as i64,
+                                );
+                                let ca_pass_block = builder.create_block();
+                                builder.ins().brif(
+                                    arg_is_int,
+                                    ca_pass_block,
+                                    &[],
+                                    post_ca_block,
+                                    &[],
+                                );
+
+                                // ── ca_pass_block: take the dispatch ──
+                                builder.switch_to_block(ca_pass_block);
+                                // Arity check via the IC cache's `arity`
+                                // (populated by op_call_miss = closure's
+                                // function.arity). For arg_count == 1, we
+                                // need cache.arity == 1.
+                                let arity_byte = builder.ins().load(
+                                    types::I8,
+                                    flags,
+                                    cache_val,
+                                    16, // CallCacheEntry::OFFSET_ARITY = 16
+                                );
+                                let arity_match = builder.ins().icmp_imm(
+                                    IntCC::Equal,
+                                    arity_byte,
+                                    arg_count as i64,
+                                );
+                                let ca_arity_ok = builder.create_block();
+                                builder.ins().brif(
+                                    arity_match,
+                                    ca_arity_ok,
+                                    &[],
+                                    post_ca_block,
+                                    &[],
+                                );
+
+                                builder.switch_to_block(ca_arity_ok);
+                                let arg_payload = builder.ins().load(
+                                    types::I64,
+                                    flags,
+                                    arg_addr_ca,
+                                    VALUE_INT_PAYLOAD_OFFSET as i32,
+                                );
+
+                                // Truncate stack: drop the arg, leave
+                                // closure on top. New len = stack_len - 1.
+                                builder.ins().store(
+                                    flags,
+                                    arg_slot_ca,
+                                    vm_val,
+                                    vm_stack_view_len_offset(),
+                                );
+
+                                // Push JitFrame for the callee. callee
+                                // is at stack[stack_len - 1] now (was
+                                // stack_len - 2 before truncate).
+                                let jit_frames_ptr_ca = builder.ins().load(
+                                    ptr_ty,
+                                    flags,
+                                    vm_val,
+                                    vm_jit_frame_view_ptr_offset(),
+                                );
+                                let jit_frames_len_ca = builder.ins().load(
+                                    types::I64,
+                                    flags,
+                                    vm_val,
+                                    vm_jit_frame_view_len_offset(),
+                                );
+                                let frame_size_ca = builder.ins().iconst(
+                                    types::I64,
+                                    std::mem::size_of::<JitFrame>() as i64,
+                                );
+                                let frame_off_ca =
+                                    builder.ins().imul(jit_frames_len_ca, frame_size_ca);
+                                let new_frame_ptr_ca =
+                                    builder.ins().iadd(jit_frames_ptr_ca, frame_off_ca);
+                                let caller_frame_ptr_ca =
+                                    emit_load_top_jit_frame_ptr(&mut builder, vm_val);
+                                let module_globals_ca = builder.ins().load(
+                                    ptr_ty,
+                                    flags,
+                                    caller_frame_ptr_ca,
+                                    JitFrame::OFFSET_MODULE_GLOBALS,
+                                );
+                                let line_val_ca =
+                                    builder.ins().iconst(types::I32, line as i64);
+                                builder.ins().store(
+                                    flags,
+                                    closure_obj_ptr,
+                                    new_frame_ptr_ca,
+                                    JitFrame::OFFSET_CLOSURE_RAW,
+                                );
+                                // callee_slot = position of closure now
+                                // (= stack_len - 1 before truncate; after
+                                // truncate, stack_view.len = stack_len-1
+                                // and callee is at len - 1 = stack_len-2).
+                                // But the spec entry's slot_offset is the
+                                // CLOSURE'S position, which is `arg_slot_ca - 1`.
+                                let callee_slot_ca = builder.ins().iadd_imm(arg_slot_ca, -1);
+                                builder.ins().store(
+                                    flags,
+                                    callee_slot_ca,
+                                    new_frame_ptr_ca,
+                                    JitFrame::OFFSET_SLOT_OFFSET,
+                                );
+                                builder.ins().store(
+                                    flags,
+                                    module_globals_ca,
+                                    new_frame_ptr_ca,
+                                    JitFrame::OFFSET_MODULE_GLOBALS,
+                                );
+                                builder.ins().store(
+                                    flags,
+                                    line_val_ca,
+                                    new_frame_ptr_ca,
+                                    JitFrame::OFFSET_LINE,
+                                );
+                                let one_inc_ca = builder.ins().iconst(types::I64, 1);
+                                let new_fl_ca =
+                                    builder.ins().iadd(jit_frames_len_ca, one_inc_ca);
+                                builder.ins().store(
+                                    flags,
+                                    new_fl_ca,
+                                    vm_val,
+                                    vm_jit_frame_view_len_offset(),
+                                );
+
+                                // Truncate stack again — actually need to
+                                // truncate to slot_offset + 1 (closure on
+                                // top). slot_offset = callee_slot_ca.
+                                // stack_view.len should be callee_slot+1.
+                                let stack_truncate_target =
+                                    builder.ins().iadd_imm(callee_slot_ca, 1);
+                                builder.ins().store(
+                                    flags,
+                                    stack_truncate_target,
+                                    vm_val,
+                                    vm_stack_view_len_offset(),
+                                );
+
+                                // Build closure-aware spec call sig and
+                                // dispatch via helper.
+                                let mut ca_sig = self.module.make_signature();
+                                ca_sig.params.push(AbiParam::new(ptr_ty));
+                                ca_sig.params.push(AbiParam::new(ptr_ty));
+                                ca_sig.params.push(AbiParam::new(types::I64));
+                                ca_sig.returns.push(AbiParam::new(types::I32));
+                                ca_sig.returns.push(AbiParam::new(types::I64));
+                                let ca_sig_ref = builder.import_signature(ca_sig);
+
+                                // Load spec_thunk from the IC cache (set
+                                // by op_call_miss). Cache_val is a constant
+                                // address baked into the IR — no folding
+                                // ambiguity that we hit reading via
+                                // closure_obj_ptr + offset_of!.
+                                let spec_thunk = builder.ins().load(
+                                    ptr_ty,
+                                    flags,
+                                    cache_val,
+                                    CallCacheEntry::OFFSET_SPECIALIZED_THUNK,
+                                );
+
+                                let ca_call_inst = builder.ins().call_indirect(
+                                    ca_sig_ref,
+                                    spec_thunk,
+                                    &[vm_val, closure_obj_ptr, arg_payload],
+                                );
+                                let ca_results = builder.inst_results(ca_call_inst);
+                                let ca_status = ca_results[0];
+                                let ca_payload = ca_results[1];
+
+                                let ca_ok_block = builder.create_block();
+                                let ca_err_block = builder.create_block();
+                                builder.append_block_param(ca_err_block, types::I32);
+                                builder.ins().brif(
+                                    ca_status,
+                                    ca_err_block,
+                                    &[ca_status.into()],
+                                    ca_ok_block,
+                                    &[],
+                                );
+
+                                // ── ca_err_block: rollback frame, propagate ──
+                                builder.switch_to_block(ca_err_block);
+                                let ca_err_status = builder.block_params(ca_err_block)[0];
+                                builder.ins().store(
+                                    flags,
+                                    jit_frames_len_ca,
+                                    vm_val,
+                                    vm_jit_frame_view_len_offset(),
+                                );
+                                let zero64_ca = builder.ins().iconst(types::I64, 0);
+                                builder.ins().jump(
+                                    exit_block,
+                                    &[ca_err_status.into(), zero64_ca.into()],
+                                );
+
+                                // ── ca_ok_block: push int payload, jump pcb ──
+                                builder.switch_to_block(ca_ok_block);
+                                if let Some(cp) = counters_ptr_opt {
+                                    emit_counter_bump(
+                                        &mut builder,
+                                        cp,
+                                        counter_offsets::CLOSURE_AWARE_CALL_DISPATCH,
+                                    );
+                                }
+                                emit_inline_push_integer(&mut builder, vm_val, ca_payload);
+                                let pcb = match shared_post_call_block {
+                                    Some(b) => b,
+                                    None => {
+                                        let b = builder.create_block();
+                                        shared_post_call_block = Some(b);
+                                        b
+                                    }
+                                };
+                                builder.ins().jump(pcb, &[]);
+
+                                // builder is now in post_ca_block (the
+                                // continuation when CA attempt failed).
+                                builder.switch_to_block(post_ca_block);
+                                Some(post_ca_block)
+                            } else {
+                                None
+                            };
+                            let _ = post_ca_dispatch_block;
+
                             let jit_frames_ptr = builder.ins().load(
                                 ptr_ty,
                                 flags,

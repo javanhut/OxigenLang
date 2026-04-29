@@ -1450,6 +1450,16 @@ pub unsafe extern "C" fn jit_op_call_miss(
                     cache.closure_raw = rc_raw;
                     cache.thunk_raw = thunk as *const ();
                     cache.arity = c.function.arity;
+                    // B2.2.f: cache the closure-aware spec entry too
+                    // so the IC's CA dispatch can read both fields
+                    // from a constant `cache_ptr` instead of going
+                    // through `closure.specialized_thunk` (which
+                    // tripped a Cranelift folding bug on the load).
+                    cache.specialized_kind = c.specialized_kind.get();
+                    cache.specialized_thunk = c
+                        .specialized_thunk
+                        .get()
+                        .unwrap_or(std::ptr::null());
                     cache._keeper = Some(c);
                 }
             }
