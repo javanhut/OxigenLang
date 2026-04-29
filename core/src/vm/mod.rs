@@ -399,7 +399,7 @@ impl VM {
         let val = self.pop();
         self.globals.insert(name.to_string(), val);
         self.global_mutability.insert(name.to_string(), mutable);
-        if let Value::String(tn) = type_name {
+        if let Some(tn) = type_name.as_string() {
             self.global_type_constraints
                 .insert(name.to_string(), Some(tn.to_string()));
         }
@@ -513,7 +513,7 @@ impl VM {
         let mut field_vec: Vec<Value> = layout.slots.iter().map(|_| Value::None).collect();
 
         for pair in flat.chunks(2) {
-            if let Value::String(fname) = &pair[0] {
+            if let Some(fname) = pair[0].as_string() {
                 if let Some(&idx) = layout.indices.get(fname.as_ref()) {
                     field_vec[idx] = pair[1].clone();
                 } else {
@@ -618,7 +618,7 @@ impl VM {
                 }
                 // Fall through: it might be a method on the struct def.
                 let method_val =
-                    if let Some(Value::StructDef(def)) = self.globals.get(&inst.struct_name) {
+                    if let Some(def) = self.globals.get(&inst.struct_name).and_then(|v| v.as_struct_def()) {
                         let methods = def.methods.borrow();
                         methods.get(fname.as_ref()).cloned()
                     } else {
@@ -708,7 +708,7 @@ impl VM {
                         crate::vm::value::VmEnumPayload::Tuple(items) => {
                             let idx_opt = other.parse::<usize>().ok().or_else(|| {
                                 self.globals.get(&inst.enum_name).and_then(|gv| {
-                                    if let Value::EnumDef(def) = gv {
+                                    if let Some(def) = gv.as_enum_def() {
                                         def.variants
                                             .iter()
                                             .find(|v| v.name == inst.variant_name)
@@ -819,10 +819,10 @@ impl VM {
         let method_count = method_count as usize;
         let start = self.stack.len() - method_count * 2;
         let flat: Vec<Value> = self.stack_drain_from(start);
-        if let Some(Value::StructDef(def)) = self.globals.get(name_str.as_ref()) {
+        if let Some(def) = self.globals.get(name_str.as_ref()).and_then(|v| v.as_struct_def()) {
             let mut methods = def.methods.borrow_mut();
             for pair in flat.chunks(2) {
-                if let Value::String(mname) = &pair[1] {
+                if let Some(mname) = pair[1].as_string() {
                     methods.insert(mname.to_string(), pair[0].clone());
                 }
             }
@@ -1634,7 +1634,7 @@ impl VM {
                     for _ in 0..named_count {
                         let val = self.pop();
                         let name = self.pop();
-                        if let Value::String(name_str) = name {
+                        if let Some(name_str) = name.as_string() {
                             named_args.push((name_str.to_string(), val));
                         }
                     }
@@ -1778,10 +1778,10 @@ impl VM {
                     if has_tag == 1 {
                         let tag = self.pop();
                         let value = self.pop();
-                        let tag_str = if let Value::String(s) = tag {
-                            s
+                        let tag_str: Rc<String> = if let Some(s) = tag.as_string() {
+                            Rc::clone(s)
                         } else {
-                            format!("{}", tag).into()
+                            Rc::new(format!("{}", tag))
                         };
                         self.push(Value::ErrorValue(Rc::new(ErrorValueData {
                             msg: rc_str(format!("{}", value)),
@@ -1809,9 +1809,9 @@ impl VM {
                     let binding_name = self.frames[frame_idx].read_constant(binding_idx).clone();
 
                     let value = self.peek(0).clone();
-                    if let Value::ErrorValue(_) = &value {
+                    if let Some(_) = value.as_error_value() {
                         // Error case: bind the error value, jump to fallback
-                        if let Value::String(name) = binding_name {
+                        if let Some(name) = binding_name.as_string() {
                             self.globals.insert(name.to_string(), value);
                         }
                         self.pop(); // pop the error
@@ -1848,13 +1848,13 @@ impl VM {
                     let mut selective_names = Vec::new();
                     for _ in 0..selective_count {
                         let name = self.pop();
-                        if let Value::String(s) = name {
+                        if let Some(s) = name.as_string() {
                             selective_names.push(s.to_string());
                         }
                     }
                     selective_names.reverse();
 
-                    if let Value::String(path_str) = path {
+                    if let Some(path_str) = path.as_string() {
                         self.import_module(&path_str, &selective_names)?;
                     }
                 }
@@ -1953,7 +1953,7 @@ impl VM {
                     let type_name = self.frames[frame_idx].read_constant(type_idx).clone();
                     let value = self.pop();
 
-                    if let Value::String(target) = type_name {
+                    if let Some(target) = type_name.as_string() {
                         let result = self.type_wrap(&target, value)?;
                         self.push(result);
                     } else {
@@ -2008,13 +2008,13 @@ impl VM {
                     for _ in 0..named_count {
                         let val = self.pop();
                         let name = self.pop();
-                        if let Value::String(name_str) = name {
+                        if let Some(name_str) = name.as_string() {
                             named_args.push((name_str.to_string(), val));
                         }
                     }
                     named_args.reverse();
 
-                    if let Value::String(mname) = method_name {
+                    if let Some(mname) = method_name.as_string() {
                         self.call_method(&mname, arg_count, &named_args)?;
                     } else {
                         return Err(self.runtime_error("invalid method name"));
@@ -2025,7 +2025,7 @@ impl VM {
                 OpCode::IsMut => {
                     let name_idx = self.frames[frame_idx].read_u16();
                     let name = self.frames[frame_idx].read_constant(name_idx).clone();
-                    if let Value::String(var_name) = name {
+                    if let Some(var_name) = name.as_string() {
                         let is_mut = self
                             .global_mutability
                             .get(var_name.as_ref())
@@ -2042,7 +2042,7 @@ impl VM {
                     let type_name = self.frames[frame_idx].read_constant(type_idx).clone();
                     let value = self.pop();
 
-                    if let Value::String(tname) = type_name {
+                    if let Some(tname) = type_name.as_string() {
                         let matches = match (tname.as_str(), &value) {
                             ("int", Value::Integer(_)) => true,
                             ("float", Value::Float(_)) => true,
@@ -2070,7 +2070,7 @@ impl VM {
                 OpCode::IsTypeMut => {
                     let name_idx = self.frames[frame_idx].read_u16();
                     let name = self.frames[frame_idx].read_constant(name_idx).clone();
-                    if let Value::String(var_name) = name {
+                    if let Some(var_name) = name.as_string() {
                         let has_constraint = self
                             .global_type_constraints
                             .get(var_name.as_ref())
@@ -2140,12 +2140,12 @@ impl VM {
                     let start = self.stack.len() - arg_count;
                     let args: Vec<Value> = self.stack.drain(start..).collect();
                     let enum_val = self.pop();
-                    let vname = if let Value::String(s) = &variant_name {
+                    let vname = if let Some(s) = variant_name.as_string() {
                         Rc::clone(s)
                     } else {
                         return Err(self.runtime_error("expected variant name string"));
                     };
-                    if let Value::EnumDef(def) = &enum_val {
+                    if let Some(def) = enum_val.as_enum_def() {
                         let variant = def
                             .variants
                             .iter()
@@ -2200,17 +2200,17 @@ impl VM {
                     let flat: Vec<Value> = self.stack.drain(start..).collect();
                     let mut fields: Vec<(String, Value)> = Vec::new();
                     for pair in flat.chunks(2) {
-                        if let Value::String(fname) = &pair[0] {
+                        if let Some(fname) = pair[0].as_string() {
                             fields.push((fname.to_string(), pair[1].clone()));
                         }
                     }
                     let enum_val = self.pop();
-                    let vname = if let Value::String(s) = &variant_name {
+                    let vname = if let Some(s) = variant_name.as_string() {
                         Rc::clone(s)
                     } else {
                         return Err(self.runtime_error("expected variant name string"));
                     };
-                    if let Value::EnumDef(def) = &enum_val {
+                    if let Some(def) = enum_val.as_enum_def() {
                         let variant = def
                             .variants
                             .iter()
@@ -2659,7 +2659,7 @@ impl VM {
                 } else {
                     None
                 };
-                if let Some(Value::Closure(closure)) = field_val {
+                if let Some(closure) = field_val.as_ref().and_then(|v| v.as_closure()).cloned() {
                     // Callable field — treat as regular call
                     self.stack[instance_idx] = Value::Closure(Rc::clone(&closure));
                     return self.call_closure(closure, arg_count, named_args, None);
@@ -2675,12 +2675,13 @@ impl VM {
                 // e.g. `Parser.parse_args()` from another module fails
                 // when the method body references file-local
                 // `normalize_array`.
-                let owning_module_globals = match self.globals.get(&inst.struct_name) {
-                    Some(Value::StructDef(def)) => def.module_globals.borrow().clone(),
-                    _ => None,
-                };
+                let owning_module_globals = self
+                    .globals
+                    .get(&inst.struct_name)
+                    .and_then(|v| v.as_struct_def())
+                    .and_then(|def| def.module_globals.borrow().clone());
 
-                if let Value::Closure(closure) = method {
+                if let Some(closure) = method.as_closure().cloned() {
                     // Method has implicit `self` as first param.
                     // Rearrange stack: [instance, arg1, ...] → [closure, instance, arg1, ...]
                     // The instance becomes the `self` argument.
@@ -2735,7 +2736,7 @@ impl VM {
                     self.stack[instance_idx] = func.clone();
                     // Pass the module's globals so the function can access
                     // module-scoped variables (e.g. `io` inside `toml`).
-                    if let Value::Closure(closure) = func {
+                    if let Some(closure) = func.as_closure().cloned() {
                         return self.call_closure(
                             closure,
                             arg_count,
@@ -2827,7 +2828,7 @@ impl VM {
     ) -> Result<Value, VMError> {
         let mut current = struct_name.to_string();
         loop {
-            if let Some(Value::StructDef(def)) = self.globals.get(&current) {
+            if let Some(def) = self.globals.get(&current).and_then(|v| v.as_struct_def()) {
                 let methods = def.methods.borrow();
                 if let Some(method) = methods.get(method_name) {
                     return Ok(method.clone());
@@ -3655,8 +3656,8 @@ impl VM {
             },
             "VALUE" => Ok(Value::Wrapped(Rc::new(value.clone()))),
             "ENUM" => {
-                match value {
-                    Value::EnumInstance(_) | Value::EnumDef(_) => Ok(value.clone()),
+                match value.repr() {
+                    ValueRepr::EnumInstance(_) | ValueRepr::EnumDef(_) => Ok(value.clone()),
                     _ => Err(self
                         .runtime_error(&format!("cannot convert {} to ENUM", value.type_name()))),
                 }
