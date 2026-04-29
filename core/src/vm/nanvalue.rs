@@ -176,9 +176,9 @@ pub enum PointerKindB {
 
 // ── Pre-computed complete bit patterns for None and Bool singletons ────
 
-const NANVALUE_NONE_BITS: u64 = TAG_PRIMITIVE | ((PrimitiveKind::None as u64) << 40);
-const NANVALUE_BOOL_FALSE_BITS: u64 = TAG_PRIMITIVE | ((PrimitiveKind::Bool as u64) << 40);
-const NANVALUE_BOOL_TRUE_BITS: u64 = NANVALUE_BOOL_FALSE_BITS | 1;
+pub const NANVALUE_NONE_BITS: u64 = TAG_PRIMITIVE | ((PrimitiveKind::None as u64) << 40);
+pub const NANVALUE_BOOL_FALSE_BITS: u64 = TAG_PRIMITIVE | ((PrimitiveKind::Bool as u64) << 40);
+pub const NANVALUE_BOOL_TRUE_BITS: u64 = NANVALUE_BOOL_FALSE_BITS | 1;
 
 // ── Boxed storage types for non-primitive values we can't inline ───────
 
@@ -235,11 +235,13 @@ impl std::fmt::Debug for NanValue {
 impl NanValue {
     // ── Primitive / SMI constructors ──────────────────────────────────
 
+    /// `None` as a `const`-evaluable value, so `Value::None` can be a
+    /// `pub const` after the A1.2.5 storage swap.
+    pub const NONE: NanValue = NanValue { raw: NANVALUE_NONE_BITS };
+
     #[inline]
     pub fn none() -> Self {
-        NanValue {
-            raw: NANVALUE_NONE_BITS,
-        }
+        NanValue::NONE
     }
 
     #[inline]
