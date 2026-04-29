@@ -1624,6 +1624,226 @@ mod tests {
         assert_eq!(Rc::strong_count(&inst), baseline);
     }
 
+    // ── Refcount conformance for every pointer kind (A1.2.4) ──────────
+    //
+    // The existing struct_instance_clone_drop_preserves_refcount test
+    // pinned StructInstance specifically. These tests extend coverage
+    // to every PointerKindA / PointerKindB variant so a future tweak to
+    // the dispatch tables in `Clone for NanValue` / `Drop for NanValue`
+    // (e.g. adding a kind, reordering subkinds) is caught immediately.
+
+    /// Generic helper: build a `Rc<T>` once, wrap it via `wrap`, then
+    /// clone the NanValue and drop both — refcount must round-trip
+    /// exactly. Works for every pointer kind whose constructor takes a
+    /// single Rc.
+    fn check_rc_refcount_round_trip<T>(rc: Rc<T>, wrap: impl Fn(Rc<T>) -> NanValue) {
+        let baseline = Rc::strong_count(&rc);
+        let v = wrap(Rc::clone(&rc));
+        assert_eq!(
+            Rc::strong_count(&rc),
+            baseline + 1,
+            "constructor must bump strong"
+        );
+        let v2 = v.clone();
+        assert_eq!(
+            Rc::strong_count(&rc),
+            baseline + 2,
+            "clone must bump strong"
+        );
+        drop(v);
+        assert_eq!(
+            Rc::strong_count(&rc),
+            baseline + 1,
+            "drop must decrement strong by one"
+        );
+        drop(v2);
+        assert_eq!(
+            Rc::strong_count(&rc),
+            baseline,
+            "final drop must restore strong"
+        );
+    }
+
+    // PointerKindA — already-covered: StructInstance and String. Add
+    // the rest: Array, Tuple, Map, Set, Closure, StructDef.
+
+    #[test]
+    fn refcount_array_round_trip() {
+        let rc = Rc::new(RefCell::new(vec![NanValue::from_i64(1)]));
+        check_rc_refcount_round_trip(rc, NanValue::from_array);
+    }
+
+    #[test]
+    fn refcount_tuple_round_trip() {
+        let rc = Rc::new(vec![NanValue::from_bool(true), NanValue::from_byte(7)]);
+        check_rc_refcount_round_trip(rc, NanValue::from_tuple);
+    }
+
+    #[test]
+    fn refcount_map_round_trip() {
+        let rc = Rc::new(RefCell::new(vec![(
+            NanValue::from_i64(1),
+            NanValue::from_i64(2),
+        )]));
+        check_rc_refcount_round_trip(rc, NanValue::from_map);
+    }
+
+    #[test]
+    fn refcount_set_round_trip() {
+        let rc = Rc::new(RefCell::new(vec![NanValue::from_i64(42)]));
+        check_rc_refcount_round_trip(rc, NanValue::from_set);
+    }
+
+    #[test]
+    fn refcount_closure_round_trip() {
+        use crate::vm::value::{Function, make_upvalue_int_caches};
+        use std::cell::Cell;
+        let func = Rc::new(Function::new(None, 0));
+        let (kinds, values) = make_upvalue_int_caches(0);
+        let rc = Rc::new(ObjClosure {
+            function: func,
+            upvalues: Vec::new(),
+            module_globals: RefCell::new(None),
+            call_count: Cell::new(0),
+            loop_count: Cell::new(0),
+            jit_state: Cell::new(0),
+            jit_thunk: Cell::new(None),
+            specialized_thunk: Cell::new(None),
+            specialized_arity: Cell::new(0),
+            specialized_kind: Cell::new(0),
+            upvalue_int_kinds: kinds,
+            upvalue_int_values: values,
+        });
+        check_rc_refcount_round_trip(rc, NanValue::from_closure);
+    }
+
+    #[test]
+    fn refcount_struct_def_round_trip() {
+        use crate::vm::value::ObjStructDef;
+        let rc = Rc::new(ObjStructDef {
+            name: "Empty".to_string(),
+            fields: Vec::new(),
+            methods: RefCell::new(HashMap::new()),
+            parent: None,
+            layout: std::cell::OnceCell::new(),
+            module_globals: RefCell::new(None),
+        });
+        check_rc_refcount_round_trip(rc, NanValue::from_struct_def);
+    }
+
+    // PointerKindB — EnumDef, EnumInstance, Module, ErrorValue, Wrapped
+    // (special), Error, BoxedInt, BoxedUint.
+
+    #[test]
+    fn refcount_enum_def_round_trip() {
+        use crate::vm::value::ObjEnumDef;
+        let rc = Rc::new(ObjEnumDef {
+            name: "T".to_string(),
+            variants: Vec::new(),
+        });
+        check_rc_refcount_round_trip(rc, NanValue::from_enum_def);
+    }
+
+    #[test]
+    fn refcount_enum_instance_round_trip() {
+        use crate::vm::value::{ObjEnumInstance, VmEnumPayload};
+        let rc = Rc::new(ObjEnumInstance {
+            enum_name: "E".to_string(),
+            variant_name: "V".to_string(),
+            payload: VmEnumPayload::Unit(None),
+        });
+        check_rc_refcount_round_trip(rc, NanValue::from_enum_instance);
+    }
+
+    #[test]
+    fn refcount_module_round_trip() {
+        use crate::vm::value::ObjModule;
+        let rc = Rc::new(ObjModule {
+            name: "m".to_string(),
+            globals: Rc::new(HashMap::new()),
+        });
+        check_rc_refcount_round_trip(rc, NanValue::from_module);
+    }
+
+    #[test]
+    fn refcount_error_value_round_trip() {
+        let rc = Rc::new(ErrorValueStorage {
+            msg: Rc::from("oops"),
+            tag: None,
+        });
+        check_rc_refcount_round_trip(rc, NanValue::from_error_value);
+    }
+
+    #[test]
+    fn refcount_error_round_trip() {
+        let rc: Rc<String> = Rc::new("err".to_string());
+        check_rc_refcount_round_trip(rc, NanValue::from_error_rc_string);
+    }
+
+    #[test]
+    fn refcount_boxed_i64_round_trip() {
+        // The boxed-int path is reached implicitly via from_i64 when the
+        // value is outside SMI range — there's no `Rc<i64>` constructor.
+        // We can still verify clone/drop preserve count by going through
+        // the public API.
+        let big = SMI_MAX + 1;
+        let v = NanValue::from_i64(big);
+        // The boxed Rc<i64> is hidden inside; we can't observe its count
+        // directly, but clone+drop must not panic and the value must
+        // round-trip.
+        let v2 = v.clone();
+        assert_eq!(v.as_i64(), Some(big));
+        assert_eq!(v2.as_i64(), Some(big));
+        drop(v);
+        drop(v2); // must not double-free the underlying Rc<i64>
+    }
+
+    #[test]
+    fn refcount_boxed_u64_round_trip() {
+        let big = SMI_UINT_MAX + 1;
+        let v = NanValue::from_u64(big);
+        let v2 = v.clone();
+        assert_eq!(v.as_u64(), Some(big));
+        assert_eq!(v2.as_u64(), Some(big));
+        drop(v);
+        drop(v2);
+    }
+
+    /// Wrapped is special because its constructor takes a `NanValue`,
+    /// not an `Rc<_>`. Verify the inner NanValue's refcount is preserved
+    /// through a Wrapped clone/drop cycle.
+    #[test]
+    fn refcount_wrapped_preserves_inner_refcount() {
+        use crate::vm::value::ObjModule;
+        let inner_rc = Rc::new(ObjModule {
+            name: "inner".to_string(),
+            globals: Rc::new(HashMap::new()),
+        });
+        let baseline = Rc::strong_count(&inner_rc);
+
+        let inner_nan = NanValue::from_module(Rc::clone(&inner_rc));
+        assert_eq!(Rc::strong_count(&inner_rc), baseline + 1);
+
+        let wrapped = NanValue::from_wrapped(inner_nan);
+        // wrapped owns inner_nan via Rc<WrappedStorage>; inner Module
+        // refcount stays at +1 (the from_module strong didn't move).
+        assert_eq!(Rc::strong_count(&inner_rc), baseline + 1);
+
+        let wrapped2 = wrapped.clone();
+        // Cloning Wrapped bumps Rc<WrappedStorage> only — the inner
+        // Module's strong is unchanged because the WrappedStorage holds
+        // it once.
+        assert_eq!(Rc::strong_count(&inner_rc), baseline + 1);
+
+        drop(wrapped);
+        assert_eq!(Rc::strong_count(&inner_rc), baseline + 1);
+
+        drop(wrapped2);
+        // Last Wrapped drop frees the WrappedStorage, which drops its
+        // inner NanValue, which decrements the Module strong.
+        assert_eq!(Rc::strong_count(&inner_rc), baseline);
+    }
+
     #[test]
     fn bridge_preserves_array_contents_with_cycle_free_recursion() {
         let original = OldValue::Array(Rc::new(RefCell::new(vec![
