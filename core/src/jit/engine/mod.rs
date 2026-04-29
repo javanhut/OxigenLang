@@ -2666,40 +2666,14 @@ impl JitInner {
                             // generic-thunk's interpreter dispatch on
                             // every iteration.
                             let post_ca_dispatch_block = if arg_count == 1 {
-                                // Read specialized_kind from the IC's
-                                // cache (populated by op_call_miss). This
-                                // avoids reading it via offset_of! on
-                                // ObjClosure, which we observed Cranelift
-                                // miscompiling on this site.
-                                let kind_byte = builder.ins().load(
-                                    types::I8,
-                                    flags,
-                                    cache_val,
-                                    CallCacheEntry::OFFSET_SPECIALIZED_KIND,
-                                );
-                                let is_ca_kind = builder.ins().icmp_imm(
-                                    IntCC::Equal,
-                                    kind_byte,
-                                    crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE as i64,
-                                );
+                                // Compute closure_obj_ptr once.
                                 let closure_obj_ptr = builder
                                     .ins()
                                     .iadd_imm(curr_rc, RC_VALUE_OFFSET as i64);
-                                let ca_attempt_block = builder.create_block();
-                                let post_ca_block = builder.create_block();
-                                builder.ins().brif(
-                                    is_ca_kind,
-                                    ca_attempt_block,
-                                    &[],
-                                    post_ca_block,
-                                    &[],
-                                );
 
-                                // ── CA attempt: tag-check arg, dispatch ──
-                                builder.switch_to_block(ca_attempt_block);
-                                // Arg is at stack[stack_len - 1]. callee
-                                // (closure) is at stack[stack_len - 2] in
-                                // the IC's expected layout.
+                                // Locate arg slot up front so we can
+                                // tag-check it alongside the kind/arity
+                                // checks from the cache.
                                 let stack_ptr_ca = emit_load_stack_ptr(&mut builder, vm_val);
                                 let stack_len_ca = emit_load_stack_len(&mut builder, vm_val);
                                 let value_size_ca =
@@ -2708,48 +2682,60 @@ impl JitInner {
                                 let arg_slot_ca = builder.ins().isub(stack_len_ca, one64_ca);
                                 let arg_off_ca = builder.ins().imul(arg_slot_ca, value_size_ca);
                                 let arg_addr_ca = builder.ins().iadd(stack_ptr_ca, arg_off_ca);
-                                let arg_tag = builder.ins().load(types::I8, flags, arg_addr_ca, 0);
-                                let arg_is_int = builder.ins().icmp_imm(
-                                    IntCC::Equal,
-                                    arg_tag,
-                                    VALUE_TAG_INTEGER as i64,
-                                );
-                                let ca_pass_block = builder.create_block();
-                                builder.ins().brif(
-                                    arg_is_int,
-                                    ca_pass_block,
-                                    &[],
-                                    post_ca_block,
-                                    &[],
-                                );
 
-                                // ── ca_pass_block: take the dispatch ──
-                                builder.switch_to_block(ca_pass_block);
-                                // Arity check via the IC cache's `arity`
-                                // (populated by op_call_miss = closure's
-                                // function.arity). For arg_count == 1, we
-                                // need cache.arity == 1.
+                                // Load all three predicate bytes from
+                                // their constant addresses (cache_val
+                                // for kind/arity, arg_addr for tag).
+                                // `cache_val` is an iconst — Cranelift
+                                // can hoist these loads aggressively.
+                                let kind_byte = builder.ins().load(
+                                    types::I8,
+                                    flags,
+                                    cache_val,
+                                    CallCacheEntry::OFFSET_SPECIALIZED_KIND,
+                                );
                                 let arity_byte = builder.ins().load(
                                     types::I8,
                                     flags,
                                     cache_val,
                                     16, // CallCacheEntry::OFFSET_ARITY = 16
                                 );
+                                let arg_tag = builder.ins().load(types::I8, flags, arg_addr_ca, 0);
+
+                                let is_ca_kind = builder.ins().icmp_imm(
+                                    IntCC::Equal,
+                                    kind_byte,
+                                    crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE as i64,
+                                );
                                 let arity_match = builder.ins().icmp_imm(
                                     IntCC::Equal,
                                     arity_byte,
                                     arg_count as i64,
                                 );
-                                let ca_arity_ok = builder.create_block();
+                                let arg_is_int = builder.ins().icmp_imm(
+                                    IntCC::Equal,
+                                    arg_tag,
+                                    VALUE_TAG_INTEGER as i64,
+                                );
+                                // Fuse kind + arity + arg_tag into one
+                                // boolean + one brif. Saves 2 brifs and 2
+                                // intermediate blocks per call site
+                                // compared to the prior cascade.
+                                let kind_and_arity = builder.ins().band(is_ca_kind, arity_match);
+                                let all_ok = builder.ins().band(kind_and_arity, arg_is_int);
+
+                                let ca_dispatch_block = builder.create_block();
+                                let post_ca_block = builder.create_block();
                                 builder.ins().brif(
-                                    arity_match,
-                                    ca_arity_ok,
+                                    all_ok,
+                                    ca_dispatch_block,
                                     &[],
                                     post_ca_block,
                                     &[],
                                 );
 
-                                builder.switch_to_block(ca_arity_ok);
+                                // ── ca_dispatch_block: take the call ──
+                                builder.switch_to_block(ca_dispatch_block);
                                 let arg_payload = builder.ins().load(
                                     types::I64,
                                     flags,
@@ -2758,7 +2744,11 @@ impl JitInner {
                                 );
 
                                 // Truncate stack: drop the arg, leave
-                                // closure on top. New len = stack_len - 1.
+                                // closure on top. New len = stack_len - 1
+                                // = arg_slot_ca. The spec entry's
+                                // prologue then bumps len by `arity`
+                                // (= 1) when it materialises the i64
+                                // arg back at slot+1 for helper compat.
                                 builder.ins().store(
                                     flags,
                                     arg_slot_ca,
@@ -2838,19 +2828,6 @@ impl JitInner {
                                     new_fl_ca,
                                     vm_val,
                                     vm_jit_frame_view_len_offset(),
-                                );
-
-                                // Truncate stack again — actually need to
-                                // truncate to slot_offset + 1 (closure on
-                                // top). slot_offset = callee_slot_ca.
-                                // stack_view.len should be callee_slot+1.
-                                let stack_truncate_target =
-                                    builder.ins().iadd_imm(callee_slot_ca, 1);
-                                builder.ins().store(
-                                    flags,
-                                    stack_truncate_target,
-                                    vm_val,
-                                    vm_stack_view_len_offset(),
                                 );
 
                                 // Build closure-aware spec call sig and
