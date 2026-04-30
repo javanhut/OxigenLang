@@ -198,6 +198,31 @@ impl VirtStack {
             .all(|s| matches!(s, VirtSlot::IntSsa(_)))
     }
 
+    /// B2.2.f: capture the current virt-stack contents so a sibling
+    /// emission can mutate them (e.g. pop args for a fast-path call)
+    /// without disturbing what later code expects to see. Restoring
+    /// only rewinds the compile-time tracking — Cranelift IR already
+    /// emitted is untouched, so SSA values that were popped remain
+    /// valid (they were registered with the function and live as long
+    /// as they have downstream uses).
+    #[inline]
+    pub(crate) fn snapshot(&self) -> Vec<VirtSlot> {
+        self.slots.clone()
+    }
+
+    /// B2.2.f: pair to `snapshot`. Resets the compile-time tracking to
+    /// `snap`, so a subsequent emission sees the same set of pending
+    /// virt slots as before the bracketed mutation. Caller's
+    /// responsibility to ensure the runtime branch that this restore
+    /// "feeds" cannot observe IR emitted between the snapshot and the
+    /// restore — i.e. the bracketed emission must end on a block that
+    /// is reached only via paths where the popped values are
+    /// inaccessible (or have been re-pushed).
+    #[inline]
+    pub(crate) fn restore(&mut self, snap: Vec<VirtSlot>) {
+        self.slots = snap;
+    }
+
     /// Materialise every pending virt slot into `vm.stack[]` and bump
     /// `stack_view.len` accordingly. After this call the virt stack
     /// is empty and `vm.stack` reflects the full logical depth.

@@ -8,7 +8,7 @@
 //! plan.
 
 use crate::compiler::opcode::{Chunk, OpCode};
-use crate::vm::value::Value;
+use crate::vm::value::ValueRepr;
 
 /// Result of a successful scan. The branch-target list is sorted and
 /// deduplicated.
@@ -274,14 +274,14 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
                     read_u16(code, ip + 1).ok_or(ScanError::InvalidBytecode { offset: ip })?;
                 if let Some(v) = chunk.constants.get(idx as usize) {
                     if !matches!(
-                        v,
-                        Value::Integer(_)
-                            | Value::Float(_)
-                            | Value::Boolean(_)
-                            | Value::Byte(_)
-                            | Value::Uint(_)
-                            | Value::Char(_)
-                            | Value::None
+                        v.repr(),
+                        ValueRepr::Integer(_)
+                            | ValueRepr::Float(_)
+                            | ValueRepr::Boolean(_)
+                            | ValueRepr::Byte(_)
+                            | ValueRepr::Uint(_)
+                            | ValueRepr::Char(_)
+                            | ValueRepr::None
                     ) {
                         info.touches_heap_values = true;
                     }
@@ -296,10 +296,12 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
             // 3 bytes per upvalue descriptor (u8 is_local + u16 index).
             // We need the constants pool to resolve the upvalue count.
             let fn_idx = read_u16(code, ip + 1).ok_or(ScanError::InvalidBytecode { offset: ip })?;
-            let upvalue_count = match chunk.constants.get(fn_idx as usize) {
-                Some(Value::Closure(t)) => t.function.upvalue_count as usize,
-                _ => return Err(ScanError::InvalidBytecode { offset: ip }),
-            };
+            let upvalue_count = chunk
+                .constants
+                .get(fn_idx as usize)
+                .and_then(|v| v.as_closure())
+                .map(|t| t.function.upvalue_count as usize)
+                .ok_or(ScanError::InvalidBytecode { offset: ip })?;
             // Closure opcode means this function may capture locals into
             // upvalues of the inner closure; Return must therefore call
             // close_upvalues. Record that fact so the JIT can NOT inline

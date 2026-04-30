@@ -1,4 +1,4 @@
-use crate::vm::value::{ErrorValueData, Value, rc_str};
+use crate::vm::value::{ErrorValueData, Value, ValueRepr, rc_str};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -187,12 +187,12 @@ fn builtin_len(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("len() takes exactly 1 argument"));
     }
-    match &args[0] {
-        Value::String(s) => Value::Integer(s.len() as i64),
-        Value::Array(a) => Value::Integer(a.borrow().len() as i64),
-        Value::Tuple(t) => Value::Integer(t.len() as i64),
-        Value::Map(m) => Value::Integer(m.borrow().len() as i64),
-        Value::Set(s) => Value::Integer(s.borrow().len() as i64),
+    match args[0].repr() {
+        ValueRepr::String(s) => Value::Integer(s.len() as i64),
+        ValueRepr::Array(a) => Value::Integer(a.borrow().len() as i64),
+        ValueRepr::Tuple(t) => Value::Integer(t.len() as i64),
+        ValueRepr::Map(m) => Value::Integer(m.borrow().len() as i64),
+        ValueRepr::Set(s) => Value::Integer(s.borrow().len() as i64),
         _ => Value::Error(rc_str(format!(
             "len() not supported for {}",
             args[0].type_name()
@@ -204,8 +204,8 @@ fn builtin_push(args: Vec<Value>) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("push() takes exactly 2 arguments"));
     }
-    match &args[0] {
-        Value::Array(arr) => {
+    match args[0].repr() {
+        ValueRepr::Array(arr) => {
             arr.borrow_mut().push(args[1].clone());
             args[0].clone() // return the array (same behavior as tree-walker)
         }
@@ -217,8 +217,8 @@ fn builtin_first(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("first() takes exactly 1 argument"));
     }
-    match &args[0] {
-        Value::Array(arr) => arr.borrow().first().cloned().unwrap_or(Value::None),
+    match args[0].repr() {
+        ValueRepr::Array(arr) => arr.borrow().first().cloned().unwrap_or(Value::None),
         _ => Value::Error(rc_str("first() requires an array")),
     }
 }
@@ -227,8 +227,8 @@ fn builtin_last(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("last() takes exactly 1 argument"));
     }
-    match &args[0] {
-        Value::Array(arr) => arr.borrow().last().cloned().unwrap_or(Value::None),
+    match args[0].repr() {
+        ValueRepr::Array(arr) => arr.borrow().last().cloned().unwrap_or(Value::None),
         _ => Value::Error(rc_str("last() requires an array")),
     }
 }
@@ -237,8 +237,8 @@ fn builtin_rest(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("rest() takes exactly 1 argument"));
     }
-    match &args[0] {
-        Value::Array(arr) => {
+    match args[0].repr() {
+        ValueRepr::Array(arr) => {
             let borrowed = arr.borrow();
             if borrowed.is_empty() {
                 Value::Array(Rc::new(RefCell::new(Vec::new())))
@@ -268,20 +268,20 @@ fn builtin_int(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("int() takes exactly 1 argument"));
     }
-    match &args[0] {
-        Value::Integer(n) => Value::Integer(*n),
-        Value::Float(f) => Value::Integer(*f as i64),
-        Value::String(s) => match s.parse::<i64>() {
+    match args[0].repr() {
+        ValueRepr::Integer(n) => Value::Integer(n),
+        ValueRepr::Float(f) => Value::Integer(f as i64),
+        ValueRepr::String(s) => match s.parse::<i64>() {
             Ok(n) => Value::Integer(n),
             Err(_) => match s.parse::<f64>() {
                 Ok(f) => Value::Integer(f as i64),
                 Err(_) => Value::Error(rc_str(format!("cannot convert '{}' to int", s))),
             },
         },
-        Value::Boolean(b) => Value::Integer(if *b { 1 } else { 0 }),
-        Value::Byte(b) => Value::Integer(*b as i64),
-        Value::Uint(u) => Value::Integer(*u as i64),
-        Value::Char(c) => Value::Integer(*c as i64),
+        ValueRepr::Boolean(b) => Value::Integer(if b { 1 } else { 0 }),
+        ValueRepr::Byte(b) => Value::Integer(b as i64),
+        ValueRepr::Uint(u) => Value::Integer(u as i64),
+        ValueRepr::Char(c) => Value::Integer(c as i64),
         _ => Value::Error(rc_str(format!(
             "cannot convert {} to int",
             args[0].type_name()
@@ -293,15 +293,15 @@ fn builtin_float(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("float() takes exactly 1 argument"));
     }
-    match &args[0] {
-        Value::Float(f) => Value::Float(*f),
-        Value::Integer(n) => Value::Float(*n as f64),
-        Value::String(s) => match s.parse::<f64>() {
+    match args[0].repr() {
+        ValueRepr::Float(f) => Value::Float(f),
+        ValueRepr::Integer(n) => Value::Float(n as f64),
+        ValueRepr::String(s) => match s.parse::<f64>() {
             Ok(f) => Value::Float(f),
             Err(_) => Value::Error(rc_str(format!("cannot convert '{}' to float", s))),
         },
-        Value::Byte(b) => Value::Float(*b as f64),
-        Value::Uint(u) => Value::Float(*u as f64),
+        ValueRepr::Byte(b) => Value::Float(b as f64),
+        ValueRepr::Uint(u) => Value::Float(u as f64),
         _ => Value::Error(rc_str(format!(
             "cannot convert {} to float",
             args[0].type_name()
@@ -311,8 +311,8 @@ fn builtin_float(args: Vec<Value>) -> Value {
 
 fn builtin_range(args: Vec<Value>) -> Value {
     let (start, end) = match args.len() {
-        1 => match &args[0] {
-            Value::Integer(n) => (0i64, *n),
+        1 => match args[0].repr() {
+            ValueRepr::Integer(n) => (0i64, n),
             _ => return Value::Error(rc_str("range() requires integer arguments")),
         },
         2 => match (&args[0], &args[1]) {
@@ -329,8 +329,8 @@ fn builtin_chars(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("chars() takes exactly 1 argument"));
     }
-    match &args[0] {
-        Value::String(s) => {
+    match args[0].repr() {
+        ValueRepr::String(s) => {
             let arr: Vec<Value> = s.chars().map(Value::Char).collect();
             Value::Array(Rc::new(RefCell::new(arr)))
         }
@@ -377,8 +377,8 @@ fn builtin_keys(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("keys() takes exactly 1 argument"));
     }
-    match &args[0] {
-        Value::Map(m) => {
+    match args[0].repr() {
+        ValueRepr::Map(m) => {
             let keys: Vec<Value> = m.borrow().iter().map(|(k, _)| k.clone()).collect();
             Value::Array(Rc::new(RefCell::new(keys)))
         }
@@ -390,8 +390,8 @@ fn builtin_values(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("values() takes exactly 1 argument"));
     }
-    match &args[0] {
-        Value::Map(m) => {
+    match args[0].repr() {
+        ValueRepr::Map(m) => {
             let vals: Vec<Value> = m.borrow().iter().map(|(_, v)| v.clone()).collect();
             Value::Array(Rc::new(RefCell::new(vals)))
         }
@@ -403,8 +403,8 @@ fn builtin_insert(args: Vec<Value>) -> Value {
     if args.len() != 3 {
         return Value::Error(rc_str("insert() takes exactly 3 arguments"));
     }
-    match &args[0] {
-        Value::Map(m) => {
+    match args[0].repr() {
+        ValueRepr::Map(m) => {
             let mut map = m.borrow_mut();
             // Check if key exists, update if so
             for entry in map.iter_mut() {
@@ -416,7 +416,7 @@ fn builtin_insert(args: Vec<Value>) -> Value {
             map.push((args[1].clone(), args[2].clone()));
             Value::None
         }
-        Value::Set(s) => {
+        ValueRepr::Set(s) => {
             let mut set = s.borrow_mut();
             if !set.iter().any(|item| item == &args[1]) {
                 set.push(args[1].clone());
@@ -431,13 +431,13 @@ fn builtin_remove(args: Vec<Value>) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("remove() takes exactly 2 arguments"));
     }
-    match &args[0] {
-        Value::Map(m) => {
+    match args[0].repr() {
+        ValueRepr::Map(m) => {
             let mut map = m.borrow_mut();
             map.retain(|(k, _)| k != &args[1]);
             Value::None
         }
-        Value::Set(s) => {
+        ValueRepr::Set(s) => {
             let mut set = s.borrow_mut();
             set.retain(|item| item != &args[1]);
             Value::None
@@ -450,12 +450,12 @@ fn builtin_has(args: Vec<Value>) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("has() takes exactly 2 arguments"));
     }
-    match &args[0] {
-        Value::Map(m) => {
+    match args[0].repr() {
+        ValueRepr::Map(m) => {
             let map = m.borrow();
             Value::Boolean(map.iter().any(|(k, _)| k == &args[1]))
         }
-        Value::Set(s) => {
+        ValueRepr::Set(s) => {
             let set = s.borrow();
             Value::Boolean(set.iter().any(|item| item == &args[1]))
         }
@@ -482,9 +482,9 @@ fn builtin_byte(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("byte() takes exactly 1 argument"));
     }
-    match &args[0] {
-        Value::Integer(n) => Value::Byte(*n as u8),
-        Value::Uint(n) => Value::Byte(*n as u8),
+    match args[0].repr() {
+        ValueRepr::Integer(n) => Value::Byte(n as u8),
+        ValueRepr::Uint(n) => Value::Byte(n as u8),
         _ => Value::Error(rc_str(format!(
             "cannot convert {} to byte",
             args[0].type_name()
@@ -496,11 +496,11 @@ fn builtin_uint(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("uint() takes exactly 1 argument"));
     }
-    match &args[0] {
-        Value::Integer(n) => Value::Uint(*n as u64),
-        Value::Float(f) => Value::Uint(*f as u64),
-        Value::Byte(b) => Value::Uint(*b as u64),
-        Value::String(s) => match s.parse::<u64>() {
+    match args[0].repr() {
+        ValueRepr::Integer(n) => Value::Uint(n as u64),
+        ValueRepr::Float(f) => Value::Uint(f as u64),
+        ValueRepr::Byte(b) => Value::Uint(b as u64),
+        ValueRepr::String(s) => match s.parse::<u64>() {
             Ok(n) => Value::Uint(n),
             Err(_) => Value::Error(rc_str(format!("cannot convert '{}' to uint", s))),
         },
@@ -515,8 +515,8 @@ fn builtin_chr(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("chr() takes exactly 1 argument"));
     }
-    match &args[0] {
-        Value::Integer(n) => match char::from_u32(*n as u32) {
+    match args[0].repr() {
+        ValueRepr::Integer(n) => match char::from_u32(n as u32) {
             Some(c) => Value::Char(c),
             None => Value::Error(rc_str(format!("invalid char code: {}", n))),
         },
@@ -528,8 +528,8 @@ fn builtin_ord(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("ord() takes exactly 1 argument"));
     }
-    match &args[0] {
-        Value::Char(c) => Value::Integer(*c as i64),
+    match args[0].repr() {
+        ValueRepr::Char(c) => Value::Integer(c as i64),
         _ => Value::Error(rc_str("ord() requires a char")),
     }
 }
@@ -569,8 +569,8 @@ fn builtin_trim(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__trim() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(s) => Value::String(rc_str(s.trim())),
+    match args[0].repr() {
+        ValueRepr::String(s) => Value::String(rc_str(s.trim())),
         _ => Value::Error(rc_str("__trim() requires a string")),
     }
 }
@@ -579,8 +579,8 @@ fn builtin_upper(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__upper() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(s) => Value::String(rc_str(s.to_uppercase())),
+    match args[0].repr() {
+        ValueRepr::String(s) => Value::String(rc_str(s.to_uppercase())),
         _ => Value::Error(rc_str("__upper() requires a string")),
     }
 }
@@ -589,8 +589,8 @@ fn builtin_lower(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__lower() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(s) => Value::String(rc_str(s.to_lowercase())),
+    match args[0].repr() {
+        ValueRepr::String(s) => Value::String(rc_str(s.to_lowercase())),
         _ => Value::Error(rc_str("__lower() requires a string")),
     }
 }
@@ -683,8 +683,8 @@ fn builtin_sort(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__sort() takes 1 argument"));
     }
-    match &args[0] {
-        Value::Array(arr) => {
+    match args[0].repr() {
+        ValueRepr::Array(arr) => {
             let mut sorted = arr.borrow().clone();
             sorted.sort_by(|a, b| match (a, b) {
                 (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
@@ -706,9 +706,9 @@ fn builtin_sqrt(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__sqrt() takes 1 argument"));
     }
-    match &args[0] {
-        Value::Float(f) => Value::Float(f.sqrt()),
-        Value::Integer(n) => Value::Float((*n as f64).sqrt()),
+    match args[0].repr() {
+        ValueRepr::Float(f) => Value::Float(f.sqrt()),
+        ValueRepr::Integer(n) => Value::Float((n as f64).sqrt()),
         _ => Value::Error(rc_str("__sqrt() requires a number")),
     }
 }
@@ -717,9 +717,9 @@ fn builtin_floor(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__floor() takes 1 argument"));
     }
-    match &args[0] {
-        Value::Float(f) => Value::Integer(f.floor() as i64),
-        Value::Integer(n) => Value::Integer(*n),
+    match args[0].repr() {
+        ValueRepr::Float(f) => Value::Integer(f.floor() as i64),
+        ValueRepr::Integer(n) => Value::Integer(n),
         _ => Value::Error(rc_str("__floor() requires a number")),
     }
 }
@@ -728,9 +728,9 @@ fn builtin_ceil(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__ceil() takes 1 argument"));
     }
-    match &args[0] {
-        Value::Float(f) => Value::Integer(f.ceil() as i64),
-        Value::Integer(n) => Value::Integer(*n),
+    match args[0].repr() {
+        ValueRepr::Float(f) => Value::Integer(f.ceil() as i64),
+        ValueRepr::Integer(n) => Value::Integer(n),
         _ => Value::Error(rc_str("__ceil() requires a number")),
     }
 }
@@ -739,9 +739,9 @@ fn builtin_round(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__round() takes 1 argument"));
     }
-    match &args[0] {
-        Value::Float(f) => Value::Integer(f.round() as i64),
-        Value::Integer(n) => Value::Integer(*n),
+    match args[0].repr() {
+        ValueRepr::Float(f) => Value::Integer(f.round() as i64),
+        ValueRepr::Integer(n) => Value::Integer(n),
         _ => Value::Error(rc_str("__round() requires a number")),
     }
 }
@@ -775,8 +775,8 @@ fn builtin_read_file(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__read_file() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(path) => match std::fs::read_to_string(path.as_ref()) {
+    match args[0].repr() {
+        ValueRepr::String(path) => match std::fs::read_to_string(path.as_ref()) {
             Ok(contents) => Value::String(rc_str(contents)),
             Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
                 msg: rc_str(format!("{}", e)),
@@ -838,8 +838,8 @@ fn builtin_file_exists(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__file_exists() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).exists()),
+    match args[0].repr() {
+        ValueRepr::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).exists()),
         _ => Value::Error(rc_str("__file_exists() requires a string")),
     }
 }
@@ -850,8 +850,8 @@ fn builtin_exec(args: Vec<Value>) -> Value {
     if args.is_empty() {
         return Value::Error(rc_str("__exec() takes at least 1 argument"));
     }
-    let cmd = match &args[0] {
-        Value::String(s) => s.to_string(),
+    let cmd = match args[0].repr() {
+        ValueRepr::String(s) => s.to_string(),
         _ => return Value::Error(rc_str("__exec() requires a string command")),
     };
     let extra_args: Vec<String> = args[1..].iter().map(|a| format!("{}", a)).collect();
@@ -910,8 +910,8 @@ fn builtin_env_get(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__env_get() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(name) => match std::env::var(name.as_ref()) {
+    match args[0].repr() {
+        ValueRepr::String(name) => match std::env::var(name.as_ref()) {
             Ok(val) => Value::String(rc_str(val)),
             Err(_) => Value::None,
         },
@@ -953,8 +953,8 @@ fn builtin_chdir(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__chdir() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(path) => match std::env::set_current_dir(path.as_ref()) {
+    match args[0].repr() {
+        ValueRepr::String(path) => match std::env::set_current_dir(path.as_ref()) {
             Ok(_) => Value::None,
             Err(e) => Value::Error(rc_str(format!("chdir error: {}", e))),
         },
@@ -966,8 +966,8 @@ fn builtin_exit(args: Vec<Value>) -> Value {
     let code = if args.is_empty() {
         0
     } else {
-        match &args[0] {
-            Value::Integer(n) => *n as i32,
+        match args[0].repr() {
+            ValueRepr::Integer(n) => n as i32,
             _ => 1,
         }
     };
@@ -982,8 +982,8 @@ fn builtin_list_dir(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__list_dir() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(path) => match std::fs::read_dir(path.as_ref()) {
+    match args[0].repr() {
+        ValueRepr::String(path) => match std::fs::read_dir(path.as_ref()) {
             Ok(entries) => {
                 let items: Vec<Value> = entries
                     .filter_map(|e| e.ok())
@@ -1004,8 +1004,8 @@ fn builtin_walk_dir(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__walk_dir() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(path) => {
+    match args[0].repr() {
+        ValueRepr::String(path) => {
             let mut items = Vec::new();
             fn walk(dir: &std::path::Path, items: &mut Vec<Value>) {
                 if let Ok(entries) = std::fs::read_dir(dir) {
@@ -1029,8 +1029,8 @@ fn builtin_mkdir(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__mkdir() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(path) => match std::fs::create_dir_all(path.as_ref()) {
+    match args[0].repr() {
+        ValueRepr::String(path) => match std::fs::create_dir_all(path.as_ref()) {
             Ok(_) => Value::None,
             Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
                 msg: rc_str(format!("{}", e)),
@@ -1045,8 +1045,8 @@ fn builtin_rmdir(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__rmdir() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(path) => match std::fs::remove_dir_all(path.as_ref()) {
+    match args[0].repr() {
+        ValueRepr::String(path) => match std::fs::remove_dir_all(path.as_ref()) {
             Ok(_) => Value::None,
             Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
                 msg: rc_str(format!("{}", e)),
@@ -1061,8 +1061,8 @@ fn builtin_remove_file(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__remove() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(path) => match std::fs::remove_file(path.as_ref()) {
+    match args[0].repr() {
+        ValueRepr::String(path) => match std::fs::remove_file(path.as_ref()) {
             Ok(_) => Value::None,
             Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
                 msg: rc_str(format!("{}", e)),
@@ -1077,8 +1077,8 @@ fn builtin_is_dir(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__is_dir() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).is_dir()),
+    match args[0].repr() {
+        ValueRepr::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).is_dir()),
         _ => Value::Error(rc_str("__is_dir() requires a string")),
     }
 }
@@ -1087,8 +1087,8 @@ fn builtin_is_file(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__is_file() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).is_file()),
+    match args[0].repr() {
+        ValueRepr::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).is_file()),
         _ => Value::Error(rc_str("__is_file() requires a string")),
     }
 }
@@ -1115,9 +1115,9 @@ fn builtin_time_sleep(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__time_sleep() takes 1 argument"));
     }
-    match &args[0] {
-        Value::Integer(ms) => {
-            std::thread::sleep(std::time::Duration::from_millis(*ms as u64));
+    match args[0].repr() {
+        ValueRepr::Integer(ms) => {
+            std::thread::sleep(std::time::Duration::from_millis(ms as u64));
             Value::None
         }
         _ => Value::Error(rc_str("__time_sleep() requires an integer (ms)")),
@@ -1168,9 +1168,9 @@ fn builtin_rand_seed(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__rand_seed() takes 1 argument"));
     }
-    match &args[0] {
-        Value::Integer(n) => {
-            let seed = if *n == 0 { 1u64 } else { *n as u64 };
+    match args[0].repr() {
+        ValueRepr::Integer(n) => {
+            let seed = if n == 0 { 1u64 } else { n as u64 };
             RNG_STATE.with(|state| state.set(seed));
             Value::None
         }
@@ -1206,8 +1206,8 @@ fn builtin_path_join(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__path_join() takes 1 argument (array)"));
     }
-    match &args[0] {
-        Value::Array(parts) => {
+    match args[0].repr() {
+        ValueRepr::Array(parts) => {
             let borrowed = parts.borrow();
             let mut path = std::path::PathBuf::new();
             for part in borrowed.iter() {
@@ -1223,8 +1223,8 @@ fn builtin_path_ext(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__path_ext() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(path) => {
+    match args[0].repr() {
+        ValueRepr::String(path) => {
             let p = std::path::Path::new(path.as_ref());
             match p.extension() {
                 Some(ext) => Value::String(rc_str(ext.to_string_lossy())),
@@ -1239,8 +1239,8 @@ fn builtin_path_filename(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__path_filename() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(path) => {
+    match args[0].repr() {
+        ValueRepr::String(path) => {
             let p = std::path::Path::new(path.as_ref());
             match p.file_name() {
                 Some(name) => Value::String(rc_str(name.to_string_lossy())),
@@ -1255,8 +1255,8 @@ fn builtin_path_parent(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__path_parent() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(path) => {
+    match args[0].repr() {
+        ValueRepr::String(path) => {
             let p = std::path::Path::new(path.as_ref());
             match p.parent() {
                 Some(parent) => Value::String(rc_str(parent.display().to_string())),
@@ -1271,8 +1271,8 @@ fn builtin_path_stem(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__path_stem() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(path) => {
+    match args[0].repr() {
+        ValueRepr::String(path) => {
             let p = std::path::Path::new(path.as_ref());
             match p.file_stem() {
                 Some(stem) => Value::String(rc_str(stem.to_string_lossy())),
@@ -1287,8 +1287,8 @@ fn builtin_path_is_absolute(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__path_is_absolute() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).is_absolute()),
+    match args[0].repr() {
+        ValueRepr::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).is_absolute()),
         _ => Value::Error(rc_str("__path_is_absolute() requires a string")),
     }
 }
@@ -1299,8 +1299,8 @@ fn builtin_json_parse(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__json_parse() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(s) => {
+    match args[0].repr() {
+        ValueRepr::String(s) => {
             let chars: Vec<char> = s.chars().collect();
             let mut pos = 0;
             match json_parse_value(&chars, &mut pos) {
@@ -1511,18 +1511,18 @@ fn builtin_json_stringify(args: Vec<Value>) -> Value {
 }
 
 fn value_to_json(val: &Value) -> Result<String, String> {
-    match val {
-        Value::None => Ok("null".to_string()),
-        Value::Boolean(b) => Ok(if *b { "true" } else { "false" }.to_string()),
-        Value::Integer(n) => Ok(n.to_string()),
-        Value::Float(f) => {
+    match val.repr() {
+        ValueRepr::None => Ok("null".to_string()),
+        ValueRepr::Boolean(b) => Ok(if b { "true" } else { "false" }.to_string()),
+        ValueRepr::Integer(n) => Ok(n.to_string()),
+        ValueRepr::Float(f) => {
             if f.is_nan() || f.is_infinite() {
                 Ok("null".to_string())
             } else {
                 Ok(f.to_string())
             }
         }
-        Value::String(s) => {
+        ValueRepr::String(s) => {
             let mut out = String::from('"');
             for c in s.chars() {
                 match c {
@@ -1538,12 +1538,12 @@ fn value_to_json(val: &Value) -> Result<String, String> {
             out.push('"');
             Ok(out)
         }
-        Value::Array(arr) => {
+        ValueRepr::Array(arr) => {
             let items: Result<Vec<String>, String> =
                 arr.borrow().iter().map(|e| value_to_json(e)).collect();
             Ok(format!("[{}]", items?.join(",")))
         }
-        Value::Map(entries) => {
+        ValueRepr::Map(entries) => {
             let items: Result<Vec<String>, String> = entries
                 .borrow()
                 .iter()
@@ -1555,13 +1555,13 @@ fn value_to_json(val: &Value) -> Result<String, String> {
                 .collect();
             Ok(format!("{{{}}}", items?.join(",")))
         }
-        Value::Tuple(t) => {
+        ValueRepr::Tuple(t) => {
             let items: Result<Vec<String>, String> = t.iter().map(|e| value_to_json(e)).collect();
             Ok(format!("[{}]", items?.join(",")))
         }
-        Value::Byte(n) => Ok(n.to_string()),
-        Value::Uint(n) => Ok(n.to_string()),
-        Value::Char(c) => Ok(format!("\"{}\"", c)),
+        ValueRepr::Byte(n) => Ok(n.to_string()),
+        ValueRepr::Uint(n) => Ok(n.to_string()),
+        ValueRepr::Char(c) => Ok(format!("\"{}\"", c)),
         _ => Err(format!("cannot serialize {} to JSON", val.type_name())),
     }
 }
@@ -1572,8 +1572,8 @@ fn builtin_toml_parse(args: Vec<Value>) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__toml_parse() takes 1 argument"));
     }
-    match &args[0] {
-        Value::String(s) => match toml::from_str::<toml::Value>(s.as_ref()) {
+    match args[0].repr() {
+        ValueRepr::String(s) => match toml::from_str::<toml::Value>(s.as_ref()) {
             Ok(value) => toml_value_to_value(value),
             Err(e) => Value::Error(rc_str(format!("toml parse error: {}", e))),
         },
@@ -1616,42 +1616,42 @@ fn builtin_toml_stringify(args: Vec<Value>) -> Value {
 }
 
 fn value_to_toml(val: &Value) -> Result<toml::Value, String> {
-    match val {
-        Value::String(s) => Ok(toml::Value::String(s.to_string())),
-        Value::Integer(n) => Ok(toml::Value::Integer(*n)),
-        Value::Float(f) => {
+    match val.repr() {
+        ValueRepr::String(s) => Ok(toml::Value::String(s.to_string())),
+        ValueRepr::Integer(n) => Ok(toml::Value::Integer(n)),
+        ValueRepr::Float(f) => {
             if f.is_nan() || f.is_infinite() {
                 Err("TOML does not support NaN or Infinity".to_string())
             } else {
-                Ok(toml::Value::Float(*f))
+                Ok(toml::Value::Float(f))
             }
         }
-        Value::Boolean(b) => Ok(toml::Value::Boolean(*b)),
-        Value::Uint(n) => Ok(toml::Value::Integer(*n as i64)),
-        Value::Byte(n) => Ok(toml::Value::Integer(*n as i64)),
-        Value::Char(c) => Ok(toml::Value::String(c.to_string())),
-        Value::Array(arr) => {
+        ValueRepr::Boolean(b) => Ok(toml::Value::Boolean(b)),
+        ValueRepr::Uint(n) => Ok(toml::Value::Integer(n as i64)),
+        ValueRepr::Byte(n) => Ok(toml::Value::Integer(n as i64)),
+        ValueRepr::Char(c) => Ok(toml::Value::String(c.to_string())),
+        ValueRepr::Array(arr) => {
             let items: Result<Vec<toml::Value>, String> =
                 arr.borrow().iter().map(|e| value_to_toml(e)).collect();
             Ok(toml::Value::Array(items?))
         }
-        Value::Tuple(t) => {
+        ValueRepr::Tuple(t) => {
             let items: Result<Vec<toml::Value>, String> =
                 t.iter().map(|e| value_to_toml(e)).collect();
             Ok(toml::Value::Array(items?))
         }
-        Value::Map(entries) => {
+        ValueRepr::Map(entries) => {
             let mut table = toml::map::Map::new();
             for (k, v) in entries.borrow().iter() {
-                let key = match k {
-                    Value::String(s) => s.to_string(),
+                let key = match k.repr() {
+                    ValueRepr::String(s) => s.to_string(),
                     _ => return Err(format!("TOML keys must be strings, got {}", k.type_name())),
                 };
                 table.insert(key, value_to_toml(v)?);
             }
             Ok(toml::Value::Table(table))
         }
-        Value::None => Err("TOML does not support null/None".to_string()),
+        ValueRepr::None => Err("TOML does not support null/None".to_string()),
         _ => Err(format!("cannot serialize {} to TOML", val.type_name())),
     }
 }
@@ -1664,8 +1664,8 @@ fn builtin_http_request(args: Vec<Value>) -> Value {
             "__http_request: expected 2-4 arguments (method, url, headers?, body?)",
         ));
     }
-    let method = match &args[0] {
-        Value::String(s) => s.to_uppercase(),
+    let method = match args[0].repr() {
+        ValueRepr::String(s) => s.to_uppercase(),
         _ => {
             return Value::Error(
                 format!(
@@ -1676,8 +1676,8 @@ fn builtin_http_request(args: Vec<Value>) -> Value {
             );
         }
     };
-    let url = match &args[1] {
-        Value::String(s) => s.to_string(),
+    let url = match args[1].repr() {
+        ValueRepr::String(s) => s.to_string(),
         _ => {
             return Value::Error(
                 format!(
@@ -1709,9 +1709,9 @@ fn builtin_http_request(args: Vec<Value>) -> Value {
     };
 
     let body: Option<String> = if args.len() >= 4 {
-        match &args[3] {
-            Value::String(s) => Some(s.to_string()),
-            Value::None => None,
+        match args[3].repr() {
+            ValueRepr::String(s) => Some(s.to_string()),
+            ValueRepr::None => None,
             _ => {
                 return Value::Error(
                     format!(

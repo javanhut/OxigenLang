@@ -335,8 +335,8 @@ impl VM {
     /// guarantees globals use string constants, but we defensively return
     /// an error if that invariant is broken.
     fn name_constant(&self, name_idx: u16) -> Result<Rc<String>, VMError> {
-        match self.current_constant(name_idx) {
-            Value::String(s) => Ok(s),
+        match self.current_constant(name_idx).repr() {
+            ValueRepr::String(s) => Ok(Rc::clone(s)),
             _ => Err(self.runtime_error("invalid global name")),
         }
     }
@@ -399,7 +399,7 @@ impl VM {
         let val = self.pop();
         self.globals.insert(name.to_string(), val);
         self.global_mutability.insert(name.to_string(), mutable);
-        if let Value::String(tn) = type_name {
+        if let Some(tn) = type_name.as_string() {
             self.global_type_constraints
                 .insert(name.to_string(), Some(tn.to_string()));
         }
@@ -513,7 +513,7 @@ impl VM {
         let mut field_vec: Vec<Value> = layout.slots.iter().map(|_| Value::None).collect();
 
         for pair in flat.chunks(2) {
-            if let Value::String(fname) = &pair[0] {
+            if let Some(fname) = pair[0].as_string() {
                 if let Some(&idx) = layout.indices.get(fname.as_ref()) {
                     field_vec[idx] = pair[1].clone();
                 } else {
@@ -609,8 +609,8 @@ impl VM {
             return Err(self.runtime_error("invalid field name"));
         };
 
-        match &object {
-            Value::StructInstance(inst) => {
+        match object.repr() {
+            ValueRepr::StructInstance(inst) => {
                 // Field lookup via the instance's cached layout — direct
                 // Vec index, no HashMap lookup in the hot path.
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
@@ -618,7 +618,7 @@ impl VM {
                 }
                 // Fall through: it might be a method on the struct def.
                 let method_val =
-                    if let Some(Value::StructDef(def)) = self.globals.get(&inst.struct_name) {
+                    if let Some(def) = self.globals.get(&inst.struct_name).and_then(|v| v.as_struct_def()) {
                         let methods = def.methods.borrow();
                         methods.get(fname.as_ref()).cloned()
                     } else {
@@ -633,14 +633,14 @@ impl VM {
                     ))
                 }
             }
-            Value::Module(m) => match m.globals.get(fname.as_ref()) {
+            ValueRepr::Module(m) => match m.globals.get(fname.as_ref()) {
                 Some(val) => Ok(val.clone()),
                 None => Err(self.runtime_error_hint(
                     &format!("module '{}' has no member '{}'", m.name, fname),
                     "check the module's public API for available members",
                 )),
             },
-            Value::ErrorValue(data) => match fname.as_str() {
+            ValueRepr::ErrorValue(data) => match fname.as_str() {
                 "msg" => Ok(Value::String(Rc::clone(&data.msg))),
                 "tag" => Ok(match &data.tag {
                     Some(t) => Value::String(Rc::clone(t)),
@@ -648,7 +648,7 @@ impl VM {
                 }),
                 _ => Err(self.runtime_error(&format!("ErrorValue has no field '{}'", fname))),
             },
-            Value::Map(entries) => {
+            ValueRepr::Map(entries) => {
                 let entries = entries.borrow();
                 let key = Value::String(Rc::clone(fname));
                 let mut found = None;
@@ -660,7 +660,7 @@ impl VM {
                 }
                 Ok(found.unwrap_or(Value::None))
             }
-            Value::EnumDef(def) => {
+            ValueRepr::EnumDef(def) => {
                 let variant = def
                     .variants
                     .iter()
@@ -695,7 +695,7 @@ impl VM {
                         .runtime_error(&format!("enum {} has no variant '{}'", def.name, fname))),
                 }
             }
-            Value::EnumInstance(inst) => {
+            ValueRepr::EnumInstance(inst) => {
                 let name = fname.as_str();
                 match name {
                     "name" => Ok(Value::String(rc_str(inst.variant_name.as_str()))),
@@ -708,7 +708,7 @@ impl VM {
                         crate::vm::value::VmEnumPayload::Tuple(items) => {
                             let idx_opt = other.parse::<usize>().ok().or_else(|| {
                                 self.globals.get(&inst.enum_name).and_then(|gv| {
-                                    if let Value::EnumDef(def) = gv {
+                                    if let Some(def) = gv.as_enum_def() {
                                         def.variants
                                             .iter()
                                             .find(|v| v.name == inst.variant_name)
@@ -772,8 +772,8 @@ impl VM {
         let Value::String(fname) = &field_name else {
             return Err(self.runtime_error("invalid field name"));
         };
-        match &object {
-            Value::StructInstance(inst) => {
+        match object.repr() {
+            ValueRepr::StructInstance(inst) => {
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
                     inst.set_field(idx, value);
                     Ok(())
@@ -784,7 +784,7 @@ impl VM {
                     ))
                 }
             }
-            Value::Map(entries) => {
+            ValueRepr::Map(entries) => {
                 let mut entries = entries.borrow_mut();
                 let key = Value::String(Rc::clone(fname));
                 let mut found = false;
@@ -819,10 +819,10 @@ impl VM {
         let method_count = method_count as usize;
         let start = self.stack.len() - method_count * 2;
         let flat: Vec<Value> = self.stack_drain_from(start);
-        if let Some(Value::StructDef(def)) = self.globals.get(name_str.as_ref()) {
+        if let Some(def) = self.globals.get(name_str.as_ref()).and_then(|v| v.as_struct_def()) {
             let mut methods = def.methods.borrow_mut();
             for pair in flat.chunks(2) {
-                if let Value::String(mname) = &pair[1] {
+                if let Some(mname) = pair[1].as_string() {
                     methods.insert(mname.to_string(), pair[0].clone());
                 }
             }
@@ -1508,9 +1508,9 @@ impl VM {
                 // ── Unary ───────────────────────────────────────────
                 OpCode::Negate => {
                     let val = self.pop();
-                    match val {
-                        Value::Integer(n) => self.push(Value::Integer(-n)),
-                        Value::Float(f) => self.push(Value::Float(-f)),
+                    match val.repr() {
+                        ValueRepr::Integer(n) => self.push(Value::Integer(-n)),
+                        ValueRepr::Float(f) => self.push(Value::Float(-f)),
                         _ => {
                             return Err(self.runtime_error_hint(
                                 &format!(
@@ -1607,8 +1607,8 @@ impl VM {
                 // ── Functions ───────────────────────────────────────
                 OpCode::Closure => {
                     let fn_idx = self.frames[frame_idx].read_u16();
-                    let upvalue_count = match self.frames[frame_idx].read_constant(fn_idx) {
-                        Value::Closure(t) => t.function.upvalue_count as usize,
+                    let upvalue_count = match self.frames[frame_idx].read_constant(fn_idx).repr() {
+                        ValueRepr::Closure(t) => t.function.upvalue_count as usize,
                         _ => {
                             return Err(self.runtime_error("expected closure constant"));
                         }
@@ -1634,7 +1634,7 @@ impl VM {
                     for _ in 0..named_count {
                         let val = self.pop();
                         let name = self.pop();
-                        if let Value::String(name_str) = name {
+                        if let Some(name_str) = name.as_string() {
                             named_args.push((name_str.to_string(), val));
                         }
                     }
@@ -1778,10 +1778,10 @@ impl VM {
                     if has_tag == 1 {
                         let tag = self.pop();
                         let value = self.pop();
-                        let tag_str = if let Value::String(s) = tag {
-                            s
+                        let tag_str: Rc<String> = if let Some(s) = tag.as_string() {
+                            Rc::clone(s)
                         } else {
-                            format!("{}", tag).into()
+                            Rc::new(format!("{}", tag))
                         };
                         self.push(Value::ErrorValue(Rc::new(ErrorValueData {
                             msg: rc_str(format!("{}", value)),
@@ -1809,9 +1809,9 @@ impl VM {
                     let binding_name = self.frames[frame_idx].read_constant(binding_idx).clone();
 
                     let value = self.peek(0).clone();
-                    if let Value::ErrorValue(_) = &value {
+                    if let Some(_) = value.as_error_value() {
                         // Error case: bind the error value, jump to fallback
-                        if let Value::String(name) = binding_name {
+                        if let Some(name) = binding_name.as_string() {
                             self.globals.insert(name.to_string(), value);
                         }
                         self.pop(); // pop the error
@@ -1822,8 +1822,8 @@ impl VM {
 
                 OpCode::Fail => {
                     let value = self.pop();
-                    match value {
-                        Value::ErrorValue(data) => {
+                    match value.repr() {
+                        ValueRepr::ErrorValue(data) => {
                             return Err(VMError {
                                 message: data.msg.to_string(),
                                 line: self.current_line(),
@@ -1848,13 +1848,13 @@ impl VM {
                     let mut selective_names = Vec::new();
                     for _ in 0..selective_count {
                         let name = self.pop();
-                        if let Value::String(s) = name {
+                        if let Some(s) = name.as_string() {
                             selective_names.push(s.to_string());
                         }
                     }
                     selective_names.reverse();
 
-                    if let Value::String(path_str) = path {
+                    if let Some(path_str) = path.as_string() {
                         self.import_module(&path_str, &selective_names)?;
                     }
                 }
@@ -1886,15 +1886,15 @@ impl VM {
                 OpCode::Unpack => {
                     let count = self.frames[frame_idx].read_byte() as usize;
                     let value = self.pop();
-                    match value {
-                        Value::Array(arr) => {
+                    match value.repr() {
+                        ValueRepr::Array(arr) => {
                             let borrowed = arr.borrow();
                             for i in 0..count {
                                 let val = borrowed.get(i).cloned().unwrap_or(Value::None);
                                 self.push(val);
                             }
                         }
-                        Value::Tuple(t) => {
+                        ValueRepr::Tuple(t) => {
                             for i in 0..count {
                                 let val = t.get(i).cloned().unwrap_or(Value::None);
                                 self.push(val);
@@ -1932,12 +1932,12 @@ impl VM {
                     // The iterable is accessed via GetLocal, so we just compute length
                     // from what's on top of stack and replace it.
                     let iterable = self.pop();
-                    let len = match &iterable {
-                        Value::Array(a) => a.borrow().len() as i64,
-                        Value::String(s) => s.chars().count() as i64,
-                        Value::Tuple(t) => t.len() as i64,
-                        Value::Set(s) => s.borrow().len() as i64,
-                        Value::Map(m) => m.borrow().len() as i64,
+                    let len = match iterable.repr() {
+                        ValueRepr::Array(a) => a.borrow().len() as i64,
+                        ValueRepr::String(s) => s.chars().count() as i64,
+                        ValueRepr::Tuple(t) => t.len() as i64,
+                        ValueRepr::Set(s) => s.borrow().len() as i64,
+                        ValueRepr::Map(m) => m.borrow().len() as i64,
                         _ => {
                             return Err(self.runtime_error_hint(
                                 &format!("cannot iterate over {}", iterable.type_name()),
@@ -1953,7 +1953,7 @@ impl VM {
                     let type_name = self.frames[frame_idx].read_constant(type_idx).clone();
                     let value = self.pop();
 
-                    if let Value::String(target) = type_name {
+                    if let Some(target) = type_name.as_string() {
                         let result = self.type_wrap(&target, value)?;
                         self.push(result);
                     } else {
@@ -1964,20 +1964,20 @@ impl VM {
                 OpCode::IterGet => {
                     let index = self.pop();
                     let iterable = self.pop();
-                    let idx = match index {
-                        Value::Integer(i) => i as usize,
+                    let idx = match index.repr() {
+                        ValueRepr::Integer(i) => i as usize,
                         _ => return Err(self.runtime_error("index must be integer")),
                     };
-                    let val = match &iterable {
-                        Value::Array(a) => a.borrow().get(idx).cloned().unwrap_or(Value::None),
-                        Value::String(s) => s
+                    let val = match iterable.repr() {
+                        ValueRepr::Array(a) => a.borrow().get(idx).cloned().unwrap_or(Value::None),
+                        ValueRepr::String(s) => s
                             .chars()
                             .nth(idx)
                             .map(|c| Value::String(rc_str(c.to_string())))
                             .unwrap_or(Value::None),
-                        Value::Tuple(t) => t.get(idx).cloned().unwrap_or(Value::None),
-                        Value::Set(s) => s.borrow().get(idx).cloned().unwrap_or(Value::None),
-                        Value::Map(m) => {
+                        ValueRepr::Tuple(t) => t.get(idx).cloned().unwrap_or(Value::None),
+                        ValueRepr::Set(s) => s.borrow().get(idx).cloned().unwrap_or(Value::None),
+                        ValueRepr::Map(m) => {
                             let borrowed = m.borrow();
                             if let Some((k, v)) = borrowed.get(idx) {
                                 // For maps, yield (key, value) tuple
@@ -2008,13 +2008,13 @@ impl VM {
                     for _ in 0..named_count {
                         let val = self.pop();
                         let name = self.pop();
-                        if let Value::String(name_str) = name {
+                        if let Some(name_str) = name.as_string() {
                             named_args.push((name_str.to_string(), val));
                         }
                     }
                     named_args.reverse();
 
-                    if let Value::String(mname) = method_name {
+                    if let Some(mname) = method_name.as_string() {
                         self.call_method(&mname, arg_count, &named_args)?;
                     } else {
                         return Err(self.runtime_error("invalid method name"));
@@ -2025,7 +2025,7 @@ impl VM {
                 OpCode::IsMut => {
                     let name_idx = self.frames[frame_idx].read_u16();
                     let name = self.frames[frame_idx].read_constant(name_idx).clone();
-                    if let Value::String(var_name) = name {
+                    if let Some(var_name) = name.as_string() {
                         let is_mut = self
                             .global_mutability
                             .get(var_name.as_ref())
@@ -2042,7 +2042,7 @@ impl VM {
                     let type_name = self.frames[frame_idx].read_constant(type_idx).clone();
                     let value = self.pop();
 
-                    if let Value::String(tname) = type_name {
+                    if let Some(tname) = type_name.as_string() {
                         let matches = match (tname.as_str(), &value) {
                             ("int", Value::Integer(_)) => true,
                             ("float", Value::Float(_)) => true,
@@ -2070,7 +2070,7 @@ impl VM {
                 OpCode::IsTypeMut => {
                     let name_idx = self.frames[frame_idx].read_u16();
                     let name = self.frames[frame_idx].read_constant(name_idx).clone();
-                    if let Value::String(var_name) = name {
+                    if let Some(var_name) = name.as_string() {
                         let has_constraint = self
                             .global_type_constraints
                             .get(var_name.as_ref())
@@ -2140,12 +2140,12 @@ impl VM {
                     let start = self.stack.len() - arg_count;
                     let args: Vec<Value> = self.stack.drain(start..).collect();
                     let enum_val = self.pop();
-                    let vname = if let Value::String(s) = &variant_name {
+                    let vname = if let Some(s) = variant_name.as_string() {
                         Rc::clone(s)
                     } else {
                         return Err(self.runtime_error("expected variant name string"));
                     };
-                    if let Value::EnumDef(def) = &enum_val {
+                    if let Some(def) = enum_val.as_enum_def() {
                         let variant = def
                             .variants
                             .iter()
@@ -2200,17 +2200,17 @@ impl VM {
                     let flat: Vec<Value> = self.stack.drain(start..).collect();
                     let mut fields: Vec<(String, Value)> = Vec::new();
                     for pair in flat.chunks(2) {
-                        if let Value::String(fname) = &pair[0] {
+                        if let Some(fname) = pair[0].as_string() {
                             fields.push((fname.to_string(), pair[1].clone()));
                         }
                     }
                     let enum_val = self.pop();
-                    let vname = if let Value::String(s) = &variant_name {
+                    let vname = if let Some(s) = variant_name.as_string() {
                         Rc::clone(s)
                     } else {
                         return Err(self.runtime_error("expected variant name string"));
                     };
-                    if let Value::EnumDef(def) = &enum_val {
+                    if let Some(def) = enum_val.as_enum_def() {
                         let variant = def
                             .variants
                             .iter()
@@ -2445,8 +2445,8 @@ impl VM {
     }
 
     pub(crate) fn unary_bnot(&self, a: Value) -> Result<Value, VMError> {
-        match &a {
-            Value::Integer(n) => Ok(Value::Integer(!n)),
+        match a.repr() {
+            ValueRepr::Integer(n) => Ok(Value::Integer(!n)),
             _ => Err(self.runtime_error("bitwise ~ requires an integer")),
         }
     }
@@ -2543,12 +2543,12 @@ impl VM {
         let callee_idx = self.stack.len() - 1 - arg_count;
         let callee = self.stack[callee_idx].clone();
 
-        match callee {
-            Value::Closure(closure) => {
+        match callee.repr() {
+            ValueRepr::Closure(closure) => {
                 let module_globals = closure.module_globals.borrow().clone();
-                self.call_closure(closure, arg_count, named_args, module_globals)
+                self.call_closure(Rc::clone(closure), arg_count, named_args, module_globals)
             }
-            Value::Builtin(func) => {
+            ValueRepr::Builtin(func) => {
                 let start = self.stack.len() - arg_count;
                 let args: Vec<Value> = self.stack_drain_from(start);
                 self.pop(); // pop the builtin itself
@@ -2569,7 +2569,7 @@ impl VM {
                 self.push(result);
                 Ok(())
             }
-            Value::StructDef(def) => {
+            ValueRepr::StructDef(def) => {
                 // Struct constructor call (positional args)
                 let start = self.stack.len() - arg_count;
                 let args: Vec<Value> = self.stack_drain_from(start);
@@ -2587,7 +2587,7 @@ impl VM {
                 }
 
                 self.push(Value::StructInstance(Rc::new(ObjStructInstance::new(
-                    def_name, field_vec, layout, def,
+                    def_name, field_vec, layout, Rc::clone(def),
                 ))));
                 Ok(())
             }
@@ -2651,15 +2651,15 @@ impl VM {
         let instance_idx = self.stack.len() - 1 - arg_count;
         let instance = self.stack[instance_idx].clone();
 
-        match &instance {
-            Value::StructInstance(inst) => {
+        match instance.repr() {
+            ValueRepr::StructInstance(inst) => {
                 // Check instance fields first (for callable fields)
                 let field_val = if let Some(&idx) = inst.layout.indices.get(method_name) {
                     Some(inst.get_field(idx))
                 } else {
                     None
                 };
-                if let Some(Value::Closure(closure)) = field_val {
+                if let Some(closure) = field_val.as_ref().and_then(|v| v.as_closure()).cloned() {
                     // Callable field — treat as regular call
                     self.stack[instance_idx] = Value::Closure(Rc::clone(&closure));
                     return self.call_closure(closure, arg_count, named_args, None);
@@ -2675,12 +2675,13 @@ impl VM {
                 // e.g. `Parser.parse_args()` from another module fails
                 // when the method body references file-local
                 // `normalize_array`.
-                let owning_module_globals = match self.globals.get(&inst.struct_name) {
-                    Some(Value::StructDef(def)) => def.module_globals.borrow().clone(),
-                    _ => None,
-                };
+                let owning_module_globals = self
+                    .globals
+                    .get(&inst.struct_name)
+                    .and_then(|v| v.as_struct_def())
+                    .and_then(|def| def.module_globals.borrow().clone());
 
-                if let Value::Closure(closure) = method {
+                if let Some(closure) = method.as_closure().cloned() {
                     // Method has implicit `self` as first param.
                     // Rearrange stack: [instance, arg1, ...] → [closure, instance, arg1, ...]
                     // The instance becomes the `self` argument.
@@ -2700,11 +2701,11 @@ impl VM {
                     "check the struct definition for available methods",
                 ))
             }
-            Value::Array(_)
-            | Value::String(_)
-            | Value::Map(_)
-            | Value::Set(_)
-            | Value::Tuple(_) => {
+            ValueRepr::Array(_)
+            | ValueRepr::String(_)
+            | ValueRepr::Map(_)
+            | ValueRepr::Set(_)
+            | ValueRepr::Tuple(_) => {
                 // Built-in method syntax: collection.method(args)
                 // Convert to builtin call: __method(collection, args)
                 let builtin_name = format!("__{}", method_name);
@@ -2729,13 +2730,13 @@ impl VM {
                     "check available built-in methods for this type",
                 ))
             }
-            Value::Module(m) => {
+            ValueRepr::Module(m) => {
                 // Module method call: module.func(args)
                 if let Some(func) = m.globals.get(method_name).cloned() {
                     self.stack[instance_idx] = func.clone();
                     // Pass the module's globals so the function can access
                     // module-scoped variables (e.g. `io` inside `toml`).
-                    if let Value::Closure(closure) = func {
+                    if let Some(closure) = func.as_closure().cloned() {
                         return self.call_closure(
                             closure,
                             arg_count,
@@ -2750,7 +2751,7 @@ impl VM {
                     "check the module's public API for available functions",
                 ))
             }
-            Value::EnumDef(def) => {
+            ValueRepr::EnumDef(def) => {
                 // Tuple-variant construction: `EnumName.Variant(args)`.
                 let variant = def.variants.iter().find(|v| v.name == method_name).cloned();
                 match variant {
@@ -2827,7 +2828,7 @@ impl VM {
     ) -> Result<Value, VMError> {
         let mut current = struct_name.to_string();
         loop {
-            if let Some(Value::StructDef(def)) = self.globals.get(&current) {
+            if let Some(def) = self.globals.get(&current).and_then(|v| v.as_struct_def()) {
                 let methods = def.methods.borrow();
                 if let Some(method) = methods.get(method_name) {
                     return Ok(method.clone());
@@ -3182,8 +3183,8 @@ impl VM {
         start: Option<Value>,
         end: Option<Value>,
     ) -> Result<Value, VMError> {
-        match &collection {
-            Value::Array(arr) => {
+        match collection.repr() {
+            ValueRepr::Array(arr) => {
                 let borrowed = arr.borrow();
                 let len = borrowed.len() as i64;
                 let s = match start {
@@ -3217,7 +3218,7 @@ impl VM {
                 };
                 Ok(Value::Array(Rc::new(RefCell::new(sliced))))
             }
-            Value::String(s) => {
+            ValueRepr::String(s) => {
                 let len = s.len() as i64;
                 let start_idx = match start {
                     Some(Value::Integer(i)) => {
@@ -3323,11 +3324,11 @@ impl VM {
         // not cloned per-struct.
         let globals_rc = Rc::new(sub_vm.globals);
         for value in globals_rc.values() {
-            match value {
-                Value::Closure(closure) => {
+            match value.repr() {
+                ValueRepr::Closure(closure) => {
                     *closure.module_globals.borrow_mut() = Some(Rc::clone(&globals_rc));
                 }
-                Value::StructDef(def) => {
+                ValueRepr::StructDef(def) => {
                     *def.module_globals.borrow_mut() = Some(Rc::clone(&globals_rc));
                 }
                 _ => {}
@@ -3510,12 +3511,12 @@ impl VM {
 
     /// Extract error info from a value (tag, message).
     fn error_info_from_value(value: &Value) -> Option<(Option<String>, String)> {
-        match value {
-            Value::ErrorValue(data) => Some((
+        match value.repr() {
+            ValueRepr::ErrorValue(data) => Some((
                 data.tag.as_ref().map(|t| t.to_string()),
                 data.msg.to_string(),
             )),
-            Value::Error(msg) => Some((None, msg.to_string())),
+            ValueRepr::Error(msg) => Some((None, msg.to_string())),
             _ => None,
         }
     }
@@ -3525,53 +3526,53 @@ impl VM {
         match target {
             "GENERIC" => Ok(value.clone()),
             "NONE" => {
-                match value {
-                    Value::None => Ok(Value::None),
+                match value.repr() {
+                    ValueRepr::None => Ok(Value::None),
                     _ => Err(self
                         .runtime_error(&format!("cannot convert {} to NONE", value.type_name()))),
                 }
             }
-            "INTEGER" => match value {
-                Value::Integer(_) => Ok(value.clone()),
-                Value::Float(f) => Ok(Value::Integer(*f as i64)),
-                Value::String(s) => s.parse::<i64>().map(Value::Integer).map_err(|_| {
+            "INTEGER" => match value.repr() {
+                ValueRepr::Integer(_) => Ok(value.clone()),
+                ValueRepr::Float(f) => Ok(Value::Integer(f as i64)),
+                ValueRepr::String(s) => s.parse::<i64>().map(Value::Integer).map_err(|_| {
                     self.runtime_error(&format!("cannot convert STRING \"{}\" to INTEGER", s))
                 }),
-                Value::Boolean(b) => Ok(Value::Integer(if *b { 1 } else { 0 })),
-                Value::Byte(b) => Ok(Value::Integer(*b as i64)),
-                Value::Uint(u) => Ok(Value::Integer(*u as i64)),
-                Value::Char(c) => Ok(Value::Integer(*c as i64)),
+                ValueRepr::Boolean(b) => Ok(Value::Integer(if b { 1 } else { 0 })),
+                ValueRepr::Byte(b) => Ok(Value::Integer(b as i64)),
+                ValueRepr::Uint(u) => Ok(Value::Integer(u as i64)),
+                ValueRepr::Char(c) => Ok(Value::Integer(c as i64)),
                 _ => {
                     Err(self
                         .runtime_error(&format!("cannot convert {} to INTEGER", value.type_name())))
                 }
             },
             "FLOAT" => {
-                match value {
-                    Value::Float(_) => Ok(value.clone()),
-                    Value::Integer(n) => Ok(Value::Float(*n as f64)),
-                    Value::String(s) => s.parse::<f64>().map(Value::Float).map_err(|_| {
+                match value.repr() {
+                    ValueRepr::Float(_) => Ok(value.clone()),
+                    ValueRepr::Integer(n) => Ok(Value::Float(n as f64)),
+                    ValueRepr::String(s) => s.parse::<f64>().map(Value::Float).map_err(|_| {
                         self.runtime_error(&format!("cannot convert STRING \"{}\" to FLOAT", s))
                     }),
-                    Value::Boolean(b) => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
-                    Value::Byte(b) => Ok(Value::Float(*b as f64)),
-                    Value::Uint(u) => Ok(Value::Float(*u as f64)),
+                    ValueRepr::Boolean(b) => Ok(Value::Float(if b { 1.0 } else { 0.0 })),
+                    ValueRepr::Byte(b) => Ok(Value::Float(b as f64)),
+                    ValueRepr::Uint(u) => Ok(Value::Float(u as f64)),
                     _ => Err(self
                         .runtime_error(&format!("cannot convert {} to FLOAT", value.type_name()))),
                 }
             }
             "STRING" => Ok(Value::String(rc_str(format!("{}", value)))),
-            "BOOLEAN" => match value {
-                Value::Boolean(_) => Ok(value.clone()),
+            "BOOLEAN" => match value.repr() {
+                ValueRepr::Boolean(_) => Ok(value.clone()),
                 _ => Ok(Value::Boolean(value.is_truthy())),
             },
             "CHAR" => {
-                match value {
-                    Value::Char(_) => Ok(value.clone()),
-                    Value::Integer(n) => char::from_u32(*n as u32)
+                match value.repr() {
+                    ValueRepr::Char(_) => Ok(value.clone()),
+                    ValueRepr::Integer(n) => char::from_u32(n as u32)
                         .map(Value::Char)
                         .ok_or_else(|| self.runtime_error(&format!("invalid char code: {}", n))),
-                    Value::String(s) => {
+                    ValueRepr::String(s) => {
                         let mut chars = s.chars();
                         match (chars.next(), chars.next()) {
                             (Some(c), None) => Ok(Value::Char(c)),
@@ -3583,47 +3584,47 @@ impl VM {
                         .runtime_error(&format!("cannot convert {} to CHAR", value.type_name()))),
                 }
             }
-            "BYTE" => match value {
-                Value::Byte(_) => Ok(value.clone()),
-                Value::Integer(n) => {
-                    if *n < 0 || *n > 255 {
+            "BYTE" => match value.repr() {
+                ValueRepr::Byte(_) => Ok(value.clone()),
+                ValueRepr::Integer(n) => {
+                    if n < 0 || n > 255 {
                         Err(self.runtime_error(&format!(
                             "cannot convert INTEGER {} to BYTE (0-255)",
                             n
                         )))
                     } else {
-                        Ok(Value::Byte(*n as u8))
+                        Ok(Value::Byte(n as u8))
                     }
                 }
-                Value::Uint(u) => {
-                    if *u > 255 {
+                ValueRepr::Uint(u) => {
+                    if u > 255 {
                         Err(self
                             .runtime_error(&format!("cannot convert UINT {} to BYTE (0-255)", u)))
                     } else {
-                        Ok(Value::Byte(*u as u8))
+                        Ok(Value::Byte(u as u8))
                     }
                 }
-                Value::Char(c) => Ok(Value::Byte(*c as u8)),
-                Value::Boolean(b) => Ok(Value::Byte(if *b { 1 } else { 0 })),
+                ValueRepr::Char(c) => Ok(Value::Byte(c as u8)),
+                ValueRepr::Boolean(b) => Ok(Value::Byte(if b { 1 } else { 0 })),
                 _ => {
                     Err(self
                         .runtime_error(&format!("cannot convert {} to BYTE", value.type_name())))
                 }
             },
             "UINT" => {
-                match value {
-                    Value::Uint(_) => Ok(value.clone()),
-                    Value::Integer(n) => Ok(Value::Uint(*n as u64)),
-                    Value::Float(f) => Ok(Value::Uint(*f as u64)),
-                    Value::Byte(b) => Ok(Value::Uint(*b as u64)),
+                match value.repr() {
+                    ValueRepr::Uint(_) => Ok(value.clone()),
+                    ValueRepr::Integer(n) => Ok(Value::Uint(n as u64)),
+                    ValueRepr::Float(f) => Ok(Value::Uint(f as u64)),
+                    ValueRepr::Byte(b) => Ok(Value::Uint(b as u64)),
                     _ => Err(self
                         .runtime_error(&format!("cannot convert {} to UINT", value.type_name()))),
                 }
             }
             "ARRAY" => {
-                match value {
-                    Value::Array(_) => Ok(value.clone()),
-                    Value::String(s) => {
+                match value.repr() {
+                    ValueRepr::Array(_) => Ok(value.clone()),
+                    ValueRepr::String(s) => {
                         let elements: Vec<Value> = s
                             .chars()
                             .map(|c| Value::String(rc_str(c.to_string())))
@@ -3635,28 +3636,28 @@ impl VM {
                 }
             }
             "TUPLE" => {
-                match value {
-                    Value::Tuple(_) => Ok(value.clone()),
+                match value.repr() {
+                    ValueRepr::Tuple(_) => Ok(value.clone()),
                     _ => Err(self
                         .runtime_error(&format!("cannot convert {} to TUPLE", value.type_name()))),
                 }
             }
-            "MAP" => match value {
-                Value::Map(_) => Ok(value.clone()),
+            "MAP" => match value.repr() {
+                ValueRepr::Map(_) => Ok(value.clone()),
                 _ => {
                     Err(self.runtime_error(&format!("cannot convert {} to MAP", value.type_name())))
                 }
             },
-            "SET" => match value {
-                Value::Set(_) => Ok(value.clone()),
+            "SET" => match value.repr() {
+                ValueRepr::Set(_) => Ok(value.clone()),
                 _ => {
                     Err(self.runtime_error(&format!("cannot convert {} to SET", value.type_name())))
                 }
             },
             "VALUE" => Ok(Value::Wrapped(Rc::new(value.clone()))),
             "ENUM" => {
-                match value {
-                    Value::EnumInstance(_) | Value::EnumDef(_) => Ok(value.clone()),
+                match value.repr() {
+                    ValueRepr::EnumInstance(_) | ValueRepr::EnumDef(_) => Ok(value.clone()),
                     _ => Err(self
                         .runtime_error(&format!("cannot convert {} to ENUM", value.type_name()))),
                 }
