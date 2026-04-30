@@ -1401,6 +1401,171 @@ impl JitInner {
                                     _ => unreachable!(),
                                 };
                                 virt_stack.push_int_ssa(result);
+                            } else if virt_stack.pending_depth() == 1
+                                && virt_stack.peek_int_ssa().is_some()
+                            {
+                                // **Mixed-mode arith fast path** (B2.2.g).
+                                //
+                                // Pre-state: top is virt int SSA (rhs); the
+                                // slot below sits on memory at memory's
+                                // top. Fires for closure-aware spec bodies
+                                // like bench_closure's `fun(y){ x + y }`
+                                // where GetUpvalue's inline path materialises
+                                // x to memory but GetLocal-on-int-mirror
+                                // pushes y to virt.
+                                //
+                                // Strategy: tag-check memory's top (the
+                                // lhs). If Integer, do register arith,
+                                // overwrite memory's top slot with the
+                                // result (still as Value::Integer), virt
+                                // becomes empty. If non-Integer, flush virt
+                                // rhs and fall to the existing all-memory
+                                // helper which handles mixed-numeric/type-
+                                // error correctly. Both branches end with:
+                                // result on memory top, virt empty,
+                                // stack_view.len unchanged.
+                                use cranelift_codegen::ir::MemFlags;
+                                use cranelift_codegen::ir::condcodes::IntCC;
+                                let flags = MemFlags::trusted();
+
+                                maybe_emit_current_line(
+                                    &mut builder,
+                                    vm_val,
+                                    line,
+                                    col,
+                                    &mut last_emitted_loc,
+                                );
+
+                                let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
+                                let stack_len = emit_load_stack_len(&mut builder, vm_val);
+                                let value_size =
+                                    builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+                                let one = builder.ins().iconst(types::I64, 1);
+                                let mem_top_idx = builder.ins().isub(stack_len, one);
+                                let mem_top_off =
+                                    builder.ins().imul(mem_top_idx, value_size);
+                                let mem_top_addr =
+                                    builder.ins().iadd(stack_ptr, mem_top_off);
+
+                                let lhs_tag =
+                                    builder.ins().load(types::I8, flags, mem_top_addr, 0);
+                                let int_tag_const = builder
+                                    .ins()
+                                    .iconst(types::I8, VALUE_TAG_INTEGER as i64);
+                                let is_int = builder.ins().icmp(
+                                    IntCC::Equal,
+                                    lhs_tag,
+                                    int_tag_const,
+                                );
+
+                                let fast_block = builder.create_block();
+                                let slow_block = builder.create_block();
+                                let cont_block = builder.create_block();
+                                builder.ins().brif(
+                                    is_int,
+                                    fast_block,
+                                    &[],
+                                    slow_block,
+                                    &[],
+                                );
+
+                                // Fast: lhs is Integer. Register arith;
+                                // overwrite memory[top].payload with the
+                                // result (tag byte already Integer, no need
+                                // to rewrite). Virt rhs is consumed but no
+                                // memory store needed for it.
+                                builder.switch_to_block(fast_block);
+                                let lhs_payload = builder.ins().load(
+                                    types::I64,
+                                    flags,
+                                    mem_top_addr,
+                                    VALUE_INT_PAYLOAD_OFFSET as i32,
+                                );
+                                let rhs_for_fast = virt_stack.peek_int_ssa().unwrap();
+                                let result_fast = match op {
+                                    OpCode::Add => {
+                                        builder.ins().iadd(lhs_payload, rhs_for_fast)
+                                    }
+                                    OpCode::Subtract => {
+                                        builder.ins().isub(lhs_payload, rhs_for_fast)
+                                    }
+                                    OpCode::Multiply => {
+                                        builder.ins().imul(lhs_payload, rhs_for_fast)
+                                    }
+                                    _ => unreachable!(),
+                                };
+                                builder.ins().store(
+                                    flags,
+                                    result_fast,
+                                    mem_top_addr,
+                                    VALUE_INT_PAYLOAD_OFFSET as i32,
+                                );
+                                builder.ins().jump(cont_block, &[]);
+
+                                // Slow: lhs is non-Integer. Flush virt rhs
+                                // to memory and let the existing fallible
+                                // int_fast_arith helper handle the type
+                                // dispatch. The helper consumes both memory
+                                // operands and pushes the result; net stack
+                                // delta matches our fast path's "no
+                                // stack_view.len change relative to entry".
+                                builder.switch_to_block(slow_block);
+                                let rhs_for_slow = virt_stack.peek_int_ssa().unwrap();
+                                {
+                                    let stack_ptr2 =
+                                        emit_load_stack_ptr(&mut builder, vm_val);
+                                    let top2 =
+                                        emit_load_stack_len(&mut builder, vm_val);
+                                    let value_size2 = builder
+                                        .ins()
+                                        .iconst(types::I64, VALUE_SIZE as i64);
+                                    let byte_off2 =
+                                        builder.ins().imul(top2, value_size2);
+                                    let slot_ptr2 =
+                                        builder.ins().iadd(stack_ptr2, byte_off2);
+                                    let int_tag = builder
+                                        .ins()
+                                        .iconst(types::I8, VALUE_TAG_INTEGER as i64);
+                                    builder.ins().store(flags, int_tag, slot_ptr2, 0);
+                                    builder.ins().store(
+                                        flags,
+                                        rhs_for_slow,
+                                        slot_ptr2,
+                                        VALUE_INT_PAYLOAD_OFFSET as i32,
+                                    );
+                                    let one2 = builder.ins().iconst(types::I64, 1);
+                                    let new_top = builder.ins().iadd(top2, one2);
+                                    builder.ins().store(
+                                        flags,
+                                        new_top,
+                                        vm_val,
+                                        vm_stack_view_len_offset(),
+                                    );
+                                }
+                                let (arith_op, slow_helper) = match op {
+                                    OpCode::Add => (IntArithOp::Add, refs.add),
+                                    OpCode::Subtract => (IntArithOp::Sub, refs.sub),
+                                    OpCode::Multiply => (IntArithOp::Mul, refs.mul),
+                                    _ => unreachable!(),
+                                };
+                                emit_int_fast_arith(
+                                    &mut builder,
+                                    exit_block,
+                                    &refs,
+                                    vm_val,
+                                    arith_op,
+                                    slow_helper,
+                                );
+                                builder.ins().jump(cont_block, &[]);
+
+                                // Cont: virt rhs was consumed by both
+                                // branches; pop it. Result is on memory top
+                                // in both cases; virt is empty.
+                                builder.switch_to_block(cont_block);
+                                builder.seal_block(fast_block);
+                                builder.seal_block(slow_block);
+                                builder.seal_block(cont_block);
+                                let _ = virt_stack.pop_int_ssa().unwrap();
                             } else {
                                 // Slow path can call the fallible helper —
                                 // ensure JitFrame.line reflects this op so
