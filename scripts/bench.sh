@@ -9,6 +9,11 @@
 #   scripts/bench.sh --warmup=8 --runs=15           # tune warmups/runs
 #   WARMUPS=3 RUNS=15 scripts/bench.sh              # legacy env-var form
 #   OXIGEN_BENCH_CPU=3 scripts/bench.sh             # pin to a specific CPU
+#   OXIGEN_BIN_B=/path/to/oxigen scripts/bench.sh   # A/B between two oxigen
+#                                                   # builds, both --jit, fully
+#                                                   # interleaved with the rest
+#                                                   # of the round so thermal
+#                                                   # drift hits both equally
 #
 # Flags (override env vars):
 #   --warmup=N | --warmups=N | --warmup N   untimed rounds per variant
@@ -79,6 +84,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BENCH_DIR="$REPO_ROOT/example"
 REPORT_DIR="$REPO_ROOT/benchmark_reports"
 OXIGEN_BIN="${OXIGEN_BIN:-$REPO_ROOT/target/release/oxigen}"
+# A/B mode: when OXIGEN_BIN_B is set to a second oxigen binary, an
+# "oxigen-B --jit" variant is added to the interleaved harness so the
+# two builds are compared under identical thermal conditions per round.
+# The B-binary is also reported with min/median/p50 in the summary
+# table along with its ratio against OXIGEN_BIN.
+OXIGEN_BIN_B="${OXIGEN_BIN_B:-}"
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python3)}"
 BUN_BIN="${BUN_BIN:-$(command -v bun 2>/dev/null || true)}"
 NODE_BIN="${NODE_BIN:-$(command -v node 2>/dev/null || true)}"
@@ -115,6 +126,10 @@ command -v awk >/dev/null 2>&1 \
     || die "Oxigen binary not found at $OXIGEN_BIN. Build with 'cargo build --release --features jit -p oxigen' first."
 [[ -x "$PYTHON_BIN" ]] \
     || die "python binary not found ($PYTHON_BIN)"
+if [[ -n "$OXIGEN_BIN_B" ]]; then
+    [[ -x "$OXIGEN_BIN_B" ]] \
+        || die "OXIGEN_BIN_B set but not executable: $OXIGEN_BIN_B"
+fi
 
 discover_benchmarks() {
     if [[ $# -gt 0 ]]; then
@@ -193,6 +208,11 @@ run_one_benchmark() {
     # are reported.
     local specs=()
     specs+=("oxigen --jit"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN --jit $oxi_file")
+    # A/B mode: B variant runs back-to-back with A in the same round
+    # so both observe the same thermal/cache state.
+    if [[ -n "$OXIGEN_BIN_B" ]]; then
+        specs+=("oxigen-B --jit"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN_B --jit $oxi_file")
+    fi
     specs+=("oxigen default"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN $oxi_file")
     if has_bun_ts "$stem"; then
         specs+=("bun (ts)"$'\t'"${TASKSET_PREFIX[*]} $BUN_BIN run $ts_file")
@@ -365,6 +385,41 @@ summarize_one() {
     ' "$out_json"
 }
 
+# A/B summary row when OXIGEN_BIN_B is in use. Reports min, median, and
+# B/A min-ratio for both binaries side-by-side. < 1.00 means B is faster.
+summarize_ab() {
+    local stem=$1
+    local out_json="$REPORT_DIR/${stem}.native.json"
+    jq -r --arg stem "$stem" '
+        def fmt1: . * 10 | round / 10 | tostring;
+        def fmtx: . * 1000 | round / 1000 | tostring + "x";
+        def median(arr):
+            (arr | sort) as $s
+            | ($s | length) as $n
+            | if $n == 0 then null
+              elif ($n % 2) == 1 then $s[($n - 1) / 2]
+              else (($s[$n/2 - 1] + $s[$n/2]) / 2)
+              end;
+        def by_name($n): [.results[] | select(.command | startswith($n))][0];
+        (by_name("oxigen --jit"))   as $a
+        | (by_name("oxigen-B --jit")) as $b
+        | ($a.min * 1000)                          as $a_min
+        | (median([$a.times[] | . * 1000]))        as $a_med
+        | ($b.min * 1000)                          as $b_min
+        | (median([$b.times[] | . * 1000]))        as $b_med
+        | [
+            $stem,
+            ($a_min | fmt1),
+            ($a_med | fmt1),
+            ($b_min | fmt1),
+            ($b_med | fmt1),
+            (($b_min / $a_min) | fmtx),
+            (($b_med / $a_med) | fmtx)
+          ]
+        | @tsv
+    ' "$out_json"
+}
+
 # Step 0 (plan): emit JIT min/p50 in ms for the under-10ms pass criterion.
 # `min < 10ms AND p50 comfortably below 11ms` — bare min can be a thermal
 # outlier on a desktop. Median is computed in jq from `.times[]`.
@@ -476,6 +531,21 @@ latest_md="$REPORT_DIR/latest-native.md"
             | awk -F'\t' '{printf "| %s | %s | %s |\n", $1,$2,$3}'
     done
     echo
+    if [[ -n "$OXIGEN_BIN_B" ]]; then
+        echo "## A/B comparison: \`$OXIGEN_BIN\` vs \`$OXIGEN_BIN_B\` (--jit)"
+        echo
+        echo "Both binaries run interleaved A/B/A/B per round so they share"
+        echo "the same thermal/cache state. \`B/A < 1.00\` means OXIGEN_BIN_B"
+        echo "(B) is faster than OXIGEN_BIN (A); \`> 1.00\` means slower."
+        echo
+        echo "| benchmark | A min | A p50 | B min | B p50 | B/A min | B/A p50 |"
+        echo "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"
+        for stem in "${benchmarks[@]}"; do
+            summarize_ab "$stem" \
+                | awk -F'\t' '{printf "| %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7}'
+        done
+        echo
+    fi
     echo "Per-benchmark JSON (per-round samples + summary stats) in \`$REPORT_DIR/\`."
 } | tee "$md" > "$latest_md"
 
