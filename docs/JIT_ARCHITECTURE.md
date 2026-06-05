@@ -15,6 +15,7 @@ This document covers:
 - [Architecture overview](#architecture-overview)
 - [Supported opcodes](#supported-opcodes)
 - [Inline caches and fast paths](#inline-caches-and-fast-paths)
+- [Specialized entries](#specialized-entries)
 - [Safety invariants](#safety-invariants)
 - [Benchmark status](#benchmark-status)
 - [Troubleshooting](#troubleshooting)
@@ -29,9 +30,16 @@ a handful of inline fast paths (int arithmetic, compare-branch, local
 access, the `Call` guard) that skip the helper for the common case.
 
 **What it is NOT.** Not an optimizing JIT. No inlining, no escape
-analysis, no type specialization beyond tag-check fast paths. No LLVM
-backend. No concurrent compilation. No deoptimization to a separate
-tier — just a clean bailout back to the interpreter.
+analysis, no LLVM backend, no concurrent compilation. The only type
+specialization is a register-args integer entry point for functions
+whose params are int-typed (see [Specialized entries](#specialized-entries))
+plus the per-op tag-check fast paths — there's no speculative type
+feedback beyond that. No deoptimization to a separate tier — just a
+clean bailout back to the interpreter.
+
+The codegen backend is Cranelift 0.131 with `opt_level=speed` (its
+egraph mid-end + ISLE peephole rules), selected because it matches or
+beats `opt_level=none` on every loop bench in the suite.
 
 **Goals.**
 
@@ -163,18 +171,31 @@ oxigen --no-jit script.oxi   # interpreter only
 present on `VM` regardless of the feature flag. When the feature is
 off it's a ZST and every method is a no-op.
 
-**`JitInner` (in `core/src/jit/engine.rs`)** — the actual Cranelift
-module + compiled-thunk cache. Holds:
+**`JitInner` (in `core/src/jit/engine/mod.rs`)** — the actual Cranelift
+module + compiled-thunk cache. The engine outgrew a single `engine.rs`
+and is now an `engine/` module: `mod.rs` (the `compile_function`
+dispatch loop), `helpers.rs` (the `extern "C"` helper table and its
+`FuncId`/`FuncRef` registration), `cache.rs` (inline-cache entry
+layouts), `counters.rs` (instrumentation), and `defs.rs` (VM-offset
+helpers + the `EntryKind` / `SpecializedEntryKind` enums). `JitInner`
+holds:
 - `module: JITModule` — Cranelift JIT module.
+- `ctx`, `fbc` — reused Cranelift `Context` and `FunctionBuilderContext`.
 - `compiled: HashMap<*const Function, Entry>` — thunk cache keyed by
-  `Rc::as_ptr(&Function)`.
+  `Rc::as_ptr(&Function)`. `Entry` is `Compiled { entries }` or
+  `Failed` (so a rejected function is never re-attempted).
 - `retained: HashMap<*const Function, Rc<Function>>` — keeps
   `Function`s alive so the pointer keys stay valid.
+- `helpers: HelperIds` — cached helper `FuncId`s, registered once at
+  module init.
 - `pending_error: Option<VMError>` — see [Safety
   invariants](#safety-invariants); accessed across the thunk-call
   boundary with volatile pointer reads/writes.
 - `current_stop_depth: usize` — the frame depth the currently-running
   thunk should execute until.
+- `next_id: u32` — monotonic counter for unique thunk symbol names.
+- `counters: Box<JitCounters>` — per-helper FFI call counters; the box
+  address is baked into emitted IR (see `counters.rs`).
 - `global_caches`, `call_caches`, `method_caches`, `field_caches` —
   per-call-site inline caches (see next section).
 
@@ -233,10 +254,16 @@ u32`. Status codes:
 ## Supported opcodes
 
 The JIT's scan (in `core/src/jit/scan.rs`) rejects any function that
-contains an opcode outside the allow-list. Current allow-list:
+contains an opcode outside the allow-list (the single source of truth
+is `is_supported` in that file). Alongside the allow-list check, the
+scan collects branch targets and computes two flags consumed by the
+translator: `may_capture_upvalues` (set by any `Closure` op — gates
+whether `Return` can inline `close_upvalues`) and `touches_heap_values`
+(set by any op that can place an Rc-bearing `Value` on the stack —
+when false, `Return` skips the stack-drop loop). Current allow-list:
 
 **Constants / values.** `Constant`, `None`, `True`, `False`, `Pop`,
-`Dup`, `BuildArray` (via helper).
+`Dup`, `BuildArray`, `Index`, `TypeWrap` (the last three via helper).
 
 **Arithmetic.** `Add`, `Subtract`, `Multiply`, `Divide`, `Modulo` —
 inline int+int fast path for Add/Sub/Mul, fallible helper for the
@@ -246,7 +273,12 @@ rest.
 `GreaterEqual` — inline int fast path, fused with `JumpIfFalse` /
 `JumpIfTrue` when followed.
 
-**Logic.** `Not`, `Negate`.
+**Logic / unary.** `Not`, `Negate`.
+
+**Bitwise.** `BitAnd`, `BitOr`, `BitXor`, `BitNot`, `ShiftLeft`,
+`ShiftRight` (via helper).
+
+**Logging.** `Log` (via helper).
 
 **Locals.** `GetLocal`, `SetLocal` — inline fast path for
 Integer/Float, slow-path helper for everything else. Peephole fusions
@@ -268,13 +300,15 @@ for `GetLocal+Const+Arith+SetLocal`, `GetLocal+GetLocal+Arith+SetLocal`,
 `SetField` (field IC), `DefineMethod`, `MethodCall` (inline IR guard
 for `arg_count <= 1` + `jit_op_method_call_ic`).
 
-**Not supported (yet).** `Log` / `println`, `BuildTuple` /
-`BuildMap` / `BuildSet`, `Index` / `IndexAssign` / `Slice`, `Import` /
-`GetModuleField`, `IsMut` / `IsType` / `IsTypeMut`, `TypeWrap`,
+**Not supported (yet).** `Increment` / `Decrement`, `BuildTuple` /
+`BuildMap` / `BuildSet`, `IndexAssign` / `Slice`, `Import` /
+`GetModuleField`, `IsMut` / `IsType` / `IsTypeMut`,
 `ErrorConstruct` / `Guard` / `Fail` / `ValueConstruct`,
 `DefinePattern` / `TestPattern`, `StringInterp`, `Unpack`, `Main`,
-`Unless`, `IterLen` / `IterGet`, bitwise ops, `CallNamed`.
-Functions that contain any of these are kept on the interpreter.
+`Unless`, `IterLen` / `IterGet`, the enum opcodes (`EnumDef`,
+`MakeEnumVariantUnit` / `Tuple` / `Struct`), `CallNamed`, and
+`MethodCallNamed`. Functions that contain any of these are kept on
+the interpreter.
 
 ## Inline caches and fast paths
 
@@ -323,6 +357,43 @@ emitted IR as an `iconst`, so hits are a single indirect load.
   `Vec::len`, pushes a `JitFrame`, and `call_indirect`s the cached
   thunk. See [Safety invariants](#safety-invariants) for the
   memory-ownership accounting.
+
+## Specialized entries
+
+`compile_function` can emit up to two entry points per function. The
+**generic** entry is always present: `extern "C" fn(*mut VM) -> u32`,
+args read off the VM stack through `stack_view`. A **specialized**
+entry is emitted only when the function passes the eligibility check in
+`compute_specialized_entry_eligibility` (`core/src/compiler/slot_types.rs`).
+Its ABI passes int args in registers and returns the result as a raw
+`i64`: `fn(*mut VM, i64, ..., i64) -> (u32 status, i64 payload)`. The
+status/payload pair funnels through a single `exit_block` so every
+return site (success, error, bailout) shares one return path.
+
+`CompiledEntries` carries `generic`, the optional `specialized` raw
+pointer, its arity, and a `SpecializedEntryKind` discriminator (mirrored
+to `ObjClosure` via the `SPECIALIZED_KIND_*` constants so call sites can
+gate direct calls on a *real* body existing):
+
+| `SpecializedEntryKind` | Body |
+|---|---|
+| `ForwardTrampoline` | A2 adapter: boxes i64 args → calls the generic entry → unboxes. Correct but not a profitable direct-call target. |
+| `NativeIntBody` | The real specialized body: runs the opcodes with i64-resident args, no box/unbox round trip. |
+| `NativeIntBodyWithClosure` | B2.2 closure-aware body: also takes `*const ObjClosure` as a register arg so `GetUpvalue` reads through the register instead of walking the `JitFrame`, and inlines the closure-aware `Return` without `jit_op_return`'s FFI crossing. |
+
+**Eligibility cascade** (`SpecEligibilityOutcome` records the first rule
+that rejected a function, for per-reason counters): rejected if the
+function takes no args, any param isn't int-typed (or an int-mirror
+candidate), any param is captured by an upvalue, the body has a
+`Closure` op, the body has upvalue ops (lifted only for the
+closure-aware kind), there's no `Return`, there's no `Call`, or a
+`Return` IP is statically unreachable. Otherwise it's `Eligible`.
+
+Related per-param analysis in `slot_types.rs` drives the inline fast
+paths even when no specialized entry is emitted: `int_mirror_param_slots`
+(read-only `Value` params that get an entry-time tag-guarded i64 mirror)
+and `captured_slots` (never virtualized, so a nested closure's capture
+never sees a stale backing slot).
 
 ## Safety invariants
 
@@ -496,10 +567,16 @@ stderr).
 
 ## See also
 
-- `core/src/jit/engine.rs` — Cranelift IR emission and helper tables.
+- `core/src/jit/engine/mod.rs` — Cranelift IR emission and the
+  `compile_function` dispatch loop.
+- `core/src/jit/engine/{helpers,cache,counters,defs}.rs` — helper
+  registration, inline-cache layouts, instrumentation counters, and
+  VM-offset/`EntryKind` definitions, respectively.
 - `core/src/jit/runtime.rs` — `extern "C"` helpers called from
   compiled code.
 - `core/src/jit/scan.rs` — opcode allow-list and fixed-length table.
+- `core/src/compiler/slot_types.rs` — per-slot type analysis and
+  specialized-entry eligibility.
 - `core/src/vm/mod.rs` — `VM`, `CallFrame`, `JitFrame`, `StackView`,
   `JitFrameView`, `invoke_thunk` call path.
 - `core/tests/jit_fallback.rs` — regression tests that run every
