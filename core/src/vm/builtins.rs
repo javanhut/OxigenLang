@@ -405,22 +405,11 @@ fn builtin_insert(args: Vec<Value>) -> Value {
     }
     match args[0].repr() {
         ValueRepr::Map(m) => {
-            let mut map = m.borrow_mut();
-            // Check if key exists, update if so
-            for entry in map.iter_mut() {
-                if entry.0 == args[1] {
-                    entry.1 = args[2].clone();
-                    return Value::None;
-                }
-            }
-            map.push((args[1].clone(), args[2].clone()));
+            m.borrow_mut().insert(args[1].clone(), args[2].clone());
             Value::None
         }
         ValueRepr::Set(s) => {
-            let mut set = s.borrow_mut();
-            if !set.iter().any(|item| item == &args[1]) {
-                set.push(args[1].clone());
-            }
+            s.borrow_mut().insert(args[1].clone());
             Value::None
         }
         _ => Value::Error(rc_str("insert() requires a map or set")),
@@ -433,13 +422,11 @@ fn builtin_remove(args: Vec<Value>) -> Value {
     }
     match args[0].repr() {
         ValueRepr::Map(m) => {
-            let mut map = m.borrow_mut();
-            map.retain(|(k, _)| k != &args[1]);
+            m.borrow_mut().remove(&args[1]);
             Value::None
         }
         ValueRepr::Set(s) => {
-            let mut set = s.borrow_mut();
-            set.retain(|item| item != &args[1]);
+            s.borrow_mut().remove(&args[1]);
             Value::None
         }
         _ => Value::Error(rc_str("remove() requires a map or set")),
@@ -451,14 +438,8 @@ fn builtin_has(args: Vec<Value>) -> Value {
         return Value::Error(rc_str("has() takes exactly 2 arguments"));
     }
     match args[0].repr() {
-        ValueRepr::Map(m) => {
-            let map = m.borrow();
-            Value::Boolean(map.iter().any(|(k, _)| k == &args[1]))
-        }
-        ValueRepr::Set(s) => {
-            let set = s.borrow();
-            Value::Boolean(set.iter().any(|item| item == &args[1]))
-        }
+        ValueRepr::Map(m) => Value::Boolean(m.borrow().contains_key(&args[1])),
+        ValueRepr::Set(s) => Value::Boolean(s.borrow().contains(&args[1])),
         _ => Value::Error(rc_str("has() requires a map or set")),
     }
 }
@@ -468,14 +449,9 @@ fn builtin_tuple(args: Vec<Value>) -> Value {
 }
 
 fn builtin_set(args: Vec<Value>) -> Value {
-    // Deduplicate
-    let mut items = Vec::new();
-    for arg in args {
-        if !items.iter().any(|i: &Value| i == &arg) {
-            items.push(arg);
-        }
-    }
-    Value::Set(Rc::new(RefCell::new(items)))
+    Value::Set(Rc::new(RefCell::new(
+        crate::vm::collections::OxSet::from_iter_dedup(args),
+    )))
 }
 
 fn builtin_byte(args: Vec<Value>) -> Value {
@@ -892,7 +868,9 @@ fn builtin_exec(args: Vec<Value>) -> Value {
                 ),
                 (Value::String(rc_str("code")), Value::Integer(code as i64)),
             ];
-            Value::Map(Rc::new(RefCell::new(entries)))
+            Value::Map(Rc::new(RefCell::new(
+                crate::vm::collections::OxMap::from_pairs(entries),
+            )))
         }
         Err(e) => Value::Error(rc_str(format!("__exec: {}", e))),
     }
@@ -939,7 +917,9 @@ fn builtin_env_vars(_args: Vec<Value>) -> Value {
     let entries: Vec<(Value, Value)> = std::env::vars()
         .map(|(k, v)| (Value::String(rc_str(k)), Value::String(rc_str(v))))
         .collect();
-    Value::Map(Rc::new(RefCell::new(entries)))
+    Value::Map(Rc::new(RefCell::new(
+                crate::vm::collections::OxMap::from_pairs(entries),
+            )))
 }
 
 fn builtin_cwd(_args: Vec<Value>) -> Value {
@@ -1472,7 +1452,9 @@ fn json_parse_object(chars: &[char], pos: &mut usize) -> Result<Value, String> {
     json_skip_ws(chars, pos);
     if *pos < chars.len() && chars[*pos] == '}' {
         *pos += 1;
-        return Ok(Value::Map(Rc::new(RefCell::new(entries))));
+        return Ok(Value::Map(Rc::new(RefCell::new(
+                crate::vm::collections::OxMap::from_pairs(entries),
+            ))));
     }
     loop {
         json_skip_ws(chars, pos);
@@ -1497,7 +1479,9 @@ fn json_parse_object(chars: &[char], pos: &mut usize) -> Result<Value, String> {
         }
         *pos += 1;
     }
-    Ok(Value::Map(Rc::new(RefCell::new(entries))))
+    Ok(Value::Map(Rc::new(RefCell::new(
+                crate::vm::collections::OxMap::from_pairs(entries),
+            ))))
 }
 
 fn builtin_json_stringify(args: Vec<Value>) -> Value {
@@ -1597,7 +1581,9 @@ fn toml_value_to_value(tv: toml::Value) -> Value {
                 .into_iter()
                 .map(|(k, v)| (Value::String(rc_str(k)), toml_value_to_value(v)))
                 .collect();
-            Value::Map(Rc::new(RefCell::new(items)))
+            Value::Map(Rc::new(RefCell::new(
+                crate::vm::collections::OxMap::from_pairs(items),
+            )))
         }
     }
 }
@@ -1753,7 +1739,9 @@ fn builtin_http_request(args: Vec<Value>) -> Value {
                             Value::String(rc_str(body_str)),
                         ),
                     ];
-                    Value::Map(Rc::new(RefCell::new(entries)))
+                    Value::Map(Rc::new(RefCell::new(
+                crate::vm::collections::OxMap::from_pairs(entries),
+            )))
                 }
                 Err(e) => Value::Error(rc_str(format!("http error: {}", e))),
             }

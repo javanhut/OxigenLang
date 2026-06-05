@@ -969,7 +969,9 @@ impl NanValue {
                         .map(|(k, v)| (k.clone().into_value(), v.clone().into_value()))
                         .collect();
                     drop(rc);
-                    OldValue::Map(Rc::new(RefCell::new(owned)))
+                    OldValue::Map(Rc::new(RefCell::new(
+                        crate::vm::collections::OxMap::from_pairs(owned),
+                    )))
                 } else if sub == PointerKindA::Set as u8 {
                     let rc = Rc::<RefCell<Vec<NanValue>>>::from_raw(
                         addr as *const RefCell<Vec<NanValue>>,
@@ -980,7 +982,9 @@ impl NanValue {
                         .map(|n| n.clone().into_value())
                         .collect();
                     drop(rc);
-                    OldValue::Set(Rc::new(RefCell::new(owned)))
+                    OldValue::Set(Rc::new(RefCell::new(
+                        crate::vm::collections::OxSet::from_iter_dedup(owned),
+                    )))
                 } else if sub == PointerKindA::Closure as u8 {
                     let rc = Rc::<ObjClosure>::from_raw(addr as *const ObjClosure);
                     OldValue::Closure(rc)
@@ -1551,11 +1555,15 @@ mod tests {
                 OldValue::Boolean(true),
                 OldValue::Integer(7),
             ])),
-            OldValue::Map(Rc::new(RefCell::new(vec![(
-                OldValue::String(Rc::new("k".into())),
-                OldValue::Integer(1),
-            )]))),
-            OldValue::Set(Rc::new(RefCell::new(vec![OldValue::Integer(9)]))),
+            OldValue::Map(Rc::new(RefCell::new(
+                crate::vm::collections::OxMap::from_pairs(vec![(
+                    OldValue::String(Rc::new("k".into())),
+                    OldValue::Integer(1),
+                )]),
+            ))),
+            OldValue::Set(Rc::new(RefCell::new(
+                crate::vm::collections::OxSet::from_iter_dedup(vec![OldValue::Integer(9)]),
+            ))),
             OldValue::ErrorValue(Rc::new(ErrorValueData {
                 msg: Rc::new("bad".into()),
                 tag: Some(Rc::new("ERR".into())),

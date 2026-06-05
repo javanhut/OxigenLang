@@ -315,6 +315,14 @@ impl Compiler {
     }
 
     fn make_constant(&mut self, value: Value, line: u32) -> u16 {
+        // Intern constant-pool strings so equal literals / identifiers /
+        // field names share one canonical `Rc<String>`. This is bounded
+        // by the program text (see vm::intern) and lets the `Rc::ptr_eq`
+        // fast path in `Value::eq` short-circuit their comparisons.
+        let value = match value {
+            Value::String(s) => Value::String(crate::vm::intern::intern(&s)),
+            other => other,
+        };
         let idx = self.current_chunk().add_constant(value);
         if idx > u16::MAX {
             self.error("Too many constants in one chunk", line);
@@ -2240,8 +2248,12 @@ fn default_for_type(type_name: &str) -> Value {
         "UINT" => Value::Uint(0),
         "ARRAY" => Value::Array(std::rc::Rc::new(std::cell::RefCell::new(Vec::new()))),
         "TUPLE" => Value::Tuple(std::rc::Rc::new(Vec::new())),
-        "MAP" => Value::Map(std::rc::Rc::new(std::cell::RefCell::new(Vec::new()))),
-        "SET" => Value::Set(std::rc::Rc::new(std::cell::RefCell::new(Vec::new()))),
+        "MAP" => Value::Map(std::rc::Rc::new(std::cell::RefCell::new(
+            crate::vm::collections::OxMap::new(),
+        ))),
+        "SET" => Value::Set(std::rc::Rc::new(std::cell::RefCell::new(
+            crate::vm::collections::OxSet::new(),
+        ))),
         _ => Value::None,
     }
 }

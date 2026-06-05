@@ -1,11 +1,12 @@
 # OxigenLang JIT Architecture
 
 > **Status: experimental.** The baseline JIT is off by default. It's
-> feature-gated and ships as an opt-in build. It already outperforms
-> CPython on a subset of workloads (tight integer loops, closures) but
-> still trails on call-heavy workloads (recursion, struct methods). It
-> will stay experimental until every bench in the suite at
-> `example/bench_*.oxi` beats CPython 3.14.
+> feature-gated and ships as an opt-in build. As of the self-recursion
+> direct-call and specialized-entry work, it now **beats CPython 3.14 on
+> every bench in the suite** at `example/bench_*.oxi` (4.6×–19.8×,
+> including the formerly-trailing recursion and struct-method cases). It
+> stays labelled experimental pending broader real-world hardening, not
+> because any suite bench is behind. See [Benchmark status](#benchmark-status).
 
 This document covers:
 
@@ -47,10 +48,10 @@ beats `opt_level=none` on every loop bench in the suite.
    JIT takes past Rust's `Rc` / borrow-checker rules is audited and
    documented.
 2. Be **correct** on every program the interpreter runs correctly. All
-   424+ unit tests and every `.oxi` in `example/` pass in `--jit`,
+   450+ unit tests and every `.oxi` in `example/` pass in `--jit`,
    `default`, and `--no-jit` modes.
-3. Beat CPython 3.14 on every bench in the suite before we drop the
-   "experimental" label. Currently we beat it on 3/7; see
+3. Beat CPython 3.14 on every bench in the suite. **Met: 7/7** as of the
+   self-recursion direct-call + specialized-entry work; see
    [Benchmark status](#benchmark-status).
 
 ## Enabling the JIT
@@ -490,46 +491,61 @@ the cache is considered empty (raw pointer is null).
 Reproduce with:
 
 ```bash
-cargo build --release --features jit
-OXIGEN_BENCH_CPU=5 python3 scripts/bench.py --python --runs 10 --warmups 3 \
-    example/bench_fib.oxi \
-    example/bench_arith.oxi \
-    example/bench_loop.oxi \
-    example/bench_nested_loop.oxi \
-    example/bench_collatz.oxi \
-    example/bench_closure.oxi \
-    example/bench_struct_method.oxi
+cargo build --release --features jit -p oxigen
+OXIGEN_JIT=1 python3 scripts/bench.py --skip-build --oxigen-bin ./target/release/oxigen \
+    --runs 10 --warmups 3 \
+    bench_fib bench_arith bench_loop bench_nested_loop \
+    bench_collatz bench_closure bench_struct_method
 ```
 
-Latest measurements (CPython 3.14, Linux x86-64, best-of-10,
-CPU-pinned):
+Latest measurements (CPython 3.14, macOS arm64 / Apple Silicon,
+median-of-10, 3 warmups, eager JIT via `OXIGEN_JIT=1`). Medians in ms;
+"jit vs py" is python ÷ jit:
 
-| Bench | Oxigen `--jit` | Python 3.14 | Ratio | Winner |
-|---|---|---|---|---|
-| `bench_loop` (tight int loop) | 24.9 ms | 74.0 ms | **2.97×** | Oxigen ✓ |
-| `bench_nested_loop` (nested int loops) | 13.3 ms | 26.7 ms | **2.02×** | Oxigen ✓ |
-| `bench_closure` (upvalue hot call) | 39.3 ms | 51.7 ms | **1.31×** | Oxigen ✓ |
-| `bench_arith` (recursive mixed arithmetic) | 67.2 ms | 56.5 ms | 0.84× | Python |
-| `bench_fib` (recursive `fib(30)`) | 147.0 ms | 104.4 ms | 0.71× | Python |
-| `bench_collatz` (mod/div loop) | 436.7 ms | 323.8 ms | 0.74× | Python |
-| `bench_struct_method` (hot method loop) | 191.2 ms | 69.7 ms | 0.36× | Python |
+| Bench | `--no-jit` | default | `--jit` | Python 3.14 | jit vs py |
+|---|---|---|---|---|---|
+| `bench_loop` (tight int loop) | 57.6 | 3.0 | 2.9 | 45.4 | **15.76×** ✓ |
+| `bench_collatz` (mod/div loop) | 424.4 | 10.6 | 10.6 | 209.9 | **19.78×** ✓ |
+| `bench_struct_method` (hot method loop) | 145.7 | 7.9 | 7.8 | 64.6 | **8.27×** ✓ |
+| `bench_nested_loop` (nested int loops) | 16.2 | 2.7 | 2.7 | 17.9 | **6.54×** ✓ |
+| `bench_fib` (recursive `fib(30)`) | 178.4 | 19.3 | 19.3 | 102.8 | **5.33×** ✓ |
+| `bench_arith` (recursive mixed arithmetic) | 74.9 | 10.8 | 10.3 | 53.5 | **5.19×** ✓ |
+| `bench_closure` (upvalue hot call) | 41.6 | 8.4 | 8.3 | 38.0 | **4.61×** ✓ |
+
+The JIT now wins **all 7** benches (4.6×–19.8×). The previously-trailing
+recursion (`bench_fib`, `bench_arith`) and method (`bench_struct_method`)
+cases were closed by the **self-recursion direct-call** path (A3 — a
+guarded direct `call` to the function's own specialized entry, args in
+registers; see [Specialized entries](#specialized-entries) and
+`OpCode::Call` in `engine/mod.rs`) and the **closure-aware specialized
+dispatch** in the IC hit block.
+
+> **Note on prior table.** Earlier revisions of this section reported the
+> JIT losing on `bench_fib` (0.71×), `bench_arith` (0.84×), `bench_collatz`
+> (0.74×), and `bench_struct_method` (0.36×) on Linux x86-64. Those
+> numbers predate the A3 / specialized-entry work and no longer hold. The
+> environment also differs (the old table was Linux x86-64, CPU-pinned;
+> the above is macOS arm64), so absolute ms are not comparable across the
+> two — but the qualitative reversal (3/7 → 7/7 wins) is robust and
+> reproducible with the command above.
 
 **Where the JIT wins.** Tight numeric loops (int arithmetic fast path,
-fused compare+branch, local-access peephole). Closures (upvalue
-access stays in native code once both the outer and inner function
-are tiered up).
+fused compare+branch, local-access peephole), self-recursion and
+closures (which now stay in native code via direct/specialized calls),
+and method loops (method IC + specialized dispatch).
 
-**Where it loses.** Call-heavy and method-heavy code. Each call pays
-for:
-
-- Two FFI crossings per Call (`jit_op_call_{hit,miss}` + `invoke_thunk`
-  for nested invocations).
-- A `JitFrame` push through the `jit_frame_view` ptr + Rc bookkeeping.
-- The `jit_executing` flag save/restore.
-- `pending_error` volatile writes.
-
-CPython's hand-optimized C call path is ~38 ns/call; Oxigen's is
-~50-60 ns/call. Closing that on a baseline JIT is the remaining work.
+**Remaining headroom (not a loss).** A general *non-self* monomorphic
+call to a function with a plain `NativeIntBody` specialized entry still
+routes through the generic `fn(*mut VM) -> u32` thunk rather than the
+register-args specialized entry — roughly **~10 ns/call** on a
+call-bound microbenchmark (the JIT still beats CPython there). The
+codebase scaffolds this opportunity with the `IC_CALLEE_HAS_SPEC_ENTRY`
+probe counter at the IC hit block ("A4"). Converting that path is a
+measurement-driven follow-up: it touches the most regression-prone
+emission code (an earlier closure-aware variant *"regressed every bench
+that didn't dispatch through it — `bench_arith` ran 254% slower"*), so it
+must be gated and benchmarked against the full suite to prove no
+regression before it lands.
 
 ## Troubleshooting
 

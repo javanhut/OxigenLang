@@ -345,8 +345,8 @@ pub enum Value {
     String(Rc<String>),
     Array(Rc<RefCell<Vec<Value>>>),
     Tuple(Rc<Vec<Value>>),
-    Map(Rc<RefCell<Vec<(Value, Value)>>>),
-    Set(Rc<RefCell<Vec<Value>>>),
+    Map(Rc<RefCell<crate::vm::collections::OxMap>>),
+    Set(Rc<RefCell<crate::vm::collections::OxSet>>),
 
     // Functions
     Closure(Rc<ObjClosure>),
@@ -408,8 +408,8 @@ pub enum ValueRepr<'a> {
     String(&'a Rc<String>),
     Array(&'a Rc<RefCell<Vec<Value>>>),
     Tuple(&'a Rc<Vec<Value>>),
-    Map(&'a Rc<RefCell<Vec<(Value, Value)>>>),
-    Set(&'a Rc<RefCell<Vec<Value>>>),
+    Map(&'a Rc<RefCell<crate::vm::collections::OxMap>>),
+    Set(&'a Rc<RefCell<crate::vm::collections::OxSet>>),
     Closure(&'a Rc<ObjClosure>),
     Builtin(BuiltinFn),
     StructDef(&'a Rc<ObjStructDef>),
@@ -798,10 +798,10 @@ impl Value {
     #[inline] pub fn as_tuple(&self) -> Option<&Rc<Vec<Value>>> {
         if let Value::Tuple(t) = self { Some(t) } else { None }
     }
-    #[inline] pub fn as_map(&self) -> Option<&Rc<RefCell<Vec<(Value, Value)>>>> {
+    #[inline] pub fn as_map(&self) -> Option<&Rc<RefCell<crate::vm::collections::OxMap>>> {
         if let Value::Map(m) = self { Some(m) } else { None }
     }
-    #[inline] pub fn as_set(&self) -> Option<&Rc<RefCell<Vec<Value>>>> {
+    #[inline] pub fn as_set(&self) -> Option<&Rc<RefCell<crate::vm::collections::OxSet>>> {
         if let Value::Set(s) = self { Some(s) } else { None }
     }
     #[inline] pub fn as_closure(&self) -> Option<&Rc<ObjClosure>> {
@@ -1072,7 +1072,11 @@ impl PartialEq for Value {
             (Value::Integer(a), Value::Integer(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Char(a), Value::Char(b)) => a == b,
-            (Value::String(a), Value::String(b)) => a == b,
+            // Pointer-equal ⇒ content-equal (always correct). With
+            // interned constant-pool strings (see vm::intern) the common
+            // case — comparing two identifiers / literals / map keys — is
+            // a single pointer compare instead of a byte-wise memcmp.
+            (Value::String(a), Value::String(b)) => Rc::ptr_eq(a, b) || a == b,
             (Value::Boolean(a), Value::Boolean(b)) => a == b,
             (Value::None, Value::None) => true,
             (Value::Byte(a), Value::Byte(b)) => a == b,
@@ -1080,11 +1084,7 @@ impl PartialEq for Value {
             (Value::Array(a), Value::Array(b)) => *a.borrow() == *b.borrow(),
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Map(a), Value::Map(b)) => *a.borrow() == *b.borrow(),
-            (Value::Set(a), Value::Set(b)) => {
-                let a = a.borrow();
-                let b = b.borrow();
-                a.len() == b.len() && a.iter().all(|item| b.iter().any(|bitem| item == bitem))
-            }
+            (Value::Set(a), Value::Set(b)) => *a.borrow() == *b.borrow(),
             (Value::ErrorValue(a), Value::ErrorValue(b)) => a.msg == b.msg && a.tag == b.tag,
             (Value::Wrapped(a), Value::Wrapped(b)) => a == b,
             (Value::StructInstance(a), Value::StructInstance(b)) => {

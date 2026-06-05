@@ -1,4 +1,6 @@
 pub mod builtins;
+pub mod collections;
+pub mod intern;
 pub mod nanvalue;
 pub mod value;
 
@@ -785,19 +787,8 @@ impl VM {
                 }
             }
             ValueRepr::Map(entries) => {
-                let mut entries = entries.borrow_mut();
                 let key = Value::String(Rc::clone(fname));
-                let mut found = false;
-                for (k, v) in entries.iter_mut() {
-                    if *k == key {
-                        *v = value.clone();
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
-                    entries.push((key, value));
-                }
+                entries.borrow_mut().insert(key, value);
                 Ok(())
             }
             _ => Err(self.runtime_error_hint(
@@ -1681,24 +1672,18 @@ impl VM {
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count * 2;
                     let flat: Vec<Value> = self.stack_drain_from(start);
-                    let mut entries = Vec::with_capacity(count);
+                    let mut map = crate::vm::collections::OxMap::new();
                     for pair in flat.chunks(2) {
-                        entries.push((pair[0].clone(), pair[1].clone()));
+                        map.insert(pair[0].clone(), pair[1].clone());
                     }
-                    self.push(Value::Map(Rc::new(RefCell::new(entries))));
+                    self.push(Value::Map(Rc::new(RefCell::new(map))));
                 }
                 OpCode::BuildSet => {
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count;
                     let elements: Vec<Value> = self.stack_drain_from(start);
-                    // Deduplicate
-                    let mut items = Vec::new();
-                    for elem in elements {
-                        if !items.iter().any(|i: &Value| i == &elem) {
-                            items.push(elem);
-                        }
-                    }
-                    self.push(Value::Set(Rc::new(RefCell::new(items))));
+                    let set = crate::vm::collections::OxSet::from_iter_dedup(elements);
+                    self.push(Value::Set(Rc::new(RefCell::new(set))));
                 }
 
                 OpCode::Index => {
@@ -1976,10 +1961,12 @@ impl VM {
                             .map(|c| Value::String(rc_str(c.to_string())))
                             .unwrap_or(Value::None),
                         ValueRepr::Tuple(t) => t.get(idx).cloned().unwrap_or(Value::None),
-                        ValueRepr::Set(s) => s.borrow().get(idx).cloned().unwrap_or(Value::None),
+                        ValueRepr::Set(s) => {
+                            s.borrow().items().get(idx).cloned().unwrap_or(Value::None)
+                        }
                         ValueRepr::Map(m) => {
                             let borrowed = m.borrow();
-                            if let Some((k, v)) = borrowed.get(idx) {
+                            if let Some((k, v)) = borrowed.entries().get(idx) {
                                 // For maps, yield (key, value) tuple
                                 Value::Tuple(Rc::new(vec![k.clone(), v.clone()]))
                             } else {
@@ -3124,15 +3111,7 @@ impl VM {
                 };
                 Ok(t.get(idx).cloned().unwrap_or(Value::None))
             }
-            (Value::Map(m), _) => {
-                let borrowed = m.borrow();
-                for (k, v) in borrowed.iter() {
-                    if k == &index {
-                        return Ok(v.clone());
-                    }
-                }
-                Ok(Value::None)
-            }
+            (Value::Map(m), _) => Ok(m.borrow().get(&index).cloned().unwrap_or(Value::None)),
             _ => Err(self.runtime_error_hint(
                 &format!("cannot index {} with {}", collection.type_name(), index.type_name()),
                 "arrays and tuples use <int> indices, maps use key values, strings use <int> indices",
@@ -3160,14 +3139,7 @@ impl VM {
                 Ok(())
             }
             (Value::Map(m), _) => {
-                let mut borrowed = m.borrow_mut();
-                for entry in borrowed.iter_mut() {
-                    if entry.0 == index {
-                        entry.1 = value;
-                        return Ok(());
-                    }
-                }
-                borrowed.push((index, value));
+                m.borrow_mut().insert(index, value);
                 Ok(())
             }
             _ => Err(self.runtime_error_hint(
@@ -3420,8 +3392,8 @@ impl VM {
             "UINT" => Value::Uint(0),
             "ARRAY" => Value::Array(Rc::new(RefCell::new(Vec::new()))),
             "TUPLE" => Value::Tuple(Rc::new(Vec::new())),
-            "MAP" => Value::Map(Rc::new(RefCell::new(Vec::new()))),
-            "SET" => Value::Set(Rc::new(RefCell::new(Vec::new()))),
+            "MAP" => Value::Map(Rc::new(RefCell::new(crate::vm::collections::OxMap::new()))),
+            "SET" => Value::Set(Rc::new(RefCell::new(crate::vm::collections::OxSet::new()))),
             "NONE" => Value::None,
             "GENERIC" => Value::None,
             _ => Value::None,

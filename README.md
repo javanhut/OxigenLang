@@ -79,11 +79,12 @@ cargo run -p oxigen -- check file.oxi # parse and report errors as JSON
 ### Optional JIT (experimental)
 
 OxigenLang ships with a baseline Cranelift-backed JIT that's off by
-default. It already beats CPython 3.14 on tight numeric loops, nested
-loops, and closure hot paths, and it's kept experimental until it wins
-across *every* bench in the suite (recursion and method dispatch are
-still behind). Build it in with the `jit` feature and opt in at run
-time with `--jit`:
+default. It now beats CPython 3.14 on *every* bench in the suite
+(4.6×–19.8×), including the recursion and method-dispatch cases that
+previously trailed — closed by self-recursion direct calls and
+specialized register-args entries. It's kept experimental pending
+broader real-world hardening. Build it in with the `jit` feature and
+opt in at run time with `--jit`:
 
 ```bash
 cargo build --release --features jit -p oxigen
