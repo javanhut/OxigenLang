@@ -72,7 +72,9 @@ while [[ $# -gt 0 ]]; do
         *) POSITIONAL+=("$1"); shift ;;
     esac
 done
-set -- "${POSITIONAL[@]}"
+# `${arr[@]+"${arr[@]}"}` expands to nothing when POSITIONAL is empty,
+# avoiding bash 3.2's "unbound variable" on an empty array under `set -u`.
+set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 
 # Validate numeric.
 [[ "$WARMUPS" =~ ^[0-9]+$ ]] || { echo "error: --warmup must be a non-negative integer (got: $WARMUPS)" >&2; exit 1; }
@@ -98,19 +100,38 @@ NODE_BIN="${NODE_BIN:-$(command -v node 2>/dev/null || true)}"
 # require --experimental-strip-types. Default to off; probe at runtime.
 NODE_TS_ARGS=()
 if [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]]; then
-    # Build a tiny .ts file in /tmp and see if node chokes without the flag.
-    _tmp_ts="$(mktemp --suffix=.ts)"
+    # Build a tiny .ts file and see if node chokes without the flag.
+    # Portable temp: BSD/macOS mktemp lacks GNU's `--suffix`, so use a
+    # temp dir with an explicit template (accepted by both) and a named
+    # file inside it.
+    _tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/oxbench.XXXXXX")"
+    _tmp_ts="$_tmp_dir/probe.ts"
     printf 'const x: number = 1; x;\n' > "$_tmp_ts"
     if ! "$NODE_BIN" "$_tmp_ts" >/dev/null 2>&1; then
         NODE_TS_ARGS=(--experimental-strip-types)
     fi
-    rm -f "$_tmp_ts"
+    rm -rf "$_tmp_dir"
 fi
 
 # Optional CPU pinning (mirrors scripts/bench.py's OXIGEN_BENCH_CPU).
+# taskset is Linux-only; on macOS there's no taskset, so pinning is simply
+# skipped (the `command -v` guard fails) — the harness still runs.
 TASKSET_PREFIX=()
 if [[ -n "${OXIGEN_BENCH_CPU:-}" ]] && command -v taskset >/dev/null 2>&1; then
     TASKSET_PREFIX=(taskset -c "$OXIGEN_BENCH_CPU")
+fi
+
+# Scalar forms for safe interpolation into the command strings below.
+# bash 3.2 (stock macOS) errors on `"${arr[*]}"` for an EMPTY array under
+# `set -u`, so collapse each optional prefix to a plain string once here,
+# with a trailing space only when non-empty.
+TASKSET_STR=""
+if [[ ${#TASKSET_PREFIX[@]} -gt 0 ]]; then
+    TASKSET_STR="${TASKSET_PREFIX[*]} "
+fi
+NODE_TS_STR=""
+if [[ ${#NODE_TS_ARGS[@]} -gt 0 ]]; then
+    NODE_TS_STR="${NODE_TS_ARGS[*]} "
 fi
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -171,18 +192,39 @@ has_node_ts() {
     has_ts_peer "$stem" && [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]]
 }
 
+# Timing backend, decided once. bash 5's $EPOCHREALTIME (microsecond
+# precision, no fork) when available; otherwise the bash `time` builtin
+# (millisecond precision), which works on macOS's stock bash 3.2. For
+# sub-millisecond timing on macOS, install a newer bash (`brew install
+# bash`) — this script then picks it up automatically, no flag needed.
+if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    HAVE_EPOCHREALTIME=1
+else
+    HAVE_EPOCHREALTIME=0
+fi
+
 # Time a single command-line invocation. Returns elapsed seconds as a
 # decimal, printed to stdout. Stderr/stdout from the command are
 # silenced so they don't leak into the parent script's output.
 time_one() {
     local cmd_str="$*"
-    # Use bash's $EPOCHREALTIME (decimal seconds, microsecond
-    # precision) so we don't fork `date` per call.
-    local s e
-    s=$EPOCHREALTIME
-    eval "$cmd_str" >/dev/null 2>&1
-    e=$EPOCHREALTIME
-    awk -v s="$s" -v e="$e" 'BEGIN { printf "%.6f", e - s }'
+    if [[ $HAVE_EPOCHREALTIME -eq 1 ]]; then
+        # $EPOCHREALTIME: decimal seconds, microsecond precision, no fork.
+        local s e
+        s=$EPOCHREALTIME
+        eval "$cmd_str" >/dev/null 2>&1 || true
+        e=$EPOCHREALTIME
+        awk -v s="$s" -v e="$e" 'BEGIN { printf "%.6f", e - s }'
+    else
+        # Fallback (e.g. macOS bash 3.2, which has no $EPOCHREALTIME): the
+        # `time` reserved word measures the eval; TIMEFORMAT='%R' prints real
+        # seconds to the group's stderr, captured below. The command's own
+        # output goes to /dev/null; `|| true` keeps a non-zero exit from the
+        # benched command from tripping `set -e` inside the substitution.
+        local t
+        t=$( { TIMEFORMAT='%R'; time eval "$cmd_str" >/dev/null 2>&1 || true; } 2>&1 )
+        awk -v t="$t" 'BEGIN { printf "%.6f", t + 0 }'
+    fi
 }
 
 # A/B/A/B/... interleaved runner. Every variant runs ONCE per round;
@@ -207,21 +249,21 @@ run_one_benchmark() {
     # thermal state per round. Order here just controls how variants
     # are reported.
     local specs=()
-    specs+=("oxigen --jit"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN --jit $oxi_file")
+    specs+=("oxigen --jit"$'\t'"${TASKSET_STR}$OXIGEN_BIN --jit $oxi_file")
     # A/B mode: B variant runs back-to-back with A in the same round
     # so both observe the same thermal/cache state.
     if [[ -n "$OXIGEN_BIN_B" ]]; then
-        specs+=("oxigen-B --jit"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN_B --jit $oxi_file")
+        specs+=("oxigen-B --jit"$'\t'"${TASKSET_STR}$OXIGEN_BIN_B --jit $oxi_file")
     fi
-    specs+=("oxigen default"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN $oxi_file")
+    specs+=("oxigen default"$'\t'"${TASKSET_STR}$OXIGEN_BIN $oxi_file")
     if has_bun_ts "$stem"; then
-        specs+=("bun (ts)"$'\t'"${TASKSET_PREFIX[*]} $BUN_BIN run $ts_file")
+        specs+=("bun (ts)"$'\t'"${TASKSET_STR}$BUN_BIN run $ts_file")
     fi
     if has_node_ts "$stem"; then
-        specs+=("node (ts)"$'\t'"${TASKSET_PREFIX[*]} $NODE_BIN ${NODE_TS_ARGS[*]} $ts_file")
+        specs+=("node (ts)"$'\t'"${TASKSET_STR}$NODE_BIN ${NODE_TS_STR}$ts_file")
     fi
-    specs+=("python3"$'\t'"${TASKSET_PREFIX[*]} $PYTHON_BIN $py_file")
-    specs+=("oxigen --no-jit"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN --no-jit $oxi_file")
+    specs+=("python3"$'\t'"${TASKSET_STR}$PYTHON_BIN $py_file")
+    specs+=("oxigen --no-jit"$'\t'"${TASKSET_STR}$OXIGEN_BIN --no-jit $oxi_file")
 
     local n_variants=${#specs[@]}
     local tmp_dir
@@ -478,7 +520,7 @@ latest_md="$REPORT_DIR/latest-native.md"
 {
     echo "# Oxigen vs Python — native harness (interleaved A/B)"
     echo
-    echo "- Generated: \`$(date -u -Iseconds)\`"
+    echo "- Generated: \`$(date -u +%Y-%m-%dT%H:%M:%SZ)\`"
     echo "- Host:      \`${HOSTNAME:-$(uname -n)}\`"
     echo "- Kernel:    \`$(uname -srm)\`"
     echo "- Oxigen:    \`$("$OXIGEN_BIN" --version 2>/dev/null | head -1 || echo unknown)\`"
