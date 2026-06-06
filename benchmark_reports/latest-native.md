@@ -1,15 +1,15 @@
 # Oxigen vs Python — native harness (interleaved A/B)
 
-- Generated: `2026-06-06T03:54:00Z`
+- Generated: `2026-06-06T04:00:54Z`
 - Host:      `Javans-MacBook-Pro.local`
 - Kernel:    `Darwin 25.5.0 arm64`
 - Oxigen:    `oxigen 0.1.2`
-- Python:    `Python 3.9.6`
+- Python:    `Python 3.14.5`
 - Bun:       `1.3.14`
 - Node:      `v26.0.0` (built-in type-stripping)
 - Warmups:   `3`
 - Runs:      `5`
-- Git commit: `c77ce82`
+- Git commit: `43ad199`
 - Git branch: `jit-improvements`
 
 ## Min times (ms)
@@ -24,25 +24,25 @@ throttle after sustained full-CPU work. See
 
 | benchmark | no-jit | default | jit | python | bun (ts) | node (ts) | jit vs py | jit vs bun | jit vs node |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| bench_arith | 78 | 10 | 10 | 57 | 9 | 59 | 5.7x | 0.9x | 5.9x |
-| bench_closure | 42 | 8 | 8 | 42 | 8 | 59 | 5.25x | 1x | 7.38x |
-| bench_collatz | 425 | 10 | 11 | 207 | 18 | 64 | 18.82x | 1.64x | 5.82x |
-| bench_fib | 184 | 19 | 19 | 107 | 11 | 58 | 5.63x | 0.58x | 3.05x |
-| bench_loop | 58 | 3 | 3 | 49 | 9 | 59 | 16.33x | 3x | 19.67x |
-| bench_nested_loop | 16 | 3 | 3 | 23 | 8 | 57 | 7.67x | 2.67x | 19x |
-| bench_nested_loop_big | 227 | 3 | 4 | 150 | 10 | 63 | 37.5x | 2.5x | 15.75x |
-| bench_struct_method | 148 | 8 | 8 | 67 | 10 | 60 | 8.38x | 1.25x | 7.5x |
+| bench_arith | 78 | 10 | 10 | 29 | 10 | 61 | 2.9x | 1x | 6.1x |
+| bench_closure | 42 | 8 | 8 | 25 | 8 | 60 | 3.13x | 1x | 7.5x |
+| bench_collatz | 423 | 10 | 11 | 161 | 19 | 65 | 14.64x | 1.73x | 5.91x |
+| bench_fib | 196 | 20 | 21 | 51 | 12 | 66 | 2.43x | 0.57x | 3.14x |
+| bench_loop | 61 | 3 | 4 | 32 | 10 | 64 | 8x | 2.5x | 16x |
+| bench_nested_loop | 17 | 3 | 4 | 19 | 9 | 66 | 4.75x | 2.25x | 16.5x |
+| bench_nested_loop_big | 229 | 3 | 4 | 86 | 10 | 63 | 21.5x | 2.5x | 15.75x |
+| bench_struct_method | 148 | 8 | 8 | 37 | 10 | 61 | 4.63x | 1.25x | 7.63x |
 
 ## JIT min / p50 (ms)
 
 | benchmark | jit min | jit p50 |
 | --- | ---: | ---: |
-| bench_arith | 10 | 11 |
+| bench_arith | 10 | 10 |
 | bench_closure | 8 | 8 |
 | bench_collatz | 11 | 11 |
-| bench_fib | 19 | 20 |
-| bench_loop | 3 | 3 |
-| bench_nested_loop | 3 | 3 |
+| bench_fib | 21 | 22 |
+| bench_loop | 4 | 4 |
+| bench_nested_loop | 4 | 4 |
 | bench_nested_loop_big | 4 | 4 |
 | bench_struct_method | 8 | 8 |
 
