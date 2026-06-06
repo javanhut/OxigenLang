@@ -6,7 +6,7 @@ use std::fmt;
 use std::rc::Rc;
 
 /// Built-in function signature for the VM.
-pub type BuiltinFn = fn(Vec<Value>) -> Value;
+pub type BuiltinFn = fn(&[Value]) -> Value;
 
 /// Numeric tag of `Value::Integer` under the `#[repr(u8)]` layout. The
 /// JIT's fast path loads this byte from stack memory to decide between

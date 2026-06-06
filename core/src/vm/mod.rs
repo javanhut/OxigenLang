@@ -1852,12 +1852,16 @@ impl VM {
 
                 // ── String Interpolation ────────────────────────────
                 OpCode::StringInterp => {
+                    use std::fmt::Write as _;
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count;
                     let parts: Vec<Value> = self.stack_drain_from(start);
-                    let mut result = String::new();
+                    // Accumulate into a single buffer instead of allocating a
+                    // throwaway String per part via `format!` (LuaJIT's SBuf
+                    // idea). `write!` into the buffer is alloc-free per part.
+                    let mut result = String::with_capacity(count * 8);
                     for part in &parts {
-                        result.push_str(&format!("{}", part));
+                        let _ = write!(result, "{}", part);
                     }
                     self.push(Value::String(rc_str(result)));
                 }
@@ -2536,17 +2540,20 @@ impl VM {
                 self.call_closure(Rc::clone(closure), arg_count, named_args, module_globals)
             }
             ValueRepr::Builtin(func) => {
-                let start = self.stack.len() - arg_count;
-                let args: Vec<Value> = self.stack_drain_from(start);
-                self.pop(); // pop the builtin itself
-
                 if !named_args.is_empty() {
                     return Err(self.runtime_error(
                         "named arguments are not supported for built-in functions",
                     ));
                 }
 
-                let result = func(args);
+                let start = self.stack.len() - arg_count;
+                // Pass args as a borrowed slice of the stack — no per-call
+                // Vec allocation (LuaJIT fast-function style). `func` is a
+                // copied fn pointer and never touches `self`, so the
+                // immutable borrow ends before we mutate the stack.
+                let result = func(&self.stack[start..]);
+                // Drop the args AND the builtin itself (at start - 1).
+                self.stack_truncate(start - 1);
                 if let Value::Error(ref msg) = result {
                     return Err(VMError {
                         message: msg.to_string(),

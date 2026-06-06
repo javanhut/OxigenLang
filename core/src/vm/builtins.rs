@@ -171,19 +171,19 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
 
 // ── Core builtins ──────────────────────────────────────────────────────
 
-fn builtin_print(args: Vec<Value>) -> Value {
+fn builtin_print(args: &[Value]) -> Value {
     let parts: Vec<String> = args.iter().map(|a| format!("{}", a)).collect();
     print!("{}", parts.join(" "));
     Value::None
 }
 
-fn builtin_println(args: Vec<Value>) -> Value {
+fn builtin_println(args: &[Value]) -> Value {
     let parts: Vec<String> = args.iter().map(|a| format!("{}", a)).collect();
     println!("{}", parts.join(" "));
     Value::None
 }
 
-fn builtin_len(args: Vec<Value>) -> Value {
+fn builtin_len(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("len() takes exactly 1 argument"));
     }
@@ -200,7 +200,7 @@ fn builtin_len(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_push(args: Vec<Value>) -> Value {
+fn builtin_push(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("push() takes exactly 2 arguments"));
     }
@@ -213,7 +213,7 @@ fn builtin_push(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_first(args: Vec<Value>) -> Value {
+fn builtin_first(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("first() takes exactly 1 argument"));
     }
@@ -223,7 +223,7 @@ fn builtin_first(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_last(args: Vec<Value>) -> Value {
+fn builtin_last(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("last() takes exactly 1 argument"));
     }
@@ -233,7 +233,7 @@ fn builtin_last(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_rest(args: Vec<Value>) -> Value {
+fn builtin_rest(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("rest() takes exactly 1 argument"));
     }
@@ -250,21 +250,21 @@ fn builtin_rest(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_type(args: Vec<Value>) -> Value {
+fn builtin_type(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("type() takes exactly 1 argument"));
     }
     Value::String(rc_str(args[0].effective_type_name()))
 }
 
-fn builtin_str(args: Vec<Value>) -> Value {
+fn builtin_str(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("str() takes exactly 1 argument"));
     }
     Value::String(rc_str(format!("{}", args[0])))
 }
 
-fn builtin_int(args: Vec<Value>) -> Value {
+fn builtin_int(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("int() takes exactly 1 argument"));
     }
@@ -289,7 +289,7 @@ fn builtin_int(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_float(args: Vec<Value>) -> Value {
+fn builtin_float(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("float() takes exactly 1 argument"));
     }
@@ -309,7 +309,7 @@ fn builtin_float(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_range(args: Vec<Value>) -> Value {
+fn builtin_range(args: &[Value]) -> Value {
     let (start, end) = match args.len() {
         1 => match args[0].repr() {
             ValueRepr::Integer(n) => (0i64, n),
@@ -325,7 +325,7 @@ fn builtin_range(args: Vec<Value>) -> Value {
     Value::Array(Rc::new(RefCell::new(arr)))
 }
 
-fn builtin_chars(args: Vec<Value>) -> Value {
+fn builtin_chars(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("chars() takes exactly 1 argument"));
     }
@@ -338,7 +338,7 @@ fn builtin_chars(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_error(args: Vec<Value>) -> Value {
+fn builtin_error(args: &[Value]) -> Value {
     match args.len() {
         1 => {
             let msg = format!("{}", args[0]);
@@ -359,21 +359,21 @@ fn builtin_error(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_is_value(args: Vec<Value>) -> Value {
+fn builtin_is_value(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("is_value() takes exactly 1 argument"));
     }
     Value::Boolean(matches!(args[0], Value::Wrapped(_)))
 }
 
-fn builtin_is_error(args: Vec<Value>) -> Value {
+fn builtin_is_error(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("is_error() takes exactly 1 argument"));
     }
     Value::Boolean(matches!(args[0], Value::ErrorValue(_)))
 }
 
-fn builtin_keys(args: Vec<Value>) -> Value {
+fn builtin_keys(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("keys() takes exactly 1 argument"));
     }
@@ -386,7 +386,7 @@ fn builtin_keys(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_values(args: Vec<Value>) -> Value {
+fn builtin_values(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("values() takes exactly 1 argument"));
     }
@@ -399,7 +399,7 @@ fn builtin_values(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_insert(args: Vec<Value>) -> Value {
+fn builtin_insert(args: &[Value]) -> Value {
     if args.len() != 3 {
         return Value::Error(rc_str("insert() takes exactly 3 arguments"));
     }
@@ -416,7 +416,7 @@ fn builtin_insert(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_remove(args: Vec<Value>) -> Value {
+fn builtin_remove(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("remove() takes exactly 2 arguments"));
     }
@@ -433,7 +433,7 @@ fn builtin_remove(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_has(args: Vec<Value>) -> Value {
+fn builtin_has(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("has() takes exactly 2 arguments"));
     }
@@ -444,17 +444,17 @@ fn builtin_has(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_tuple(args: Vec<Value>) -> Value {
-    Value::Tuple(Rc::new(args))
+fn builtin_tuple(args: &[Value]) -> Value {
+    Value::Tuple(Rc::new(args.to_vec()))
 }
 
-fn builtin_set(args: Vec<Value>) -> Value {
+fn builtin_set(args: &[Value]) -> Value {
     Value::Set(Rc::new(RefCell::new(
-        crate::vm::collections::OxSet::from_iter_dedup(args),
+        crate::vm::collections::OxSet::from_iter_dedup(args.iter().cloned()),
     )))
 }
 
-fn builtin_byte(args: Vec<Value>) -> Value {
+fn builtin_byte(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("byte() takes exactly 1 argument"));
     }
@@ -468,7 +468,7 @@ fn builtin_byte(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_uint(args: Vec<Value>) -> Value {
+fn builtin_uint(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("uint() takes exactly 1 argument"));
     }
@@ -487,7 +487,7 @@ fn builtin_uint(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_chr(args: Vec<Value>) -> Value {
+fn builtin_chr(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("chr() takes exactly 1 argument"));
     }
@@ -500,7 +500,7 @@ fn builtin_chr(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_ord(args: Vec<Value>) -> Value {
+fn builtin_ord(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("ord() takes exactly 1 argument"));
     }
@@ -512,7 +512,7 @@ fn builtin_ord(args: Vec<Value>) -> Value {
 
 // ── String builtins ────────────────────────────────────────────────────
 
-fn builtin_split(args: Vec<Value>) -> Value {
+fn builtin_split(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("__split() takes 2 arguments"));
     }
@@ -528,20 +528,30 @@ fn builtin_split(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_join(args: Vec<Value>) -> Value {
+fn builtin_join(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("__join() takes 2 arguments"));
     }
     match (&args[0], &args[1]) {
         (Value::Array(arr), Value::String(sep)) => {
-            let parts: Vec<String> = arr.borrow().iter().map(|v| format!("{}", v)).collect();
-            Value::String(rc_str(parts.join(sep.as_ref())))
+            use std::fmt::Write as _;
+            // Accumulate into one buffer instead of building a Vec<String>
+            // of N throwaway `format!` allocations and then joining.
+            let arr = arr.borrow();
+            let mut result = String::new();
+            for (i, v) in arr.iter().enumerate() {
+                if i > 0 {
+                    result.push_str(sep.as_ref());
+                }
+                let _ = write!(result, "{}", v);
+            }
+            Value::String(rc_str(result))
         }
         _ => Value::Error(rc_str("__join() requires (array, string)")),
     }
 }
 
-fn builtin_trim(args: Vec<Value>) -> Value {
+fn builtin_trim(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__trim() takes 1 argument"));
     }
@@ -551,7 +561,7 @@ fn builtin_trim(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_upper(args: Vec<Value>) -> Value {
+fn builtin_upper(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__upper() takes 1 argument"));
     }
@@ -561,7 +571,7 @@ fn builtin_upper(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_lower(args: Vec<Value>) -> Value {
+fn builtin_lower(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__lower() takes 1 argument"));
     }
@@ -571,7 +581,7 @@ fn builtin_lower(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_replace(args: Vec<Value>) -> Value {
+fn builtin_replace(args: &[Value]) -> Value {
     if args.len() != 3 {
         return Value::Error(rc_str("__replace() takes 3 arguments"));
     }
@@ -583,7 +593,7 @@ fn builtin_replace(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_starts_with(args: Vec<Value>) -> Value {
+fn builtin_starts_with(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("__starts_with() takes 2 arguments"));
     }
@@ -593,7 +603,7 @@ fn builtin_starts_with(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_ends_with(args: Vec<Value>) -> Value {
+fn builtin_ends_with(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("__ends_with() takes 2 arguments"));
     }
@@ -603,7 +613,7 @@ fn builtin_ends_with(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_contains_str(args: Vec<Value>) -> Value {
+fn builtin_contains_str(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("__contains_str() takes 2 arguments"));
     }
@@ -613,7 +623,7 @@ fn builtin_contains_str(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_strip(args: Vec<Value>) -> Value {
+fn builtin_strip(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("__strip() takes 2 arguments"));
     }
@@ -627,7 +637,7 @@ fn builtin_strip(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_strip_left(args: Vec<Value>) -> Value {
+fn builtin_strip_left(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("__strip_left() takes 2 arguments"));
     }
@@ -641,7 +651,7 @@ fn builtin_strip_left(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_strip_right(args: Vec<Value>) -> Value {
+fn builtin_strip_right(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("__strip_right() takes 2 arguments"));
     }
@@ -655,7 +665,7 @@ fn builtin_strip_right(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_sort(args: Vec<Value>) -> Value {
+fn builtin_sort(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__sort() takes 1 argument"));
     }
@@ -678,7 +688,7 @@ fn builtin_sort(args: Vec<Value>) -> Value {
 
 // ── Math builtins ──────────────────────────────────────────────────────
 
-fn builtin_sqrt(args: Vec<Value>) -> Value {
+fn builtin_sqrt(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__sqrt() takes 1 argument"));
     }
@@ -689,7 +699,7 @@ fn builtin_sqrt(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_floor(args: Vec<Value>) -> Value {
+fn builtin_floor(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__floor() takes 1 argument"));
     }
@@ -700,7 +710,7 @@ fn builtin_floor(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_ceil(args: Vec<Value>) -> Value {
+fn builtin_ceil(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__ceil() takes 1 argument"));
     }
@@ -711,7 +721,7 @@ fn builtin_ceil(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_round(args: Vec<Value>) -> Value {
+fn builtin_round(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__round() takes 1 argument"));
     }
@@ -724,7 +734,7 @@ fn builtin_round(args: Vec<Value>) -> Value {
 
 // ── I/O builtins ───────────────────────────────────────────────────────
 
-fn builtin_input(args: Vec<Value>) -> Value {
+fn builtin_input(args: &[Value]) -> Value {
     if !args.is_empty() {
         print!("{}", args[0]);
         use std::io::Write;
@@ -737,7 +747,7 @@ fn builtin_input(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_read_line(_args: Vec<Value>) -> Value {
+fn builtin_read_line(_args: &[Value]) -> Value {
     let mut line = String::new();
     match std::io::stdin().read_line(&mut line) {
         Ok(_) => Value::String(rc_str(line.trim_end_matches('\n').trim_end_matches('\r'))),
@@ -747,7 +757,7 @@ fn builtin_read_line(_args: Vec<Value>) -> Value {
 
 // ── File I/O ───────────────────────────────────────────────────────────
 
-fn builtin_read_file(args: Vec<Value>) -> Value {
+fn builtin_read_file(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__read_file() takes 1 argument"));
     }
@@ -763,7 +773,7 @@ fn builtin_read_file(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_write_file(args: Vec<Value>) -> Value {
+fn builtin_write_file(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("__write_file() takes 2 arguments"));
     }
@@ -781,7 +791,7 @@ fn builtin_write_file(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_append_file(args: Vec<Value>) -> Value {
+fn builtin_append_file(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("__append_file() takes 2 arguments"));
     }
@@ -810,7 +820,7 @@ fn builtin_append_file(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_file_exists(args: Vec<Value>) -> Value {
+fn builtin_file_exists(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__file_exists() takes 1 argument"));
     }
@@ -822,7 +832,7 @@ fn builtin_file_exists(args: Vec<Value>) -> Value {
 
 // ── OS builtins ────────────────────────────────────────────────────────
 
-fn builtin_exec(args: Vec<Value>) -> Value {
+fn builtin_exec(args: &[Value]) -> Value {
     if args.is_empty() {
         return Value::Error(rc_str("__exec() takes at least 1 argument"));
     }
@@ -876,15 +886,15 @@ fn builtin_exec(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_os_name(_args: Vec<Value>) -> Value {
+fn builtin_os_name(_args: &[Value]) -> Value {
     Value::String(rc_str(std::env::consts::OS))
 }
 
-fn builtin_os_arch(_args: Vec<Value>) -> Value {
+fn builtin_os_arch(_args: &[Value]) -> Value {
     Value::String(rc_str(std::env::consts::ARCH))
 }
 
-fn builtin_env_get(args: Vec<Value>) -> Value {
+fn builtin_env_get(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__env_get() takes 1 argument"));
     }
@@ -897,7 +907,7 @@ fn builtin_env_get(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_env_set(args: Vec<Value>) -> Value {
+fn builtin_env_set(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("__env_set() takes 2 arguments"));
     }
@@ -913,7 +923,7 @@ fn builtin_env_set(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_env_vars(_args: Vec<Value>) -> Value {
+fn builtin_env_vars(_args: &[Value]) -> Value {
     let entries: Vec<(Value, Value)> = std::env::vars()
         .map(|(k, v)| (Value::String(rc_str(k)), Value::String(rc_str(v))))
         .collect();
@@ -922,14 +932,14 @@ fn builtin_env_vars(_args: Vec<Value>) -> Value {
             )))
 }
 
-fn builtin_cwd(_args: Vec<Value>) -> Value {
+fn builtin_cwd(_args: &[Value]) -> Value {
     match std::env::current_dir() {
         Ok(path) => Value::String(rc_str(path.display().to_string())),
         Err(e) => Value::Error(rc_str(format!("cwd error: {}", e))),
     }
 }
 
-fn builtin_chdir(args: Vec<Value>) -> Value {
+fn builtin_chdir(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__chdir() takes 1 argument"));
     }
@@ -942,7 +952,7 @@ fn builtin_chdir(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_exit(args: Vec<Value>) -> Value {
+fn builtin_exit(args: &[Value]) -> Value {
     let code = if args.is_empty() {
         0
     } else {
@@ -954,11 +964,11 @@ fn builtin_exit(args: Vec<Value>) -> Value {
     std::process::exit(code);
 }
 
-fn builtin_pid(_args: Vec<Value>) -> Value {
+fn builtin_pid(_args: &[Value]) -> Value {
     Value::Integer(std::process::id() as i64)
 }
 
-fn builtin_list_dir(args: Vec<Value>) -> Value {
+fn builtin_list_dir(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__list_dir() takes 1 argument"));
     }
@@ -980,7 +990,7 @@ fn builtin_list_dir(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_walk_dir(args: Vec<Value>) -> Value {
+fn builtin_walk_dir(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__walk_dir() takes 1 argument"));
     }
@@ -1005,7 +1015,7 @@ fn builtin_walk_dir(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_mkdir(args: Vec<Value>) -> Value {
+fn builtin_mkdir(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__mkdir() takes 1 argument"));
     }
@@ -1021,7 +1031,7 @@ fn builtin_mkdir(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_rmdir(args: Vec<Value>) -> Value {
+fn builtin_rmdir(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__rmdir() takes 1 argument"));
     }
@@ -1037,7 +1047,7 @@ fn builtin_rmdir(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_remove_file(args: Vec<Value>) -> Value {
+fn builtin_remove_file(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__remove() takes 1 argument"));
     }
@@ -1053,7 +1063,7 @@ fn builtin_remove_file(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_is_dir(args: Vec<Value>) -> Value {
+fn builtin_is_dir(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__is_dir() takes 1 argument"));
     }
@@ -1063,7 +1073,7 @@ fn builtin_is_dir(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_is_file(args: Vec<Value>) -> Value {
+fn builtin_is_file(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__is_file() takes 1 argument"));
     }
@@ -1075,7 +1085,7 @@ fn builtin_is_file(args: Vec<Value>) -> Value {
 
 // ── Time builtins ──────────────────────────────────────────────────────
 
-fn builtin_time_now(_args: Vec<Value>) -> Value {
+fn builtin_time_now(_args: &[Value]) -> Value {
     use std::time::{SystemTime, UNIX_EPOCH};
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(d) => Value::Float(d.as_secs_f64()),
@@ -1083,7 +1093,7 @@ fn builtin_time_now(_args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_time_now_ms(_args: Vec<Value>) -> Value {
+fn builtin_time_now_ms(_args: &[Value]) -> Value {
     use std::time::{SystemTime, UNIX_EPOCH};
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(d) => Value::Integer(d.as_millis() as i64),
@@ -1091,7 +1101,7 @@ fn builtin_time_now_ms(_args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_time_sleep(args: Vec<Value>) -> Value {
+fn builtin_time_sleep(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__time_sleep() takes 1 argument"));
     }
@@ -1104,7 +1114,7 @@ fn builtin_time_sleep(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_time_monotonic(_args: Vec<Value>) -> Value {
+fn builtin_time_monotonic(_args: &[Value]) -> Value {
     use std::time::Instant;
     // Return monotonic time as nanoseconds integer (matches tree-walker)
     thread_local! {
@@ -1144,7 +1154,7 @@ fn next_rand() -> u64 {
     })
 }
 
-fn builtin_rand_seed(args: Vec<Value>) -> Value {
+fn builtin_rand_seed(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__rand_seed() takes 1 argument"));
     }
@@ -1158,7 +1168,7 @@ fn builtin_rand_seed(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_rand_int(args: Vec<Value>) -> Value {
+fn builtin_rand_int(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("__rand_int() takes 2 arguments"));
     }
@@ -1175,14 +1185,14 @@ fn builtin_rand_int(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_rand_float(_args: Vec<Value>) -> Value {
+fn builtin_rand_float(_args: &[Value]) -> Value {
     let r = next_rand();
     Value::Float((r as f64) / (u64::MAX as f64))
 }
 
 // ── Path builtins ──────────────────────────────────────────────────────
 
-fn builtin_path_join(args: Vec<Value>) -> Value {
+fn builtin_path_join(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__path_join() takes 1 argument (array)"));
     }
@@ -1199,7 +1209,7 @@ fn builtin_path_join(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_path_ext(args: Vec<Value>) -> Value {
+fn builtin_path_ext(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__path_ext() takes 1 argument"));
     }
@@ -1215,7 +1225,7 @@ fn builtin_path_ext(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_path_filename(args: Vec<Value>) -> Value {
+fn builtin_path_filename(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__path_filename() takes 1 argument"));
     }
@@ -1231,7 +1241,7 @@ fn builtin_path_filename(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_path_parent(args: Vec<Value>) -> Value {
+fn builtin_path_parent(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__path_parent() takes 1 argument"));
     }
@@ -1247,7 +1257,7 @@ fn builtin_path_parent(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_path_stem(args: Vec<Value>) -> Value {
+fn builtin_path_stem(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__path_stem() takes 1 argument"));
     }
@@ -1263,7 +1273,7 @@ fn builtin_path_stem(args: Vec<Value>) -> Value {
     }
 }
 
-fn builtin_path_is_absolute(args: Vec<Value>) -> Value {
+fn builtin_path_is_absolute(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__path_is_absolute() takes 1 argument"));
     }
@@ -1275,7 +1285,7 @@ fn builtin_path_is_absolute(args: Vec<Value>) -> Value {
 
 // ── JSON builtins ──────────────────────────────────────────────────────
 
-fn builtin_json_parse(args: Vec<Value>) -> Value {
+fn builtin_json_parse(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__json_parse() takes 1 argument"));
     }
@@ -1484,7 +1494,7 @@ fn json_parse_object(chars: &[char], pos: &mut usize) -> Result<Value, String> {
             ))))
 }
 
-fn builtin_json_stringify(args: Vec<Value>) -> Value {
+fn builtin_json_stringify(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__json_stringify() takes 1 argument"));
     }
@@ -1552,7 +1562,7 @@ fn value_to_json(val: &Value) -> Result<String, String> {
 
 // ── TOML builtins ──────────────────────────────────────────────────────
 
-fn builtin_toml_parse(args: Vec<Value>) -> Value {
+fn builtin_toml_parse(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__toml_parse() takes 1 argument"));
     }
@@ -1588,7 +1598,7 @@ fn toml_value_to_value(tv: toml::Value) -> Value {
     }
 }
 
-fn builtin_toml_stringify(args: Vec<Value>) -> Value {
+fn builtin_toml_stringify(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__toml_stringify() takes 1 argument"));
     }
@@ -1644,7 +1654,7 @@ fn value_to_toml(val: &Value) -> Result<toml::Value, String> {
 
 // ── HTTP builtins ──────────────────────────────────────────────────────
 
-fn builtin_http_request(args: Vec<Value>) -> Value {
+fn builtin_http_request(args: &[Value]) -> Value {
     if args.len() < 2 || args.len() > 4 {
         return Value::Error(rc_str(
             "__http_request: expected 2-4 arguments (method, url, headers?, body?)",
