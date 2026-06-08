@@ -2129,16 +2129,36 @@ impl JitInner {
                             builder.switch_to_block(hit_block);
                             // cache.value sits at byte offset 8 of the cache.
                             let cache_value_ptr = builder.ins().iadd_imm(cache_val, 8);
-                            // If the value is heap-backed (tag > 6), bump the
-                            // Rc strong count at the payload pointer (RcBox
-                            // offset 0; pinned by rc_strong_count_lives_at_
-                            // rcbox_offset_zero test in vm/value.rs).
+                            // If the value is heap-backed, bump the Rc strong
+                            // count at the payload pointer (RcBox offset 0;
+                            // pinned by rc_strong_count_lives_at_rcbox_offset_
+                            // zero test in vm/value.rs). Heap-backed means
+                            // `tag > 6` AND `tag != 13`: tag 13 = `Value::
+                            // Builtin(fn)`, whose payload is a function
+                            // pointer, NOT an Rc — bumping it would write into
+                            // a read-only code page (SIGBUS). This mirrors the
+                            // guard in `emit_*` clone helpers; the original
+                            // GetGlobal IC omitted the Builtin check, which
+                            // crashed when a builtin global (`len`, `str`,
+                            // `push`, …) was fetched from a JIT-compiled
+                            // function more than once (cache hit) — e.g. a
+                            // builtin call inside a loop.
                             let tag = builder.ins().load(types::I8, flags, cache_value_ptr, 0);
                             let six = builder.ins().iconst(types::I8, 6);
                             let is_heap = builder.ins().icmp(IntCC::UnsignedGreaterThan, tag, six);
+                            let check_builtin = builder.create_block();
                             let bump_block = builder.create_block();
                             let post_bump = builder.create_block();
-                            builder.ins().brif(is_heap, bump_block, &[], post_bump, &[]);
+                            builder
+                                .ins()
+                                .brif(is_heap, check_builtin, &[], post_bump, &[]);
+
+                            builder.switch_to_block(check_builtin);
+                            let builtin_tag = builder.ins().iconst(types::I8, 13);
+                            let is_builtin = builder.ins().icmp(IntCC::Equal, tag, builtin_tag);
+                            builder
+                                .ins()
+                                .brif(is_builtin, post_bump, &[], bump_block, &[]);
 
                             builder.switch_to_block(bump_block);
                             let rc_ptr = builder.ins().load(
