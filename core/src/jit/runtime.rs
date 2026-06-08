@@ -13,11 +13,167 @@
 #![cfg(feature = "jit")]
 
 use crate::vm::VM;
-use crate::vm::value::{Upvalue, Value};
+use crate::vm::value::{Upvalue, Value, ValueRepr};
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::engine::HelperCounter;
+
+// ── B2.2.f debug invariant helper ──────────────────────────────────────
+//
+// Validates the runtime state surrounding a closure-aware specialized
+// call. Called from JIT IR before the call (phase=0) and after a status==0
+// return (phase=1). On any invariant violation: prints a precise
+// diagnostic to stderr and returns 1; the JIT inserts `trapnz` so the
+// failure aborts cleanly with the diagnostic instead of segfaulting in
+// downstream code. Returns 0 when all invariants hold.
+///
+/// Args:
+/// - `cache_ptr`: the per-call-site `CallCacheEntry` raw pointer.
+/// - `closure_ptr`: the `*const ObjClosure` we're about to pass as the
+///   spec entry's closure register arg (= `cache.closure_raw + RC_VALUE_OFFSET`).
+/// - `phase`: 0 = pre-call, 1 = post-success.
+/// - `expected_slot_offset`: the JitFrame slot_offset the spec body
+///   should observe (= `callee_slot` in caller's IR).
+/// - `expected_jit_frame_len`: phase 0 — caller's `jit_frame_view.len`
+///   AFTER pushing the callee frame; phase 1 — what it should be after
+///   the callee popped its own frame (caller's pre-call value).
+/// - `arg_count`: number of i64 args the caller passed in registers.
+pub unsafe extern "C" fn jit_dbg_check_spec_call(
+    vm: *mut VM,
+    cache_ptr: *const super::engine::CallCacheEntry,
+    closure_ptr: *const crate::vm::value::ObjClosure,
+    phase: u32,
+    expected_slot_offset: i64,
+    expected_jit_frame_len: i64,
+    arg_count: u32,
+) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::DbgCheckSpecCall);
+
+    macro_rules! fail {
+        ($($arg:tt)*) => {{
+            eprintln!("[spec_call_dbg phase={}] {}", phase, format!($($arg)*));
+            return 1;
+        }};
+    }
+
+    if cache_ptr.is_null() {
+        fail!("cache_ptr is null");
+    }
+    if closure_ptr.is_null() {
+        fail!("closure_ptr is null");
+    }
+
+    let cache = unsafe { &*cache_ptr };
+    let cache_closure_raw = cache.closure_raw as *const u8;
+    let derived = closure_ptr as *const u8;
+    let expected_obj = unsafe {
+        cache_closure_raw.add(crate::vm::value::RC_VALUE_OFFSET)
+    } as *const crate::vm::value::ObjClosure;
+    if derived != expected_obj as *const u8 {
+        fail!(
+            "closure_ptr ({:p}) != cache.closure_raw + RC_VALUE_OFFSET ({:p})",
+            derived,
+            expected_obj
+        );
+    }
+
+    let closure = unsafe { &*closure_ptr };
+
+    if phase == 0 {
+        // Pre-call invariants.
+        let kind = closure.specialized_kind.get();
+        if kind != crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE {
+            fail!(
+                "closure.specialized_kind = {} (expected {} = NATIVE_INT_BODY_WITH_CLOSURE)",
+                kind,
+                crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE
+            );
+        }
+        if closure.specialized_thunk.get().is_none() {
+            fail!("closure.specialized_thunk is None despite kind=3");
+        }
+        let cached_arity = closure.specialized_arity.get();
+        if cached_arity as u32 != arg_count {
+            fail!(
+                "closure.specialized_arity = {} but caller arg_count = {}",
+                cached_arity, arg_count
+            );
+        }
+
+        // stack_view.len should be expected_slot_offset + 1 (closure on top, args truncated).
+        let stack_len = vm.stack_view.len as i64;
+        if stack_len != expected_slot_offset + 1 {
+            fail!(
+                "stack_view.len = {} but expected slot_offset + 1 = {}",
+                stack_len,
+                expected_slot_offset + 1
+            );
+        }
+
+        // stack[expected_slot_offset] should be Value::Closure pointing to this closure.
+        let slot_idx = expected_slot_offset as usize;
+        // sync_stack_from_view first so Vec::len matches stack_view.len.
+        vm.sync_stack_from_view();
+        if slot_idx >= vm.stack_len() {
+            fail!(
+                "expected_slot_offset {} out of bounds (stack_view.len {})",
+                slot_idx,
+                vm.stack_view.len
+            );
+        }
+        let stack_val = vm.stack_at(slot_idx);
+        if let Some(c) = stack_val.as_closure() {
+            let c_ref: *const Rc<crate::vm::value::ObjClosure> = c;
+            let raw_rc = unsafe {
+                *(c_ref as *const *const crate::vm::value::ObjClosure)
+            };
+            if raw_rc != cache.closure_raw {
+                fail!(
+                    "stack[{}] closure raw ({:p}) != cache.closure_raw ({:p})",
+                    slot_idx, raw_rc, cache.closure_raw
+                );
+            }
+        } else {
+            fail!(
+                "stack[{}] is not Value::Closure: tag={:?}",
+                slot_idx,
+                std::mem::discriminant(stack_val)
+            );
+        }
+
+        // jit_frame_view.len: caller pushed the callee frame; should equal expected.
+        let jit_len = vm.jit_frame_view.len as i64;
+        if jit_len != expected_jit_frame_len {
+            fail!(
+                "jit_frame_view.len = {} but expected {}",
+                jit_len, expected_jit_frame_len
+            );
+        }
+    } else if phase == 1 {
+        // Post-success invariants. Callee's IntSpecialized Return path has
+        // already truncated stack to slot_offset and popped the JitFrame.
+        let stack_len = vm.stack_view.len as i64;
+        if stack_len != expected_slot_offset {
+            fail!(
+                "post-call stack_view.len = {} but expected slot_offset = {} (callee Return should truncate to slot_offset)",
+                stack_len, expected_slot_offset
+            );
+        }
+        let jit_len = vm.jit_frame_view.len as i64;
+        if jit_len != expected_jit_frame_len {
+            fail!(
+                "post-call jit_frame_view.len = {} but expected {} (callee Return should pop the frame I pushed)",
+                jit_len, expected_jit_frame_len
+            );
+        }
+    } else {
+        fail!("unknown phase {}", phase);
+    }
+
+    0
+}
 
 // ── Fallback harness (Step 2, still used for functions the translator
 //    itself rejects — currently none, but kept as a safety valve) ────────
@@ -62,26 +218,9 @@ pub unsafe extern "C" fn jit_push_float_inline(vm: *mut VM, bits: u64) {
     vm.push(Value::Float(f64::from_bits(bits)));
 }
 
-pub unsafe extern "C" fn jit_push_none(vm: *mut VM) {
-    let vm = unsafe { &mut *vm };
-    vm.jit.bump_helper(HelperCounter::PushNone);
-    vm.sync_stack_from_view();
-    vm.push(Value::None);
-}
-
-pub unsafe extern "C" fn jit_push_true(vm: *mut VM) {
-    let vm = unsafe { &mut *vm };
-    vm.jit.bump_helper(HelperCounter::PushTrue);
-    vm.sync_stack_from_view();
-    vm.push(Value::Boolean(true));
-}
-
-pub unsafe extern "C" fn jit_push_false(vm: *mut VM) {
-    let vm = unsafe { &mut *vm };
-    vm.jit.bump_helper(HelperCounter::PushFalse);
-    vm.sync_stack_from_view();
-    vm.push(Value::Boolean(false));
-}
+// `jit_push_none/true/false` were removed once the virt-stack layer
+// (virt_stack.rs::emit_inline_push_const) absorbed every push site for
+// these zero-payload primitives. The historical helpers had no callers.
 
 // ── Stack manipulation ─────────────────────────────────────────────────
 
@@ -154,7 +293,7 @@ pub unsafe extern "C" fn jit_type_wrap(vm: *mut VM, type_idx: u32) -> u32 {
     let type_name = vm.current_constant(type_idx as u16);
     let value = vm.pop();
 
-    let Value::String(target) = type_name else {
+    let Some(target) = type_name.as_string().cloned() else {
         vm.jit
             .stash_error(vm.runtime_error("invalid type name in TypeWrap"));
         return 1;
@@ -263,16 +402,16 @@ pub unsafe extern "C" fn jit_struct_field_add_const(
     let base = vm.current_slot_offset();
     let self_val = vm.stack_slot(base + self_slot as usize).clone();
 
-    if let Value::StructInstance(inst) = &self_val {
+    if let Some(inst) = self_val.as_struct_instance() {
         let field_name = vm.current_constant(field_idx as u16);
-        if let Value::String(fname) = &field_name {
+        if let Some(fname) = field_name.as_string() {
             if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
                 // SAFETY: single-threaded; nothing else borrows inst.fields.
                 // Integer→Integer update: no Drop needed on the old value,
                 // so patch the i64 payload in place.
                 unsafe {
                     let slot = inst.fields.ptr.add(idx);
-                    if let Value::Integer(n) = &*slot {
+                    if let Some(n) = (*slot).as_integer() {
                         let new = n.wrapping_add(addend);
                         let payload_ptr = (slot as *mut u8)
                             .add(crate::vm::value::VALUE_INT_PAYLOAD_OFFSET)
@@ -355,15 +494,15 @@ pub unsafe extern "C" fn jit_struct_field_add_local(
     let self_val = vm.stack_slot(base + self_slot as usize).clone();
     let rhs_val = vm.stack_slot(base + rhs_slot as usize).clone();
 
-    if let (Value::StructInstance(inst), Value::Integer(rhs)) = (&self_val, &rhs_val) {
+    if let (Some(inst), Some(rhs)) = (self_val.as_struct_instance(), rhs_val.as_integer()) {
         let field_name = vm.current_constant(field_idx as u16);
-        if let Value::String(fname) = &field_name {
+        if let Some(fname) = field_name.as_string() {
             if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
                 // SAFETY: same as jit_struct_field_add_const.
                 unsafe {
                     let slot = inst.fields.ptr.add(idx);
-                    if let Value::Integer(n) = &*slot {
-                        let new = n.wrapping_add(*rhs);
+                    if let Some(n) = (*slot).as_integer() {
+                        let new = n.wrapping_add(rhs);
                         let payload_ptr = (slot as *mut u8)
                             .add(crate::vm::value::VALUE_INT_PAYLOAD_OFFSET)
                             as *mut i64;
@@ -461,6 +600,36 @@ binop_fallible!(jit_op_lt, compare_less, Lt);
 binop_fallible!(jit_op_le, compare_less_equal, Le);
 binop_fallible!(jit_op_gt, compare_greater, Gt);
 binop_fallible!(jit_op_ge, compare_greater_equal, Ge);
+binop_fallible!(jit_op_band, binary_band, OpBand);
+binop_fallible!(jit_op_bor, binary_bor, OpBor);
+binop_fallible!(jit_op_bxor, binary_bxor, OpBxor);
+binop_fallible!(jit_op_shl, binary_shl, OpShl);
+binop_fallible!(jit_op_shr, binary_shr, OpShr);
+
+pub unsafe extern "C" fn jit_op_bnot(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpBnot);
+    vm.sync_stack_from_view();
+    let v = vm.pop();
+    match vm.unary_bnot(v) {
+        Ok(result) => {
+            vm.push(result);
+            0
+        }
+        Err(e) => {
+            vm.jit.stash_error(e);
+            1
+        }
+    }
+}
+
+pub unsafe extern "C" fn jit_op_log(vm: *mut VM, flags: u32) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpLog);
+    vm.sync_stack_from_view();
+    vm.handle_log(flags as u8);
+    0
+}
 
 // ── Comparison that can't fail (PartialEq over Value) ─────────────────
 
@@ -497,16 +666,17 @@ pub unsafe extern "C" fn jit_op_negate(vm: *mut VM) -> u32 {
     vm.jit.bump_helper(HelperCounter::Negate);
     vm.sync_stack_from_view();
     let v = vm.pop();
-    match v {
-        Value::Integer(n) => {
+    match v.repr() {
+        ValueRepr::Integer(n) => {
             vm.push(Value::Integer(-n));
             0
         }
-        Value::Float(f) => {
+        ValueRepr::Float(f) => {
             vm.push(Value::Float(-f));
             0
         }
-        other => {
+        _ => {
+            let other = &v;
             let err = vm.runtime_error_hint(
                 &format!(
                     "negation is only supported for numbers, got {}",
@@ -843,10 +1013,10 @@ pub unsafe extern "C" fn jit_op_get_field_ic_miss(
     cache.struct_def = None;
     cache.closure = None;
 
-    let Value::String(fname) = field_name else {
+    let Some(fname) = field_name.as_string().cloned() else {
         return 0;
     };
-    if let Value::StructInstance(inst) = object {
+    if let Some(inst) = object.as_struct_instance() {
         let def_raw: *const crate::vm::value::ObjStructDef = unsafe {
             *(&inst.def as *const Rc<crate::vm::value::ObjStructDef>
                 as *const *const crate::vm::value::ObjStructDef)
@@ -856,7 +1026,8 @@ pub unsafe extern "C" fn jit_op_get_field_ic_miss(
         if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
             cache.field_index = idx as u32;
             cache.kind = super::engine::FieldCacheKind::InstanceField;
-        } else if let Ok(Value::Closure(closure)) = vm.find_struct_method(&inst.struct_name, &fname)
+        } else if let Ok(method) = vm.find_struct_method(&inst.struct_name, &fname)
+            && let Some(closure) = method.as_closure().cloned()
         {
             let closure_raw: *const crate::vm::value::ObjClosure = unsafe {
                 *(&closure as *const Rc<crate::vm::value::ObjClosure>
@@ -901,10 +1072,10 @@ pub unsafe extern "C" fn jit_op_set_field_ic_miss(
     cache.struct_def_raw = std::ptr::null();
     cache.struct_def = None;
 
-    let Value::String(fname) = field_name else {
+    let Some(fname) = field_name.as_string().cloned() else {
         return 0;
     };
-    if let Value::StructInstance(inst) = object {
+    if let Some(inst) = object.as_struct_instance() {
         if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
             let def_raw: *const crate::vm::value::ObjStructDef = unsafe {
                 *(&inst.def as *const Rc<crate::vm::value::ObjStructDef>
@@ -962,9 +1133,9 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
 
     // Fast-path peek at the instance + def. The `def` lives on the
     // instance directly so there's no globals lookup on hit.
-    let (struct_def, struct_name_owned) = match vm.stack_at(instance_idx) {
-        Value::StructInstance(inst) => (Rc::clone(&inst.def), None::<String>),
-        _ => {
+    let (struct_def, struct_name_owned) = match vm.stack_at(instance_idx).as_struct_instance() {
+        Some(inst) => (Rc::clone(&inst.def), None::<String>),
+        None => {
             return unsafe { jit_op_method_call(vm as *mut VM, method_idx, arg_count) };
         }
     };
@@ -1001,7 +1172,7 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
 
     // Miss: resolve method, populate cache, dispatch.
     let method_name_val = vm.current_constant(method_idx as u16);
-    let Value::String(mname_rc) = method_name_val else {
+    let Some(mname_rc) = method_name_val.as_string().cloned() else {
         return unsafe { jit_op_method_call(vm as *mut VM, method_idx, arg_count) };
     };
     let mname: String = mname_rc.to_string();
@@ -1010,7 +1181,8 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
     // Preserve existing semantic: callable instance field shadows method.
     // Only take the IC path when the method lives on the def.
     match vm.find_struct_method(&struct_name, &mname) {
-        Ok(Value::Closure(closure)) => {
+        Ok(method) if method.as_closure().is_some() => {
+            let closure = method.as_closure().unwrap().clone();
             let Some(thunk) = closure.jit_thunk.get() else {
                 return unsafe { jit_op_method_call(vm as *mut VM, method_idx, arg_count) };
             };
@@ -1044,7 +1216,7 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
                     if closure.function.arity == expected_arity {
                         // Resolve the field name to the instance's layout
                         // index using the current receiver's FieldLayout.
-                        if let Value::StructInstance(inst) = vm.stack_at(instance_idx) {
+                        if let Some(inst) = vm.stack_at(instance_idx).as_struct_instance() {
                             if let Some(&layout_idx) =
                                 inst.layout.indices.get(info.field_name.as_ref())
                             {
@@ -1233,11 +1405,7 @@ pub unsafe extern "C" fn jit_op_call_miss(
 
     let before_depth = vm.frames_len();
     let callee_idx = vm.stack_len() - 1 - ac;
-    let callee_candidate = if let Value::Closure(c) = vm.stack_at(callee_idx) {
-        Some(Rc::clone(c))
-    } else {
-        None
-    };
+    let callee_candidate = vm.stack_at(callee_idx).as_closure().map(Rc::clone);
 
     let call_result = match vm.call_closure_from_stack(ac) {
         Ok(true) => Ok(()),
@@ -1281,6 +1449,16 @@ pub unsafe extern "C" fn jit_op_call_miss(
                     cache.closure_raw = rc_raw;
                     cache.thunk_raw = thunk as *const ();
                     cache.arity = c.function.arity;
+                    // B2.2.f: cache the closure-aware spec entry too
+                    // so the IC's CA dispatch can read both fields
+                    // from a constant `cache_ptr` instead of going
+                    // through `closure.specialized_thunk` (which
+                    // tripped a Cranelift folding bug on the load).
+                    cache.specialized_kind = c.specialized_kind.get();
+                    cache.specialized_thunk = c
+                        .specialized_thunk
+                        .get()
+                        .unwrap_or(std::ptr::null());
                     cache._keeper = Some(c);
                 }
             }

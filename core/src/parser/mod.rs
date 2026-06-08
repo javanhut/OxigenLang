@@ -15,11 +15,15 @@ enum Precedence {
     Recovery,    // guard err -> ...
     LogicalOr,   // or
     LogicalAnd,  // and
+    BitOr,       // |
+    BitXor,      // ^
+    BitAnd,      // &
     Equals,      // == !=
     LessGreater, // <,>,<=,>=
+    Shift,       // << >>
     Sum,         // + -
     Product,     // *, / , %
-    Prefix,      // -x, !x
+    Prefix,      // -x, !x, ~x
     Postfix,     // x--, x++
     Call,        // f(x)
     Index,       // array[index]
@@ -34,8 +38,12 @@ fn precedence_of(tt: &TokenType) -> Precedence {
         Guard => Recovery,
         Or => LogicalOr,
         And => LogicalAnd,
+        Pipe => BitOr,
+        Caret => BitXor,
+        Ampersand => BitAnd,
         Eq | NotEq => Equals,
         Lt | Lte | Gt | Gte => LessGreater,
+        LShift | RShift => Shift,
         Plus | Minus => Sum,
         Asterisk | FSlash | Mod => Product,
         Increment | Decrement => Postfix,
@@ -156,6 +164,7 @@ impl Parser {
         p.register_prefix(TokenType::Minus, Parser::parse_prefix_expression);
         p.register_prefix(TokenType::Shebang, Parser::parse_prefix_expression);
         p.register_prefix(TokenType::Not, Parser::parse_prefix_expression);
+        p.register_prefix(TokenType::Tilde, Parser::parse_prefix_expression);
         p.register_prefix(TokenType::Fail, Parser::parse_fail_expression);
         p.register_prefix(TokenType::Function, Parser::parse_function_expression);
         p.register_prefix(TokenType::LBrace, Parser::parse_map_literal);
@@ -186,6 +195,16 @@ impl Parser {
         p.register_infix(TokenType::Asterisk, Parser::parse_infix_expression);
         p.register_infix(TokenType::FSlash, Parser::parse_infix_expression);
         p.register_infix(TokenType::Mod, Parser::parse_infix_expression);
+
+        // Bitwise (precedence: | < ^ < & < equality, shifts between < and +
+        // — matches C/Rust). The compiler/interpreter already handle these
+        // (vm/mod.rs binary_b{and,or,xor,shl,shr} + unary_bnot); we only
+        // had to wire them through the parser.
+        p.register_infix(TokenType::Pipe, Parser::parse_infix_expression);
+        p.register_infix(TokenType::Caret, Parser::parse_infix_expression);
+        p.register_infix(TokenType::Ampersand, Parser::parse_infix_expression);
+        p.register_infix(TokenType::LShift, Parser::parse_infix_expression);
+        p.register_infix(TokenType::RShift, Parser::parse_infix_expression);
 
         // Postfix
         p.register_infix(TokenType::Increment, Parser::parse_postfix_expression);

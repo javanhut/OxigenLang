@@ -1,4 +1,5 @@
 /target
+/target-dev
 .codex
 .claude
 oxigen-lsp

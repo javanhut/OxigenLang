@@ -208,6 +208,25 @@ pub struct FunctionSlotTypes {
     /// know the specialized signature arity and which slots to
     /// materialize from register args.
     pub specialized_param_slots: Vec<u16>,
+
+    /// B2.2: true iff the function is `specialized_entry_eligible` AND
+    /// its body contains at least one `GetUpvalue`. The JIT engine
+    /// uses this to pick `SpecializedEntryKind::NativeIntBodyWithClosure`
+    /// (closure pointer in a register) over the plain `NativeIntBody`.
+    /// False for functions that don't read upvalues — those continue
+    /// to use the original int-only specialized ABI.
+    pub wants_closure_arg: bool,
+
+    /// IPs of `OpCode::TypeWrap` whose runtime effect is provably
+    /// identity: target constant is the string `"INTEGER"` AND the
+    /// abstract stack top at entry is `Int64`. The JIT skips the
+    /// `jit_type_wrap` FFI call at these IPs entirely — `convert_to_type`
+    /// for `INTEGER` on a `Value::Integer` is just `value.clone()`,
+    /// which is a bit-copy with no Rc. Eliminates ~50k FFI hops per
+    /// `bench_collatz` run (one per `steps <int> := 0` reinit per
+    /// `collatz_steps` call) plus the auto-flush that the helper-call
+    /// dispatch path would otherwise force.
+    pub noop_type_wrap_ips: std::collections::HashSet<usize>,
 }
 
 impl FunctionSlotTypes {
@@ -428,17 +447,84 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                 if new_pos < num_slots {
                     let ty = next_state.stack.last().copied().unwrap_or(SlotType::Bottom);
                     next_state.write_slot(new_pos, ty);
-                    // B2.1a metadata: record the earliest IP at which
-                    // this slot appears to be initialized. Ordering by
-                    // IP value isn't dominator-correct in general, but
-                    // for Oxigen's locals (declared/initialized before
-                    // use on every reaching path) it matches the
-                    // declaration site. The certifier below verifies
-                    // use-after-init.
-                    let slot = new_pos as u16;
-                    let prev = first_init_ip.get(&slot).copied();
-                    if prev.map_or(true, |p| cursor < p) {
-                        first_init_ip.insert(slot, cursor);
+                    // Filter: a Constant is a slot's initializer iff the
+                    // NEXT op LEAVES the just-pushed value at that
+                    // position. Reject when the next op consumes the
+                    // top (Call's arg, BuildArray's literal element,
+                    // arith operand, Pop, etc.). Accept the dominant
+                    // patterns: typed walrus `Constant; TypeWrap;`
+                    // (TypeWrap pops 1 + pushes 1, value preserved),
+                    // and untyped walrus `Constant;` followed by any
+                    // non-consumer (next slot's init, Loop, Jump,
+                    // Return through subsequent ops, etc.).
+                    let next_op = code.get(fallthrough).and_then(|&b| OpCode::from_byte(b));
+                    let next_consumes_top = matches!(
+                        next_op,
+                        Some(OpCode::Pop)
+                            | Some(OpCode::Call)
+                            | Some(OpCode::CallNamed)
+                            | Some(OpCode::MethodCall)
+                            | Some(OpCode::Add)
+                            | Some(OpCode::Subtract)
+                            | Some(OpCode::Multiply)
+                            | Some(OpCode::Divide)
+                            | Some(OpCode::Modulo)
+                            | Some(OpCode::Equal)
+                            | Some(OpCode::NotEqual)
+                            | Some(OpCode::Less)
+                            | Some(OpCode::LessEqual)
+                            | Some(OpCode::Greater)
+                            | Some(OpCode::GreaterEqual)
+                            | Some(OpCode::BitAnd)
+                            | Some(OpCode::BitOr)
+                            | Some(OpCode::BitXor)
+                            | Some(OpCode::ShiftLeft)
+                            | Some(OpCode::ShiftRight)
+                            | Some(OpCode::Negate)
+                            | Some(OpCode::Not)
+                            | Some(OpCode::BitNot)
+                            | Some(OpCode::JumpIfFalse)
+                            | Some(OpCode::JumpIfTrue)
+                            | Some(OpCode::PopJumpIfFalse)
+                            | Some(OpCode::Unless)
+                            | Some(OpCode::SetLocal)
+                            | Some(OpCode::SetGlobal)
+                            | Some(OpCode::DefineGlobal)
+                            | Some(OpCode::DefineGlobalTyped)
+                            | Some(OpCode::SetUpvalue)
+                            | Some(OpCode::Increment)
+                            | Some(OpCode::Decrement)
+                            | Some(OpCode::Index)
+                            | Some(OpCode::IndexAssign)
+                            | Some(OpCode::IsType)
+                            | Some(OpCode::IsMut)
+                            | Some(OpCode::IsTypeMut)
+                            | Some(OpCode::BuildArray)
+                            | Some(OpCode::BuildSet)
+                            | Some(OpCode::BuildTuple)
+                            | Some(OpCode::BuildMap)
+                            | Some(OpCode::StructLiteral)
+                            | Some(OpCode::Closure)
+                            | Some(OpCode::Return)
+                    );
+                    if !next_consumes_top {
+                        let slot = new_pos as u16;
+                        let prev = first_init_ip.get(&slot).copied();
+                        // B2.2.f: "latest wins". Earlier Constants at this
+                        // position are typically array-literal elements
+                        // (e.g., `arr := [1, 2, 3, 4]` pushes 4 Constants
+                        // at slot positions 2..5 before BuildArray pops
+                        // them). The REAL init for slot N is the LATEST
+                        // surviving Constant push at position N — which,
+                        // by the linear nature of Oxigen's bytecode, is
+                        // the typed-walrus / untyped-walrus init that
+                        // follows the array literal. Picking earliest
+                        // cursor (the original rule) attributes init to
+                        // the array literal's transient, then int_locals
+                        // gets def_var'd with the wrong value.
+                        if prev.map_or(true, |p| cursor > p) {
+                            first_init_ip.insert(slot, cursor);
+                        }
                     }
                 }
             }
@@ -641,7 +727,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         ))
     };
     let eligibility_states = lifted_states.as_ref().unwrap_or(&states);
-    let (specialized_entry_outcome, specialized_param_slots) =
+    let (specialized_entry_outcome, specialized_param_slots, wants_closure_arg) =
         compute_specialized_entry_eligibility(
             code,
             chunk,
@@ -652,6 +738,39 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
             eligibility_states,
         );
     let specialized_entry_eligible = specialized_entry_outcome.is_eligible();
+
+    // Post-pass 5: collect noop-INTEGER TypeWrap IPs. For each TypeWrap
+    // in the bytecode, if the target constant is `"INTEGER"` AND the
+    // abstract stack top at IP-entry is `Int64`, the runtime conversion
+    // is identity (a `Value::Integer` clone) and the JIT can skip the
+    // FFI helper entirely. Use `eligibility_states` so param mirrors
+    // (lifted Value→Int64) participate.
+    let mut noop_type_wrap_ips: HashSet<usize> = HashSet::new();
+    for (&ip, st) in eligibility_states.iter() {
+        if ip + 2 >= code.len() {
+            continue;
+        }
+        let op = match OpCode::from_byte(code[ip]) {
+            Some(o) => o,
+            None => continue,
+        };
+        if op != OpCode::TypeWrap {
+            continue;
+        }
+        let target_idx = read_u16(code, ip + 1) as usize;
+        let target_is_int = chunk
+            .constants
+            .get(target_idx)
+            .and_then(|v| v.as_string())
+            .is_some_and(|s| s.as_str() == "INTEGER");
+        if !target_is_int {
+            continue;
+        }
+        let top = st.stack.last().copied().unwrap_or(SlotType::Value);
+        if top == SlotType::Int64 {
+            noop_type_wrap_ips.insert(ip);
+        }
+    }
 
     FunctionSlotTypes {
         slots: result,
@@ -664,6 +783,8 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         specialized_entry_eligible,
         specialized_entry_outcome,
         specialized_param_slots,
+        wants_closure_arg,
+        noop_type_wrap_ips,
     }
 }
 
@@ -764,9 +885,13 @@ fn compute_specialized_entry_eligibility(
     captured_slots: &HashSet<u16>,
     int_mirror_param_slots: &HashSet<u16>,
     states: &HashMap<usize, AbstractState>,
-) -> (SpecEligibilityOutcome, Vec<u16>) {
+) -> (SpecEligibilityOutcome, Vec<u16>, bool) {
+    // Third return: `wants_closure_arg` — true iff at least one
+    // `GetUpvalue` was observed AND the function is otherwise eligible.
+    // The JIT engine uses this to pick the closure-aware specialized
+    // ABI (`NativeIntBodyWithClosure`) instead of the plain `NativeIntBody`.
     if arity == 0 {
-        return (SpecEligibilityOutcome::RejectedZeroArity, Vec::new());
+        return (SpecEligibilityOutcome::RejectedZeroArity, Vec::new(), false);
     }
 
     // Every param slot must be Int-stable AND not captured.
@@ -780,26 +905,28 @@ fn compute_specialized_entry_eligibility(
         );
         let is_int_demand_mirror = int_mirror_param_slots.contains(&slot);
         if !(is_int_typed || is_int_demand_mirror) {
-            return (SpecEligibilityOutcome::RejectedParamNotInt, Vec::new());
+            return (SpecEligibilityOutcome::RejectedParamNotInt, Vec::new(), false);
         }
         if captured_slots.contains(&slot) {
-            return (SpecEligibilityOutcome::RejectedParamCaptured, Vec::new());
+            return (SpecEligibilityOutcome::RejectedParamCaptured, Vec::new(), false);
         }
     }
 
     // The body must not contain opcodes we don't yet know how to
-    // handle in the specialized entry: closures, upvalues, nonlocal
-    // control flow that might invalidate our frame assumptions.
+    // handle in the specialized entry. Closures (RejectedHasClosureOp)
+    // and SetUpvalue / CloseUpvalue (RejectedHasUpvalueOp) still bail.
+    // GetUpvalue is acceptable when no SetUpvalue / CloseUpvalue is
+    // present (B2.2: closure-aware specialized entry takes the closure
+    // pointer as a register arg and reads upvalues directly).
     //
     // Also require at least one `Call` opcode: A2.5 emits a
     // specialized body ONLY to be directly-called by A3 (from a
-    // self-recursive Call site). A function with no Calls can never
-    // self-recurse, so emitting a specialized body is pure compile-
-    // time overhead. Benches with tight loops-without-calls (e.g.,
-    // bench_nested_loop) would regress from the extra codegen work
-    // without this gate.
+    // self-recursive Call site) or by the IC's hit path (closure
+    // case). A function with no Calls can never self-recurse, so
+    // emitting a specialized body is pure compile-time overhead.
     let mut has_return = false;
     let mut has_call = false;
+    let mut has_get_upvalue = false;
     let mut return_ips: Vec<usize> = Vec::new();
     let mut ip = 0;
     while ip < code.len() {
@@ -811,10 +938,17 @@ fn compute_specialized_entry_eligibility(
 
         match op {
             OpCode::Closure => {
-                return (SpecEligibilityOutcome::RejectedHasClosureOp, Vec::new());
+                return (SpecEligibilityOutcome::RejectedHasClosureOp, Vec::new(), false);
             }
-            OpCode::GetUpvalue | OpCode::SetUpvalue | OpCode::CloseUpvalue => {
-                return (SpecEligibilityOutcome::RejectedHasUpvalueOp, Vec::new());
+            // `SetUpvalue` would require write-through into the live
+            // `Rc<RefCell<Upvalue>>` — out of scope for v1.
+            // `CloseUpvalue` is emitted at scope-end for upvalues that
+            // captured this frame's locals; v1 keeps the helper path.
+            OpCode::SetUpvalue | OpCode::CloseUpvalue => {
+                return (SpecEligibilityOutcome::RejectedHasUpvalueOp, Vec::new(), false);
+            }
+            OpCode::GetUpvalue => {
+                has_get_upvalue = true;
             }
             OpCode::Return => {
                 has_return = true;
@@ -830,10 +964,23 @@ fn compute_specialized_entry_eligibility(
     }
 
     if !has_return {
-        return (SpecEligibilityOutcome::RejectedNoReturn, Vec::new());
+        return (SpecEligibilityOutcome::RejectedNoReturn, Vec::new(), false);
     }
-    if !has_call {
-        return (SpecEligibilityOutcome::RejectedNoCall, Vec::new());
+    // B2.2.f: relax `RejectedNoCall` for closures with `GetUpvalue`.
+    // The original rule's rationale was that a function with no Call
+    // can never self-recurse (A3 has no work) and the IC has no other
+    // way to dispatch through a specialized entry — so emitting a spec
+    // body was pure compile-time overhead. With the closure-aware Call
+    // IC dispatch landed in the previous commit, no-Call closures CAN
+    // be invoked through a specialized entry: their caller's IC reads
+    // `closure.specialized_kind == NATIVE_INT_BODY_WITH_CLOSURE` and
+    // dispatches with the closure pointer in a register. So accept
+    // them here when at least one `GetUpvalue` is present (any closure
+    // body that does upvalue work — the only payoff case for the new
+    // ABI). Functions that also lack `GetUpvalue` are still rejected
+    // — they have no way to be reached by either A3 or CA.
+    if !has_call && !has_get_upvalue {
+        return (SpecEligibilityOutcome::RejectedNoCall, Vec::new(), false);
     }
 
     // Every Return IP must have a non-Bottom top (reachable) and must
@@ -846,26 +993,20 @@ fn compute_specialized_entry_eligibility(
         let state = match states.get(&rip) {
             Some(s) => s,
             None => {
-                return (
-                    SpecEligibilityOutcome::RejectedReturnUnreachable,
-                    Vec::new(),
-                );
+                return (SpecEligibilityOutcome::RejectedReturnUnreachable, Vec::new(), false);
             }
         };
         let top_ty = state.stack.last().copied().unwrap_or(SlotType::Bottom);
         // Bottom means unreachable → still reject (can't trust).
         if matches!(top_ty, SlotType::Bottom) {
-            return (
-                SpecEligibilityOutcome::RejectedReturnUnreachable,
-                Vec::new(),
-            );
+            return (SpecEligibilityOutcome::RejectedReturnUnreachable, Vec::new(), false);
         }
         // Value and Int64 both ok: the trampoline's runtime tag check
         // takes care of correctness.
     }
 
     let param_slots: Vec<u16> = (1..=arity).collect();
-    (SpecEligibilityOutcome::Eligible, param_slots)
+    (SpecEligibilityOutcome::Eligible, param_slots, has_get_upvalue)
 }
 
 /// Walk the bytecode and pick out param slots that qualify for an
@@ -1085,8 +1226,8 @@ fn collect_captured_slots(code: &[u8], chunk: &Chunk) -> HashSet<u16> {
                 break;
             }
             let const_idx = read_u16(code, ip + 1) as usize;
-            let upvalue_count = match chunk.constants.get(const_idx) {
-                Some(Value::Closure(cl)) => cl.function.upvalue_count as usize,
+            let upvalue_count = match chunk.constants.get(const_idx).and_then(|v| v.as_closure()) {
+                Some(cl) => cl.function.upvalue_count as usize,
                 _ => {
                     // Malformed — treat as no upvalues and continue.
                     0
@@ -1134,9 +1275,10 @@ fn transfer(
         // Push a constant — type depends on the constant's variant.
         OpCode::Constant => {
             let idx = read_u16(code, ip + 1) as usize;
-            let ty = match chunk.constants.get(idx) {
-                Some(Value::Integer(_)) => SlotType::Int64,
-                _ => SlotType::Value,
+            let ty = if chunk.constants.get(idx).and_then(|v| v.as_integer()).is_some() {
+                SlotType::Int64
+            } else {
+                SlotType::Value
             };
             next.stack.push(ty);
         }
@@ -1480,14 +1622,18 @@ fn transfer(
             next.stack.push(SlotType::Value);
         }
         OpCode::Log => {
+            // Log pops one slot per set flag (tag/sub/msg, all pushed
+            // by the compiler before this opcode) and pushes Value::None
+            // as its result. See vm::handle_log.
             let flags = code[ip + 1];
             let has_tag = flags & 1 != 0;
             let has_sub = flags & 2 != 0;
             let has_msg = flags & 4 != 0;
-            let pops = has_tag as usize + has_sub as usize + has_msg as usize + 1; /* the expression */
+            let pops = has_tag as usize + has_sub as usize + has_msg as usize;
             for _ in 0..pops {
                 next.stack.pop();
             }
+            next.stack.push(SlotType::Value);
         }
         OpCode::Unpack => {
             let count = code[ip + 1] as usize;
@@ -1514,8 +1660,22 @@ fn transfer(
             }
         }
         OpCode::TypeWrap => {
-            next.stack.pop();
-            next.stack.push(SlotType::Value);
+            // For `<int>` annotations ("INTEGER" target), TypeWrap is
+            // identity at the value level — same Int64 in, same Int64
+            // out. Preserve the slot's Int64 type so typed-int locals
+            // become virtualizable. Other targets stay conservative.
+            let top = next.stack.pop().unwrap_or(SlotType::Value);
+            let target_idx = read_u16(code, ip + 1) as usize;
+            let target_is_int = chunk
+                .constants
+                .get(target_idx)
+                .and_then(|v| v.as_string())
+                .is_some_and(|s| s.as_str() == "INTEGER");
+            if target_is_int && top == SlotType::Int64 {
+                next.stack.push(SlotType::Int64);
+            } else {
+                next.stack.push(SlotType::Value);
+            }
         }
         OpCode::IsMut | OpCode::IsType | OpCode::IsTypeMut => {
             if matches!(op, OpCode::IsType) {
@@ -1637,10 +1797,12 @@ fn opcode_len(op: OpCode, code: &[u8], ip: usize, chunk: &Chunk) -> usize {
         // conservatively (everything touched becomes `Value`).
         OpCode::Closure => {
             let idx = read_u16(code, ip + 1) as usize;
-            let upv = match chunk.constants.get(idx) {
-                Some(Value::Closure(cl)) => cl.function.upvalue_count as usize,
-                _ => 0,
-            };
+            let upv = chunk
+                .constants
+                .get(idx)
+                .and_then(|v| v.as_closure())
+                .map(|cl| cl.function.upvalue_count as usize)
+                .unwrap_or(0);
             3 + upv * 3
         }
     }
@@ -2068,7 +2230,7 @@ mod tests {
                 // that we haven't built yet, so the compiler embeds the
                 // raw `Function` as a constant).
                 for c in &top.chunk.constants {
-                    if let Value::Closure(closure) = c {
+                    if let Some(closure) = c.as_closure() {
                         if closure.function.name.as_deref() == Some(want) {
                             return (*closure.function).clone();
                         }
@@ -2078,9 +2240,9 @@ mod tests {
                 // via a different path; recursively look inside nested
                 // functions too.
                 for c in &top.chunk.constants {
-                    if let Value::Closure(closure) = c {
+                    if let Some(closure) = c.as_closure() {
                         for inner in &closure.function.chunk.constants {
-                            if let Value::Closure(ic) = inner {
+                            if let Some(ic) = inner.as_closure() {
                                 if ic.function.name.as_deref() == Some(want) {
                                     return (*ic.function).clone();
                                 }
@@ -2273,7 +2435,9 @@ mod tests {
     #[test]
     fn local_init_result_ip_recorded_for_constant_int_init() {
         // With arity=0, slot 1 is the first non-closure-marker local,
-        // and the first Constant push at ip=0 initializes it.
+        // and the first Constant push at ip=0 initializes it (next op
+        // is None, which doesn't consume the top — the value stays at
+        // slot 1's stack position).
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(42)]);
         f.chunk.code = vec![
             OpCode::Constant as u8,
@@ -2593,5 +2757,140 @@ mod tests {
         let r = analyze(&f);
         assert!(r.specialized_entry_eligible);
         assert_eq!(r.specialized_param_slots, vec![1]);
+        // No GetUpvalue → wants_closure_arg false (uses plain
+        // NativeIntBody, not the closure-aware variant).
+        assert!(!r.wants_closure_arg);
     }
+
+    // ── B2.2: closure-aware specialized entry eligibility ──────────────
+
+    #[test]
+    fn specialized_eligible_closure_with_int_upvalue() {
+        // Body: GetUpvalue 0; GetLocal 1; f(0); Pop; GetUpvalue 0;
+        // GetLocal 1; Add; Return. The closure reads `x` (upvalue 0),
+        // adds it to its int param. Eligible AND wants_closure_arg.
+        let mut f = make_fn("closure", 1, vec![], vec![]);
+        f.params[0].type_ann = Some("int".to_string());
+        f.chunk.code = vec![
+            OpCode::GetLocal as u8, 0, 1,    // push self (for synthetic call)
+            OpCode::Constant as u8, 0, 0,
+            OpCode::Call as u8, 1,
+            OpCode::Pop as u8,
+            OpCode::GetUpvalue as u8, 0, 0,  // push upvalue 0 (x)
+            OpCode::GetLocal as u8, 0, 1,    // push y (param)
+            OpCode::Add as u8,
+            OpCode::Return as u8,
+        ];
+        f.chunk.constants = vec![Value::Integer(0)];
+        let r = analyze(&f);
+        assert!(r.specialized_entry_eligible);
+        assert!(r.wants_closure_arg);
+        assert_eq!(r.specialized_param_slots, vec![1]);
+    }
+
+    #[test]
+    fn specialized_ineligible_closure_with_set_upvalue() {
+        // Body has SetUpvalue → still rejected (write-through is out
+        // of scope for v1). wants_closure_arg false.
+        let mut f = make_fn("mut_closure", 1, vec![], vec![]);
+        f.params[0].type_ann = Some("int".to_string());
+        f.chunk.code = vec![
+            OpCode::GetLocal as u8, 0, 1,
+            OpCode::Constant as u8, 0, 0,
+            OpCode::Call as u8, 1,
+            OpCode::Pop as u8,
+            OpCode::GetLocal as u8, 0, 1,
+            OpCode::SetUpvalue as u8, 0, 0,  // mutate upvalue 0
+            OpCode::Pop as u8,
+            OpCode::GetLocal as u8, 0, 1,
+            OpCode::Return as u8,
+        ];
+        f.chunk.constants = vec![Value::Integer(0)];
+        let r = analyze(&f);
+        assert!(!r.specialized_entry_eligible);
+        assert!(matches!(
+            r.specialized_entry_outcome,
+            SpecEligibilityOutcome::RejectedHasUpvalueOp
+        ));
+        assert!(!r.wants_closure_arg);
+    }
+
+    #[test]
+    fn specialized_ineligible_closure_with_close_upvalue() {
+        // Body has CloseUpvalue → rejected. v1 specialized return
+        // path doesn't run close_upvalues; bail to Generic.
+        let mut f = make_fn("closing", 1, vec![], vec![]);
+        f.params[0].type_ann = Some("int".to_string());
+        f.chunk.code = vec![
+            OpCode::GetLocal as u8, 0, 1,
+            OpCode::Constant as u8, 0, 0,
+            OpCode::Call as u8, 1,
+            OpCode::Pop as u8,
+            OpCode::CloseUpvalue as u8,
+            OpCode::GetLocal as u8, 0, 1,
+            OpCode::Return as u8,
+        ];
+        f.chunk.constants = vec![Value::Integer(0)];
+        let r = analyze(&f);
+        assert!(!r.specialized_entry_eligible);
+        assert!(matches!(
+            r.specialized_entry_outcome,
+            SpecEligibilityOutcome::RejectedHasUpvalueOp
+        ));
+        assert!(!r.wants_closure_arg);
+    }
+
+    #[test]
+    fn specialized_eligible_closure_no_call_with_upvalue() {
+        // Body: GetUpvalue 0; GetLocal 1; Add; Return. No Call op —
+        // exactly the bench_closure inner closure shape. Pre-B2.2.f
+        // the `!has_call` rule rejected this as RejectedNoCall, killing
+        // the closure-aware spec entry. After the relax, the rule
+        // accepts no-Call bodies that have at least one GetUpvalue,
+        // because the closure-aware Call IC dispatch can now reach
+        // them via the caller's IC.
+        let mut f = make_fn("inner_closure", 1, vec![], vec![]);
+        f.params[0].type_ann = Some("int".to_string());
+        f.chunk.code = vec![
+            OpCode::GetUpvalue as u8, 0, 0,  // push upvalue 0 (x)
+            OpCode::GetLocal as u8, 0, 1,    // push y (param)
+            OpCode::Add as u8,
+            OpCode::Return as u8,
+        ];
+        f.chunk.constants = vec![];
+        let r = analyze(&f);
+        assert!(r.specialized_entry_eligible);
+        assert!(r.wants_closure_arg);
+        assert_eq!(r.specialized_param_slots, vec![1]);
+    }
+
+    #[test]
+    fn specialized_ineligible_no_call_no_upvalue() {
+        // Body: GetLocal 1; Return. No Call AND no GetUpvalue — there
+        // is no way to reach a specialized entry for this function (A3
+        // needs self-recursion, CA needs closure-aware spec callee
+        // identity). Still reject as RejectedNoCall to avoid emitting
+        // a useless second entry point.
+        let mut f = make_fn("identity", 1, vec![], vec![]);
+        f.params[0].type_ann = Some("int".to_string());
+        f.chunk.code = vec![
+            OpCode::GetLocal as u8, 0, 1,
+            OpCode::Return as u8,
+        ];
+        f.chunk.constants = vec![];
+        let r = analyze(&f);
+        assert!(!r.specialized_entry_eligible);
+        assert!(matches!(
+            r.specialized_entry_outcome,
+            SpecEligibilityOutcome::RejectedNoCall
+        ));
+        assert!(!r.wants_closure_arg);
+    }
+
+    // (The nested-closure case — body contains both `OpCode::Closure`
+    // and `OpCode::GetUpvalue` — is covered indirectly by the existing
+    // RejectedHasClosureOp test path; `OpCode::Closure` always rejects
+    // first, before the new `has_get_upvalue` flag has any chance to
+    // fire. Skipped here because it would require constructing a real
+    // `ObjClosure` value for the constants pool.)
 }

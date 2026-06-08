@@ -6,7 +6,7 @@ use std::fmt;
 use std::rc::Rc;
 
 /// Built-in function signature for the VM.
-pub type BuiltinFn = fn(Vec<Value>) -> Value;
+pub type BuiltinFn = fn(&[Value]) -> Value;
 
 /// Numeric tag of `Value::Integer` under the `#[repr(u8)]` layout. The
 /// JIT's fast path loads this byte from stack memory to decide between
@@ -345,8 +345,8 @@ pub enum Value {
     String(Rc<String>),
     Array(Rc<RefCell<Vec<Value>>>),
     Tuple(Rc<Vec<Value>>),
-    Map(Rc<RefCell<Vec<(Value, Value)>>>),
-    Set(Rc<RefCell<Vec<Value>>>),
+    Map(Rc<RefCell<crate::vm::collections::OxMap>>),
+    Set(Rc<RefCell<crate::vm::collections::OxSet>>),
 
     // Functions
     Closure(Rc<ObjClosure>),
@@ -373,6 +373,53 @@ pub enum Value {
     /// Terminal error — stops execution. Thin `Rc<String>` for the same
     /// reason as `String` above.
     Error(Rc<String>),
+}
+
+/// "Read-only view" enum that mirrors the variant structure of
+/// [`Value`]. Returned from [`Value::repr`].
+///
+/// Why this exists: A1.2.5 (NaN-box flag-day) replaces the storage of
+/// `Value` with an 8-byte NaN-boxed payload. Pattern matching directly
+/// on `Value::Variant(...)` will break at that swap. Migrating call
+/// sites from `match &v { Value::X(p) => ... }` to
+/// `match v.repr() { ValueRepr::X(p) => ... }` decouples consumers
+/// from the storage shape — the swap then becomes a localized change
+/// to `Value::repr()` (re-materializing variants from NaN-box accessors)
+/// without touching every call site.
+///
+/// Encoding choices:
+/// - Primitives are by value (no `&` / `*` indirection at the call
+///   site), matching what NanValue's accessors return after the swap.
+/// - Rc-bearing variants borrow the existing `Rc<T>` from the enum
+///   payload during Phase 1, so this view is allocation-free. After
+///   the swap, the impl will reconstruct typed `Rc` references via
+///   `ManuallyDrop` so consumer code stays unchanged.
+///
+/// Variant names match `Value` exactly so the migration is a
+/// sed-friendly rename: `Value::` → `ValueRepr::` inside match arms.
+pub enum ValueRepr<'a> {
+    Integer(i64),
+    Float(f64),
+    Char(char),
+    Boolean(bool),
+    Byte(u8),
+    Uint(u64),
+    None,
+    String(&'a Rc<String>),
+    Array(&'a Rc<RefCell<Vec<Value>>>),
+    Tuple(&'a Rc<Vec<Value>>),
+    Map(&'a Rc<RefCell<crate::vm::collections::OxMap>>),
+    Set(&'a Rc<RefCell<crate::vm::collections::OxSet>>),
+    Closure(&'a Rc<ObjClosure>),
+    Builtin(BuiltinFn),
+    StructDef(&'a Rc<ObjStructDef>),
+    StructInstance(&'a Rc<ObjStructInstance>),
+    EnumDef(&'a Rc<ObjEnumDef>),
+    EnumInstance(&'a Rc<ObjEnumInstance>),
+    Module(&'a Rc<ObjModule>),
+    ErrorValue(&'a Rc<ErrorValueData>),
+    Wrapped(&'a Rc<Value>),
+    Error(&'a Rc<String>),
 }
 
 /// Boxed payload of `Value::ErrorValue`. Kept off the enum so `Value`
@@ -518,6 +565,11 @@ pub fn make_upvalue_int_caches(n: usize) -> (Box<[Cell<u8>]>, Box<[Cell<i64>]>) 
 pub const SPECIALIZED_KIND_NONE: u8 = 0;
 pub const SPECIALIZED_KIND_FORWARD_TRAMPOLINE: u8 = 1;
 pub const SPECIALIZED_KIND_NATIVE_INT_BODY: u8 = 2;
+/// B2.2: closure-aware specialized body. Differs from
+/// `NATIVE_INT_BODY` only in the ABI: the thunk takes
+/// `(*mut VM, *const ObjClosure, i64...)` so `GetUpvalue` can read
+/// through the closure register instead of walking the JitFrame.
+pub const SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE: u8 = 3;
 
 /// An upvalue captures a variable from an enclosing scope.
 #[derive(Debug, Clone)]
@@ -711,6 +763,108 @@ pub struct ObjModule {
 // ── Value methods ──────────────────────────────────────────────────────
 
 impl Value {
+    // ── Variant accessors (A1.2.5 flag-day prep) ─────────────────────
+    // Mirror NanValue's accessor surface so call sites can stop relying
+    // on the enum's pattern shape. Primitives return by value; Rc
+    // variants borrow the existing Rc to stay allocation-free.
+
+    #[inline] pub fn as_integer(&self) -> Option<i64> {
+        if let Value::Integer(n) = self { Some(*n) } else { None }
+    }
+    #[inline] pub fn as_float(&self) -> Option<f64> {
+        if let Value::Float(f) = self { Some(*f) } else { None }
+    }
+    #[inline] pub fn as_char(&self) -> Option<char> {
+        if let Value::Char(c) = self { Some(*c) } else { None }
+    }
+    #[inline] pub fn as_bool(&self) -> Option<bool> {
+        if let Value::Boolean(b) = self { Some(*b) } else { None }
+    }
+    #[inline] pub fn as_byte(&self) -> Option<u8> {
+        if let Value::Byte(b) = self { Some(*b) } else { None }
+    }
+    #[inline] pub fn as_uint(&self) -> Option<u64> {
+        if let Value::Uint(n) = self { Some(*n) } else { None }
+    }
+    #[inline] pub fn is_none(&self) -> bool {
+        matches!(self, Value::None)
+    }
+    #[inline] pub fn as_string(&self) -> Option<&Rc<String>> {
+        if let Value::String(s) = self { Some(s) } else { None }
+    }
+    #[inline] pub fn as_array(&self) -> Option<&Rc<RefCell<Vec<Value>>>> {
+        if let Value::Array(a) = self { Some(a) } else { None }
+    }
+    #[inline] pub fn as_tuple(&self) -> Option<&Rc<Vec<Value>>> {
+        if let Value::Tuple(t) = self { Some(t) } else { None }
+    }
+    #[inline] pub fn as_map(&self) -> Option<&Rc<RefCell<crate::vm::collections::OxMap>>> {
+        if let Value::Map(m) = self { Some(m) } else { None }
+    }
+    #[inline] pub fn as_set(&self) -> Option<&Rc<RefCell<crate::vm::collections::OxSet>>> {
+        if let Value::Set(s) = self { Some(s) } else { None }
+    }
+    #[inline] pub fn as_closure(&self) -> Option<&Rc<ObjClosure>> {
+        if let Value::Closure(c) = self { Some(c) } else { None }
+    }
+    #[inline] pub fn as_builtin(&self) -> Option<BuiltinFn> {
+        if let Value::Builtin(f) = self { Some(*f) } else { None }
+    }
+    #[inline] pub fn as_struct_def(&self) -> Option<&Rc<ObjStructDef>> {
+        if let Value::StructDef(d) = self { Some(d) } else { None }
+    }
+    #[inline] pub fn as_struct_instance(&self) -> Option<&Rc<ObjStructInstance>> {
+        if let Value::StructInstance(i) = self { Some(i) } else { None }
+    }
+    #[inline] pub fn as_enum_def(&self) -> Option<&Rc<ObjEnumDef>> {
+        if let Value::EnumDef(d) = self { Some(d) } else { None }
+    }
+    #[inline] pub fn as_enum_instance(&self) -> Option<&Rc<ObjEnumInstance>> {
+        if let Value::EnumInstance(i) = self { Some(i) } else { None }
+    }
+    #[inline] pub fn as_module(&self) -> Option<&Rc<ObjModule>> {
+        if let Value::Module(m) = self { Some(m) } else { None }
+    }
+    #[inline] pub fn as_error_value(&self) -> Option<&Rc<ErrorValueData>> {
+        if let Value::ErrorValue(d) = self { Some(d) } else { None }
+    }
+    #[inline] pub fn as_wrapped(&self) -> Option<&Rc<Value>> {
+        if let Value::Wrapped(v) = self { Some(v) } else { None }
+    }
+    #[inline] pub fn as_error_string(&self) -> Option<&Rc<String>> {
+        if let Value::Error(s) = self { Some(s) } else { None }
+    }
+
+    /// Borrow as a [`ValueRepr`] — the migration-friendly view enum.
+    /// See `ValueRepr` doc-comment for rationale (A1.2.5 flag-day prep).
+    #[inline]
+    pub fn repr(&self) -> ValueRepr<'_> {
+        match self {
+            Value::Integer(n) => ValueRepr::Integer(*n),
+            Value::Float(f) => ValueRepr::Float(*f),
+            Value::Char(c) => ValueRepr::Char(*c),
+            Value::Boolean(b) => ValueRepr::Boolean(*b),
+            Value::Byte(b) => ValueRepr::Byte(*b),
+            Value::Uint(n) => ValueRepr::Uint(*n),
+            Value::None => ValueRepr::None,
+            Value::String(s) => ValueRepr::String(s),
+            Value::Array(a) => ValueRepr::Array(a),
+            Value::Tuple(t) => ValueRepr::Tuple(t),
+            Value::Map(m) => ValueRepr::Map(m),
+            Value::Set(s) => ValueRepr::Set(s),
+            Value::Closure(c) => ValueRepr::Closure(c),
+            Value::Builtin(f) => ValueRepr::Builtin(*f),
+            Value::StructDef(d) => ValueRepr::StructDef(d),
+            Value::StructInstance(i) => ValueRepr::StructInstance(i),
+            Value::EnumDef(d) => ValueRepr::EnumDef(d),
+            Value::EnumInstance(i) => ValueRepr::EnumInstance(i),
+            Value::Module(m) => ValueRepr::Module(m),
+            Value::ErrorValue(d) => ValueRepr::ErrorValue(d),
+            Value::Wrapped(v) => ValueRepr::Wrapped(v),
+            Value::Error(s) => ValueRepr::Error(s),
+        }
+    }
+
     pub fn is_truthy(&self) -> bool {
         match self {
             Value::Boolean(b) => *b,
@@ -918,7 +1072,11 @@ impl PartialEq for Value {
             (Value::Integer(a), Value::Integer(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Char(a), Value::Char(b)) => a == b,
-            (Value::String(a), Value::String(b)) => a == b,
+            // Pointer-equal ⇒ content-equal (always correct). With
+            // interned constant-pool strings (see vm::intern) the common
+            // case — comparing two identifiers / literals / map keys — is
+            // a single pointer compare instead of a byte-wise memcmp.
+            (Value::String(a), Value::String(b)) => Rc::ptr_eq(a, b) || a == b,
             (Value::Boolean(a), Value::Boolean(b)) => a == b,
             (Value::None, Value::None) => true,
             (Value::Byte(a), Value::Byte(b)) => a == b,
@@ -926,11 +1084,7 @@ impl PartialEq for Value {
             (Value::Array(a), Value::Array(b)) => *a.borrow() == *b.borrow(),
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Map(a), Value::Map(b)) => *a.borrow() == *b.borrow(),
-            (Value::Set(a), Value::Set(b)) => {
-                let a = a.borrow();
-                let b = b.borrow();
-                a.len() == b.len() && a.iter().all(|item| b.iter().any(|bitem| item == bitem))
-            }
+            (Value::Set(a), Value::Set(b)) => *a.borrow() == *b.borrow(),
             (Value::ErrorValue(a), Value::ErrorValue(b)) => a.msg == b.msg && a.tag == b.tag,
             (Value::Wrapped(a), Value::Wrapped(b)) => a == b,
             (Value::StructInstance(a), Value::StructInstance(b)) => {

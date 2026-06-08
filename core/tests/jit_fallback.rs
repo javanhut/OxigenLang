@@ -1033,3 +1033,560 @@ bad_index()
     // The indexing expression `a[0]` is on line 4.
     assert_eq!(line, 4, "expected line 4, got {} (msg: {msg})", line);
 }
+
+// ── Bitwise + Log JIT coverage (Tier 1) ───────────────────────────────
+//
+// Oxigen has no 0b/0x literal prefixes, no `while`, and no `return` —
+// these tests use decimal integers, `repeat when`, and option-as-value.
+
+#[test]
+fn fallback_bitwise_band_matches_interpreter() {
+    // 12 & 10 == 8
+    let source = r#"
+fun f() { 12 & 10 }
+f()
+"#;
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+    assert_eq!(baseline, jitted);
+    assert!(j_ok >= 1, "JIT should compile f");
+}
+
+#[test]
+fn fallback_bitwise_bor_matches_interpreter() {
+    // 12 | 10 == 14
+    let source = r#"
+fun f() { 12 | 10 }
+f()
+"#;
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+    assert_eq!(baseline, jitted);
+    assert!(j_ok >= 1);
+}
+
+#[test]
+fn fallback_bitwise_bxor_matches_interpreter() {
+    // 12 ^ 10 == 6
+    let source = r#"
+fun f() { 12 ^ 10 }
+f()
+"#;
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+    assert_eq!(baseline, jitted);
+    assert!(j_ok >= 1);
+}
+
+#[test]
+fn fallback_bitwise_bnot_matches_interpreter() {
+    let source = r#"
+fun f() { ~5 }
+f()
+"#;
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+    assert_eq!(baseline, jitted);
+    assert!(j_ok >= 1);
+}
+
+#[test]
+fn fallback_bitwise_shl_matches_interpreter() {
+    // 1 << 4 == 16
+    let source = r#"
+fun f() { 1 << 4 }
+f()
+"#;
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+    assert_eq!(baseline, jitted);
+    assert!(j_ok >= 1);
+}
+
+#[test]
+fn fallback_bitwise_shr_matches_interpreter() {
+    // 256 >> 3 == 32
+    let source = r#"
+fun f() { 256 >> 3 }
+f()
+"#;
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+    assert_eq!(baseline, jitted);
+    assert!(j_ok >= 1);
+}
+
+#[test]
+fn fallback_bitwise_loop_virt_int_fast_path() {
+    // total = total ^ i across a tight loop — exercises the virt-int
+    // SSA fast path. The single-Constant inits `total := 0` and
+    // `i := 0` avoid an unrelated pre-existing JIT bug in multi-op
+    // initializers (`c := 1 + 5` style); the BitXor in the loop body
+    // exercises in-place update semantics, which is the shape we want
+    // to cover here.
+    let source = r#"
+fun loop_xor(n) {
+    total := 0
+    i := 0
+    repeat when i < n {
+        total = total ^ i
+        i = i + 1
+    }
+    total
+}
+loop_xor(64)
+"#;
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+    assert_eq!(baseline, jitted);
+    assert!(j_ok >= 1);
+}
+
+// Shift edges, split per-case so a failure tells us which edge diverged.
+// Pinned semantics: shift count masked to low 6 bits (matches x86
+// SHL/SAR + Cranelift ishl/sshr + Rust wrapping_shl/shr).
+
+fn check_match(source: &str) {
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+    assert_eq!(baseline, jitted, "JIT and interpreter must agree on shift");
+    assert!(j_ok >= 1);
+}
+
+#[test]
+fn fallback_shift_edge_shl_zero() {
+    check_match("fun f() { 1 << 0 }\nf()");
+}
+
+#[test]
+fn fallback_shift_edge_shl_one() {
+    check_match("fun f() { 1 << 1 }\nf()");
+}
+
+#[test]
+fn fallback_shift_edge_shl_sixty_three() {
+    check_match("fun f() { 1 << 63 }\nf()");
+}
+
+#[test]
+fn fallback_shift_edge_shl_sixty_four_masks_to_zero() {
+    // 1 << 64 should equal 1 << 0 = 1 under the pinned masking semantics.
+    check_match("fun f() { 1 << 64 }\nf()");
+}
+
+#[test]
+fn fallback_shift_edge_shr_basic() {
+    check_match("fun f() { 256 >> 3 }\nf()");
+}
+
+#[test]
+fn fallback_shift_edge_shr_negative_one_arithmetic() {
+    // -1 >> 1 is the arithmetic shift right on a sign-extended value:
+    // still -1.
+    check_match("fun f() { -1 >> 1 }\nf()");
+}
+
+// NOTE on multi-op initializers (`c := 1 << 63`, `c := 1 + 5`, etc.):
+//
+// A pre-existing JIT bug causes any `c := <expr>` whose initializer is
+// multi-op AND starts with a Constant to mis-store: the Constant handler's
+// init_slot path does `def_var(c_var, <first_constant>)` eagerly, and the
+// later SetLocal's def_var doesn't override it (suspected Cranelift
+// SSA/CSE interaction). Result: `c` ends up holding the LHS constant
+// rather than the expression's value. Reproduces with both `1 + 5` and
+// `1 << 4` — not bitwise-specific. Out of scope for the Tier 1 PR;
+// existing benchmarks don't hit it because they only use single-Constant
+// inits like `n := 0`. The shifts-through-arg test below avoids the
+// pattern by passing the shift result as a parameter.
+
+// ── Type-contract audit (Tier 2.1) ────────────────────────────────────
+//
+// These probes ask: does the JIT honor the explicit type annotation as
+// a guarantee, or does it still speculate? If a typed `<int>` slot is
+// non-negotiable, multi-op init RHS should compute correctly because
+// the slot's type is fixed by contract. If these tests fail the same
+// way the untyped form did, the JIT is downgrading despite the
+// annotation — that's the bug to fix.
+
+#[test]
+fn type_contract_form3_walrus_multiop_init() {
+    // Form 3: typed walrus. `c <int> := 1 + 5` — the type annotation
+    // means c's slot is locked to Int64. Multi-op RHS should work.
+    check_match("fun f() {\n    c <int> := 1 + 5\n    c + 1\n}\nf()");
+}
+
+#[test]
+fn type_contract_form2_strict_multiop_init() {
+    // Form 2: strict typed. `c <int> = 1 + 5` — value AND type frozen.
+    // Foldable to a single Constant in principle.
+    check_match("fun f() {\n    c <int> = 1 + 5\n    c + 1\n}\nf()");
+}
+
+#[test]
+fn type_contract_form4_zero_init_then_assign() {
+    // Form 4: zero-init, then explicit assign. Forces the typed slot
+    // path through a separate code path (no init expression).
+    check_match("fun f() {\n    c <int>\n    c = 6\n    c + 1\n}\nf()");
+}
+
+#[test]
+fn type_contract_form3_walrus_int_min() {
+    // Form 3 with INT_MIN init. The typed contract says c is i64,
+    // and 1 << 63 fits — should not require any speculation.
+    check_match("fun f() {\n    c <int> := 1 << 63\n    c + 1\n}\nf()");
+}
+
+// Tier 2.1 (iii) — compile-time literal folding for walrus init RHS.
+// Pure-literal RHS expressions are folded to a single Constant at
+// compile time, so the JIT init-slot path sees a single push (no
+// multi-op-init mishap). Applies to all four init forms.
+
+#[test]
+fn fold_form1_untyped_multiop_init() {
+    // Pre-fold: `c := 1 + 5` emitted Constant 1, Constant 5, Add. The
+    // JIT's init-slot path primed c_var = 1 and never overrode it.
+    // Post-fold: `c := 6` — single Constant init, works correctly.
+    check_match("fun f() {\n    c := 1 + 5\n    c + 1\n}\nf()");
+}
+
+#[test]
+fn fold_form1_untyped_shift_int_min() {
+    check_match("fun f() {\n    c := 1 << 63\n    c + 1\n}\nf()");
+}
+
+#[test]
+fn fold_form1_two_locals_sum() {
+    let source = r#"
+fun f() {
+    a := 1 << 4
+    b := 1 << 5
+    a + b
+}
+f()
+"#;
+    check_match(source);
+}
+
+#[test]
+fn fold_form1_three_locals_sum() {
+    // The cascade case (3+ sequential walrus inits with multi-op RHS)
+    // was the smallest deferred bug from Tier 1. With folding, each
+    // RHS becomes a single Constant — no cascade, no bug.
+    let source = r#"
+fun f() {
+    a := 1 << 4
+    b := 1 << 5
+    c := 1 << 6
+    a + b + c
+}
+f()
+"#;
+    check_match(source);
+}
+
+#[test]
+fn fold_form1_six_locals_sum() {
+    let source = r#"
+fun shift_table() {
+    a := 1 << 0
+    b := 1 << 1
+    c := 1 << 63
+    d := 1 << 64
+    e := 256 >> 3
+    f := -1 >> 1
+    a + b + c + d + e + f
+}
+shift_table()
+"#;
+    check_match(source);
+}
+
+#[test]
+fn fold_form3_typed_three_locals_sum() {
+    // Same cascade shape, typed. Folding makes each RHS a single
+    // Constant; the subsequent TypeWrap still validates the type.
+    let source = r#"
+fun f() {
+    a <int> := 1 << 4
+    b <int> := 1 << 5
+    c <int> := 1 << 6
+    a + b + c
+}
+f()
+"#;
+    check_match(source);
+}
+
+#[test]
+fn fold_form2_immutable_init() {
+    // Form 2: immutable typed. Pure-literal RHS folds to single
+    // Constant; the slot is forever the folded value.
+    check_match("fun f() {\n    c <int> = 1 + 5\n    c + 1\n}\nf()");
+}
+
+#[test]
+fn fold_arith_chain() {
+    // Mixed operators — exercises that the folder handles ordering
+    // and precedence correctly (matches the parser's tree shape).
+    check_match("fun f() {\n    c := (1 + 2) * 3 - 4\n    c\n}\nf()");
+}
+
+#[test]
+fn fold_bitwise_chain() {
+    check_match("fun f() {\n    c := (12 & 10) | (4 ^ 1)\n    c\n}\nf()");
+}
+
+#[test]
+fn fold_division_by_zero_falls_through() {
+    // `1 / 0` MUST NOT fold — would lose the runtime error. Folder
+    // returns None for div-by-zero; compiler falls through to
+    // compile_expression, which emits the Divide opcode and the
+    // interpreter / JIT raise the same runtime error.
+    let source = "fun f() {\n    c := 1 / 0\n    c\n}\nf()";
+    let baseline_err = run_result(source, None).expect_err("interpreter must error");
+    let jitted_err = run_result(source, Some(1)).expect_err("JIT must error");
+    assert_eq!(baseline_err, jitted_err);
+}
+
+#[test]
+fn fold_non_literal_rhs_uses_runtime() {
+    // Non-foldable RHS (contains a function call) compiles unchanged.
+    // The fold returns None for `f()` so the original Add opcode is
+    // emitted at runtime. No behavior change vs pre-folding.
+    let source = r#"
+fun get_five() { 5 }
+fun caller() {
+    c := get_five() + 1
+    c + 1
+}
+caller()
+"#;
+    check_match(source);
+}
+
+#[test]
+fn fallback_shift_int_min_through_param() {
+    // INT_MIN = 1 << 63 produced at the call site (function value, not a
+    // multi-op init), then summed inside the function. Exercises an i64
+    // payload at the parameter slot and an Add on top.
+    let source = r#"
+fun f(c) { c + 1 }
+f(1 << 63)
+"#;
+    check_match(source);
+}
+
+#[test]
+fn fallback_shift_six_via_args_sum() {
+    // Same idea as the original six-locals test but with the shifted
+    // values passed as arguments — bypasses the multi-op-init bug.
+    let source = r#"
+fun sum6(a, b, c, d, e, f) { a + b + c + d + e + f }
+sum6(1 << 0, 1 << 1, 1 << 63, 1 << 64, 256 >> 3, -1 >> 1)
+"#;
+    check_match(source);
+}
+
+#[test]
+fn fallback_bitwise_type_error_matches_interpreter() {
+    // f(1) tier-ups via the int branch; f(0) then exercises the
+    // JIT-compiled type-check slow path of `1.5 & 2`.
+    let source = r#"
+fun f(b) {
+    option {
+        b == 1 -> 1 & 2,
+        1.5 & 2
+    }
+}
+f(1)
+f(0)
+"#;
+    let baseline_err = run_result(source, None).expect_err("baseline should error");
+    let jitted_err = run_result(source, Some(1)).expect_err("jitted should error");
+    assert_eq!(baseline_err, jitted_err);
+    assert!(
+        jitted_err.contains("bitwise &"),
+        "expected `bitwise &` in {jitted_err:?}"
+    );
+}
+
+#[test]
+fn fallback_log_no_msg_matches_interpreter() {
+    let source = r#"
+fun f() {
+    <log<INFO>>
+    42
+}
+f()
+"#;
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+    assert_eq!(baseline, jitted, "post-Log return value must match");
+    assert!(j_ok >= 1, "JIT should compile a Log-bearing function");
+}
+
+#[test]
+fn fallback_log_msg_only_matches_interpreter() {
+    let source = r#"
+fun f() {
+    <log>("hello")
+    7
+}
+f()
+"#;
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+    assert_eq!(baseline, jitted);
+    assert!(j_ok >= 1);
+}
+
+#[test]
+fn fallback_log_tag_msg_matches_interpreter() {
+    let source = r#"
+fun f() {
+    <log<DEBUG>>("hi")
+    11
+}
+f()
+"#;
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+    assert_eq!(baseline, jitted);
+    assert!(j_ok >= 1);
+}
+
+#[test]
+fn fallback_log_tag_sub_msg_matches_interpreter() {
+    let source = r#"
+fun f() {
+    <log<Error<network>>>("connection lost")
+    99
+}
+f()
+"#;
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+    assert_eq!(baseline, jitted);
+    assert!(j_ok >= 1);
+}
+
+#[test]
+fn fallback_post_log_stack_coherence() {
+    // Pre-Log virt-int staging then Log flush then post-Log continuation.
+    // Pass the staged value as an argument to avoid the multi-op-init
+    // bug noted above; the function body is single-statement so Log's
+    // flush + post-Log expression is the load-bearing test surface.
+    let source = r#"
+fun f(x) {
+    <log>("x")
+    (x & 3) + 40
+}
+f((1 + 2) ^ 7)
+"#;
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+    assert_eq!(baseline, jitted);
+    assert!(j_ok >= 1);
+}
+
+#[test]
+fn fallback_bitwise_plus_log_compiles() {
+    // 4660 (0x1234) & 255 == 52; 52 << 1 == 104. `masked := n & 255`
+    // starts with GetLocal (not Constant), so the multi-op-init bug
+    // doesn't trip — masked stays out of int_locals and goes through
+    // memory, which is correct.
+    let source = r#"
+fun f(n) {
+    masked := n & 255
+    <log>("masked")
+    masked << 1
+}
+f(4660)
+"#;
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, _) = run(source, Some(1));
+    assert_eq!(baseline, jitted);
+    assert!(j_ok >= 1, "function with both bitwise and log should JIT");
+}
+
+// ── Regression tests for JIT correctness bugs (2026-06) ──────────────────
+
+/// Regression: `option { cond -> X, Y }` whose arms are bare locals must
+/// return the selected arm, not always the second. The compile-time
+/// operand stack (virt_stack) was not flushed at block boundaries, so both
+/// arms read the same (last-emitted) SSA value — `min(a,b)` returned `b`
+/// unconditionally once JIT-compiled. See "flush virt_stack at block
+/// boundaries" fix in jit/engine/mod.rs.
+#[test]
+fn regression_option_arms_select_correct_value() {
+    let src_min = r#"
+fun mn(a, b) { option { a <= b -> a, b } }
+mn(3, 7)
+"#;
+    let (baseline, _, _) = run(src_min, None);
+    let (jitted, j_ok, _) = run(src_min, Some(1));
+    assert_eq!(baseline, "3", "interpreter min(3,7) must be 3");
+    assert_eq!(jitted, baseline, "JIT min(3,7) must match interpreter");
+    assert!(j_ok >= 1, "mn should JIT-compile");
+
+    // max: the other arm must win.
+    let src_max = r#"
+fun mx(a, b) { option { a >= b -> a, b } }
+mx(3, 7)
+"#;
+    let (b2, _, _) = run(src_max, None);
+    let (j2, _, _) = run(src_max, Some(1));
+    assert_eq!(b2, "7");
+    assert_eq!(j2, b2, "JIT max(3,7) must match interpreter");
+}
+
+/// Regression: a hot `option`-returning function must stay correct after it
+/// tiers up in *default* mode (not just eager --jit). Drives `mn` past the
+/// default hot threshold inside a loop and checks every result.
+#[test]
+fn regression_option_correct_when_hot_default_mode() {
+    let src = r#"
+fun mn(a, b) { option { a <= b -> a, b } }
+fun run() {
+    bad := 0
+    i := 0
+    repeat unless i >= 200 {
+        r := mn(3, 7)
+        option { r != 3 -> bad = bad + 1, 0 }
+        i = i + 1
+    }
+    bad
+}
+run()
+"#;
+    // None => default thresholds (mn tiers up after the hot threshold).
+    let (baseline, _, _) = run(src, None);
+    assert_eq!(baseline, "0", "hot min(3,7) must return 3 every iteration");
+}
+
+/// Regression: calling a builtin (`len`, `str`, `push`, …) inside a
+/// JIT-compiled loop must not crash. The GetGlobal IC hit path bumped the
+/// "Rc" of any tag > 6, but `Value::Builtin` (tag 13) holds a function
+/// pointer, not an Rc — bumping it wrote into a read-only code page
+/// (SIGBUS) on the second+ fetch. See the Builtin-tag guard in the
+/// GetGlobal IC.
+#[test]
+fn regression_builtin_call_in_loop_no_crash() {
+    let src = r#"
+fun go() {
+    a <array>
+    s <int>
+    repeat unless s >= 5 {
+        len(a)
+        s = s + 1
+    }
+    s
+}
+go()
+"#;
+    let (baseline, _, _) = run(src, None);
+    let (jitted, j_ok, _) = run(src, Some(1));
+    assert_eq!(baseline, "5");
+    assert_eq!(jitted, baseline, "builtin call in JIT loop must match interpreter");
+    assert!(j_ok >= 1, "go should JIT-compile");
+}

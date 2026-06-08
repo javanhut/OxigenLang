@@ -15,6 +15,108 @@ fn unwrap_grouped(expr: &Expression) -> &Expression {
     }
 }
 
+/// Compile-time literal fold for walrus init RHS expressions. Recursively
+/// evaluates pure-literal expression trees (Int / Float / Bool / None /
+/// Char / Str leaves combined via Prefix / Infix / Grouped) and returns
+/// `Some(Value)` when the entire tree is constant, otherwise `None`.
+///
+/// Falling back to `None` on failure (rather than partial folding) keeps
+/// the contract simple: the caller emits a single `Constant` opcode iff
+/// fold succeeds, otherwise compiles the original expression. Operators
+/// that can fail at runtime (division/modulo by zero) intentionally
+/// return `None` so the runtime error is preserved at the interpreter
+/// level, matching `--no-jit` behaviour.
+///
+/// Shift semantics match `vm::binary_shl/shr` (count masked to low 6
+/// bits via `wrapping_shl/shr` on i64). Integer arith uses wrapping
+/// ops to match the runtime, which never panics on overflow in release.
+fn fold_constant_expression(expr: &Expression) -> Option<Value> {
+    match expr {
+        Expression::Int { value, .. } => Some(Value::Integer(*value)),
+        Expression::Float { value, .. } => Some(Value::Float(*value)),
+        Expression::Boolean { value, .. } => Some(Value::Boolean(*value)),
+        Expression::NoneExpr { .. } => Some(Value::None),
+        Expression::Char { value, .. } => Some(Value::Char(*value)),
+        Expression::Str { value, .. } => Some(Value::String(rc_str(value.as_str()))),
+        Expression::Grouped(inner) => fold_constant_expression(inner),
+
+        Expression::Prefix {
+            operator, right, ..
+        } => {
+            let r = fold_constant_expression(right)?;
+            match (operator.as_str(), r) {
+                ("-", Value::Integer(n)) => Some(Value::Integer(n.wrapping_neg())),
+                ("-", Value::Float(f)) => Some(Value::Float(-f)),
+                ("!" | "not", Value::Boolean(b)) => Some(Value::Boolean(!b)),
+                ("~", Value::Integer(n)) => Some(Value::Integer(!n)),
+                _ => None,
+            }
+        }
+
+        Expression::Infix {
+            operator,
+            left,
+            right,
+            ..
+        } => {
+            let l = fold_constant_expression(left)?;
+            let r = fold_constant_expression(right)?;
+            match (operator.as_str(), &l, &r) {
+                // Integer arithmetic
+                ("+", Value::Integer(a), Value::Integer(b)) => {
+                    Some(Value::Integer(a.wrapping_add(*b)))
+                }
+                ("-", Value::Integer(a), Value::Integer(b)) => {
+                    Some(Value::Integer(a.wrapping_sub(*b)))
+                }
+                ("*", Value::Integer(a), Value::Integer(b)) => {
+                    Some(Value::Integer(a.wrapping_mul(*b)))
+                }
+                ("/", Value::Integer(a), Value::Integer(b)) if *b != 0 => {
+                    Some(Value::Integer(a.wrapping_div(*b)))
+                }
+                ("%", Value::Integer(a), Value::Integer(b)) if *b != 0 => {
+                    Some(Value::Integer(a.wrapping_rem(*b)))
+                }
+                // Integer bitwise / shift (same semantics as vm::binary_b*)
+                ("&", Value::Integer(a), Value::Integer(b)) => Some(Value::Integer(a & b)),
+                ("|", Value::Integer(a), Value::Integer(b)) => Some(Value::Integer(a | b)),
+                ("^", Value::Integer(a), Value::Integer(b)) => Some(Value::Integer(a ^ b)),
+                ("<<", Value::Integer(a), Value::Integer(b)) => {
+                    Some(Value::Integer(a.wrapping_shl(*b as u32)))
+                }
+                (">>", Value::Integer(a), Value::Integer(b)) => {
+                    Some(Value::Integer(a.wrapping_shr(*b as u32)))
+                }
+                // Integer comparison
+                ("==", Value::Integer(a), Value::Integer(b)) => Some(Value::Boolean(a == b)),
+                ("!=", Value::Integer(a), Value::Integer(b)) => Some(Value::Boolean(a != b)),
+                ("<", Value::Integer(a), Value::Integer(b)) => Some(Value::Boolean(a < b)),
+                ("<=", Value::Integer(a), Value::Integer(b)) => Some(Value::Boolean(a <= b)),
+                (">", Value::Integer(a), Value::Integer(b)) => Some(Value::Boolean(a > b)),
+                (">=", Value::Integer(a), Value::Integer(b)) => Some(Value::Boolean(a >= b)),
+                // Float arithmetic + comparison
+                ("+", Value::Float(a), Value::Float(b)) => Some(Value::Float(a + b)),
+                ("-", Value::Float(a), Value::Float(b)) => Some(Value::Float(a - b)),
+                ("*", Value::Float(a), Value::Float(b)) => Some(Value::Float(a * b)),
+                ("/", Value::Float(a), Value::Float(b)) if *b != 0.0 => Some(Value::Float(a / b)),
+                ("==", Value::Float(a), Value::Float(b)) => Some(Value::Boolean(a == b)),
+                ("!=", Value::Float(a), Value::Float(b)) => Some(Value::Boolean(a != b)),
+                ("<", Value::Float(a), Value::Float(b)) => Some(Value::Boolean(a < b)),
+                ("<=", Value::Float(a), Value::Float(b)) => Some(Value::Boolean(a <= b)),
+                (">", Value::Float(a), Value::Float(b)) => Some(Value::Boolean(a > b)),
+                (">=", Value::Float(a), Value::Float(b)) => Some(Value::Boolean(a >= b)),
+                // Boolean short-circuit (eager since both sides folded)
+                ("and", Value::Boolean(a), Value::Boolean(b)) => Some(Value::Boolean(*a && *b)),
+                ("or", Value::Boolean(a), Value::Boolean(b)) => Some(Value::Boolean(*a || *b)),
+                _ => None,
+            }
+        }
+
+        _ => None,
+    }
+}
+
 /// Compilation error with source location.
 #[derive(Debug)]
 pub struct CompileError {
@@ -90,6 +192,14 @@ pub struct Compiler {
     /// When true, Choose/If won't pop their result value (used when they're
     /// the last statement of a block that needs to produce a value).
     suppress_statement_pop: bool,
+    /// Column stack for source-location tracking. Pushed at the start of
+    /// `compile_expression`/`compile_statement` with the current node's
+    /// column, popped at exit. `emit_byte` reads the top before each
+    /// write so opcodes emitted by a parent *between* two child compiles
+    /// (e.g., the `Add` in `compile_left; compile_right; emit Add`) get
+    /// the parent's column, not whatever column the last child left
+    /// behind on the chunk.
+    loc_column_stack: Vec<u32>,
 }
 
 impl Compiler {
@@ -99,6 +209,7 @@ impl Compiler {
             errors: Vec::new(),
             dup_next_define: false,
             suppress_statement_pop: false,
+            loc_column_stack: Vec::new(),
         };
         // Push the top-level script frame.
         compiler.frames.push(CompilerFrame::new(None, 0));
@@ -175,6 +286,13 @@ impl Compiler {
     }
 
     fn emit_byte(&mut self, byte: u8, line: u32) {
+        // Re-establish the column from the active scope's top, in case a
+        // recursive child compile updated the chunk's `cur_column` to its
+        // own and then returned. Without this the parent's emit_op-after-
+        // child-compile would inherit the child's column.
+        if let Some(&col) = self.loc_column_stack.last() {
+            self.current_chunk().set_loc_column(col);
+        }
         self.current_chunk().write(byte, line);
     }
 
@@ -197,6 +315,14 @@ impl Compiler {
     }
 
     fn make_constant(&mut self, value: Value, line: u32) -> u16 {
+        // Intern constant-pool strings so equal literals / identifiers /
+        // field names share one canonical `Rc<String>`. This is bounded
+        // by the program text (see vm::intern) and lets the `Rc::ptr_eq`
+        // fast path in `Value::eq` short-circuit their comparisons.
+        let value = match value {
+            Value::String(s) => Value::String(crate::vm::intern::intern(&s)),
+            other => other,
+        };
         let idx = self.current_chunk().add_constant(value);
         if idx > u16::MAX {
             self.error("Too many constants in one chunk", line);
@@ -429,10 +555,82 @@ impl Compiler {
         }
     }
 
+    /// Column number (1-based; 0 = unknown) for the token that anchors
+    /// this expression. Mirrors `expr_line` exactly. Used to attach
+    /// caret columns to emitted bytecode for error reporting.
+    fn expr_column(expr: &Expression) -> u32 {
+        match expr {
+            Expression::Int { token, .. }
+            | Expression::Float { token, .. }
+            | Expression::Str { token, .. }
+            | Expression::Char { token, .. }
+            | Expression::Boolean { token, .. }
+            | Expression::NoneExpr { token }
+            | Expression::Array { token, .. }
+            | Expression::Prefix { token, .. }
+            | Expression::Infix { token, .. }
+            | Expression::Postfix { token, .. }
+            | Expression::Call { token, .. }
+            | Expression::Index { token, .. }
+            | Expression::FunctionLiteral { token, .. }
+            | Expression::StructLiteral { token, .. }
+            | Expression::DotAccess { token, .. }
+            | Expression::Slice { token, .. }
+            | Expression::TupleLiteral { token, .. }
+            | Expression::MapLiteral { token, .. }
+            | Expression::Option { token, .. }
+            | Expression::Guard { token, .. }
+            | Expression::Log { token, .. }
+            | Expression::ErrorConstruct { token, .. }
+            | Expression::ValueConstruct { token, .. }
+            | Expression::TypeWrap { token, .. }
+            | Expression::Fail { token, .. }
+            | Expression::Unless { token, .. }
+            | Expression::StringInterp { token, .. }
+            | Expression::EnumVariantConstruct { token, .. } => token.span.column as u32,
+            Expression::Ident(ident) => ident.token.span.column as u32,
+            Expression::Grouped(inner) => Self::expr_column(inner),
+        }
+    }
+
+    fn stmt_column(stmt: &Statement) -> u32 {
+        match stmt {
+            Statement::Let { name, .. } => name.token.span.column as u32,
+            Statement::Expr(expr) => Self::expr_column(expr),
+            Statement::Each { token, .. }
+            | Statement::Repeat { token, .. }
+            | Statement::Pattern { token, .. }
+            | Statement::Choose { token, .. }
+            | Statement::If { token, .. }
+            | Statement::Give { token, .. }
+            | Statement::StructDef { token, .. }
+            | Statement::EnumDef { token, .. }
+            | Statement::ContainsDef { token, .. }
+            | Statement::DotAssign { token, .. }
+            | Statement::Introduce { token, .. }
+            | Statement::IndexAssign { token, .. }
+            | Statement::Main { token, .. } => token.span.column as u32,
+            Statement::TypedLet { name, .. }
+            | Statement::TypedDeclare { name, .. }
+            | Statement::Assign { name, .. } => name.token.span.column as u32,
+            Statement::Unpack { names, .. } => {
+                names.first().map_or(0, |n| n.token.span.column as u32)
+            }
+            Statement::Skip | Statement::Stop => 0,
+        }
+    }
+
     // ── Statement Compilation ──────────────────────────────────────────
 
     fn compile_statement(&mut self, stmt: &Statement) {
         let line = Self::stmt_line(stmt);
+        let col = Self::stmt_column(stmt);
+        self.loc_column_stack.push(col);
+        let _r = self.compile_statement_inner(stmt, line);
+        self.loc_column_stack.pop();
+    }
+
+    fn compile_statement_inner(&mut self, stmt: &Statement, line: u32) {
         match stmt {
             Statement::Expr(expr) => {
                 self.compile_expression(expr);
@@ -447,6 +645,15 @@ impl Compiler {
                 } = value
                 {
                     self.compile_function(Some(&name.value), parameters, body, line);
+                } else if let Some(folded) = fold_constant_expression(value) {
+                    // Tier 2.1 (iii): pure-literal init RHS folds to a
+                    // single Constant. Matches Oxigen's design intent —
+                    // each init is specific so the JIT can fold and
+                    // virtualize cleanly. Side effect: the multi-op-init
+                    // mishap (`c := 1 + 5; c + 1` returning 2 in JIT)
+                    // disappears for foldable RHS because the init-slot
+                    // path now sees a single Constant.
+                    self.emit_constant(folded, line);
                 } else {
                     self.compile_expression(value);
                 }
@@ -491,7 +698,18 @@ impl Compiler {
                         line,
                     );
                 }
-                self.compile_expression(value);
+                // Tier 2.1 (iii): same fold as Statement::Let. The
+                // subsequent TypeWrap still fires (runtime contract) for
+                // non-Generic/None annotations, so the conversion
+                // semantics for Form 3 (e.g., `x <int> := 3.9` → 3) are
+                // preserved when the RHS is non-foldable. For pure-
+                // literal RHS that already matches the target type the
+                // wrap is a no-op.
+                if let Some(folded) = fold_constant_expression(value) {
+                    self.emit_constant(folded, line);
+                } else {
+                    self.compile_expression(value);
+                }
                 let type_name = type_ann.type_name();
                 let mutable = *walrus; // walrus (:=) means mutable
                 // Walrus := converts the value to the target type.
@@ -1073,6 +1291,13 @@ impl Compiler {
 
     fn compile_expression(&mut self, expr: &Expression) {
         let line = Self::expr_line(expr);
+        let col = Self::expr_column(expr);
+        self.loc_column_stack.push(col);
+        self.compile_expression_inner(expr, line);
+        self.loc_column_stack.pop();
+    }
+
+    fn compile_expression_inner(&mut self, expr: &Expression, line: u32) {
         match expr {
             Expression::Int { value, .. } => {
                 self.emit_constant(Value::Integer(*value), line);
@@ -1846,6 +2071,14 @@ impl Compiler {
 
     fn compile_identifier(&mut self, ident: &Identifier) {
         let line = ident.token.span.line as u32;
+        let col = ident.token.span.column as u32;
+        self.loc_column_stack.push(col);
+        let result = self.compile_identifier_inner(ident, line);
+        self.loc_column_stack.pop();
+        result
+    }
+
+    fn compile_identifier_inner(&mut self, ident: &Identifier, line: u32) {
         // Try local first
         if let Some(slot) = self.resolve_local(&ident.value) {
             self.emit_op_u16(OpCode::GetLocal, slot, line);
@@ -2015,8 +2248,12 @@ fn default_for_type(type_name: &str) -> Value {
         "UINT" => Value::Uint(0),
         "ARRAY" => Value::Array(std::rc::Rc::new(std::cell::RefCell::new(Vec::new()))),
         "TUPLE" => Value::Tuple(std::rc::Rc::new(Vec::new())),
-        "MAP" => Value::Map(std::rc::Rc::new(std::cell::RefCell::new(Vec::new()))),
-        "SET" => Value::Set(std::rc::Rc::new(std::cell::RefCell::new(Vec::new()))),
+        "MAP" => Value::Map(std::rc::Rc::new(std::cell::RefCell::new(
+            crate::vm::collections::OxMap::new(),
+        ))),
+        "SET" => Value::Set(std::rc::Rc::new(std::cell::RefCell::new(
+            crate::vm::collections::OxSet::new(),
+        ))),
         _ => Value::None,
     }
 }

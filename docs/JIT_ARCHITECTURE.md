@@ -1,11 +1,12 @@
 # OxigenLang JIT Architecture
 
 > **Status: experimental.** The baseline JIT is off by default. It's
-> feature-gated and ships as an opt-in build. It already outperforms
-> CPython on a subset of workloads (tight integer loops, closures) but
-> still trails on call-heavy workloads (recursion, struct methods). It
-> will stay experimental until every bench in the suite at
-> `example/bench_*.oxi` beats CPython 3.14.
+> feature-gated and ships as an opt-in build. As of the self-recursion
+> direct-call and specialized-entry work, it now **beats CPython 3.14 on
+> every bench in the suite** at `example/bench_*.oxi` (4.6×–19.8×,
+> including the formerly-trailing recursion and struct-method cases). It
+> stays labelled experimental pending broader real-world hardening, not
+> because any suite bench is behind. See [Benchmark status](#benchmark-status).
 
 This document covers:
 
@@ -15,6 +16,7 @@ This document covers:
 - [Architecture overview](#architecture-overview)
 - [Supported opcodes](#supported-opcodes)
 - [Inline caches and fast paths](#inline-caches-and-fast-paths)
+- [Specialized entries](#specialized-entries)
 - [Safety invariants](#safety-invariants)
 - [Benchmark status](#benchmark-status)
 - [Troubleshooting](#troubleshooting)
@@ -29,9 +31,16 @@ a handful of inline fast paths (int arithmetic, compare-branch, local
 access, the `Call` guard) that skip the helper for the common case.
 
 **What it is NOT.** Not an optimizing JIT. No inlining, no escape
-analysis, no type specialization beyond tag-check fast paths. No LLVM
-backend. No concurrent compilation. No deoptimization to a separate
-tier — just a clean bailout back to the interpreter.
+analysis, no LLVM backend, no concurrent compilation. The only type
+specialization is a register-args integer entry point for functions
+whose params are int-typed (see [Specialized entries](#specialized-entries))
+plus the per-op tag-check fast paths — there's no speculative type
+feedback beyond that. No deoptimization to a separate tier — just a
+clean bailout back to the interpreter.
+
+The codegen backend is Cranelift 0.131 with `opt_level=speed` (its
+egraph mid-end + ISLE peephole rules), selected because it matches or
+beats `opt_level=none` on every loop bench in the suite.
 
 **Goals.**
 
@@ -39,10 +48,10 @@ tier — just a clean bailout back to the interpreter.
    JIT takes past Rust's `Rc` / borrow-checker rules is audited and
    documented.
 2. Be **correct** on every program the interpreter runs correctly. All
-   424+ unit tests and every `.oxi` in `example/` pass in `--jit`,
+   450+ unit tests and every `.oxi` in `example/` pass in `--jit`,
    `default`, and `--no-jit` modes.
-3. Beat CPython 3.14 on every bench in the suite before we drop the
-   "experimental" label. Currently we beat it on 3/7; see
+3. Beat CPython 3.14 on every bench in the suite. **Met: 7/7** as of the
+   self-recursion direct-call + specialized-entry work; see
    [Benchmark status](#benchmark-status).
 
 ## Enabling the JIT
@@ -163,18 +172,31 @@ oxigen --no-jit script.oxi   # interpreter only
 present on `VM` regardless of the feature flag. When the feature is
 off it's a ZST and every method is a no-op.
 
-**`JitInner` (in `core/src/jit/engine.rs`)** — the actual Cranelift
-module + compiled-thunk cache. Holds:
+**`JitInner` (in `core/src/jit/engine/mod.rs`)** — the actual Cranelift
+module + compiled-thunk cache. The engine outgrew a single `engine.rs`
+and is now an `engine/` module: `mod.rs` (the `compile_function`
+dispatch loop), `helpers.rs` (the `extern "C"` helper table and its
+`FuncId`/`FuncRef` registration), `cache.rs` (inline-cache entry
+layouts), `counters.rs` (instrumentation), and `defs.rs` (VM-offset
+helpers + the `EntryKind` / `SpecializedEntryKind` enums). `JitInner`
+holds:
 - `module: JITModule` — Cranelift JIT module.
+- `ctx`, `fbc` — reused Cranelift `Context` and `FunctionBuilderContext`.
 - `compiled: HashMap<*const Function, Entry>` — thunk cache keyed by
-  `Rc::as_ptr(&Function)`.
+  `Rc::as_ptr(&Function)`. `Entry` is `Compiled { entries }` or
+  `Failed` (so a rejected function is never re-attempted).
 - `retained: HashMap<*const Function, Rc<Function>>` — keeps
   `Function`s alive so the pointer keys stay valid.
+- `helpers: HelperIds` — cached helper `FuncId`s, registered once at
+  module init.
 - `pending_error: Option<VMError>` — see [Safety
   invariants](#safety-invariants); accessed across the thunk-call
   boundary with volatile pointer reads/writes.
 - `current_stop_depth: usize` — the frame depth the currently-running
   thunk should execute until.
+- `next_id: u32` — monotonic counter for unique thunk symbol names.
+- `counters: Box<JitCounters>` — per-helper FFI call counters; the box
+  address is baked into emitted IR (see `counters.rs`).
 - `global_caches`, `call_caches`, `method_caches`, `field_caches` —
   per-call-site inline caches (see next section).
 
@@ -233,10 +255,16 @@ u32`. Status codes:
 ## Supported opcodes
 
 The JIT's scan (in `core/src/jit/scan.rs`) rejects any function that
-contains an opcode outside the allow-list. Current allow-list:
+contains an opcode outside the allow-list (the single source of truth
+is `is_supported` in that file). Alongside the allow-list check, the
+scan collects branch targets and computes two flags consumed by the
+translator: `may_capture_upvalues` (set by any `Closure` op — gates
+whether `Return` can inline `close_upvalues`) and `touches_heap_values`
+(set by any op that can place an Rc-bearing `Value` on the stack —
+when false, `Return` skips the stack-drop loop). Current allow-list:
 
 **Constants / values.** `Constant`, `None`, `True`, `False`, `Pop`,
-`Dup`, `BuildArray` (via helper).
+`Dup`, `BuildArray`, `Index`, `TypeWrap` (the last three via helper).
 
 **Arithmetic.** `Add`, `Subtract`, `Multiply`, `Divide`, `Modulo` —
 inline int+int fast path for Add/Sub/Mul, fallible helper for the
@@ -246,7 +274,12 @@ rest.
 `GreaterEqual` — inline int fast path, fused with `JumpIfFalse` /
 `JumpIfTrue` when followed.
 
-**Logic.** `Not`, `Negate`.
+**Logic / unary.** `Not`, `Negate`.
+
+**Bitwise.** `BitAnd`, `BitOr`, `BitXor`, `BitNot`, `ShiftLeft`,
+`ShiftRight` (via helper).
+
+**Logging.** `Log` (via helper).
 
 **Locals.** `GetLocal`, `SetLocal` — inline fast path for
 Integer/Float, slow-path helper for everything else. Peephole fusions
@@ -268,13 +301,15 @@ for `GetLocal+Const+Arith+SetLocal`, `GetLocal+GetLocal+Arith+SetLocal`,
 `SetField` (field IC), `DefineMethod`, `MethodCall` (inline IR guard
 for `arg_count <= 1` + `jit_op_method_call_ic`).
 
-**Not supported (yet).** `Log` / `println`, `BuildTuple` /
-`BuildMap` / `BuildSet`, `Index` / `IndexAssign` / `Slice`, `Import` /
-`GetModuleField`, `IsMut` / `IsType` / `IsTypeMut`, `TypeWrap`,
+**Not supported (yet).** `Increment` / `Decrement`, `BuildTuple` /
+`BuildMap` / `BuildSet`, `IndexAssign` / `Slice`, `Import` /
+`GetModuleField`, `IsMut` / `IsType` / `IsTypeMut`,
 `ErrorConstruct` / `Guard` / `Fail` / `ValueConstruct`,
 `DefinePattern` / `TestPattern`, `StringInterp`, `Unpack`, `Main`,
-`Unless`, `IterLen` / `IterGet`, bitwise ops, `CallNamed`.
-Functions that contain any of these are kept on the interpreter.
+`Unless`, `IterLen` / `IterGet`, the enum opcodes (`EnumDef`,
+`MakeEnumVariantUnit` / `Tuple` / `Struct`), `CallNamed`, and
+`MethodCallNamed`. Functions that contain any of these are kept on
+the interpreter.
 
 ## Inline caches and fast paths
 
@@ -323,6 +358,43 @@ emitted IR as an `iconst`, so hits are a single indirect load.
   `Vec::len`, pushes a `JitFrame`, and `call_indirect`s the cached
   thunk. See [Safety invariants](#safety-invariants) for the
   memory-ownership accounting.
+
+## Specialized entries
+
+`compile_function` can emit up to two entry points per function. The
+**generic** entry is always present: `extern "C" fn(*mut VM) -> u32`,
+args read off the VM stack through `stack_view`. A **specialized**
+entry is emitted only when the function passes the eligibility check in
+`compute_specialized_entry_eligibility` (`core/src/compiler/slot_types.rs`).
+Its ABI passes int args in registers and returns the result as a raw
+`i64`: `fn(*mut VM, i64, ..., i64) -> (u32 status, i64 payload)`. The
+status/payload pair funnels through a single `exit_block` so every
+return site (success, error, bailout) shares one return path.
+
+`CompiledEntries` carries `generic`, the optional `specialized` raw
+pointer, its arity, and a `SpecializedEntryKind` discriminator (mirrored
+to `ObjClosure` via the `SPECIALIZED_KIND_*` constants so call sites can
+gate direct calls on a *real* body existing):
+
+| `SpecializedEntryKind` | Body |
+|---|---|
+| `ForwardTrampoline` | A2 adapter: boxes i64 args → calls the generic entry → unboxes. Correct but not a profitable direct-call target. |
+| `NativeIntBody` | The real specialized body: runs the opcodes with i64-resident args, no box/unbox round trip. |
+| `NativeIntBodyWithClosure` | B2.2 closure-aware body: also takes `*const ObjClosure` as a register arg so `GetUpvalue` reads through the register instead of walking the `JitFrame`, and inlines the closure-aware `Return` without `jit_op_return`'s FFI crossing. |
+
+**Eligibility cascade** (`SpecEligibilityOutcome` records the first rule
+that rejected a function, for per-reason counters): rejected if the
+function takes no args, any param isn't int-typed (or an int-mirror
+candidate), any param is captured by an upvalue, the body has a
+`Closure` op, the body has upvalue ops (lifted only for the
+closure-aware kind), there's no `Return`, there's no `Call`, or a
+`Return` IP is statically unreachable. Otherwise it's `Eligible`.
+
+Related per-param analysis in `slot_types.rs` drives the inline fast
+paths even when no specialized entry is emitted: `int_mirror_param_slots`
+(read-only `Value` params that get an entry-time tag-guarded i64 mirror)
+and `captured_slots` (never virtualized, so a nested closure's capture
+never sees a stale backing slot).
 
 ## Safety invariants
 
@@ -419,46 +491,61 @@ the cache is considered empty (raw pointer is null).
 Reproduce with:
 
 ```bash
-cargo build --release --features jit
-OXIGEN_BENCH_CPU=5 python3 scripts/bench.py --python --runs 10 --warmups 3 \
-    example/bench_fib.oxi \
-    example/bench_arith.oxi \
-    example/bench_loop.oxi \
-    example/bench_nested_loop.oxi \
-    example/bench_collatz.oxi \
-    example/bench_closure.oxi \
-    example/bench_struct_method.oxi
+cargo build --release --features jit -p oxigen
+OXIGEN_JIT=1 python3 scripts/bench.py --skip-build --oxigen-bin ./target/release/oxigen \
+    --runs 10 --warmups 3 \
+    bench_fib bench_arith bench_loop bench_nested_loop \
+    bench_collatz bench_closure bench_struct_method
 ```
 
-Latest measurements (CPython 3.14, Linux x86-64, best-of-10,
-CPU-pinned):
+Latest measurements (CPython 3.14, macOS arm64 / Apple Silicon,
+median-of-10, 3 warmups, eager JIT via `OXIGEN_JIT=1`). Medians in ms;
+"jit vs py" is python ÷ jit:
 
-| Bench | Oxigen `--jit` | Python 3.14 | Ratio | Winner |
-|---|---|---|---|---|
-| `bench_loop` (tight int loop) | 24.9 ms | 74.0 ms | **2.97×** | Oxigen ✓ |
-| `bench_nested_loop` (nested int loops) | 13.3 ms | 26.7 ms | **2.02×** | Oxigen ✓ |
-| `bench_closure` (upvalue hot call) | 39.3 ms | 51.7 ms | **1.31×** | Oxigen ✓ |
-| `bench_arith` (recursive mixed arithmetic) | 67.2 ms | 56.5 ms | 0.84× | Python |
-| `bench_fib` (recursive `fib(30)`) | 147.0 ms | 104.4 ms | 0.71× | Python |
-| `bench_collatz` (mod/div loop) | 436.7 ms | 323.8 ms | 0.74× | Python |
-| `bench_struct_method` (hot method loop) | 191.2 ms | 69.7 ms | 0.36× | Python |
+| Bench | `--no-jit` | default | `--jit` | Python 3.14 | jit vs py |
+|---|---|---|---|---|---|
+| `bench_loop` (tight int loop) | 57.6 | 3.0 | 2.9 | 45.4 | **15.76×** ✓ |
+| `bench_collatz` (mod/div loop) | 424.4 | 10.6 | 10.6 | 209.9 | **19.78×** ✓ |
+| `bench_struct_method` (hot method loop) | 145.7 | 7.9 | 7.8 | 64.6 | **8.27×** ✓ |
+| `bench_nested_loop` (nested int loops) | 16.2 | 2.7 | 2.7 | 17.9 | **6.54×** ✓ |
+| `bench_fib` (recursive `fib(30)`) | 178.4 | 19.3 | 19.3 | 102.8 | **5.33×** ✓ |
+| `bench_arith` (recursive mixed arithmetic) | 74.9 | 10.8 | 10.3 | 53.5 | **5.19×** ✓ |
+| `bench_closure` (upvalue hot call) | 41.6 | 8.4 | 8.3 | 38.0 | **4.61×** ✓ |
+
+The JIT now wins **all 7** benches (4.6×–19.8×). The previously-trailing
+recursion (`bench_fib`, `bench_arith`) and method (`bench_struct_method`)
+cases were closed by the **self-recursion direct-call** path (A3 — a
+guarded direct `call` to the function's own specialized entry, args in
+registers; see [Specialized entries](#specialized-entries) and
+`OpCode::Call` in `engine/mod.rs`) and the **closure-aware specialized
+dispatch** in the IC hit block.
+
+> **Note on prior table.** Earlier revisions of this section reported the
+> JIT losing on `bench_fib` (0.71×), `bench_arith` (0.84×), `bench_collatz`
+> (0.74×), and `bench_struct_method` (0.36×) on Linux x86-64. Those
+> numbers predate the A3 / specialized-entry work and no longer hold. The
+> environment also differs (the old table was Linux x86-64, CPU-pinned;
+> the above is macOS arm64), so absolute ms are not comparable across the
+> two — but the qualitative reversal (3/7 → 7/7 wins) is robust and
+> reproducible with the command above.
 
 **Where the JIT wins.** Tight numeric loops (int arithmetic fast path,
-fused compare+branch, local-access peephole). Closures (upvalue
-access stays in native code once both the outer and inner function
-are tiered up).
+fused compare+branch, local-access peephole), self-recursion and
+closures (which now stay in native code via direct/specialized calls),
+and method loops (method IC + specialized dispatch).
 
-**Where it loses.** Call-heavy and method-heavy code. Each call pays
-for:
-
-- Two FFI crossings per Call (`jit_op_call_{hit,miss}` + `invoke_thunk`
-  for nested invocations).
-- A `JitFrame` push through the `jit_frame_view` ptr + Rc bookkeeping.
-- The `jit_executing` flag save/restore.
-- `pending_error` volatile writes.
-
-CPython's hand-optimized C call path is ~38 ns/call; Oxigen's is
-~50-60 ns/call. Closing that on a baseline JIT is the remaining work.
+**Remaining headroom (not a loss).** A general *non-self* monomorphic
+call to a function with a plain `NativeIntBody` specialized entry still
+routes through the generic `fn(*mut VM) -> u32` thunk rather than the
+register-args specialized entry — roughly **~10 ns/call** on a
+call-bound microbenchmark (the JIT still beats CPython there). The
+codebase scaffolds this opportunity with the `IC_CALLEE_HAS_SPEC_ENTRY`
+probe counter at the IC hit block ("A4"). Converting that path is a
+measurement-driven follow-up: it touches the most regression-prone
+emission code (an earlier closure-aware variant *"regressed every bench
+that didn't dispatch through it — `bench_arith` ran 254% slower"*), so it
+must be gated and benchmarked against the full suite to prove no
+regression before it lands.
 
 ## Troubleshooting
 
@@ -496,10 +583,16 @@ stderr).
 
 ## See also
 
-- `core/src/jit/engine.rs` — Cranelift IR emission and helper tables.
+- `core/src/jit/engine/mod.rs` — Cranelift IR emission and the
+  `compile_function` dispatch loop.
+- `core/src/jit/engine/{helpers,cache,counters,defs}.rs` — helper
+  registration, inline-cache layouts, instrumentation counters, and
+  VM-offset/`EntryKind` definitions, respectively.
 - `core/src/jit/runtime.rs` — `extern "C"` helpers called from
   compiled code.
 - `core/src/jit/scan.rs` — opcode allow-list and fixed-length table.
+- `core/src/compiler/slot_types.rs` — per-slot type analysis and
+  specialized-entry eligibility.
 - `core/src/vm/mod.rs` — `VM`, `CallFrame`, `JitFrame`, `StackView`,
   `JitFrameView`, `invoke_thunk` call path.
 - `core/tests/jit_fallback.rs` — regression tests that run every

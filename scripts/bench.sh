@@ -4,10 +4,22 @@
 # harness — pure bash + awk + jq.
 #
 # Usage:
-#   scripts/bench.sh                        # full paired suite
-#   scripts/bench.sh bench_arith bench_fib  # specific benchmarks
-#   WARMUPS=3 RUNS=15 scripts/bench.sh      # tune warmups/runs
-#   OXIGEN_BENCH_CPU=3 scripts/bench.sh     # pin to a specific CPU
+#   scripts/bench.sh                                # full paired suite
+#   scripts/bench.sh bench_arith bench_fib          # specific benchmarks
+#   scripts/bench.sh --warmup=8 --runs=15           # tune warmups/runs
+#   WARMUPS=3 RUNS=15 scripts/bench.sh              # legacy env-var form
+#   OXIGEN_BENCH_CPU=3 scripts/bench.sh             # pin to a specific CPU
+#   OXIGEN_BIN_B=/path/to/oxigen scripts/bench.sh   # A/B between two oxigen
+#                                                   # builds, both --jit, fully
+#                                                   # interleaved with the rest
+#                                                   # of the round so thermal
+#                                                   # drift hits both equally
+#
+# Flags (override env vars):
+#   --warmup=N | --warmups=N | --warmup N   untimed rounds per variant
+#   --runs=N                                timed rounds per variant
+#   --                                      stop flag parsing
+# Anything else is treated as a positional benchmark name.
 #
 # For each benchmark we run V variants (oxigen --jit, oxigen
 # default, oxigen --no-jit, python3, optional bun (ts), optional
@@ -40,11 +52,46 @@ set -euo pipefail
 # count.
 WARMUPS="${WARMUPS:-3}"
 RUNS="${RUNS:-5}"
+
+# Flag parsing — `--warmup=8 --runs=15` overrides the env-var defaults
+# above. Unrecognised non-flag args drop through as positional benchmark
+# names (consumed by `discover_benchmarks` below).
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --warmup=*|--warmups=*) WARMUPS="${1#*=}"; shift ;;
+        --warmup|--warmups)
+            [[ $# -ge 2 ]] || { echo "error: $1 needs a value" >&2; exit 1; }
+            WARMUPS="$2"; shift 2 ;;
+        --runs=*) RUNS="${1#*=}"; shift ;;
+        --runs)
+            [[ $# -ge 2 ]] || { echo "error: --runs needs a value" >&2; exit 1; }
+            RUNS="$2"; shift 2 ;;
+        --) shift; POSITIONAL+=("$@"); break ;;
+        --*) echo "error: unknown flag: $1" >&2; exit 1 ;;
+        *) POSITIONAL+=("$1"); shift ;;
+    esac
+done
+# `${arr[@]+"${arr[@]}"}` expands to nothing when POSITIONAL is empty,
+# avoiding bash 3.2's "unbound variable" on an empty array under `set -u`.
+set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
+
+# Validate numeric.
+[[ "$WARMUPS" =~ ^[0-9]+$ ]] || { echo "error: --warmup must be a non-negative integer (got: $WARMUPS)" >&2; exit 1; }
+[[ "$RUNS"    =~ ^[0-9]+$ ]] || { echo "error: --runs must be a non-negative integer (got: $RUNS)" >&2; exit 1; }
+[[ "$RUNS" -ge 1 ]] || { echo "error: --runs must be >= 1 (got: $RUNS)" >&2; exit 1; }
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BENCH_DIR="$REPO_ROOT/example"
 REPORT_DIR="$REPO_ROOT/benchmark_reports"
 OXIGEN_BIN="${OXIGEN_BIN:-$REPO_ROOT/target/release/oxigen}"
+# A/B mode: when OXIGEN_BIN_B is set to a second oxigen binary, an
+# "oxigen-B --jit" variant is added to the interleaved harness so the
+# two builds are compared under identical thermal conditions per round.
+# The B-binary is also reported with min/median/p50 in the summary
+# table along with its ratio against OXIGEN_BIN.
+OXIGEN_BIN_B="${OXIGEN_BIN_B:-}"
 PYTHON_BIN="${PYTHON_BIN:-$(command -v python3)}"
 BUN_BIN="${BUN_BIN:-$(command -v bun 2>/dev/null || true)}"
 NODE_BIN="${NODE_BIN:-$(command -v node 2>/dev/null || true)}"
@@ -53,19 +100,38 @@ NODE_BIN="${NODE_BIN:-$(command -v node 2>/dev/null || true)}"
 # require --experimental-strip-types. Default to off; probe at runtime.
 NODE_TS_ARGS=()
 if [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]]; then
-    # Build a tiny .ts file in /tmp and see if node chokes without the flag.
-    _tmp_ts="$(mktemp --suffix=.ts)"
+    # Build a tiny .ts file and see if node chokes without the flag.
+    # Portable temp: BSD/macOS mktemp lacks GNU's `--suffix`, so use a
+    # temp dir with an explicit template (accepted by both) and a named
+    # file inside it.
+    _tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/oxbench.XXXXXX")"
+    _tmp_ts="$_tmp_dir/probe.ts"
     printf 'const x: number = 1; x;\n' > "$_tmp_ts"
     if ! "$NODE_BIN" "$_tmp_ts" >/dev/null 2>&1; then
         NODE_TS_ARGS=(--experimental-strip-types)
     fi
-    rm -f "$_tmp_ts"
+    rm -rf "$_tmp_dir"
 fi
 
 # Optional CPU pinning (mirrors scripts/bench.py's OXIGEN_BENCH_CPU).
+# taskset is Linux-only; on macOS there's no taskset, so pinning is simply
+# skipped (the `command -v` guard fails) — the harness still runs.
 TASKSET_PREFIX=()
 if [[ -n "${OXIGEN_BENCH_CPU:-}" ]] && command -v taskset >/dev/null 2>&1; then
     TASKSET_PREFIX=(taskset -c "$OXIGEN_BENCH_CPU")
+fi
+
+# Scalar forms for safe interpolation into the command strings below.
+# bash 3.2 (stock macOS) errors on `"${arr[*]}"` for an EMPTY array under
+# `set -u`, so collapse each optional prefix to a plain string once here,
+# with a trailing space only when non-empty.
+TASKSET_STR=""
+if [[ ${#TASKSET_PREFIX[@]} -gt 0 ]]; then
+    TASKSET_STR="${TASKSET_PREFIX[*]} "
+fi
+NODE_TS_STR=""
+if [[ ${#NODE_TS_ARGS[@]} -gt 0 ]]; then
+    NODE_TS_STR="${NODE_TS_ARGS[*]} "
 fi
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -81,6 +147,10 @@ command -v awk >/dev/null 2>&1 \
     || die "Oxigen binary not found at $OXIGEN_BIN. Build with 'cargo build --release --features jit -p oxigen' first."
 [[ -x "$PYTHON_BIN" ]] \
     || die "python binary not found ($PYTHON_BIN)"
+if [[ -n "$OXIGEN_BIN_B" ]]; then
+    [[ -x "$OXIGEN_BIN_B" ]] \
+        || die "OXIGEN_BIN_B set but not executable: $OXIGEN_BIN_B"
+fi
 
 discover_benchmarks() {
     if [[ $# -gt 0 ]]; then
@@ -122,18 +192,39 @@ has_node_ts() {
     has_ts_peer "$stem" && [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]]
 }
 
+# Timing backend, decided once. bash 5's $EPOCHREALTIME (microsecond
+# precision, no fork) when available; otherwise the bash `time` builtin
+# (millisecond precision), which works on macOS's stock bash 3.2. For
+# sub-millisecond timing on macOS, install a newer bash (`brew install
+# bash`) — this script then picks it up automatically, no flag needed.
+if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    HAVE_EPOCHREALTIME=1
+else
+    HAVE_EPOCHREALTIME=0
+fi
+
 # Time a single command-line invocation. Returns elapsed seconds as a
 # decimal, printed to stdout. Stderr/stdout from the command are
 # silenced so they don't leak into the parent script's output.
 time_one() {
     local cmd_str="$*"
-    # Use bash's $EPOCHREALTIME (decimal seconds, microsecond
-    # precision) so we don't fork `date` per call.
-    local s e
-    s=$EPOCHREALTIME
-    eval "$cmd_str" >/dev/null 2>&1
-    e=$EPOCHREALTIME
-    awk -v s="$s" -v e="$e" 'BEGIN { printf "%.6f", e - s }'
+    if [[ $HAVE_EPOCHREALTIME -eq 1 ]]; then
+        # $EPOCHREALTIME: decimal seconds, microsecond precision, no fork.
+        local s e
+        s=$EPOCHREALTIME
+        eval "$cmd_str" >/dev/null 2>&1 || true
+        e=$EPOCHREALTIME
+        awk -v s="$s" -v e="$e" 'BEGIN { printf "%.6f", e - s }'
+    else
+        # Fallback (e.g. macOS bash 3.2, which has no $EPOCHREALTIME): the
+        # `time` reserved word measures the eval; TIMEFORMAT='%R' prints real
+        # seconds to the group's stderr, captured below. The command's own
+        # output goes to /dev/null; `|| true` keeps a non-zero exit from the
+        # benched command from tripping `set -e` inside the substitution.
+        local t
+        t=$( { TIMEFORMAT='%R'; time eval "$cmd_str" >/dev/null 2>&1 || true; } 2>&1 )
+        awk -v t="$t" 'BEGIN { printf "%.6f", t + 0 }'
+    fi
 }
 
 # A/B/A/B/... interleaved runner. Every variant runs ONCE per round;
@@ -158,16 +249,21 @@ run_one_benchmark() {
     # thermal state per round. Order here just controls how variants
     # are reported.
     local specs=()
-    specs+=("oxigen --jit"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN --jit $oxi_file")
-    specs+=("oxigen default"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN $oxi_file")
+    specs+=("oxigen --jit"$'\t'"${TASKSET_STR}$OXIGEN_BIN --jit $oxi_file")
+    # A/B mode: B variant runs back-to-back with A in the same round
+    # so both observe the same thermal/cache state.
+    if [[ -n "$OXIGEN_BIN_B" ]]; then
+        specs+=("oxigen-B --jit"$'\t'"${TASKSET_STR}$OXIGEN_BIN_B --jit $oxi_file")
+    fi
+    specs+=("oxigen default"$'\t'"${TASKSET_STR}$OXIGEN_BIN $oxi_file")
     if has_bun_ts "$stem"; then
-        specs+=("bun (ts)"$'\t'"${TASKSET_PREFIX[*]} $BUN_BIN run $ts_file")
+        specs+=("bun (ts)"$'\t'"${TASKSET_STR}$BUN_BIN run $ts_file")
     fi
     if has_node_ts "$stem"; then
-        specs+=("node (ts)"$'\t'"${TASKSET_PREFIX[*]} $NODE_BIN ${NODE_TS_ARGS[*]} $ts_file")
+        specs+=("node (ts)"$'\t'"${TASKSET_STR}$NODE_BIN ${NODE_TS_STR}$ts_file")
     fi
-    specs+=("python3"$'\t'"${TASKSET_PREFIX[*]} $PYTHON_BIN $py_file")
-    specs+=("oxigen --no-jit"$'\t'"${TASKSET_PREFIX[*]} $OXIGEN_BIN --no-jit $oxi_file")
+    specs+=("python3"$'\t'"${TASKSET_STR}$PYTHON_BIN $py_file")
+    specs+=("oxigen --no-jit"$'\t'"${TASKSET_STR}$OXIGEN_BIN --no-jit $oxi_file")
 
     local n_variants=${#specs[@]}
     local tmp_dir
@@ -331,6 +427,41 @@ summarize_one() {
     ' "$out_json"
 }
 
+# A/B summary row when OXIGEN_BIN_B is in use. Reports min, median, and
+# B/A min-ratio for both binaries side-by-side. < 1.00 means B is faster.
+summarize_ab() {
+    local stem=$1
+    local out_json="$REPORT_DIR/${stem}.native.json"
+    jq -r --arg stem "$stem" '
+        def fmt1: . * 10 | round / 10 | tostring;
+        def fmtx: . * 1000 | round / 1000 | tostring + "x";
+        def median(arr):
+            (arr | sort) as $s
+            | ($s | length) as $n
+            | if $n == 0 then null
+              elif ($n % 2) == 1 then $s[($n - 1) / 2]
+              else (($s[$n/2 - 1] + $s[$n/2]) / 2)
+              end;
+        def by_name($n): [.results[] | select(.command | startswith($n))][0];
+        (by_name("oxigen --jit"))   as $a
+        | (by_name("oxigen-B --jit")) as $b
+        | ($a.min * 1000)                          as $a_min
+        | (median([$a.times[] | . * 1000]))        as $a_med
+        | ($b.min * 1000)                          as $b_min
+        | (median([$b.times[] | . * 1000]))        as $b_med
+        | [
+            $stem,
+            ($a_min | fmt1),
+            ($a_med | fmt1),
+            ($b_min | fmt1),
+            ($b_med | fmt1),
+            (($b_min / $a_min) | fmtx),
+            (($b_med / $a_med) | fmtx)
+          ]
+        | @tsv
+    ' "$out_json"
+}
+
 # Step 0 (plan): emit JIT min/p50 in ms for the under-10ms pass criterion.
 # `min < 10ms AND p50 comfortably below 11ms` — bare min can be a thermal
 # outlier on a desktop. Median is computed in jq from `.times[]`.
@@ -389,7 +520,7 @@ latest_md="$REPORT_DIR/latest-native.md"
 {
     echo "# Oxigen vs Python — native harness (interleaved A/B)"
     echo
-    echo "- Generated: \`$(date -u -Iseconds)\`"
+    echo "- Generated: \`$(date -u +%Y-%m-%dT%H:%M:%SZ)\`"
     echo "- Host:      \`${HOSTNAME:-$(uname -n)}\`"
     echo "- Kernel:    \`$(uname -srm)\`"
     echo "- Oxigen:    \`$("$OXIGEN_BIN" --version 2>/dev/null | head -1 || echo unknown)\`"
@@ -442,6 +573,21 @@ latest_md="$REPORT_DIR/latest-native.md"
             | awk -F'\t' '{printf "| %s | %s | %s |\n", $1,$2,$3}'
     done
     echo
+    if [[ -n "$OXIGEN_BIN_B" ]]; then
+        echo "## A/B comparison: \`$OXIGEN_BIN\` vs \`$OXIGEN_BIN_B\` (--jit)"
+        echo
+        echo "Both binaries run interleaved A/B/A/B per round so they share"
+        echo "the same thermal/cache state. \`B/A < 1.00\` means OXIGEN_BIN_B"
+        echo "(B) is faster than OXIGEN_BIN (A); \`> 1.00\` means slower."
+        echo
+        echo "| benchmark | A min | A p50 | B min | B p50 | B/A min | B/A p50 |"
+        echo "| --- | ---: | ---: | ---: | ---: | ---: | ---: |"
+        for stem in "${benchmarks[@]}"; do
+            summarize_ab "$stem" \
+                | awk -F'\t' '{printf "| %s | %s | %s | %s | %s | %s | %s |\n", $1,$2,$3,$4,$5,$6,$7}'
+        done
+        echo
+    fi
     echo "Per-benchmark JSON (per-round samples + summary stats) in \`$REPORT_DIR/\`."
 } | tee "$md" > "$latest_md"
 

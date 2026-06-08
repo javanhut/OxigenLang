@@ -2582,6 +2582,14 @@ impl Evaluator {
         match operator {
             "!" | "not" => self.eval_bang_operator(right),
             "-" => self.eval_minus_prefix(right, span),
+            "~" => match right.as_ref() {
+                Object::Integer(n) => Rc::new(Object::Integer(!n)),
+                _ => self.runtime_error(
+                    span,
+                    &format!("unknown operator: ~{}", right.type_name()),
+                    Some("bitwise ~ requires an integer"),
+                ),
+            },
             _ => self.runtime_error(
                 span,
                 &format!("unknown operator: {}{}", operator, right.type_name()),
@@ -2803,6 +2811,13 @@ impl Evaluator {
             ">=" => Rc::new(Object::Boolean(left >= right)),
             "==" => Rc::new(Object::Boolean(left == right)),
             "!=" => Rc::new(Object::Boolean(left != right)),
+            "&" => Rc::new(Object::Integer(left & right)),
+            "|" => Rc::new(Object::Integer(left | right)),
+            "^" => Rc::new(Object::Integer(left ^ right)),
+            // Shift count masked to low 6 bits via `as u32` + wrapping_*,
+            // matching vm::binary_shl/shr and the JIT's ishl/sshr.
+            "<<" => Rc::new(Object::Integer(left.wrapping_shl(right as u32))),
+            ">>" => Rc::new(Object::Integer(left.wrapping_shr(right as u32))),
             _ => self.runtime_error(
                 span,
                 &format!("unknown operator: INTEGER {} INTEGER", operator),

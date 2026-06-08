@@ -55,7 +55,7 @@ Legend: ☐ not started · ◐ in progress · ✅ landed · ❌ attempted & aban
 | ID | Task | Status | Prereqs | Target gain | Scope |
 | --- | --- | --- | --- | --- | --- |
 | **Phase A — Representation (foundational)** | | | | | |
-| A1 | NaN-box Value (full 8 B migration) | ◐ partial (A1.1b landed; A1.2 deferred — see Decisions Log 2026-04-23 pivot) | — | 30–50% geomean | vm/value.rs, jit/engine.rs, all VM consumers |
+| A1 | NaN-box Value (full 8 B migration) | ❌ abandoned (data-driven, see A1.2.5 below) | — | — | vm/value.rs, jit/engine.rs, all VM consumers |
 | A2 | Small-integer tagging (SMI) | ☐ | A1 | 20–30% on int-heavy benches | vm/value.rs, jit arith paths |
 | A3 | Feedback vectors (record-only) | ☐ | — | 0% standalone — enables B3 | jit/engine.rs, jit/runtime.rs |
 | **Phase B — Typed JIT frames + unboxed execution** (revised 2026-04-23) | | | | | |
@@ -137,6 +137,28 @@ Each entry specifies the concrete change, what test to add, the perf gate, and t
 - The JIT assumes stack stride = `VALUE_SIZE = 40`. Every `imul(slot, 40)` becomes `imul(slot, 8)` (or `shl 3`). Update `emit_inline_stack_pop_one`, `emit_copy_value`, every stack-offset computation.
 - `f64::NAN` bit pattern is non-canonical on most platforms; normalize all NaNs to a single sentinel or accept the ambiguity.
 - Drop semantics: cloning a pointer-bearing Value must still bump Rc strong; decoding must re-cast the 48-bit pointer back to `Rc<T>` through `Rc::from_raw`. Document the invariant.
+
+---
+
+### A1.2.5 · NaN-boxed Value representation — abandoned
+
+**Status:** ❌ abandoned, data-driven.
+
+A microbenchmark comparing the current enum-based `Value` representation against an 8-byte NaN-boxed representation showed NaN-boxing regressing inline int+int Add performance by **roughly 23–42%** across all three measured access patterns:
+
+| Pattern | Working set | nanbox / enum |
+| --- | --- | --- |
+| Tight 3-slot loop | L1-resident (48 B) | 1.27× |
+| 128-slot scan | L1-resident (1–2 KB) | 1.42× |
+| Stride-7 walk over 1024 slots | L1-resident (8–16 KB) | 1.23× |
+
+Source: `nanbox_ubench.rs` (rustc -O -C target-cpu=native, 7-trial median, 100M / 10M ops). Bench computed both representations' inline Add fast paths against an in-memory `Vec<u8>` simulating the VM stack.
+
+**Why the cache-density argument didn't materialize:** Oxigen's hot working sets — locals, operand stack slots, closure call paths, recursion benches — fit comfortably in L1d (32 KB typical) under either representation. With no L1 pressure to relieve, the per-operation decode/encode overhead (tag masking + comparison, SMI sign-extension via `(payload << 16) >> 16`, payload re-encoding on store) is paid in full and gets nothing back. Pattern 2 being *worse* than Pattern 1 confirms there's no locality benefit to be had at these stack sizes — only added arithmetic.
+
+**Why NaN-box wins for SpiderMonkey/V8/LuaJIT but not us:** those engines benefit from compact values across the entire runtime value graph — object properties, arrays, interpreter frames, inline caches, boxed primitives, hidden-class metadata, GC-managed heap structures. NaN-boxing helps because the *whole system* is bottlenecked on tagged-value memory traffic. For Oxigen, unless `Value` appears heavily in heap objects, arrays, structs, closures, captured environments, and call frames at scale that exceeds L1, the representation change does not pay off.
+
+**Decision:** do not pursue NaN-boxing for the current JIT roadmap. Revisit only if future workloads (struct-heavy / object-heavy code, deep recursion, large arrays) regularly push hot value-memory regions past L1 capacity. The Phase 2 consumer-decoupling work (commits `7ac4524..74ead50` on `jit_performance_improvements` — `Value::repr()`, `as_X()` accessors, ValueRepr view enum) is preserved as harmless refactoring; it makes any *future* representation change easier without committing to NaN-box specifically.
 
 ---
 
@@ -557,6 +579,8 @@ Record each task's outcome here. Keep terse.
 | 2026-04-23 | **Pivot decision: A1.2 → B2 (typed JIT frames)** | ☐ (recording) | After A1.1a+b diminishing returns on struct_method (flat) and persistent bench_loop regression, user refocused on typed JIT frames rather than continuing Value-size shrinkage. Key insight: "hot integer code shouldn't traffic in `Value` at all" — unboxing locals alone under-delivers because recursive calls re-box. Phase B revised to 5 sub-tasks (B2.0–B2.4); see Phase B section above. A1.2 (full NaN-box) deferred — may be revisited later as foundation for B3 tier-2 + D1 hidden classes. A1 marked `◐ partial` in task table. |
 | 2026-04-23 | B2.0 typed slot analysis | ✅ landed | 15 tests pass (unit + 4 integration tests against compiled bench source). Forward abstract interpretation; 3-element lattice `Bottom/Int64/Value`; worklist with pointwise join at control-flow merges. Two bug classes caught during review (thanks to user diagnosis): (1) `join` pads shorter side with `Value` instead of `Bottom`, contaminating every merged position; (2) final projection scans stack positions across all IPs, poisoning a slot's type whenever a transient sat at that stack index between uses. Fixed both: pad with `Bottom` (lattice identity); track writes via a separate `slot_types` field updated only on initialization pushes / `SetLocal` / `Increment`, project from that. Also corrected `SetLocal` transfer to PEEK not pop (matches VM semantics). No runtime behavior change — analysis is pure input for B2.1+. |
 | 2026-04-25 | Step 0: attribution counters | ✅ landed | Per-helper FFI counts + spec-eligibility outcome breakdown + p50 column in bench harness. No semantic change; baseline snapshot below. **Findings that reshape later steps:** (1) `bench_collatz` 5,025,114 `push_none` helper crossings per run — the `option` else-branch is calling `jit_push_none` per inner-loop iter; targeting this earlier (V4 → near top) likely unlocks collatz cheaply. (2) `bench_struct_method` 1,000,002 `jit_get_local` crossings per run — receiver loaded via FFI 2× per inner iter; B2.1 unboxed locals + receiver typed-stack will cut this to zero. (3) `bench_closure` 499,999 `op_call_hit` + 500,003 `op_return` round trips per run, with `add5` rejected by spec-eligibility (`spec_entry_rejected_has_upvalue_op = 1`) — confirms Step 4 (closure-aware spec ABI) unlocks. (4) `bench_fib` 2.7M self-recursion direct calls go through native code already (only 4 helper FFI calls total); per-call cost ≈ 10ns, so the residual is the multi-return prologue — Step 3 fib audit is the lever. (5) `bench_arith` mirrors fib (1.0M self-recursion direct calls, 5 helper FFI calls). |
+| 2026-04-29 | A1.2 Phase 2 (decoupling) | ✅ landed | 8 commits on `jit_performance_improvements` (`7ac4524..74ead50`): added `Value::repr() -> ValueRepr<'_>` view enum + `Value::as_X()` accessors mirroring NanValue's surface; migrated ~250 pattern sites in `vm/builtins.rs`, `vm/mod.rs`, `compiler/slot_types.rs`, `jit/runtime.rs`, `jit/engine/mod.rs`, `jit/scan.rs` from `match v { Value::X(p) => ... }` to `match v.repr() { ValueRepr::X(p) => ... }`. Plus `feat: skip type_wrap FFI for noop INTEGER cast` (`e9372de`) which dropped bench_collatz `type_wrap` count 50,002 → 0. All 453 lib + 73 jit_fallback tests green. **Useful in its own right** as cleanup; does not commit to any specific Value layout change. |
+| 2026-04-29 | A1.2.5 Phase 3+4 (storage flip + JIT IR rewrite) | ❌ abandoned | Attempted on `wip/nanbox-phase-3` (deleted): replaced `pub enum Value` with `#[repr(transparent)] struct Value { nan: NanValue }` (8 bytes), migrated 449 lib tests to green, all 8 example benches produced correct results. Phase 4 attempted FFI-fallback strategy (disabled JIT entirely) → bench A/B showed **7–130× regression** vs mainline (geomean ~25–30× slower), confirming that 8-byte storage gives nothing without JIT inline IR rewrite. Standalone µbench (`/tmp/nanbox_ubench.rs`, 7-trial median, 100M / 10M ops) then measured the inline int+int Add fast path directly: NaN-box was 1.27× / 1.42× / 1.23× slower than enum across L1-resident, 128-slot scan, and 1024-slot stride patterns. Cache-density argument doesn't materialize at Oxigen stack sizes (typically <16 KB working set, well under L1d). NaN-boxing is rejected; revisit only if future workloads grow live value working sets past L1 capacity. See A1.2.5 task entry above for the full analysis. |
 
 ---
 
