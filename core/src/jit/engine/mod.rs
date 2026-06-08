@@ -5671,10 +5671,12 @@ fn iconst_imm(builder: &FunctionBuilder<'_>, val: cranelift_codegen::ir::Value) 
 
 /// B2.1g parity-branch peephole. Detects the four shapes
 ///
-///     (x % 2) == 0      —— pattern A, evaluating "is even"
-///     (x % 2) != 0      —— pattern A, "is odd"
-///     0 == (x % 2)      —— pattern B, "is even" (commuted)
-///     0 != (x % 2)      —— pattern B, "is odd"  (commuted)
+/// ```text
+/// (x % 2) == 0      —— pattern A, evaluating "is even"
+/// (x % 2) != 0      —— pattern A, "is odd"
+/// 0 == (x % 2)      —— pattern B, "is even" (commuted)
+/// 0 != (x % 2)      —— pattern B, "is odd"  (commuted)
+/// ```
 ///
 /// when followed immediately by `JumpIfFalse` / `JumpIfTrue` /
 /// `PopJumpIfFalse`. On match, lowers to `band_imm + icmp_imm + brif`
@@ -5870,8 +5872,10 @@ fn emit_load_stack_top_integer_payload(
 /// Trunc-toward-zero semantics for signed integers require a sign-bias
 /// before the right shift:
 ///
-///     q = (x + ((x >> 63) & (|d| - 1))) >> log2(|d|)
-///     if d < 0 { q = -q }
+/// ```text
+/// q = (x + ((x >> 63) & (|d| - 1))) >> log2(|d|)
+/// if d < 0 { q = -q }
+/// ```
 ///
 /// For known non-negative `x`, the cheaper form `q = x >> log2(|d|)`
 /// is correct. v1 doesn't have non-negative facts yet, so we always
