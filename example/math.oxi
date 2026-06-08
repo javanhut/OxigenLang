@@ -3,7 +3,7 @@ struct Math {
     num_two <int>
 }
 
-Math contains {
+Math includes {
     fun add() { self.num_one + self.num_two }
     fun subtract() { self.num_one - self.num_two }
     fun multiply() { self.num_one * self.num_two }

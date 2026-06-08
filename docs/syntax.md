@@ -100,7 +100,7 @@ p := Person { name: "Alice", age: 30 }           // named
 p.name                                           // field access
 p.age = 31                                       // field mutation
 
-Person contains {                                // methods
+Person includes {                                // methods
     fun greet() { "Hello, " + name }
 }
 

@@ -303,14 +303,14 @@ println(scale(5))
 
 ## Struct Methods
 
-Functions can be attached to structs using `contains` blocks. Inside a method, struct fields are accessible directly by name (implicit self):
+Functions can be attached to structs using `includes` blocks. Inside a method, struct fields are accessible directly by name (implicit self):
 
 ```oxi
 struct Circle {
     radius <float>
 }
 
-Circle contains {
+Circle includes {
     fun area() { 3.14159 * radius * radius }
     fun scale(factor <float>) { radius = radius * factor }
 }

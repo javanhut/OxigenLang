@@ -1793,7 +1793,7 @@ fn test_struct_method_implicit_self() {
                 name <str>
                 age <int>
             }
-            Person contains {
+            Person includes {
                 fun greet() { name }
             }
             p := Person("Alice", 30)
@@ -1809,7 +1809,7 @@ fn test_struct_method_is_adult() {
                 name <str>
                 age <int>
             }
-            Person contains {
+            Person includes {
                 fun is_adult() { age >= 18 }
             }
             p := Person("Alice", 30)
@@ -1857,7 +1857,7 @@ fn test_struct_inheritance_inherits_methods() {
                 name <str>
                 age <int>
             }
-            Person contains {
+            Person includes {
                 fun greet() { name }
             }
             struct American(Person) {
@@ -1876,13 +1876,13 @@ fn test_struct_method_override() {
                 name <str>
                 age <int>
             }
-            Person contains {
+            Person includes {
                 fun greet() { name }
             }
             struct American(Person) {
                 nationality <str>
             }
-            American contains {
+            American includes {
                 fun greet() { name + " from " + nationality }
             }
             a := American("John", 25, "USA")
@@ -1953,7 +1953,7 @@ fn test_struct_method_with_give() {
             struct Counter {
                 count <int>
             }
-            Counter contains {
+            Counter includes {
                 fun get_double() { give count * 2 }
             }
             c := Counter(5)
@@ -1968,7 +1968,7 @@ fn test_struct_method_mutates_field() {
             struct Bag {
                 items <array>
             }
-            Bag contains {
+            Bag includes {
                 fun add(item) { items := push(items, item) }
             }
             b := Bag([])
@@ -1986,7 +1986,7 @@ fn test_struct_method_mutates_counter() {
             struct Counter {
                 count <int>
             }
-            Counter contains {
+            Counter includes {
                 fun inc() { count := count + 1 }
             }
             c := Counter(0)
@@ -2007,7 +2007,7 @@ fn test_struct_dot_chaining() {
             struct Outer {
                 name <str>
             }
-            Outer contains {
+            Outer includes {
                 fun make_inner() { Inner(42) }
             }
             o := Outer("test")
@@ -2868,7 +2868,7 @@ fn test_hidden_field_accessible_via_self() {
             struct Person {
                 hide name <str>
             }
-            Person contains {
+            Person includes {
                 fun get_name() { self.name }
             }
             p <Person>
@@ -2884,7 +2884,7 @@ fn test_self_field_mutation_persists() {
             struct Person {
                 hide name <str>
             }
-            Person contains {
+            Person includes {
                 fun set_name(n <str>) { self.name = n }
                 fun get_name() { self.name }
             }
@@ -2922,7 +2922,7 @@ fn test_typed_param_enforced() {
             struct Person {
                 hide name <str>
             }
-            Person contains {
+            Person includes {
                 fun set_name(n <str>) { self.name = n }
             }
             p <Person>
@@ -2966,7 +2966,7 @@ fn test_inheritance_with_hide() {
                 hide fname <str>
                 hide lname <str>
             }
-            Person contains {
+            Person includes {
                 fun set_name(fn <str>, ln <str>) {
                     self.fname = fn
                     self.lname = ln
@@ -2993,7 +2993,7 @@ fn test_struct_example_runs() {
                 hide lname <str>
                 hide age <int>
             }
-            Person contains {
+            Person includes {
                 fun set_name(fn <str>, ln <str>) {
                     self.fname = fn
                     self.lname = ln
@@ -3006,7 +3006,7 @@ fn test_struct_example_runs() {
                 hide country <str>
                 hide title <str>
             }
-            Nationality contains {
+            Nationality includes {
                 fun set_country(country <str>) {
                     self.country = country
                 }

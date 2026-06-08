@@ -3,7 +3,7 @@ struct Container {
     label <str>
 }
 
-Container contains {
+Container includes {
     fun show() { println("{self.label}: {self.data}") }
 }
 

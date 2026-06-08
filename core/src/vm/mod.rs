@@ -3713,7 +3713,7 @@ mod tests {
             struct Counter {
                 count <int>
             }
-            Counter contains {
+            Counter includes {
                 fun add(delta) { self.count + delta }
             }
             c := Counter(1)

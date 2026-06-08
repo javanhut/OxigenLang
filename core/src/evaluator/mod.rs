@@ -977,7 +977,7 @@ impl Evaluator {
                     .set(name.value.clone(), Rc::clone(&enum_obj));
                 enum_obj
             }
-            Statement::ContainsDef {
+            Statement::IncludesDef {
                 token,
                 struct_name,
                 methods,
@@ -1018,14 +1018,14 @@ impl Evaluator {
                             self.runtime_error(
                                 token.span,
                                 &format!("{} is not a struct", struct_name.value),
-                                Some("'contains' can only add methods to a struct definition"),
+                                Some("'includes' can only add methods to a struct definition"),
                             )
                         }
                     }
                     None => self.runtime_error(
                         token.span,
                         &format!("struct not found: {}", struct_name.value),
-                        Some("make sure the struct is defined before using 'contains'"),
+                        Some("make sure the struct is defined before using 'includes'"),
                     ),
                 }
             }

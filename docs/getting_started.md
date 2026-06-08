@@ -212,7 +212,7 @@ struct Person {
     age <int>
 }
 
-Person contains {
+Person includes {
     fun greet() { println("Hi, I'm " + name) }
     fun is_adult() { age >= 18 }
 }
