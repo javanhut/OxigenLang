@@ -927,11 +927,28 @@ impl JitInner {
                     if let Some(&block) = blocks.get(&ip) {
                         if block != current_block {
                             if !terminated {
+                                // Fall-through into a new block is a control-
+                                // flow edge: materialize any operand-stack
+                                // value still staged in `virt_stack` so it
+                                // lives in memory at the merge. Without this,
+                                // a value produced in this block and consumed
+                                // after the merge (e.g. an `option`/ternary
+                                // arm's result) would be read from the single
+                                // compile-time `virt_stack`, which only retains
+                                // the last-emitted arm — so every arm returns
+                                // the same (last) value. No-op in tight loops,
+                                // where the operand stack is empty at block
+                                // boundaries (locals use Cranelift Variables).
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
                                 builder.ins().jump(block, &[]);
                             }
                             builder.switch_to_block(block);
                             current_block = block;
                             terminated = false;
+                            // A new block may be a control-flow merge: start
+                            // with an empty abstract operand stack (all live
+                            // values are now in memory).
+                            virt_stack = VirtStack::new();
                             // Reset line cache at block boundaries — a
                             // predecessor block could have written any
                             // line to JitFrame.line. The first opcode of
@@ -2033,6 +2050,11 @@ impl JitInner {
                             let off = read_u16(code, ip + 1) as usize;
                             let target_ip = ip + 3 + off;
                             let target = blocks[&target_ip];
+                            // Materialize staged operands before leaving the
+                            // block so a merge reads them from memory, not the
+                            // shared compile-time virt_stack (see block-boundary
+                            // comment above). No-op when virt_stack is empty.
+                            virt_stack.flush_to_memory(&mut builder, vm_val);
                             builder.ins().jump(target, &[]);
                             terminated = true;
                             ip += 3;
@@ -2041,6 +2063,7 @@ impl JitInner {
                             let off = read_u16(code, ip + 1) as usize;
                             let target_ip = (ip + 3) - off;
                             let target = blocks[&target_ip];
+                            virt_stack.flush_to_memory(&mut builder, vm_val);
                             builder.ins().jump(target, &[]);
                             terminated = true;
                             ip += 3;
@@ -2054,6 +2077,11 @@ impl JitInner {
                                 .entry(next_ip)
                                 .or_insert_with(|| builder.create_block());
 
+                            // Materialize staged operands (incl. the condition)
+                            // to memory before the branch: the helper reads the
+                            // top from memory, and both successors are block
+                            // edges that must see a consistent memory stack.
+                            virt_stack.flush_to_memory(&mut builder, vm_val);
                             let call = builder.ins().call(refs.peek_truthy, &[vm_val]);
                             let truthy = builder.inst_results(call)[0];
                             // truthy != 0 -> fall through; else -> target
@@ -2072,6 +2100,7 @@ impl JitInner {
                                 .entry(next_ip)
                                 .or_insert_with(|| builder.create_block());
 
+                            virt_stack.flush_to_memory(&mut builder, vm_val);
                             let call = builder.ins().call(refs.peek_truthy, &[vm_val]);
                             let truthy = builder.inst_results(call)[0];
                             // truthy != 0 -> target; else -> fall through
@@ -2090,6 +2119,7 @@ impl JitInner {
                                 .entry(next_ip)
                                 .or_insert_with(|| builder.create_block());
 
+                            virt_stack.flush_to_memory(&mut builder, vm_val);
                             let call = builder.ins().call(refs.pop_truthy, &[vm_val]);
                             let truthy = builder.inst_results(call)[0];
                             builder
