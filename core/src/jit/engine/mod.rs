@@ -369,6 +369,21 @@ impl JitInner {
         unsafe {
             stop_depth_ptr.write_volatile(0);
         }
+
+        // Sync the backing `Vec`'s length from `stack_view.len`. The thunk
+        // operated on `stack_view` (raw ptr + len); the inline return path
+        // (`emit_inline_generic_return`) updates only `stack_view.len` via a
+        // raw store, NOT `vm.stack`'s `Vec` length (the `op_return` helper
+        // path does sync, because it mutates the `Vec` directly). Without
+        // this, an inline-return thunk invoked from the interpreter leaves
+        // `vm.stack.len()` stale by +1, so the interpreter's next
+        // `Call`/index computation reads the wrong slot ("cannot call
+        // INTEGER"). Safe to set_len down here: inline return only runs when
+        // all truncated slots are primitives (no `Drop`); see
+        // `return_slots_safe_to_truncate`.
+        unsafe {
+            (*vm).sync_stack_from_view();
+        }
         match status {
             0 => InvokeOutcome::Returned,
             1 => {
