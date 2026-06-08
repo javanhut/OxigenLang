@@ -1508,3 +1508,85 @@ f(4660)
     assert_eq!(baseline, jitted);
     assert!(j_ok >= 1, "function with both bitwise and log should JIT");
 }
+
+// ── Regression tests for JIT correctness bugs (2026-06) ──────────────────
+
+/// Regression: `option { cond -> X, Y }` whose arms are bare locals must
+/// return the selected arm, not always the second. The compile-time
+/// operand stack (virt_stack) was not flushed at block boundaries, so both
+/// arms read the same (last-emitted) SSA value — `min(a,b)` returned `b`
+/// unconditionally once JIT-compiled. See "flush virt_stack at block
+/// boundaries" fix in jit/engine/mod.rs.
+#[test]
+fn regression_option_arms_select_correct_value() {
+    let src_min = r#"
+fun mn(a, b) { option { a <= b -> a, b } }
+mn(3, 7)
+"#;
+    let (baseline, _, _) = run(src_min, None);
+    let (jitted, j_ok, _) = run(src_min, Some(1));
+    assert_eq!(baseline, "3", "interpreter min(3,7) must be 3");
+    assert_eq!(jitted, baseline, "JIT min(3,7) must match interpreter");
+    assert!(j_ok >= 1, "mn should JIT-compile");
+
+    // max: the other arm must win.
+    let src_max = r#"
+fun mx(a, b) { option { a >= b -> a, b } }
+mx(3, 7)
+"#;
+    let (b2, _, _) = run(src_max, None);
+    let (j2, _, _) = run(src_max, Some(1));
+    assert_eq!(b2, "7");
+    assert_eq!(j2, b2, "JIT max(3,7) must match interpreter");
+}
+
+/// Regression: a hot `option`-returning function must stay correct after it
+/// tiers up in *default* mode (not just eager --jit). Drives `mn` past the
+/// default hot threshold inside a loop and checks every result.
+#[test]
+fn regression_option_correct_when_hot_default_mode() {
+    let src = r#"
+fun mn(a, b) { option { a <= b -> a, b } }
+fun run() {
+    bad := 0
+    i := 0
+    repeat unless i >= 200 {
+        r := mn(3, 7)
+        option { r != 3 -> bad = bad + 1, 0 }
+        i = i + 1
+    }
+    bad
+}
+run()
+"#;
+    // None => default thresholds (mn tiers up after the hot threshold).
+    let (baseline, _, _) = run(src, None);
+    assert_eq!(baseline, "0", "hot min(3,7) must return 3 every iteration");
+}
+
+/// Regression: calling a builtin (`len`, `str`, `push`, …) inside a
+/// JIT-compiled loop must not crash. The GetGlobal IC hit path bumped the
+/// "Rc" of any tag > 6, but `Value::Builtin` (tag 13) holds a function
+/// pointer, not an Rc — bumping it wrote into a read-only code page
+/// (SIGBUS) on the second+ fetch. See the Builtin-tag guard in the
+/// GetGlobal IC.
+#[test]
+fn regression_builtin_call_in_loop_no_crash() {
+    let src = r#"
+fun go() {
+    a <array>
+    s <int>
+    repeat unless s >= 5 {
+        len(a)
+        s = s + 1
+    }
+    s
+}
+go()
+"#;
+    let (baseline, _, _) = run(src, None);
+    let (jitted, j_ok, _) = run(src, Some(1));
+    assert_eq!(baseline, "5");
+    assert_eq!(jitted, baseline, "builtin call in JIT loop must match interpreter");
+    assert!(j_ok >= 1, "go should JIT-compile");
+}
