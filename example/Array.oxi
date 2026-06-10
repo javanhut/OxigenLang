@@ -2,7 +2,7 @@ struct Array {
     data <array>
 }
 
-Array contains {
+Array includes {
     fun append(value <generic>) {
         self.data = push(self.data, value)
     }

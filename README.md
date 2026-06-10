@@ -11,7 +11,7 @@ OxigenLang is a modern, lightweight, interpreted programming language implemente
 - **Pattern Matching**: Define reusable patterns with the `pattern` keyword and match against them with `choose`.
 - **Rich Type System**: Dynamic typing by default with optional type annotations for locking types and controlling mutability. Four declaration forms give precise control over value and type mutability.
 - **Data Types**: Integers, Floats, Strings (with escape sequences and interpolation), Characters, Booleans, Arrays, Bytes, Uints, Tuples, Maps, Sets, and `None`.
-- **Structs**: Composite data types with typed fields, single-inheritance, methods via `contains` blocks, `self` access, hidden fields, and dot-chaining.
+- **Structs**: Composite data types with typed fields, single-inheritance, methods via `includes` blocks, `self` access, hidden fields, and dot-chaining.
 - **First-Class Functions**: Named and anonymous functions, closures, typed parameters, default values, optional parameters, and implicit/explicit returns.
 - **Unpacking**: Destructure arrays and tuples into multiple variables with `a, b := [1, 2]`.
 - **Index Assignment**: Set map keys and array elements directly with `m[key] = value` and `arr[i] = value`.
@@ -162,7 +162,7 @@ struct Person {
     age <int>
 }
 
-Person contains {
+Person includes {
     fun greet() { "Hello, {self.name}" }
     fun is_adult() { self.age >= 18 }
 }

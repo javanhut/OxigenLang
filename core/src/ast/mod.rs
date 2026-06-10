@@ -154,7 +154,7 @@ pub enum Statement {
         name: Identifier,
         variants: Vec<EnumVariant>,
     },
-    ContainsDef {
+    IncludesDef {
         token: Token,
         struct_name: Identifier,
         methods: Vec<(Identifier, Expression)>,

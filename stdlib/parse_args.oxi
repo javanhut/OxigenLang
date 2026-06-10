@@ -49,7 +49,7 @@ fun k_v_pair(s <str>){
   (key,value)
 }
 
-Parser contains {
+Parser includes {
   fun parse_args() {
     current_args := os.args() 
     option {

@@ -4,7 +4,7 @@ struct Counter {
     val <int>
 }
 
-Counter contains {
+Counter includes {
     fun inc() {
         self.val = self.val + 1
     }

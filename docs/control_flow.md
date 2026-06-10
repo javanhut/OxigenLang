@@ -486,7 +486,7 @@ In indentation mode:
 - Returning to a previous indentation level closes the block (replaces `}`).
 - The `#[indent]` directive is stripped from the source before parsing.
 
-All language constructs that use blocks (`each`, `repeat`, `unless`, `option`, `choose`, `fun`, `struct`, `contains`) work with both block styles.
+All language constructs that use blocks (`each`, `repeat`, `unless`, `option`, `choose`, `fun`, `struct`, `includes`) work with both block styles.
 
 #### Indentation Mode Example
 
@@ -500,7 +500,7 @@ struct Person:
     name <str>
     age <int>
 
-Person contains:
+Person includes:
     fun greet():
         println(name)
 

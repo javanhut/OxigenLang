@@ -540,7 +540,7 @@ impl Compiler {
             | Statement::Give { token, .. }
             | Statement::StructDef { token, .. }
             | Statement::EnumDef { token, .. }
-            | Statement::ContainsDef { token, .. }
+            | Statement::IncludesDef { token, .. }
             | Statement::DotAssign { token, .. }
             | Statement::Introduce { token, .. }
             | Statement::IndexAssign { token, .. }
@@ -605,7 +605,7 @@ impl Compiler {
             | Statement::Give { token, .. }
             | Statement::StructDef { token, .. }
             | Statement::EnumDef { token, .. }
-            | Statement::ContainsDef { token, .. }
+            | Statement::IncludesDef { token, .. }
             | Statement::DotAssign { token, .. }
             | Statement::Introduce { token, .. }
             | Statement::IndexAssign { token, .. }
@@ -1128,7 +1128,7 @@ impl Compiler {
                 }
             }
 
-            Statement::ContainsDef {
+            Statement::IncludesDef {
                 struct_name,
                 methods,
                 ..

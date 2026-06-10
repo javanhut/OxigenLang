@@ -507,8 +507,8 @@ impl Parser {
             if self.peek_token.token_type == TokenType::Assign {
                 return self.parse_assign_statement();
             }
-            if self.peek_token.token_type == TokenType::Contains {
-                return self.parse_contains_statement();
+            if self.peek_token.token_type == TokenType::Includes {
+                return self.parse_includes_statement();
             }
         }
         if self.curr_token.token_type == TokenType::Ident
@@ -2907,14 +2907,14 @@ impl Parser {
         })
     }
 
-    fn parse_contains_statement(&mut self) -> Option<Statement> {
+    fn parse_includes_statement(&mut self) -> Option<Statement> {
         let struct_name = Identifier {
             token: self.curr_token.clone(),
             value: self.curr_token.literal.clone(),
         };
         let token = self.curr_token.clone();
 
-        self.expect_peek(TokenType::Contains)?; // 'contains'
+        self.expect_peek(TokenType::Includes)?; // 'includes'
         self.expect_peek(TokenType::LBrace)?; // '{'
 
         let mut methods = Vec::new();
@@ -2943,10 +2943,10 @@ impl Parser {
                 self.errors.push(Diagnostic::error_with_hint(
                     self.curr_token.span,
                     format!(
-                        "expected `fun` inside contains block, got {:?}",
+                        "expected `fun` inside includes block, got {:?}",
                         self.curr_token.literal
                     ),
-                    "contains blocks should only contain method definitions: fun name() { ... }",
+                    "includes blocks should only contain method definitions: fun name() { ... }",
                 ));
                 return None;
             }
@@ -2981,7 +2981,7 @@ impl Parser {
 
         self.expect_peek(TokenType::RBrace)?; // '}'
 
-        Some(Statement::ContainsDef {
+        Some(Statement::IncludesDef {
             token,
             struct_name,
             methods,
@@ -3200,7 +3200,7 @@ impl Parser {
             TokenType::Lt => {
                 // Expected '<' for a type annotation but got something else
                 match got.token_type {
-                    TokenType::Contains
+                    TokenType::Includes
                     | TokenType::Function
                     | TokenType::Struct
                     | TokenType::Each
@@ -3231,7 +3231,7 @@ impl Parser {
                     None
                 }
             }
-            TokenType::Contains => Some("did you mean `StructName contains { ... }`?".to_string()),
+            TokenType::Includes => Some("did you mean `StructName includes { ... }`?".to_string()),
             TokenType::From => Some("did you mean `introduce {name} from module`?".to_string()),
             _ => None,
         }

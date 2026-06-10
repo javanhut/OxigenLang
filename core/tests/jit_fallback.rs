@@ -379,7 +379,7 @@ struct Point {
     y <int>
 }
 
-Point contains {
+Point includes {
     fun sum_xy() { self.x + self.y }
 }
 
@@ -401,7 +401,7 @@ struct Counter {
     val <int>
 }
 
-Counter contains {
+Counter includes {
     fun inc() { self.val = self.val + 1 }
     fun add(amount) { self.val = self.val + amount }
 }
@@ -436,7 +436,7 @@ struct LinkedList {
     head <Node> || <None>
 }
 
-LinkedList contains {
+LinkedList includes {
     fun add(data <generic>) {
         new_node <Node> := Node { data: data, next: None }
         option {
@@ -832,7 +832,7 @@ fn method_call_ic_hit_path_getter_loop_is_refcount_safe() {
     // one emit_copy_value (move receiver) + emit_write_closure_value.
     let source = r#"
 struct C { val <int> }
-C contains { fun get() { self.val } }
+C includes { fun get() { self.val } }
 fun run(n <int>) {
     c <C> := C(42)
     total <int> := 0
@@ -862,7 +862,7 @@ fn method_call_ic_hit_path_setter_loop_is_refcount_safe() {
     // receiver over arg's old slot) + emit_write_closure_value.
     let source = r#"
 struct C { val <int> }
-C contains {
+C includes {
     fun add(v <int>) { self.val = self.val + v }
     fun get() { self.val }
 }

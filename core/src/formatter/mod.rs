@@ -370,13 +370,13 @@ impl Formatter {
                 self.push_indent();
                 self.push("}");
             }
-            Statement::ContainsDef {
+            Statement::IncludesDef {
                 struct_name,
                 methods,
                 ..
             } => {
                 self.push(&struct_name.value);
-                self.push(" contains {");
+                self.push(" includes {");
                 self.newline();
                 self.indent += 1;
                 for (i, (method_name, method_expr)) in methods.iter().enumerate() {
@@ -1000,7 +1000,7 @@ fn top_level_section(stmt: &Statement) -> TopLevelSection {
         Statement::Pattern { .. }
         | Statement::StructDef { .. }
         | Statement::EnumDef { .. }
-        | Statement::ContainsDef { .. }
+        | Statement::IncludesDef { .. }
         | Statement::Main { .. } => TopLevelSection::Definition,
         _ => TopLevelSection::Other,
     }

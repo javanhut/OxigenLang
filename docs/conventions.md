@@ -312,7 +312,7 @@ struct Animal {
     sound <str>
 }
 
-Animal contains {
+Animal includes {
     fun speak() { println(name, "says", sound) }
     fun describe() { println("Animal:", name) }
 }
@@ -322,13 +322,13 @@ struct Dog(Animal) {
 }
 
 // Good — only add new functionality and override what's different
-Dog contains {
+Dog includes {
     fun fetch() { println(name, "fetches the ball!") }
     fun describe() { println("Dog:", name, "- Breed:", breed) }
 }
 
 // Avoid — redeclaring speak() when Animal's version already works
-Dog contains {
+Dog includes {
     fun speak() { println(name, "says", sound) }  // identical to parent
     fun fetch() { println(name, "fetches the ball!") }
     fun describe() { println("Dog:", name, "- Breed:", breed) }
@@ -349,7 +349,7 @@ struct HttpResponse {
     headers <map>
 }
 
-HttpResponse contains {
+HttpResponse includes {
     fun is_ok() { status >= 200 and status < 300 }
     fun is_error() { status >= 400 }
 }
@@ -359,7 +359,7 @@ struct Greeter {
     name <str>
 }
 
-Greeter contains {
+Greeter includes {
     fun greet() { println("Hello, {name}!") }
 }
 
@@ -411,7 +411,7 @@ struct Account {
     hide pin <int>
 }
 
-Account contains {
+Account includes {
     fun deposit(amount <int>) { self.balance = self.balance + amount }
     fun get_balance() { self.balance }
 }
@@ -436,13 +436,13 @@ struct Player {
 }
 
 // Good — explicit self
-Player contains {
+Player includes {
     fun add_score(points <int>) { self.score = self.score + points }
     fun display() { println(self.name, ":", self.score) }
 }
 
 // Avoid — implicit field access
-Player contains {
+Player includes {
     fun add_score(points <int>) { score = score + points }
     fun display() { println(name, ":", score) }
 }
@@ -457,7 +457,7 @@ struct User {
 }
 
 // Good — self disambiguates the struct field from the parameter
-User contains {
+User includes {
     fun set_name(name <str>) { self.name = name }
     fun set_age(age <int>) { self.age = age }
 }

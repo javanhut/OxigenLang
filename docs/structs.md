@@ -91,7 +91,7 @@ struct Person {
     hide age <int>
 }
 
-Person contains {
+Person includes {
     fun set_name(fn <str>, ln <str>) {
         self.fname = fn
         self.lname = ln
@@ -108,10 +108,10 @@ Use `hide` to encapsulate implementation details and control access through meth
 
 ## Methods
 
-Attach methods to a struct using a `contains` block:
+Attach methods to a struct using a `includes` block:
 
 ```oxi
-Person contains {
+Person includes {
     fun greet() { println(name) }
     fun is_adult() { age >= 18 }
 }
@@ -127,7 +127,7 @@ struct Person {
     age <int>
 }
 
-Person contains {
+Person includes {
     fun greet() { name + " is " + str(age) + " years old" }
 }
 
@@ -140,7 +140,7 @@ println(p.greet())
 You can also use `self` to explicitly reference the instance. This is required when you want to assign to a field within a method:
 
 ```oxi
-Person contains {
+Person includes {
     fun set_name(new_name <str>) {
         self.name = new_name
     }
@@ -161,7 +161,7 @@ Use `self.field = value` to mutate the instance's field from within a method. Pl
 Methods can take additional parameters beyond the implicit fields:
 
 ```oxi
-Person contains {
+Person includes {
     fun greet_with(greeting) { greeting + ", " + name }
 }
 
@@ -174,7 +174,7 @@ println(p.greet_with("Hello"))
 Methods can use `give` for early returns, or implicitly return the last expression:
 
 ```oxi
-Person contains {
+Person includes {
     fun birth_year(current_year) { give current_year - age }
 }
 
@@ -239,7 +239,7 @@ struct American(Nationality) {
 A child struct automatically inherits all methods defined on the parent:
 
 ```oxi
-Person contains {
+Person includes {
     fun greet() { name }
 }
 
@@ -253,10 +253,10 @@ println(a.greet())
 
 ### Overriding Methods
 
-Define a `contains` block on the child struct to add or override methods:
+Define a `includes` block on the child struct to add or override methods:
 
 ```oxi
-American contains {
+American includes {
     fun greet() { name + " from " + nationality }
 }
 
@@ -264,27 +264,27 @@ a := American("John", 25, "USA")
 println(a.greet())
 ```
 
-The child's `contains` block only affects the child. The parent's methods remain unchanged for parent instances.
+The child's `includes` block only affects the child. The parent's methods remain unchanged for parent instances.
 
 ### Adding Methods at Each Level
 
 Each level in an inheritance chain can define its own methods:
 
 ```oxi
-Person contains {
+Person includes {
     fun set_name(fn <str>, ln <str>) {
         self.fname = fn
         self.lname = ln
     }
 }
 
-Nationality contains {
+Nationality includes {
     fun set_country(country <str>) {
         self.country = country
     }
 }
 
-American contains {
+American includes {
     fun print_info() {
         println("Name: ", self.fname, self.lname)
         println("Age: ", self.age)
@@ -319,7 +319,7 @@ struct Outer {
     name <str>
 }
 
-Outer contains {
+Outer includes {
     fun make_inner() { Inner(42) }
 }
 
@@ -429,7 +429,7 @@ Person("Alice", "thirty")
 
 ## Indentation Mode
 
-Structs and `contains` blocks work with indentation mode:
+Structs and `includes` blocks work with indentation mode:
 
 ```oxi
 #[indent]
@@ -438,7 +438,7 @@ struct Person:
     name <str>
     age <int>
 
-Person contains:
+Person includes:
     fun greet():
         name
 ```
@@ -455,11 +455,11 @@ struct Dog(Animal) {
     breed <str>
 }
 
-Animal contains {
+Animal includes {
     fun speak() { name + " says " + sound }
 }
 
-Dog contains {
+Dog includes {
     fun info() { name + " (" + breed + ")" }
 }
 

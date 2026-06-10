@@ -1076,10 +1076,10 @@ fn test_parse_struct_with_parent() {
 }
 
 #[test]
-fn test_parse_contains_def() {
-    let program = parse_ok("Person contains {\n    fun greet() { 42 }\n}");
+fn test_parse_includes_def() {
+    let program = parse_ok("Person includes {\n    fun greet() { 42 }\n}");
     match &program.statements[0] {
-        Statement::ContainsDef {
+        Statement::IncludesDef {
             struct_name,
             methods,
             ..
@@ -1088,7 +1088,7 @@ fn test_parse_contains_def() {
             assert_eq!(methods.len(), 1);
             assert_eq!(methods[0].0.value, "greet");
         }
-        other => panic!("Expected ContainsDef, got {:?}", other),
+        other => panic!("Expected IncludesDef, got {:?}", other),
     }
 }
 

@@ -4,7 +4,7 @@ struct Person {
     hide age <int>
 }
 
-Person contains {
+Person includes {
     fun set_name(fname <str>, lname <str>) {
         self.fname = fname
         self.lname = lname
@@ -19,7 +19,7 @@ struct Nationality(Person) {
     hide title <str>
 }
 
-Nationality contains {
+Nationality includes {
     fun set_country(country <str>) {
         self.country = country
     }
@@ -32,7 +32,7 @@ struct American(Nationality) {
     state <str>
 }
 
-American contains {
+American includes {
     fun print_info() {
         println("Name:", self.fname, self.lname)
         println("Age:", self.age)

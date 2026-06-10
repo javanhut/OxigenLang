@@ -9,7 +9,7 @@ struct LinkedList {
   head <Node> || <None>
 }
 
-LinkedList contains {
+LinkedList includes {
   fun add(data <generic>) {
     new_node <Node> := Node { data: data, next:  None}
     option {
