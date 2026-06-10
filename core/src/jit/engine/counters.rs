@@ -94,10 +94,33 @@ pub(crate) enum HelperCounter {
     OpLog,
     DbgCheckSpecCall,
     RunViaInterpreter,
+    BuildTuple,
+    BuildMap,
+    BuildSet,
+    StringInterp,
+    IndexAssign,
+    OpSlice,
+    IterLen,
+    IterGet,
+    Unpack,
+    ErrorConstruct,
+    ValueConstruct,
+    OpGuard,
+    OpFail,
+    IsMainContext,
+    OpImport,
+    MakeEnumVariantUnit,
+    MakeEnumVariantTuple,
+    MakeEnumVariantStruct,
+    IsMut,
+    IsType,
+    IsTypeMut,
+    OpCallNamed,
+    OpMethodCallNamed,
 }
 
 impl HelperCounter {
-    pub(crate) const COUNT: usize = HelperCounter::RunViaInterpreter as usize + 1;
+    pub(crate) const COUNT: usize = HelperCounter::OpMethodCallNamed as usize + 1;
 }
 
 pub(crate) const HELPER_NAMES: [&str; HelperCounter::COUNT] = [
@@ -168,6 +191,29 @@ pub(crate) const HELPER_NAMES: [&str; HelperCounter::COUNT] = [
     "op_log",
     "dbg_check_spec_call",
     "run_via_interpreter",
+    "build_tuple",
+    "build_map",
+    "build_set",
+    "string_interp",
+    "index_assign",
+    "op_slice",
+    "iter_len",
+    "iter_get",
+    "unpack",
+    "error_construct",
+    "value_construct",
+    "op_guard",
+    "op_fail",
+    "is_main_context",
+    "op_import",
+    "make_enum_variant_unit",
+    "make_enum_variant_tuple",
+    "make_enum_variant_struct",
+    "is_mut",
+    "is_type",
+    "is_type_mut",
+    "op_call_named",
+    "op_method_call_named",
 ];
 
 /// Lightweight JIT instrumentation counters. Each field is a

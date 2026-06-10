@@ -1444,10 +1444,10 @@ fn transfer(
             targets.push(ip + 3 + off);
         }
         OpCode::Unless => {
+            // Unless peeks the condition (does NOT pop — see the VM's
+            // Unless arm, which mirrors JumpIfFalse); both successors
+            // share the same stack.
             let off = read_u16(code, ip + 1) as usize;
-            // Unless: if condition (already on stack) is truthy, jump
-            // to alternative.
-            next.stack.pop();
             targets.push(ip + 3 + off);
         }
 
@@ -1599,8 +1599,10 @@ fn transfer(
             next.stack.push(SlotType::Value);
         }
         OpCode::Guard => {
-            // Binds top of stack (peek, not pop) and may jump on error.
-            let off = read_u16(code, ip + 3) as usize;
+            // Binds top of stack (peek; pops only on the error path) and
+            // may jump on error. Encoding is u16 jump offset at ip+1,
+            // then 2 binding-index bytes — matching the VM's read order.
+            let off = read_u16(code, ip + 1) as usize;
             targets.push(ip + 5 + off);
         }
         OpCode::Fail => {
@@ -1648,10 +1650,13 @@ fn transfer(
             targets.push(ip + 3 + off);
         }
         OpCode::IterLen | OpCode::IterGet => {
-            // IterLen: [it] → [it, len]. len is int-in-range but we don't
-            // know if it'll be used as Int; be conservative → Value.
+            // IterLen: [it] → [len] — the VM pops the iterable and pushes
+            // the length (see the IterLen arm in vm/mod.rs). len is
+            // int-in-range but we don't know if it'll be used as Int; be
+            // conservative → Value.
             // IterGet: [it, idx] → [elem].
             if matches!(op, OpCode::IterLen) {
+                next.stack.pop();
                 next.stack.push(SlotType::Value);
             } else {
                 next.stack.pop();
@@ -1762,7 +1767,6 @@ fn opcode_len(op: OpCode, code: &[u8], ip: usize, chunk: &Chunk) -> usize {
         | OpCode::StructDef
         | OpCode::EnumDef
         | OpCode::MakeEnumVariantUnit
-        | OpCode::DefinePattern
         | OpCode::GetModuleField
         | OpCode::StringInterp
         | OpCode::Main
@@ -1778,6 +1782,7 @@ fn opcode_len(op: OpCode, code: &[u8], ip: usize, chunk: &Chunk) -> usize {
         | OpCode::MakeEnumVariantTuple
         | OpCode::MakeEnumVariantStruct
         | OpCode::MethodCall
+        | OpCode::DefinePattern
         | OpCode::Import => 4,
         // 1-byte opcode + 2*u16
         OpCode::TestPattern | OpCode::Guard => 5,

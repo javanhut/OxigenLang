@@ -32,6 +32,15 @@ pub(super) struct HelperIds {
 
     // Collections
     pub build_array: FuncId,               // (vm, u32)
+    pub build_tuple: FuncId,               // (vm, u32)
+    pub build_map: FuncId,                 // (vm, u32)
+    pub build_set: FuncId,                 // (vm, u32)
+    pub string_interp: FuncId,             // (vm, u32)
+    pub index_assign: FuncId,              // (vm) -> u32
+    pub op_slice: FuncId,                  // (vm, u32) -> u32
+    pub iter_len: FuncId,                  // (vm) -> u32
+    pub iter_get: FuncId,                  // (vm) -> u32
+    pub unpack: FuncId,                    // (vm, u32) -> u32
     pub index_fast_array_int: FuncId,      // (vm) -> u32
     pub type_wrap: FuncId,                 // (vm, u32) -> u32
     pub local_add_array_mod_index: FuncId, // (vm, u32, u32, u32, i64, u32) -> u32
@@ -86,6 +95,28 @@ pub(super) struct HelperIds {
     pub op_call: FuncId,      // (vm, u32) -> u32
     pub op_call_hit: FuncId,  // (vm, *mut CallCacheEntry) -> u32
     pub op_call_miss: FuncId, // (vm, u32, *mut CallCacheEntry) -> u32
+    pub op_call_named: FuncId, // (vm, u32, u32) -> u32
+    pub op_method_call_named: FuncId, // (vm, u32, u32, u32) -> u32
+
+    // Error handling / value wrapping
+    pub error_construct: FuncId, // (vm, u32)
+    pub value_construct: FuncId, // (vm)
+    pub op_guard: FuncId,        // (vm, u32) -> u32 take-jump flag
+    pub op_fail: FuncId,         // (vm) -> u32 (always 1)
+
+    // Modules / script context
+    pub is_main_context: FuncId, // (vm) -> u32
+    pub op_import: FuncId,       // (vm, u32, u32) -> u32
+
+    // Enums
+    pub make_enum_variant_unit: FuncId,   // (vm, u32) -> u32
+    pub make_enum_variant_tuple: FuncId,  // (vm, u32, u32) -> u32
+    pub make_enum_variant_struct: FuncId, // (vm, u32, u32) -> u32
+
+    // Type introspection
+    pub is_mut: FuncId,      // (vm, u32)
+    pub is_type: FuncId,     // (vm, u32)
+    pub is_type_mut: FuncId, // (vm, u32)
 
     // Globals
     pub get_global: FuncId,          // (vm, u32) -> u32
@@ -133,6 +164,29 @@ pub(super) struct HelperRefs {
     pub pop: FuncRef,
     pub dup: FuncRef,
     pub build_array: FuncRef,
+    pub build_tuple: FuncRef,
+    pub build_map: FuncRef,
+    pub build_set: FuncRef,
+    pub string_interp: FuncRef,
+    pub index_assign: FuncRef,
+    pub op_slice: FuncRef,
+    pub iter_len: FuncRef,
+    pub iter_get: FuncRef,
+    pub unpack: FuncRef,
+    pub op_call_named: FuncRef,
+    pub op_method_call_named: FuncRef,
+    pub error_construct: FuncRef,
+    pub value_construct: FuncRef,
+    pub op_guard: FuncRef,
+    pub op_fail: FuncRef,
+    pub is_main_context: FuncRef,
+    pub op_import: FuncRef,
+    pub make_enum_variant_unit: FuncRef,
+    pub make_enum_variant_tuple: FuncRef,
+    pub make_enum_variant_struct: FuncRef,
+    pub is_mut: FuncRef,
+    pub is_type: FuncRef,
+    pub is_type_mut: FuncRef,
     pub index_fast_array_int: FuncRef,
     pub type_wrap: FuncRef,
     pub local_add_array_mod_index: FuncRef,
@@ -219,6 +273,41 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_pop", runtime::jit_pop);
     reg!("jit_dup", runtime::jit_dup);
     reg!("jit_build_array", runtime::jit_build_array);
+    reg!("jit_build_tuple", runtime::jit_build_tuple);
+    reg!("jit_build_map", runtime::jit_build_map);
+    reg!("jit_build_set", runtime::jit_build_set);
+    reg!("jit_string_interp", runtime::jit_string_interp);
+    reg!("jit_op_index_assign", runtime::jit_op_index_assign);
+    reg!("jit_op_slice", runtime::jit_op_slice);
+    reg!("jit_op_iter_len", runtime::jit_op_iter_len);
+    reg!("jit_op_iter_get", runtime::jit_op_iter_get);
+    reg!("jit_op_unpack", runtime::jit_op_unpack);
+    reg!("jit_op_call_named", runtime::jit_op_call_named);
+    reg!(
+        "jit_op_method_call_named",
+        runtime::jit_op_method_call_named
+    );
+    reg!("jit_error_construct", runtime::jit_error_construct);
+    reg!("jit_value_construct", runtime::jit_value_construct);
+    reg!("jit_op_guard", runtime::jit_op_guard);
+    reg!("jit_op_fail", runtime::jit_op_fail);
+    reg!("jit_is_main_context", runtime::jit_is_main_context);
+    reg!("jit_op_import", runtime::jit_op_import);
+    reg!(
+        "jit_make_enum_variant_unit",
+        runtime::jit_make_enum_variant_unit
+    );
+    reg!(
+        "jit_make_enum_variant_tuple",
+        runtime::jit_make_enum_variant_tuple
+    );
+    reg!(
+        "jit_make_enum_variant_struct",
+        runtime::jit_make_enum_variant_struct
+    );
+    reg!("jit_is_mut", runtime::jit_is_mut);
+    reg!("jit_is_type", runtime::jit_is_type);
+    reg!("jit_is_type_mut", runtime::jit_is_type_mut);
     reg!(
         "jit_op_index_fast_array_int",
         runtime::jit_op_index_fast_array_int
@@ -478,6 +567,37 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         pop: decl(module, "jit_pop", &sig_vm_only),
         dup: decl(module, "jit_dup", &sig_vm_only),
         build_array: decl(module, "jit_build_array", &sig_vm_u32),
+        build_tuple: decl(module, "jit_build_tuple", &sig_vm_u32),
+        build_map: decl(module, "jit_build_map", &sig_vm_u32),
+        build_set: decl(module, "jit_build_set", &sig_vm_u32),
+        string_interp: decl(module, "jit_string_interp", &sig_vm_u32),
+        index_assign: decl(module, "jit_op_index_assign", &sig_vm_to_u32),
+        op_slice: decl(module, "jit_op_slice", &sig_vm_u32_to_u32),
+        iter_len: decl(module, "jit_op_iter_len", &sig_vm_to_u32),
+        iter_get: decl(module, "jit_op_iter_get", &sig_vm_to_u32),
+        unpack: decl(module, "jit_op_unpack", &sig_vm_u32_to_u32),
+        op_call_named: decl(module, "jit_op_call_named", &sig_vm_u32_u32_to_u32),
+        op_method_call_named: decl(module, "jit_op_method_call_named", &sig_vm_3u32_to_u32),
+        error_construct: decl(module, "jit_error_construct", &sig_vm_u32),
+        value_construct: decl(module, "jit_value_construct", &sig_vm_only),
+        op_guard: decl(module, "jit_op_guard", &sig_vm_u32_to_u32),
+        op_fail: decl(module, "jit_op_fail", &sig_vm_to_u32),
+        is_main_context: decl(module, "jit_is_main_context", &sig_vm_to_u32),
+        op_import: decl(module, "jit_op_import", &sig_vm_u32_u32_to_u32),
+        make_enum_variant_unit: decl(module, "jit_make_enum_variant_unit", &sig_vm_u32_to_u32),
+        make_enum_variant_tuple: decl(
+            module,
+            "jit_make_enum_variant_tuple",
+            &sig_vm_u32_u32_to_u32,
+        ),
+        make_enum_variant_struct: decl(
+            module,
+            "jit_make_enum_variant_struct",
+            &sig_vm_u32_u32_to_u32,
+        ),
+        is_mut: decl(module, "jit_is_mut", &sig_vm_u32),
+        is_type: decl(module, "jit_is_type", &sig_vm_u32),
+        is_type_mut: decl(module, "jit_is_type_mut", &sig_vm_u32),
         index_fast_array_int: decl(module, "jit_op_index_fast_array_int", &sig_vm_to_u32),
         type_wrap: decl(module, "jit_type_wrap", sig_vm_u32_fallible),
         local_add_array_mod_index: decl(
@@ -564,6 +684,29 @@ pub(super) fn declare_helper_refs(
         pop: r(ids.pop),
         dup: r(ids.dup),
         build_array: r(ids.build_array),
+        build_tuple: r(ids.build_tuple),
+        build_map: r(ids.build_map),
+        build_set: r(ids.build_set),
+        string_interp: r(ids.string_interp),
+        index_assign: r(ids.index_assign),
+        op_slice: r(ids.op_slice),
+        iter_len: r(ids.iter_len),
+        iter_get: r(ids.iter_get),
+        unpack: r(ids.unpack),
+        op_call_named: r(ids.op_call_named),
+        op_method_call_named: r(ids.op_method_call_named),
+        error_construct: r(ids.error_construct),
+        value_construct: r(ids.value_construct),
+        op_guard: r(ids.op_guard),
+        op_fail: r(ids.op_fail),
+        is_main_context: r(ids.is_main_context),
+        op_import: r(ids.op_import),
+        make_enum_variant_unit: r(ids.make_enum_variant_unit),
+        make_enum_variant_tuple: r(ids.make_enum_variant_tuple),
+        make_enum_variant_struct: r(ids.make_enum_variant_struct),
+        is_mut: r(ids.is_mut),
+        is_type: r(ids.is_type),
+        is_type_mut: r(ids.is_type_mut),
         index_fast_array_int: r(ids.index_fast_array_int),
         type_wrap: r(ids.type_wrap),
         local_add_array_mod_index: r(ids.local_add_array_mod_index),

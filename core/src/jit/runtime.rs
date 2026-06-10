@@ -254,6 +254,282 @@ pub unsafe extern "C" fn jit_build_array(vm: *mut VM, count: u32) {
     vm.push(Value::Array(Rc::new(RefCell::new(elements))));
 }
 
+pub unsafe extern "C" fn jit_build_tuple(vm: *mut VM, count: u32) {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::BuildTuple);
+    vm.sync_stack_from_view();
+    vm.handle_build_tuple(count as usize);
+}
+
+pub unsafe extern "C" fn jit_build_map(vm: *mut VM, count: u32) {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::BuildMap);
+    vm.sync_stack_from_view();
+    vm.handle_build_map(count as usize);
+}
+
+pub unsafe extern "C" fn jit_build_set(vm: *mut VM, count: u32) {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::BuildSet);
+    vm.sync_stack_from_view();
+    vm.handle_build_set(count as usize);
+}
+
+pub unsafe extern "C" fn jit_string_interp(vm: *mut VM, count: u32) {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::StringInterp);
+    vm.sync_stack_from_view();
+    vm.handle_string_interp(count as usize);
+}
+
+pub unsafe extern "C" fn jit_op_index_assign(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::IndexAssign);
+    vm.sync_stack_from_view();
+    match vm.handle_index_assign() {
+        Ok(()) => 0,
+        Err(e) => {
+            vm.jit.stash_error(e);
+            1
+        }
+    }
+}
+
+pub unsafe extern "C" fn jit_op_slice(vm: *mut VM, flags: u32) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpSlice);
+    vm.sync_stack_from_view();
+    match vm.handle_slice(flags as u8) {
+        Ok(()) => 0,
+        Err(e) => {
+            vm.jit.stash_error(e);
+            1
+        }
+    }
+}
+
+pub unsafe extern "C" fn jit_op_iter_len(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::IterLen);
+    vm.sync_stack_from_view();
+    match vm.handle_iter_len() {
+        Ok(()) => 0,
+        Err(e) => {
+            vm.jit.stash_error(e);
+            1
+        }
+    }
+}
+
+pub unsafe extern "C" fn jit_op_iter_get(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::IterGet);
+    vm.sync_stack_from_view();
+    match vm.handle_iter_get() {
+        Ok(()) => 0,
+        Err(e) => {
+            vm.jit.stash_error(e);
+            1
+        }
+    }
+}
+
+pub unsafe extern "C" fn jit_op_unpack(vm: *mut VM, count: u32) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::Unpack);
+    vm.sync_stack_from_view();
+    match vm.handle_unpack(count as usize) {
+        Ok(()) => 0,
+        Err(e) => {
+            vm.jit.stash_error(e);
+            1
+        }
+    }
+}
+
+pub unsafe extern "C" fn jit_error_construct(vm: *mut VM, has_tag: u32) {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::ErrorConstruct);
+    vm.sync_stack_from_view();
+    vm.handle_error_construct(has_tag != 0);
+}
+
+pub unsafe extern "C" fn jit_value_construct(vm: *mut VM) {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::ValueConstruct);
+    vm.sync_stack_from_view();
+    vm.handle_value_construct();
+}
+
+/// Guard's bind-and-pop half. Returns 1 when the JIT must take the
+/// fallback jump (top of stack was an error value), 0 to fall through.
+/// Infallible — error propagation happens via the jump, not a status.
+pub unsafe extern "C" fn jit_op_guard(vm: *mut VM, binding_idx: u32) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpGuard);
+    vm.sync_stack_from_view();
+    if vm.handle_guard(binding_idx as u16) { 1 } else { 0 }
+}
+
+/// Fail always raises: stash the error and return status 1.
+pub unsafe extern "C" fn jit_op_fail(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpFail);
+    vm.sync_stack_from_view();
+    let err = vm.handle_fail();
+    vm.jit.stash_error(err);
+    1
+}
+
+/// Read `vm.is_main_context` for the `Main` opcode's conditional jump.
+pub unsafe extern "C" fn jit_is_main_context(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::IsMainContext);
+    if vm.is_main_context { 1 } else { 0 }
+}
+
+pub unsafe extern "C" fn jit_op_import(vm: *mut VM, path_idx: u32, selective_count: u32) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpImport);
+    vm.sync_stack_from_view();
+    match vm.handle_import_op(path_idx as u16, selective_count as usize) {
+        Ok(()) => 0,
+        Err(e) => {
+            vm.jit.stash_error(e);
+            1
+        }
+    }
+}
+
+pub unsafe extern "C" fn jit_make_enum_variant_unit(vm: *mut VM, variant_idx: u32) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::MakeEnumVariantUnit);
+    vm.sync_stack_from_view();
+    match vm.handle_make_enum_variant_unit(variant_idx as u16) {
+        Ok(()) => 0,
+        Err(e) => {
+            vm.jit.stash_error(e);
+            1
+        }
+    }
+}
+
+pub unsafe extern "C" fn jit_make_enum_variant_tuple(
+    vm: *mut VM,
+    variant_idx: u32,
+    arg_count: u32,
+) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::MakeEnumVariantTuple);
+    vm.sync_stack_from_view();
+    match vm.handle_make_enum_variant_tuple(variant_idx as u16, arg_count as usize) {
+        Ok(()) => 0,
+        Err(e) => {
+            vm.jit.stash_error(e);
+            1
+        }
+    }
+}
+
+pub unsafe extern "C" fn jit_make_enum_variant_struct(
+    vm: *mut VM,
+    variant_idx: u32,
+    field_count: u32,
+) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::MakeEnumVariantStruct);
+    vm.sync_stack_from_view();
+    match vm.handle_make_enum_variant_struct(variant_idx as u16, field_count as usize) {
+        Ok(()) => 0,
+        Err(e) => {
+            vm.jit.stash_error(e);
+            1
+        }
+    }
+}
+
+pub unsafe extern "C" fn jit_is_mut(vm: *mut VM, name_idx: u32) {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::IsMut);
+    vm.sync_stack_from_view();
+    vm.handle_is_mut(name_idx as u16);
+}
+
+pub unsafe extern "C" fn jit_is_type(vm: *mut VM, type_idx: u32) {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::IsType);
+    vm.sync_stack_from_view();
+    vm.handle_is_type(type_idx as u16);
+}
+
+pub unsafe extern "C" fn jit_is_type_mut(vm: *mut VM, name_idx: u32) {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::IsTypeMut);
+    vm.sync_stack_from_view();
+    vm.handle_is_type_mut(name_idx as u16);
+}
+
+/// CallNamed — mirrors `jit_op_call`: if a user frame was pushed, drive
+/// the interpreter until it returns.
+pub unsafe extern "C" fn jit_op_call_named(vm: *mut VM, pos_count: u32, named_count: u32) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpCallNamed);
+    vm.sync_stack_from_view();
+    let before_depth = vm.frames_len();
+    match vm.handle_call_named(pos_count as usize, named_count as usize) {
+        Ok(()) => {
+            if vm.frames_len() > before_depth {
+                match vm.execute_until(before_depth) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        vm.jit.stash_error(e);
+                        1
+                    }
+                }
+            } else {
+                0
+            }
+        }
+        Err(e) => {
+            vm.jit.stash_error(e);
+            1
+        }
+    }
+}
+
+/// MethodCallNamed — like `jit_op_method_call`.
+pub unsafe extern "C" fn jit_op_method_call_named(
+    vm: *mut VM,
+    method_idx: u32,
+    arg_count: u32,
+    named_count: u32,
+) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::OpMethodCallNamed);
+    vm.sync_stack_from_view();
+    let before_depth = vm.frames_len();
+    match vm.handle_method_call_named(method_idx as u16, arg_count as usize, named_count as usize)
+    {
+        Ok(()) => {
+            if vm.frames_len() > before_depth {
+                match vm.execute_until(before_depth) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        vm.jit.stash_error(e);
+                        1
+                    }
+                }
+            } else {
+                0
+            }
+        }
+        Err(e) => {
+            vm.jit.stash_error(e);
+            1
+        }
+    }
+}
+
 pub unsafe extern "C" fn jit_op_index_fast_array_int(vm: *mut VM) -> u32 {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::IndexFastArrayInt);

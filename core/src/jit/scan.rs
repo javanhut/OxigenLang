@@ -102,6 +102,7 @@ fn is_supported(op: OpCode) -> bool {
             | OpCode::PopJumpIfFalse
             // Functions
             | OpCode::Call
+            | OpCode::CallNamed
             | OpCode::Return
             // Structs
             | OpCode::StructDef
@@ -110,6 +111,38 @@ fn is_supported(op: OpCode) -> bool {
             | OpCode::SetField
             | OpCode::DefineMethod
             | OpCode::MethodCall
+            | OpCode::MethodCallNamed
+            // Collections (helper-call lowering)
+            | OpCode::BuildTuple
+            | OpCode::BuildMap
+            | OpCode::BuildSet
+            | OpCode::IndexAssign
+            | OpCode::Slice
+            | OpCode::Unpack
+            // Iteration
+            | OpCode::IterLen
+            | OpCode::IterGet
+            // String interpolation
+            | OpCode::StringInterp
+            // Error handling
+            | OpCode::ErrorConstruct
+            | OpCode::ValueConstruct
+            | OpCode::Guard
+            | OpCode::Fail
+            // Modules / script context
+            | OpCode::Import
+            | OpCode::GetModuleField
+            | OpCode::Main
+            | OpCode::Unless
+            // Enums
+            | OpCode::EnumDef
+            | OpCode::MakeEnumVariantUnit
+            | OpCode::MakeEnumVariantTuple
+            | OpCode::MakeEnumVariantStruct
+            // Type introspection
+            | OpCode::IsMut
+            | OpCode::IsType
+            | OpCode::IsTypeMut
     )
 }
 
@@ -144,17 +177,29 @@ fn instr_fixed_len(op: OpCode) -> usize {
         | OpCode::ShiftLeft
         | OpCode::ShiftRight
         | OpCode::Index
+        | OpCode::IndexAssign
+        | OpCode::IterLen
+        | OpCode::IterGet
+        | OpCode::ValueConstruct
+        | OpCode::Fail
         | OpCode::CloseUpvalue
         | OpCode::Return => 1,
 
         // u8 operand (2 bytes)
-        OpCode::Call | OpCode::Log => 2,
+        OpCode::Call | OpCode::Log | OpCode::Slice | OpCode::ErrorConstruct | OpCode::Unpack => 2,
+
+        // u8 + u8 (3 bytes)
+        OpCode::CallNamed => 3,
 
         // u16 operand (3 bytes)
         OpCode::Constant
         | OpCode::GetLocal
         | OpCode::SetLocal
         | OpCode::BuildArray
+        | OpCode::BuildTuple
+        | OpCode::BuildMap
+        | OpCode::BuildSet
+        | OpCode::StringInterp
         | OpCode::TypeWrap
         | OpCode::GetGlobal
         | OpCode::SetGlobal
@@ -167,11 +212,27 @@ fn instr_fixed_len(op: OpCode) -> usize {
         | OpCode::Loop
         | OpCode::PopJumpIfFalse
         | OpCode::StructDef
+        | OpCode::EnumDef
+        | OpCode::MakeEnumVariantUnit
+        | OpCode::GetModuleField
+        | OpCode::Main
+        | OpCode::Unless
+        | OpCode::IsMut
+        | OpCode::IsType
+        | OpCode::IsTypeMut
         | OpCode::GetField
         | OpCode::SetField => 3,
 
         // u16 + u8 (4 bytes)
-        OpCode::StructLiteral | OpCode::DefineMethod | OpCode::MethodCall => 4,
+        OpCode::StructLiteral
+        | OpCode::DefineMethod
+        | OpCode::MethodCall
+        | OpCode::MakeEnumVariantTuple
+        | OpCode::MakeEnumVariantStruct
+        | OpCode::Import => 4,
+
+        // u16 + u8 + u8 (5 bytes)
+        OpCode::MethodCallNamed | OpCode::Guard => 5,
 
         // u16 + u8 + u16 (6 bytes)
         OpCode::DefineGlobalTyped => 6,
@@ -204,10 +265,23 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
         // Branch targets: jumps use u16 offsets right after the opcode
         // byte.
         match op {
-            OpCode::Jump | OpCode::JumpIfFalse | OpCode::JumpIfTrue | OpCode::PopJumpIfFalse => {
+            OpCode::Jump
+            | OpCode::JumpIfFalse
+            | OpCode::JumpIfTrue
+            | OpCode::PopJumpIfFalse
+            | OpCode::Main
+            | OpCode::Unless => {
                 let off =
                     read_u16(code, ip + 1).ok_or(ScanError::InvalidBytecode { offset: ip })?;
                 let target = ip + 3 + off as usize;
+                info.branch_targets.push(target);
+            }
+            OpCode::Guard => {
+                // Guard: u16 jump offset at ip+1, then 2 binding-index
+                // bytes. Target is relative to the instruction end (ip+5).
+                let off =
+                    read_u16(code, ip + 1).ok_or(ScanError::InvalidBytecode { offset: ip })?;
+                let target = ip + 5 + off as usize;
                 info.branch_targets.push(target);
             }
             OpCode::Loop => {

@@ -1433,6 +1433,31 @@ impl JitInner {
                                     _ => unreachable!(),
                                 };
                                 virt_stack.push_int_ssa(result);
+                            } else if virt_stack.top_n_are_float_ssa(2) {
+                                // Virtual Float arithmetic: both operands
+                                // staged as f64 bit patterns. Bitcast to
+                                // F64, do register fadd/fsub/fmul, bitcast
+                                // back. Float arithmetic is IEEE-total
+                                // (no error path — matches binary_add/sub/
+                                // mul's Float×Float arms), so no guard or
+                                // helper fallback is needed.
+                                use cranelift_codegen::ir::MemFlags;
+                                let rhs_bits = virt_stack.pop_float_ssa().unwrap();
+                                let lhs_bits = virt_stack.pop_float_ssa().unwrap();
+                                let no_flags = MemFlags::new();
+                                let lhs =
+                                    builder.ins().bitcast(types::F64, no_flags, lhs_bits);
+                                let rhs =
+                                    builder.ins().bitcast(types::F64, no_flags, rhs_bits);
+                                let result = match op {
+                                    OpCode::Add => builder.ins().fadd(lhs, rhs),
+                                    OpCode::Subtract => builder.ins().fsub(lhs, rhs),
+                                    OpCode::Multiply => builder.ins().fmul(lhs, rhs),
+                                    _ => unreachable!(),
+                                };
+                                let result_bits =
+                                    builder.ins().bitcast(types::I64, no_flags, result);
+                                virt_stack.push_float_ssa(result_bits);
                             } else if virt_stack.pending_depth() == 1
                                 && virt_stack.peek_int_ssa().is_some()
                             {
@@ -1729,6 +1754,28 @@ impl JitInner {
                             // Required at `opt_level=none`; without this,
                             // bench_collatz's `n / 2` falls through to a
                             // real `idiv` instead of `sshr`.
+
+                            // Virtual Float division: IEEE-total (0.0/0.0 is
+                            // NaN, x/0.0 is ±inf — matches binary_div's
+                            // Float×Float arm), so no guards needed. Float
+                            // modulo stays on the helper path: Cranelift has
+                            // no f64 frem instruction.
+                            if !is_mod && virt_stack.top_n_are_float_ssa(2) {
+                                use cranelift_codegen::ir::MemFlags;
+                                let rhs_bits = virt_stack.pop_float_ssa().unwrap();
+                                let lhs_bits = virt_stack.pop_float_ssa().unwrap();
+                                let no_flags = MemFlags::new();
+                                let lhs =
+                                    builder.ins().bitcast(types::F64, no_flags, lhs_bits);
+                                let rhs =
+                                    builder.ins().bitcast(types::F64, no_flags, rhs_bits);
+                                let result = builder.ins().fdiv(lhs, rhs);
+                                let result_bits =
+                                    builder.ins().bitcast(types::I64, no_flags, result);
+                                virt_stack.push_float_ssa(result_bits);
+                                ip += 1;
+                                continue;
+                            }
 
                             // Virtual path: operands on expr_stack as virt Ints.
                             // Emit register-resident sdiv/srem with zero +
@@ -4024,6 +4071,253 @@ impl JitInner {
                             ip += 1;
                         }
 
+                        // ── Collections (helper-call lowering) ──────────
+                        OpCode::BuildTuple => {
+                            let count = read_u16(code, ip + 1);
+                            let count_val = builder.ins().iconst(types::I32, count as i64);
+                            builder.ins().call(refs.build_tuple, &[vm_val, count_val]);
+                            ip += 3;
+                        }
+                        OpCode::BuildMap => {
+                            let count = read_u16(code, ip + 1);
+                            let count_val = builder.ins().iconst(types::I32, count as i64);
+                            builder.ins().call(refs.build_map, &[vm_val, count_val]);
+                            ip += 3;
+                        }
+                        OpCode::BuildSet => {
+                            let count = read_u16(code, ip + 1);
+                            let count_val = builder.ins().iconst(types::I32, count as i64);
+                            builder.ins().call(refs.build_set, &[vm_val, count_val]);
+                            ip += 3;
+                        }
+                        OpCode::StringInterp => {
+                            let count = read_u16(code, ip + 1);
+                            let count_val = builder.ins().iconst(types::I32, count as i64);
+                            builder.ins().call(refs.string_interp, &[vm_val, count_val]);
+                            ip += 3;
+                        }
+                        OpCode::IndexAssign => {
+                            emit_fallible(&mut builder, exit_block, refs.index_assign, vm_val);
+                            ip += 1;
+                        }
+                        OpCode::Slice => {
+                            let flags = code[ip + 1];
+                            let flags_val = builder.ins().iconst(types::I32, flags as i64);
+                            let call = builder.ins().call(refs.op_slice, &[vm_val, flags_val]);
+                            let status = builder.inst_results(call)[0];
+                            emit_early_exit_on_err(&mut builder, exit_block, status);
+                            ip += 2;
+                        }
+                        OpCode::Unpack => {
+                            let count = code[ip + 1];
+                            let count_val = builder.ins().iconst(types::I32, count as i64);
+                            let call = builder.ins().call(refs.unpack, &[vm_val, count_val]);
+                            let status = builder.inst_results(call)[0];
+                            emit_early_exit_on_err(&mut builder, exit_block, status);
+                            ip += 2;
+                        }
+
+                        // ── Iteration ───────────────────────────────────
+                        OpCode::IterLen => {
+                            emit_fallible(&mut builder, exit_block, refs.iter_len, vm_val);
+                            ip += 1;
+                        }
+                        OpCode::IterGet => {
+                            emit_fallible(&mut builder, exit_block, refs.iter_get, vm_val);
+                            ip += 1;
+                        }
+
+                        // ── Named calls ─────────────────────────────────
+                        OpCode::CallNamed => {
+                            let pos_count = code[ip + 1];
+                            let named_count = code[ip + 2];
+                            let pos_val = builder.ins().iconst(types::I32, pos_count as i64);
+                            let named_val = builder.ins().iconst(types::I32, named_count as i64);
+                            let call = builder
+                                .ins()
+                                .call(refs.op_call_named, &[vm_val, pos_val, named_val]);
+                            let status = builder.inst_results(call)[0];
+                            emit_early_exit_on_err(&mut builder, exit_block, status);
+                            ip += 3;
+                        }
+                        OpCode::MethodCallNamed => {
+                            let method_idx = read_u16(code, ip + 1);
+                            let arg_count = code[ip + 3];
+                            let named_count = code[ip + 4];
+                            let m_val = builder.ins().iconst(types::I32, method_idx as i64);
+                            let a_val = builder.ins().iconst(types::I32, arg_count as i64);
+                            let n_val = builder.ins().iconst(types::I32, named_count as i64);
+                            let call = builder
+                                .ins()
+                                .call(refs.op_method_call_named, &[vm_val, m_val, a_val, n_val]);
+                            let status = builder.inst_results(call)[0];
+                            emit_early_exit_on_err(&mut builder, exit_block, status);
+                            ip += 5;
+                        }
+
+                        // ── Error handling ──────────────────────────────
+                        OpCode::ErrorConstruct => {
+                            let has_tag = code[ip + 1];
+                            let tag_val = builder.ins().iconst(types::I32, has_tag as i64);
+                            builder.ins().call(refs.error_construct, &[vm_val, tag_val]);
+                            ip += 2;
+                        }
+                        OpCode::ValueConstruct => {
+                            builder.ins().call(refs.value_construct, &[vm_val]);
+                            ip += 1;
+                        }
+                        OpCode::Guard => {
+                            // Encoding: u16 jump offset at ip+1, binding
+                            // constant index in the two bytes after. The
+                            // helper binds + pops on the error path and
+                            // returns 1 when the fallback jump fires.
+                            let off = read_u16(code, ip + 1) as usize;
+                            let binding_idx =
+                                ((code[ip + 3] as u16) << 8) | (code[ip + 4] as u16);
+                            let target_ip = ip + 5 + off;
+                            let next_ip = ip + 5;
+                            let target_block = blocks[&target_ip];
+                            let fall_block = *blocks
+                                .entry(next_ip)
+                                .or_insert_with(|| builder.create_block());
+
+                            let b_val = builder.ins().iconst(types::I32, binding_idx as i64);
+                            let call = builder.ins().call(refs.op_guard, &[vm_val, b_val]);
+                            let take_jump = builder.inst_results(call)[0];
+                            builder
+                                .ins()
+                                .brif(take_jump, target_block, &[], fall_block, &[]);
+                            terminated = true;
+                            ip += 5;
+                        }
+                        OpCode::Fail => {
+                            // Fail always raises (the helper stashes the
+                            // error and returns status 1), but bytecode can
+                            // carry dead code right after it that is NOT a
+                            // branch target. Emit it like any fallible
+                            // helper: the always-taken error edge exits, and
+                            // the unreachable ok-block keeps the emission
+                            // loop in a valid (unterminated) block.
+                            emit_fallible(&mut builder, exit_block, refs.op_fail, vm_val);
+                            ip += 1;
+                        }
+
+                        // ── Modules / script context ────────────────────
+                        OpCode::Import => {
+                            let path_idx = read_u16(code, ip + 1);
+                            let selective_count = code[ip + 3];
+                            let p_val = builder.ins().iconst(types::I32, path_idx as i64);
+                            let s_val = builder.ins().iconst(types::I32, selective_count as i64);
+                            let call = builder.ins().call(refs.op_import, &[vm_val, p_val, s_val]);
+                            let status = builder.inst_results(call)[0];
+                            emit_early_exit_on_err(&mut builder, exit_block, status);
+                            ip += 4;
+                        }
+                        OpCode::GetModuleField => {
+                            // No-op in the interpreter (module fields are
+                            // resolved via GetField on module values).
+                            ip += 3;
+                        }
+                        OpCode::Main => {
+                            // Conditional jump: skip the main block when not
+                            // executing as the entry script.
+                            let off = read_u16(code, ip + 1) as usize;
+                            let target_ip = ip + 3 + off;
+                            let next_ip = ip + 3;
+                            let target_block = blocks[&target_ip];
+                            let fall_block = *blocks
+                                .entry(next_ip)
+                                .or_insert_with(|| builder.create_block());
+
+                            let call = builder.ins().call(refs.is_main_context, &[vm_val]);
+                            let is_main = builder.inst_results(call)[0];
+                            builder
+                                .ins()
+                                .brif(is_main, fall_block, &[], target_block, &[]);
+                            terminated = true;
+                            ip += 3;
+                        }
+                        OpCode::Unless => {
+                            // Same semantics as JumpIfFalse: peek the
+                            // condition, jump when falsy.
+                            let off = read_u16(code, ip + 1) as usize;
+                            let target_ip = ip + 3 + off;
+                            let next_ip = ip + 3;
+                            let target_block = blocks[&target_ip];
+                            let fall_block = *blocks
+                                .entry(next_ip)
+                                .or_insert_with(|| builder.create_block());
+
+                            let call = builder.ins().call(refs.peek_truthy, &[vm_val]);
+                            let truthy = builder.inst_results(call)[0];
+                            builder
+                                .ins()
+                                .brif(truthy, fall_block, &[], target_block, &[]);
+                            terminated = true;
+                            ip += 3;
+                        }
+
+                        // ── Enums ───────────────────────────────────────
+                        OpCode::EnumDef => {
+                            // No-op in the interpreter (enum defs flow
+                            // through the constant pool / DefineGlobal).
+                            ip += 3;
+                        }
+                        OpCode::MakeEnumVariantUnit => {
+                            let variant_idx = read_u16(code, ip + 1);
+                            let v_val = builder.ins().iconst(types::I32, variant_idx as i64);
+                            let call = builder
+                                .ins()
+                                .call(refs.make_enum_variant_unit, &[vm_val, v_val]);
+                            let status = builder.inst_results(call)[0];
+                            emit_early_exit_on_err(&mut builder, exit_block, status);
+                            ip += 3;
+                        }
+                        OpCode::MakeEnumVariantTuple => {
+                            let variant_idx = read_u16(code, ip + 1);
+                            let arg_count = code[ip + 3];
+                            let v_val = builder.ins().iconst(types::I32, variant_idx as i64);
+                            let a_val = builder.ins().iconst(types::I32, arg_count as i64);
+                            let call = builder
+                                .ins()
+                                .call(refs.make_enum_variant_tuple, &[vm_val, v_val, a_val]);
+                            let status = builder.inst_results(call)[0];
+                            emit_early_exit_on_err(&mut builder, exit_block, status);
+                            ip += 4;
+                        }
+                        OpCode::MakeEnumVariantStruct => {
+                            let variant_idx = read_u16(code, ip + 1);
+                            let field_count = code[ip + 3];
+                            let v_val = builder.ins().iconst(types::I32, variant_idx as i64);
+                            let f_val = builder.ins().iconst(types::I32, field_count as i64);
+                            let call = builder
+                                .ins()
+                                .call(refs.make_enum_variant_struct, &[vm_val, v_val, f_val]);
+                            let status = builder.inst_results(call)[0];
+                            emit_early_exit_on_err(&mut builder, exit_block, status);
+                            ip += 4;
+                        }
+
+                        // ── Type introspection ──────────────────────────
+                        OpCode::IsMut => {
+                            let name_idx = read_u16(code, ip + 1);
+                            let n_val = builder.ins().iconst(types::I32, name_idx as i64);
+                            builder.ins().call(refs.is_mut, &[vm_val, n_val]);
+                            ip += 3;
+                        }
+                        OpCode::IsType => {
+                            let type_idx = read_u16(code, ip + 1);
+                            let t_val = builder.ins().iconst(types::I32, type_idx as i64);
+                            builder.ins().call(refs.is_type, &[vm_val, t_val]);
+                            ip += 3;
+                        }
+                        OpCode::IsTypeMut => {
+                            let name_idx = read_u16(code, ip + 1);
+                            let n_val = builder.ins().iconst(types::I32, name_idx as i64);
+                            builder.ins().call(refs.is_type_mut, &[vm_val, n_val]);
+                            ip += 3;
+                        }
+
                         // Scan should have rejected these — defensive.
                         _ => return Err(()),
                     }
@@ -4236,13 +4530,28 @@ fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usiz
             | OpCode::ShiftLeft
             | OpCode::ShiftRight
             | OpCode::Index
+            | OpCode::IndexAssign
+            | OpCode::IterLen
+            | OpCode::IterGet
+            | OpCode::ValueConstruct
+            | OpCode::Fail
             | OpCode::CloseUpvalue
             | OpCode::Return => 1,
             // u8 operand
-            OpCode::Call | OpCode::Log => 2,
+            OpCode::Call
+            | OpCode::Log
+            | OpCode::Slice
+            | OpCode::ErrorConstruct
+            | OpCode::Unpack => 2,
+            // u8 + u8
+            OpCode::CallNamed => 3,
             // u16 operand
             OpCode::Constant
             | OpCode::BuildArray
+            | OpCode::BuildTuple
+            | OpCode::BuildMap
+            | OpCode::BuildSet
+            | OpCode::StringInterp
             | OpCode::TypeWrap
             | OpCode::GetLocal
             | OpCode::SetLocal
@@ -4257,10 +4566,25 @@ fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usiz
             | OpCode::Loop
             | OpCode::PopJumpIfFalse
             | OpCode::StructDef
+            | OpCode::EnumDef
+            | OpCode::MakeEnumVariantUnit
+            | OpCode::GetModuleField
+            | OpCode::Main
+            | OpCode::Unless
+            | OpCode::IsMut
+            | OpCode::IsType
+            | OpCode::IsTypeMut
             | OpCode::GetField
             | OpCode::SetField => 3,
             // u16 + u8
-            OpCode::StructLiteral | OpCode::DefineMethod | OpCode::MethodCall => 4,
+            OpCode::StructLiteral
+            | OpCode::DefineMethod
+            | OpCode::MethodCall
+            | OpCode::MakeEnumVariantTuple
+            | OpCode::MakeEnumVariantStruct
+            | OpCode::Import => 4,
+            // u16 + u8 + u8
+            OpCode::MethodCallNamed | OpCode::Guard => 5,
             // u16 + u8 + u16
             OpCode::DefineGlobalTyped => 6,
             // Variable-length

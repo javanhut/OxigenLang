@@ -143,6 +143,32 @@ impl VirtStack {
         }
     }
 
+    /// Pop the top virt slot iff it is `FloatSsa`. Returns the raw f64
+    /// bit pattern as an i64-typed SSA value. Mirrors `pop_int_ssa`.
+    #[inline]
+    pub(crate) fn pop_float_ssa(&mut self) -> Option<ir::Value> {
+        match self.slots.last() {
+            Some(VirtSlot::FloatSsa(_)) => match self.slots.pop() {
+                Some(VirtSlot::FloatSsa(v)) => Some(v),
+                _ => unreachable!(),
+            },
+            _ => None,
+        }
+    }
+
+    /// True iff the top `n` slots are all `FloatSsa`. Mirrors
+    /// `top_n_are_int_ssa` for the float arithmetic fast path.
+    #[inline]
+    pub(crate) fn top_n_are_float_ssa(&self, n: usize) -> bool {
+        let len = self.slots.len();
+        if n > len {
+            return false;
+        }
+        self.slots[len - n..]
+            .iter()
+            .all(|s| matches!(s, VirtSlot::FloatSsa(_)))
+    }
+
     /// Peek at the top slot without consuming.
     #[inline]
     pub(crate) fn peek(&self) -> Option<VirtSlot> {

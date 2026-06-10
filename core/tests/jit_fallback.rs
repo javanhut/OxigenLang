@@ -680,22 +680,24 @@ update(20)
 }
 
 #[test]
-fn unsupported_opcodes_bail_out_cleanly() {
-    // Map literals are still outside the JIT allow-list, so the top-level
-    // scan must fail and the interpreter must take over without disruption.
+fn map_literals_compile_and_match_interpreter() {
+    // Map literals are in the JIT allow-list (BuildMap lowers to a helper
+    // call); the top-level scan must succeed and produce the same result
+    // as the interpreter.
     let source = r#"
 m := {"x": 7}
 m["x"]
 "#;
 
     let (baseline, _, _) = run(source, None);
-    let (jitted, _, j_failed) = run(source, Some(1));
+    let (jitted, j_ok, j_failed) = run(source, Some(1));
 
     assert_eq!(baseline, jitted);
-    assert!(
-        j_failed >= 1,
-        "top-level with map literal should have been rejected by scan"
+    assert_eq!(
+        j_failed, 0,
+        "map literal should no longer be rejected by scan"
     );
+    assert!(j_ok >= 1, "top-level with map literal should JIT-compile");
 }
 
 #[test]
@@ -1589,4 +1591,238 @@ go()
     assert_eq!(baseline, "5");
     assert_eq!(jitted, baseline, "builtin call in JIT loop must match interpreter");
     assert!(j_ok >= 1, "go should JIT-compile");
+}
+
+// ── Expanded-coverage differential tests ───────────────────────────────
+//
+// Every opcode the compiler emits is now in the JIT allow-list. Each test
+// below runs a feature through both the interpreter baseline and the
+// JIT (threshold 1), asserting identical output, at least one successful
+// compile, and zero scan rejections.
+
+fn assert_jit_matches(source: &str, expected: Option<&str>) {
+    let (baseline, _, _) = run(source, None);
+    let (jitted, j_ok, j_failed) = run(source, Some(1));
+    assert_eq!(baseline, jitted, "JIT output must match interpreter");
+    if let Some(want) = expected {
+        assert_eq!(jitted, want);
+    }
+    assert_eq!(j_failed, 0, "no function should be rejected by scan");
+    assert!(j_ok >= 1, "at least one function should JIT-compile");
+}
+
+#[test]
+fn jit_compiles_tuple_literals() {
+    assert_jit_matches(
+        r#"
+fun make_pair(a, b) {
+    t := (a, b)
+    t[0] * 10 + t[1]
+}
+make_pair(3, 4)
+"#,
+        Some("34"),
+    );
+}
+
+#[test]
+fn jit_compiles_map_literals_in_function() {
+    assert_jit_matches(
+        r#"
+fun lookup(k) {
+    m := {"a": 1, "b": 2}
+    m[k]
+}
+lookup("b")
+"#,
+        Some("2"),
+    );
+}
+
+#[test]
+fn jit_compiles_string_interpolation() {
+    assert_jit_matches(
+        r#"
+fun greet(name) {
+    "Hello, {name}!"
+}
+greet("Oxi")
+"#,
+        Some("Hello, Oxi!"),
+    );
+}
+
+#[test]
+fn jit_compiles_slices() {
+    assert_jit_matches(
+        r#"
+fun mid(arr) {
+    sub := arr[1:3]
+    sub[0] * 10 + sub[1]
+}
+mid([1, 2, 3, 4])
+"#,
+        Some("23"),
+    );
+}
+
+#[test]
+fn jit_compiles_index_assignment() {
+    assert_jit_matches(
+        r#"
+fun bump(arr) {
+    arr[0] = arr[0] + 10
+    arr[0]
+}
+bump([5])
+"#,
+        Some("15"),
+    );
+}
+
+#[test]
+fn jit_compiles_each_loops() {
+    assert_jit_matches(
+        r#"
+fun total(arr) {
+    sum := 0
+    each v in arr {
+        sum = sum + v
+    }
+    sum
+}
+total([1, 2, 3, 4])
+"#,
+        Some("10"),
+    );
+}
+
+#[test]
+fn jit_compiles_each_loop_over_string() {
+    assert_jit_matches(
+        r#"
+fun count_chars(s) {
+    n := 0
+    each c in s {
+        n = n + 1
+    }
+    n
+}
+count_chars("oxigen")
+"#,
+        Some("6"),
+    );
+}
+
+#[test]
+fn jit_compiles_unpack() {
+    assert_jit_matches(
+        r#"
+fun swap_sum() {
+    a, b := (3, 9)
+    a * 10 + b
+}
+swap_sum()
+"#,
+        Some("39"),
+    );
+}
+
+#[test]
+fn jit_compiles_error_construct_and_guard() {
+    assert_jit_matches(
+        r#"
+fun recover() {
+    x := <Error>("bad") <guard>(42)
+    x
+}
+recover()
+"#,
+        None,
+    );
+}
+
+#[test]
+fn jit_fail_matches_interpreter_error() {
+    let source = r#"
+fun boom() {
+    <fail>("kaboom")
+}
+boom()
+"#;
+    let (base_msg, base_line) = run_expect_err(source, None);
+    let (jit_msg, jit_line) = run_expect_err(source, Some(1));
+    assert_eq!(base_msg, jit_msg);
+    assert_eq!(base_line, jit_line);
+}
+
+#[test]
+fn jit_compiles_enum_variants() {
+    // Top-level form mirrors example/enum_payload.oxi; the top-level
+    // script function itself is what gets JIT-compiled here. (Enum field
+    // access on function locals has a pre-existing interpreter quirk
+    // unrelated to the JIT, so the test stays at top level.)
+    assert_jit_matches(
+        r#"
+enum Shape {
+    Circle(radius <float>)
+    Rectangle { w <float>, h <float> }
+}
+c := Shape.Circle(1.5)
+r := Shape.Rectangle { w: 3.0, h: 4.0 }
+c.radius + r.w * r.h
+"#,
+        None,
+    );
+}
+
+#[test]
+fn jit_compiles_is_type_checks() {
+    assert_jit_matches(
+        r#"
+fun classify(v) {
+    option {
+        is_type(v, int) -> "int",
+        is_type(v, str) -> "str",
+        "other"
+    }
+}
+classify(5)
+"#,
+        None,
+    );
+}
+
+#[test]
+fn jit_compiles_main_block() {
+    assert_jit_matches(
+        r#"
+total := 0
+main {
+    total = 5
+}
+total
+"#,
+        Some("5"),
+    );
+}
+
+#[test]
+fn jit_float_constant_arithmetic_matches_interpreter() {
+    // Exercises the inline FloatSsa fadd/fsub/fmul/fdiv fast paths,
+    // including IEEE totality for division (x/0.0 = inf, no error).
+    assert_jit_matches(
+        r#"
+fun mix() {
+    a := 1.5 + 2.25
+    b := 10.0 - 0.5
+    c := 3.0 * 4.5
+    d := 9.0 / 2.0
+    e := 1.0 / 0.0
+    a + b + c + d + e
+}
+mix()
+"#,
+        None,
+    );
 }
