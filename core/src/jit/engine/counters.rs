@@ -117,10 +117,11 @@ pub(crate) enum HelperCounter {
     IsTypeMut,
     OpCallNamed,
     OpMethodCallNamed,
+    RcDropValueSlot,
 }
 
 impl HelperCounter {
-    pub(crate) const COUNT: usize = HelperCounter::OpMethodCallNamed as usize + 1;
+    pub(crate) const COUNT: usize = HelperCounter::RcDropValueSlot as usize + 1;
 }
 
 pub(crate) const HELPER_NAMES: [&str; HelperCounter::COUNT] = [
@@ -214,6 +215,7 @@ pub(crate) const HELPER_NAMES: [&str; HelperCounter::COUNT] = [
     "is_type_mut",
     "op_call_named",
     "op_method_call_named",
+    "rc_drop_value_slot",
 ];
 
 /// Lightweight JIT instrumentation counters. Each field is a

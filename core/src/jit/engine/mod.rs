@@ -921,6 +921,15 @@ impl JitInner {
                 let mut method_ic_ix: usize = 0;
                 let mut field_ic_ix: usize = 0;
 
+                // A6: deferred self-callee. Set by the GetGlobal arm when
+                // the push of the function's own binding is provably
+                // consumed by an upcoming self-recursive Call with a
+                // purely-virtual argument window; consumed (taken) by the
+                // Call arm, which re-validates the binding via the
+                // GetGlobal IC's version instead of materializing the
+                // closure Value on the VM stack.
+                let mut pending_self_callee: Option<DeferredSelfCall> = None;
+
                 while ip < code.len() {
                     // If this ip starts a new block, switch to it (and glue
                     // the current block to it if fall-through).
@@ -2179,6 +2188,47 @@ impl JitInner {
                         // ── Globals ─────────────────────────────────────
                         OpCode::GetGlobal => {
                             let idx = read_u16(code, ip + 1);
+
+                            // A6: deferred self-callee. When this GetGlobal
+                            // re-fetches the enclosing function's own
+                            // binding and the matcher proves the value is
+                            // consumed by an upcoming self-recursive Call
+                            // whose argument window stays entirely on the
+                            // virt stack, skip the push (version check, Rc
+                            // bump, 16-byte copy, len bump) here and let
+                            // the Call arm re-validate the binding via the
+                            // IC version + identity instead. The IC slot is
+                            // still consumed — the Call arm's checks and
+                            // rebind fallback read through it.
+                            if pending_self_callee.is_none()
+                                && slot_types.specialized_entry_eligible
+                                && spec_thunk_id.is_some()
+                                && !spec_wants_closure_arg
+                                && match_deferred_self_call(
+                                    code,
+                                    chunk,
+                                    ip,
+                                    func,
+                                    &info.branch_targets,
+                                    &slot_types,
+                                    &int_locals,
+                                    &live_int_slots,
+                                    &param_mirrors,
+                                )
+                                .is_some()
+                            {
+                                let cache_ptr = global_cache_ptrs[ic_ix];
+                                ic_ix += 1;
+                                pending_self_callee = Some(DeferredSelfCall {
+                                    cache_ptr,
+                                    name_idx: idx,
+                                    line,
+                                    col,
+                                });
+                                ip += 3;
+                                continue;
+                            }
+
                             let cache_ptr = global_cache_ptrs[ic_ix];
                             ic_ix += 1;
                             let idx_val = builder.ins().iconst(types::I32, idx as i64);
@@ -2446,6 +2496,309 @@ impl JitInner {
                             let cache_ptr = call_cache_ptrs[call_ic_ix];
                             call_ic_ix += 1;
 
+                            // Shared post_call_block: every success path
+                            // (deferred self-call, A3 direct, closure-aware,
+                            // generic IC) converges here. Allocated lazily
+                            // by whichever path emits first; the deferred
+                            // self-call below allocates eagerly.
+                            let mut shared_post_call_block: Option<Block> = None;
+
+                            // ── A6: deferred self-callee dispatch ──────────
+                            //
+                            // The matching GetGlobal emitted nothing; the
+                            // callee slot on the VM stack is vacant and the
+                            // argc args sit on the virt stack. Re-validate
+                            // the self binding here:
+                            //   1. GetGlobal IC version == vm.globals_version
+                            //      (no global changed since the cache was
+                            //      populated, so the cached binding is
+                            //      current),
+                            //   2. cached value is a Closure,
+                            //   3. and it is the RUNNING closure.
+                            // On all-pass: stamp a None placeholder in the
+                            // callee slot (the spec return's tag-gated
+                            // refcount decrement skips None), bump len to
+                            // honor the spec prologue's len==slot_offset+1
+                            // contract, push the JitFrame, and direct-call
+                            // the specialized entry with the args still in
+                            // registers. No closure materialization, no Rc
+                            // traffic.
+                            // On any miss (cold: first call or rebind):
+                            // materialize the callee via the get_global_ic
+                            // helper (repopulating the cache), flush the
+                            // virt args above it, and fall through to the
+                            // classic A3/IC emission below.
+                            if let Some(pending) = pending_self_callee.take() {
+                                use cranelift_codegen::ir::MemFlags;
+                                use cranelift_codegen::ir::condcodes::IntCC;
+                                let flags = MemFlags::trusted();
+
+                                // The matcher guarantees these; a mismatch
+                                // means the matcher and emitter disagree —
+                                // refuse to compile rather than emit wrong
+                                // code.
+                                if arg_count as usize != func.arity as usize
+                                    || spec_thunk_id.is_none()
+                                    || !virt_stack.top_n_are_int_ssa(arg_count as usize)
+                                {
+                                    return Err(());
+                                }
+                                let spec_id = spec_thunk_id.unwrap();
+
+                                let check_tag_block = builder.create_block();
+                                let check_ident_block = builder.create_block();
+                                let self_ok_block = builder.create_block();
+                                let deferred_fallback_block = builder.create_block();
+                                let post_call_block = builder.create_block();
+                                shared_post_call_block = Some(post_call_block);
+
+                                let gcache_val =
+                                    builder.ins().iconst(ptr_ty, pending.cache_ptr as i64);
+
+                                // 1. Version check.
+                                let cache_ver =
+                                    builder.ins().load(types::I64, flags, gcache_val, 0);
+                                let vm_ver = builder.ins().load(
+                                    types::I64,
+                                    flags,
+                                    vm_val,
+                                    VM::globals_version_offset() as i32,
+                                );
+                                let ver_ok =
+                                    builder.ins().icmp(IntCC::Equal, cache_ver, vm_ver);
+                                builder.ins().brif(
+                                    ver_ok,
+                                    check_tag_block,
+                                    &[],
+                                    deferred_fallback_block,
+                                    &[],
+                                );
+
+                                // 2. Cached value is a Closure. The cache's
+                                // `value` field sits at byte offset 8 (tag)
+                                // / 16 (payload) — same layout the GetGlobal
+                                // IC hit path already bakes in.
+                                builder.switch_to_block(check_tag_block);
+                                let cval_tag =
+                                    builder.ins().load(types::I8, flags, gcache_val, 8);
+                                let closure_tag_c = builder
+                                    .ins()
+                                    .iconst(types::I8, VALUE_TAG_CLOSURE as i64);
+                                let tag_ok =
+                                    builder.ins().icmp(IntCC::Equal, cval_tag, closure_tag_c);
+                                builder.ins().brif(
+                                    tag_ok,
+                                    check_ident_block,
+                                    &[],
+                                    deferred_fallback_block,
+                                    &[],
+                                );
+
+                                // 3. ... and is the running closure.
+                                builder.switch_to_block(check_ident_block);
+                                let cached_rc =
+                                    builder.ins().load(ptr_ty, flags, gcache_val, 16);
+                                let cached_obj = builder
+                                    .ins()
+                                    .iadd_imm(cached_rc, RC_VALUE_OFFSET as i64);
+                                let caller_frame_ptr =
+                                    emit_load_top_jit_frame_ptr(&mut builder, vm_val);
+                                let current_closure_raw = builder.ins().load(
+                                    ptr_ty,
+                                    flags,
+                                    caller_frame_ptr,
+                                    JitFrame::OFFSET_CLOSURE_RAW,
+                                );
+                                let ident_ok = builder.ins().icmp(
+                                    IntCC::Equal,
+                                    cached_obj,
+                                    current_closure_raw,
+                                );
+                                builder.ins().brif(
+                                    ident_ok,
+                                    self_ok_block,
+                                    &[],
+                                    deferred_fallback_block,
+                                    &[],
+                                );
+
+                                // Snapshot the virt args BEFORE the self-ok
+                                // emission pops them: the fallback path
+                                // never executes those pops at runtime and
+                                // must flush the args to memory.
+                                let virt_snap = virt_stack.snapshot();
+
+                                // ── Self-call hit ──
+                                builder.switch_to_block(self_ok_block);
+                                if let Some(cp) = counters_ptr_opt {
+                                    emit_counter_bump(
+                                        &mut builder,
+                                        cp,
+                                        counter_offsets::SELF_RECURSION_DIRECT_CALL,
+                                    );
+                                }
+
+                                // Vacant callee slot: stamp None at
+                                // stack[len] and bump len so the callee sees
+                                // the protocol state len == slot_offset + 1.
+                                let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
+                                let callee_slot = emit_load_stack_len(&mut builder, vm_val);
+                                let value_size =
+                                    builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+                                let cs_off = builder.ins().imul(callee_slot, value_size);
+                                let cs_addr = builder.ins().iadd(stack_ptr, cs_off);
+                                let none_tag = builder
+                                    .ins()
+                                    .iconst(types::I8, VALUE_TAG_NONE as i64);
+                                builder.ins().store(flags, none_tag, cs_addr, 0);
+                                let one64 = builder.ins().iconst(types::I64, 1);
+                                let len_plus = builder.ins().iadd(callee_slot, one64);
+                                builder.ins().store(
+                                    flags,
+                                    len_plus,
+                                    vm_val,
+                                    vm_stack_view_len_offset(),
+                                );
+
+                                // JitFrame push — closure comes from the
+                                // running frame (we just proved identity).
+                                let jit_frames_ptr = builder.ins().load(
+                                    ptr_ty,
+                                    flags,
+                                    vm_val,
+                                    vm_jit_frame_view_ptr_offset(),
+                                );
+                                let jit_frames_len = builder.ins().load(
+                                    types::I64,
+                                    flags,
+                                    vm_val,
+                                    vm_jit_frame_view_len_offset(),
+                                );
+                                let frame_size = builder.ins().iconst(
+                                    types::I64,
+                                    std::mem::size_of::<JitFrame>() as i64,
+                                );
+                                let frame_off =
+                                    builder.ins().imul(jit_frames_len, frame_size);
+                                let new_frame_ptr =
+                                    builder.ins().iadd(jit_frames_ptr, frame_off);
+                                let module_globals = builder.ins().load(
+                                    ptr_ty,
+                                    flags,
+                                    caller_frame_ptr,
+                                    JitFrame::OFFSET_MODULE_GLOBALS,
+                                );
+                                let line_val =
+                                    builder.ins().iconst(types::I32, line as i64);
+                                builder.ins().store(
+                                    flags,
+                                    current_closure_raw,
+                                    new_frame_ptr,
+                                    JitFrame::OFFSET_CLOSURE_RAW,
+                                );
+                                builder.ins().store(
+                                    flags,
+                                    callee_slot,
+                                    new_frame_ptr,
+                                    JitFrame::OFFSET_SLOT_OFFSET,
+                                );
+                                builder.ins().store(
+                                    flags,
+                                    module_globals,
+                                    new_frame_ptr,
+                                    JitFrame::OFFSET_MODULE_GLOBALS,
+                                );
+                                builder.ins().store(
+                                    flags,
+                                    line_val,
+                                    new_frame_ptr,
+                                    JitFrame::OFFSET_LINE,
+                                );
+                                let new_fl = builder.ins().iadd(jit_frames_len, one64);
+                                builder.ins().store(
+                                    flags,
+                                    new_fl,
+                                    vm_val,
+                                    vm_jit_frame_view_len_offset(),
+                                );
+
+                                // Args from the virt stack, lhs-first.
+                                let mut call_args: Vec<cranelift_codegen::ir::Value> =
+                                    Vec::with_capacity(arg_count as usize + 1);
+                                call_args.push(vm_val);
+                                let mut popped: Vec<cranelift_codegen::ir::Value> =
+                                    Vec::with_capacity(arg_count as usize);
+                                for _ in 0..arg_count {
+                                    popped.push(virt_stack.pop_int_ssa().unwrap());
+                                }
+                                popped.reverse();
+                                call_args.extend(popped);
+
+                                let spec_fref =
+                                    self.module.declare_func_in_func(spec_id, builder.func);
+                                let call = builder.ins().call(spec_fref, &call_args);
+                                let results = builder.inst_results(call);
+                                let status = results[0];
+                                let payload = results[1];
+
+                                let dsc_ok_block = builder.create_block();
+                                let dsc_err_block = builder.create_block();
+                                builder.append_block_param(dsc_err_block, types::I32);
+                                builder.ins().brif(
+                                    status,
+                                    dsc_err_block,
+                                    &[status.into()],
+                                    dsc_ok_block,
+                                    &[],
+                                );
+
+                                builder.switch_to_block(dsc_err_block);
+                                let eb_status = builder.block_params(dsc_err_block)[0];
+                                let zero64 = builder.ins().iconst(types::I64, 0);
+                                builder
+                                    .ins()
+                                    .jump(exit_block, &[eb_status.into(), zero64.into()]);
+
+                                // Success: callee already truncated to
+                                // slot_offset (= the placeholder index), so
+                                // the result push lands exactly where the
+                                // interpreter would leave it.
+                                builder.switch_to_block(dsc_ok_block);
+                                emit_inline_push_integer(&mut builder, vm_val, payload);
+                                builder.ins().jump(post_call_block, &[]);
+
+                                // ── Fallback: materialize callee + args,
+                                //    then the classic A3/IC path below. ──
+                                builder.switch_to_block(deferred_fallback_block);
+                                virt_stack.restore(virt_snap);
+                                // Error attribution for a faulting
+                                // GetGlobal belongs to the GetGlobal's
+                                // source location, not the Call's.
+                                emit_store_current_loc(
+                                    &mut builder,
+                                    vm_val,
+                                    pending.line,
+                                    pending.col,
+                                );
+                                last_emitted_loc = None;
+                                let name_val = builder
+                                    .ins()
+                                    .iconst(types::I32, pending.name_idx as i64);
+                                let gcall = builder.ins().call(
+                                    refs.get_global_ic,
+                                    &[vm_val, gcache_val, name_val],
+                                );
+                                let gstatus = builder.inst_results(gcall)[0];
+                                emit_early_exit_on_err(&mut builder, exit_block, gstatus);
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
+                                // Builder now sits in the early-exit ok
+                                // block with [callee, args...] materialized
+                                // — the state the classic emission below
+                                // expects. a3_eligible recomputes as false
+                                // (virt is empty), so the IC path handles
+                                // the rebound callee.
+                            }
+
                             // B2.2.f: closure-aware specialized dispatch is
                             // emitted INSIDE the existing IC's hit block
                             // (see further down), sharing the IC's tag
@@ -2490,14 +2843,6 @@ impl JitInner {
                             // the subsequent A3 / IC emissions see the
                             // pre-CA virt-stack state — same as if CA never
                             // emitted.
-                            // Shared post_call_block: A3's success and the
-                            // existing IC's success (and CA dispatch's
-                            // success, when integrated below) converge
-                            // here. Allocated lazily by whichever path
-                            // emits first.
-                            let mut shared_post_call_block: Option<Block> = None;
-
-
                             // A2.5 commit 5: A3 direct-specialized-call
                             // fast path for self-recursion.
                             //
@@ -4015,15 +4360,17 @@ impl JitInner {
                                     // return_(&[status, payload]) for the
                                     // multi-return signature.
                                     use cranelift_codegen::ir::MemFlags;
+                                    use cranelift_codegen::ir::condcodes::IntCC;
                                     let flags = MemFlags::trusted();
+
+                                    let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
+                                    let value_size =
+                                        builder.ins().iconst(types::I64, VALUE_SIZE as i64);
 
                                     let payload = if let Some(top) = virt_stack.pop_int_ssa() {
                                         top
                                     } else {
-                                        let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
                                         let stack_len = emit_load_stack_len(&mut builder, vm_val);
-                                        let value_size =
-                                            builder.ins().iconst(types::I64, VALUE_SIZE as i64);
                                         let one = builder.ins().iconst(types::I64, 1);
                                         let top_idx = builder.ins().isub(stack_len, one);
                                         let byte_off = builder.ins().imul(top_idx, value_size);
@@ -4035,6 +4382,89 @@ impl JitInner {
                                             VALUE_INT_PAYLOAD_OFFSET as i32,
                                         )
                                     };
+
+                                    // Closure-marker refcount balance. The
+                                    // raw `stack_view.len = slot_offset`
+                                    // teardown below removes stack[slot_
+                                    // offset] — the owned callee-closure
+                                    // Value every spec-entry caller (A3
+                                    // self-recursion, CA dispatch) leaves
+                                    // there — WITHOUT running Drop. Without
+                                    // this decrement the strong count leaks
+                                    // by one per invocation, pinning
+                                    // dynamically-created closures alive
+                                    // forever. Tag-gated: the deferred
+                                    // self-callee path stamps a None
+                                    // placeholder in the slot instead, which
+                                    // owns nothing and must be skipped.
+                                    let cm_byte_off =
+                                        builder.ins().imul(slot_offset_val, value_size);
+                                    let cm_addr = builder.ins().iadd(stack_ptr, cm_byte_off);
+                                    let cm_tag = builder.ins().load(types::I8, flags, cm_addr, 0);
+                                    let closure_tag_c = builder
+                                        .ins()
+                                        .iconst(types::I8, VALUE_TAG_CLOSURE as i64);
+                                    let cm_is_closure =
+                                        builder.ins().icmp(IntCC::Equal, cm_tag, closure_tag_c);
+
+                                    let dec_block = builder.create_block();
+                                    let dec_fast_block = builder.create_block();
+                                    let dec_slow_block = builder.create_block();
+                                    let teardown_block = builder.create_block();
+                                    builder.ins().brif(
+                                        cm_is_closure,
+                                        dec_block,
+                                        &[],
+                                        teardown_block,
+                                        &[],
+                                    );
+
+                                    builder.switch_to_block(dec_block);
+                                    let cm_rc = builder.ins().load(
+                                        types::I64,
+                                        flags,
+                                        cm_addr,
+                                        VALUE_INT_PAYLOAD_OFFSET as i32,
+                                    );
+                                    // Strong count lives at RcBox offset 0
+                                    // (pinned by the rc_strong_count test in
+                                    // vm/value.rs).
+                                    let strong = builder.ins().load(types::I64, flags, cm_rc, 0);
+                                    let one_i64 = builder.ins().iconst(types::I64, 1);
+                                    let strong_gt_1 = builder.ins().icmp(
+                                        IntCC::UnsignedGreaterThan,
+                                        strong,
+                                        one_i64,
+                                    );
+                                    builder.ins().brif(
+                                        strong_gt_1,
+                                        dec_fast_block,
+                                        &[],
+                                        dec_slow_block,
+                                        &[],
+                                    );
+
+                                    // Fast: not the last ref — plain dec.
+                                    builder.switch_to_block(dec_fast_block);
+                                    let strong_dec = builder.ins().iadd_imm(strong, -1);
+                                    builder.ins().store(flags, strong_dec, cm_rc, 0);
+                                    builder.ins().jump(teardown_block, &[]);
+
+                                    // Slow (cold): last ref — full Drop chain
+                                    // via helper; it also stamps None over
+                                    // the slot.
+                                    builder.switch_to_block(dec_slow_block);
+                                    builder.ins().call(
+                                        refs.rc_drop_value_slot,
+                                        &[vm_val, slot_offset_val],
+                                    );
+                                    builder.ins().jump(teardown_block, &[]);
+
+                                    builder.switch_to_block(teardown_block);
+                                    builder.seal_block(dec_block);
+                                    builder.seal_block(dec_fast_block);
+                                    builder.seal_block(dec_slow_block);
+                                    builder.seal_block(teardown_block);
 
                                     // Inline frame teardown. Mirrors
                                     // `jit_op_return` minus the helper FFI:
@@ -4353,6 +4783,99 @@ impl JitInner {
                 builder.finalize();
             }
 
+            // A5 (experimental, opt-in via OXIGEN_JIT_SELF_INLINE): self-
+            // inlining for recursive specialized entries. The A3 fast path
+            // emits a direct `call` to this function's own specialized
+            // FuncId for self-recursion; splice the body into those call
+            // sites so each native frame handles several recursion levels.
+            //
+            // Measured on bench_fib: fires correctly (2 rounds, ~4x IR) but
+            // produces no wall-clock win — the per-call cost is dominated
+            // by explicit VM bookkeeping IR (JitFrame push/pop, callee
+            // closure fetch + Rc traffic, arg backing-store writes,
+            // stack_view.len updates), which inlining preserves as real
+            // side effects. Kept opt-in so the infrastructure is ready if
+            // a future registerized self-call ABI (frameless leaf entry)
+            // removes that bookkeeping — at which point inlining the
+            // residual body is expected to pay off. Default-off avoids the
+            // compile-time and code-size cost until then.
+            if matches!(kind, EntryKind::IntSpecialized)
+                && std::env::var("OXIGEN_JIT_SELF_INLINE").is_ok()
+            {
+                use cranelift_codegen::inline::{Inline, InlineCommand};
+                use cranelift_codegen::ir as clir;
+
+                /// Inlines direct calls whose resolved module-level name is
+                /// this function itself, substituting the pre-inline body.
+                struct SelfInliner<'a> {
+                    body: &'a clir::Function,
+                    self_index: u32,
+                }
+                impl Inline for SelfInliner<'_> {
+                    fn inline(
+                        &mut self,
+                        caller: &clir::Function,
+                        _inst: clir::Inst,
+                        _opcode: clir::Opcode,
+                        callee: clir::FuncRef,
+                        _args: &[clir::Value],
+                    ) -> InlineCommand<'_> {
+                        let ext = &caller.dfg.ext_funcs[callee];
+                        if let clir::ExternalName::User(name_ref) = ext.name {
+                            let name = &caller.params.user_named_funcs()[name_ref];
+                            if name.namespace == 0 && name.index == self.self_index {
+                                return InlineCommand::Inline {
+                                    callee: std::borrow::Cow::Borrowed(self.body),
+                                    visit_callee: false,
+                                };
+                            }
+                        }
+                        InlineCommand::KeepCall
+                    }
+                }
+
+                const SELF_INLINE_DEPTH: usize = 2;
+                const SELF_INLINE_MAX_BODY_INSTS: usize = 2_000;
+                const SELF_INLINE_MAX_TOTAL_INSTS: usize = 30_000;
+
+                if self.ctx.func.dfg.num_insts() <= SELF_INLINE_MAX_BODY_INSTS {
+                    let original = self.ctx.func.clone();
+                    let self_index = job.func_id.as_u32();
+                    for round in 0..SELF_INLINE_DEPTH {
+                        if self.ctx.func.dfg.num_insts() > SELF_INLINE_MAX_TOTAL_INSTS {
+                            break;
+                        }
+                        match self.ctx.inline(SelfInliner {
+                            body: &original,
+                            self_index,
+                        }) {
+                            Ok(true) => {
+                                if std::env::var("OXIGEN_JIT_DEBUG").is_ok() {
+                                    eprintln!(
+                                        "[jit] self-inline round {} for {:?}: {} insts",
+                                        round,
+                                        func.name.as_deref().unwrap_or("<anon>"),
+                                        self.ctx.func.dfg.num_insts(),
+                                    );
+                                }
+                            }
+                            Ok(false) => break,
+                            Err(e) => {
+                                if std::env::var("OXIGEN_JIT_DEBUG").is_ok() {
+                                    eprintln!("[jit] self-inline failed: {e:?}");
+                                }
+                                // The context may be mid-mutation — clear it
+                                // so the next compile_function starts from a
+                                // clean ctx (FunctionBuilder::new requires an
+                                // empty function).
+                                self.module.clear_context(&mut self.ctx);
+                                return Err(());
+                            }
+                        }
+                    }
+                }
+            }
+
             // Diagnostic: when OXIGEN_JIT_DISASM is set to a function
             // name, dump that function's machine-code disasm. The
             // special value "ALL" dumps every compiled function (with
@@ -4367,13 +4890,18 @@ impl JitInner {
                 self.ctx.want_disasm = true;
             }
 
-            self.module
-                .define_function(job.func_id, &mut self.ctx)
-                .map_err(|e| {
-                    if std::env::var("OXIGEN_JIT_DEBUG").is_ok() {
-                        eprintln!("[jit] define_function failed for {:?}: {:?}", kind, e,);
-                    }
-                })?;
+            if let Err(e) = self.module.define_function(job.func_id, &mut self.ctx) {
+                if std::env::var("OXIGEN_JIT_DEBUG").is_ok() {
+                    eprintln!("[jit] define_function failed for {:?}: {:?}", kind, e,);
+                }
+                // Clear before bailing: a dirty ctx would make the next
+                // compile_function's FunctionBuilder::new panic ("function
+                // must be empty") — and that panic would unwind across the
+                // extern "C" boundary when compilation is triggered from a
+                // JIT helper, aborting the process.
+                self.module.clear_context(&mut self.ctx);
+                return Err(());
+            }
 
             if want_disasm {
                 if let Some(code) = self.ctx.compiled_code() {
@@ -4605,6 +5133,102 @@ fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usiz
         };
     }
     (get_globals, calls, method_calls, field_ops)
+}
+
+/// A6: compile-time record of a deferred self-callee. Set by the
+/// GetGlobal arm when `match_deferred_self_call` proves the push can be
+/// skipped; consumed by the Call arm.
+struct DeferredSelfCall {
+    cache_ptr: *mut GlobalCacheEntry,
+    name_idx: u16,
+    line: u32,
+    col: u32,
+}
+
+/// A6 matcher: at `GetGlobal <name>` where `name` is the enclosing
+/// function's own binding, decide whether the push can be deferred to
+/// the consuming self-recursive `Call`.
+///
+/// The window between the GetGlobal and the Call must keep every value
+/// it produces on the virt stack so the callee slot stays vacant on the
+/// VM stack until the Call re-validates the binding. Allowed window
+/// ops (mirroring the emitter's virt fast paths exactly):
+///   * `Constant` of an Integer that is NOT a local-initializer site
+///     (init sites materialize to memory),
+///   * `GetLocal` of a live virtualized Int64 local or a param mirror,
+///   * `Add`/`Subtract`/`Multiply` whose BOTH operands come from within
+///     the window (simulated depth ≥ 2 — depth-1 arith would take the
+///     mixed-mode memory path).
+/// The window must contain no branch targets (a block boundary resets
+/// the virt stack), and the terminating `Call`'s argc must equal both
+/// the simulated depth and the function's arity.
+#[allow(clippy::too_many_arguments)]
+fn match_deferred_self_call(
+    code: &[u8],
+    chunk: &crate::compiler::opcode::Chunk,
+    getglobal_ip: usize,
+    func: &Function,
+    branch_targets: &[usize],
+    slot_types: &crate::compiler::slot_types::FunctionSlotTypes,
+    int_locals: &HashMap<u16, Variable>,
+    live_int_slots: &HashSet<u16>,
+    param_mirrors: &HashMap<u16, Variable>,
+) -> Option<usize> {
+    let own_name = func.name.as_deref()?;
+    let name_idx = read_u16(code, getglobal_ip + 1) as usize;
+    let binding = chunk.constants.get(name_idx)?;
+    if binding.as_string().map(|s| s.as_str()) != Some(own_name) {
+        return None;
+    }
+
+    let mut ip = getglobal_ip + 3;
+    let mut depth: usize = 0;
+    loop {
+        if branch_targets.binary_search(&ip).is_ok() {
+            return None;
+        }
+        let op = OpCode::from_byte(*code.get(ip)?)?;
+        match op {
+            OpCode::Constant => {
+                let idx = read_u16(code, ip + 1) as usize;
+                let is_int = matches!(
+                    chunk.constants.get(idx).map(|v| v.repr()),
+                    Some(crate::vm::value::ValueRepr::Integer(_))
+                );
+                if !is_int || slot_types.local_init_result_ip.contains_key(&ip) {
+                    return None;
+                }
+                depth += 1;
+                ip += 3;
+            }
+            OpCode::GetLocal => {
+                let slot = read_u16(code, ip + 1);
+                let virt = (int_locals.contains_key(&slot)
+                    && live_int_slots.contains(&slot))
+                    || param_mirrors.contains_key(&slot);
+                if !virt {
+                    return None;
+                }
+                depth += 1;
+                ip += 3;
+            }
+            OpCode::Add | OpCode::Subtract | OpCode::Multiply => {
+                if depth < 2 {
+                    return None;
+                }
+                depth -= 1;
+                ip += 1;
+            }
+            OpCode::Call => {
+                let argc = *code.get(ip + 1)? as usize;
+                if argc >= 1 && depth == argc && argc == func.arity as usize {
+                    return Some(ip);
+                }
+                return None;
+            }
+            _ => return None,
+        }
+    }
 }
 
 struct LocalConstArithUpdate {

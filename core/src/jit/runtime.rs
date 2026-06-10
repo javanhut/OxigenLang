@@ -1776,6 +1776,22 @@ pub unsafe extern "C" fn jit_op_return(vm: *mut VM) {
     vm.push(result);
 }
 
+/// Cold path of the specialized inline return's closure-marker refcount
+/// decrement: the running closure Value at `stack[abs_slot]` holds the
+/// LAST strong reference (count == 1), so the full Drop chain must run.
+/// Reads the Value out of the slot, drops it, and leaves an inert None
+/// so any later raw observer of the slot sees a valid tag.
+pub unsafe extern "C" fn jit_rc_drop_value_slot(vm: *mut VM, abs_slot: i64) {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::RcDropValueSlot);
+    unsafe {
+        let slot = vm.stack_view.ptr.add(abs_slot as usize);
+        let value = std::ptr::read(slot);
+        std::ptr::write(slot, Value::None);
+        drop(value);
+    }
+}
+
 // ── Inline int fast-path support ───────────────────────────────────────
 
 /// Return a raw pointer to the first `Value` on the VM stack. The JIT's

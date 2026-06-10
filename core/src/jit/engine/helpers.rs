@@ -142,6 +142,9 @@ pub(super) struct HelperIds {
     pub op_method_call: FuncId,       // (vm, u32, u32) -> u32
     pub op_method_call_ic: FuncId,    // (vm, u32, u32, *mut MethodCacheEntry) -> u32
 
+    // Specialized-return closure-marker drop (cold path, strong == 1)
+    pub rc_drop_value_slot: FuncId, // (vm, i64 abs_slot)
+
     // Inline int fast-path support
     pub stack_as_mut_ptr: FuncId, // (vm) -> *mut Value (pointer-sized)
     pub stack_len: FuncId,        // (vm) -> i64
@@ -241,6 +244,7 @@ pub(super) struct HelperRefs {
     #[allow(dead_code)]
     pub op_method_call: FuncRef,
     pub op_method_call_ic: FuncRef,
+    pub rc_drop_value_slot: FuncRef,
     // `stack_as_mut_ptr` and `stack_len` are still registered as
     // runtime helpers for backwards compatibility, but the hot JIT
     // paths now read `vm.stack_view.{ptr, len}` directly via
@@ -377,6 +381,7 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_op_define_method", runtime::jit_op_define_method);
     reg!("jit_op_method_call", runtime::jit_op_method_call);
     reg!("jit_op_method_call_ic", runtime::jit_op_method_call_ic);
+    reg!("jit_rc_drop_value_slot", runtime::jit_rc_drop_value_slot);
     reg!("jit_stack_as_mut_ptr", runtime::jit_stack_as_mut_ptr);
     reg!("jit_stack_len", runtime::jit_stack_len);
     reg!("jit_stack_pop_one", runtime::jit_stack_pop_one);
@@ -660,6 +665,7 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         op_define_method: decl(module, "jit_op_define_method", &sig_vm_u32_u32_to_u32),
         op_method_call: decl(module, "jit_op_method_call", &sig_vm_u32_u32_to_u32),
         op_method_call_ic: decl(module, "jit_op_method_call_ic", &sig_vm_u32_u32_ptr_to_u32),
+        rc_drop_value_slot: decl(module, "jit_rc_drop_value_slot", &sig_vm_i64),
         stack_as_mut_ptr: decl(module, "jit_stack_as_mut_ptr", &sig_vm_to_ptr),
         stack_len: decl(module, "jit_stack_len", &sig_vm_to_i64),
         stack_pop_one: decl(module, "jit_stack_pop_one", &sig_vm_only),
@@ -757,6 +763,7 @@ pub(super) fn declare_helper_refs(
         op_define_method: r(ids.op_define_method),
         op_method_call: r(ids.op_method_call),
         op_method_call_ic: r(ids.op_method_call_ic),
+        rc_drop_value_slot: r(ids.rc_drop_value_slot),
         stack_as_mut_ptr: r(ids.stack_as_mut_ptr),
         stack_len: r(ids.stack_len),
         stack_pop_one: r(ids.stack_pop_one),
