@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::env;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -164,6 +165,39 @@ fn run_file(file_path: &str, script_args: &[String]) {
     }
 }
 
+// ── Terminal colors for `oxigen test` output ──
+const C_GREEN: &str = "\x1b[32m";
+const C_RED: &str = "\x1b[31m";
+const C_RESET: &str = "\x1b[0m";
+
+/// Emit ANSI colors only when stdout is a terminal and the conventional
+/// `NO_COLOR` variable is unset, so piped/redirected output stays clean.
+fn color_enabled() -> bool {
+    std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
+}
+
+/// Wrap `text` in `code` when color is enabled, otherwise return it as-is.
+fn paint(text: &str, code: &str, color: bool) -> String {
+    if color {
+        format!("{code}{text}{C_RESET}")
+    } else {
+        text.to_string()
+    }
+}
+
+/// A `[ok]` (green) / `[fail]` (red) status marker, padded so test names line
+/// up regardless of marker width. Color codes are zero-width, so padding is
+/// applied to the plain text length.
+fn status_marker(passed: bool, color: bool) -> String {
+    let (text, code) = if passed {
+        ("[ok]", C_GREEN)
+    } else {
+        ("[fail]", C_RED)
+    };
+    let pad = " ".repeat("[fail]".len() - text.len());
+    format!("{}{}", paint(text, code, color), pad)
+}
+
 /// Recursively collect `*_test.oxi` files under `dir`, skipping hidden
 /// directories and common build/vendor folders. Results are sorted for
 /// deterministic ordering.
@@ -207,7 +241,7 @@ struct FileResult {
 
 /// Run every `<test>` block in a single file. The per-file output is returned
 /// in `output` rather than printed, so the caller controls separators.
-fn run_test_file(path: &std::path::Path) -> FileResult {
+fn run_test_file(path: &std::path::Path, color: bool) -> FileResult {
     use std::fmt::Write as _;
 
     let display = path.display();
@@ -264,12 +298,12 @@ fn run_test_file(path: &std::path::Path) -> FileResult {
     for outcome in &outcomes {
         if outcome.passed {
             passed += 1;
-            let _ = write!(output, "\n  ok   {}", outcome.name);
+            let _ = write!(output, "\n  {} {}", status_marker(true, color), outcome.name);
         } else {
             failed += 1;
-            let _ = write!(output, "\n  FAIL {}", outcome.name);
+            let _ = write!(output, "\n  {} {}", status_marker(false, color), outcome.name);
             if let Some(msg) = &outcome.message {
-                let _ = write!(output, "\n       {}", msg);
+                let _ = write!(output, "\n       {}", paint(msg, C_RED, color));
             }
         }
     }
@@ -306,11 +340,12 @@ fn run_tests_command(paths: &[String]) {
         return;
     }
 
+    let color = color_enabled();
     let mut total_passed = 0;
     let mut total_failed = 0;
     let mut any_printed = false;
     for file in &files {
-        let result = run_test_file(file);
+        let result = run_test_file(file, color);
         if !result.output.is_empty() {
             // Blank line between consecutive files that produced output.
             if any_printed {
@@ -327,11 +362,17 @@ fn run_tests_command(paths: &[String]) {
         println!();
     }
     let summary = if total_failed == 0 {
-        format!("test result: ok. {} passed", total_passed)
+        format!(
+            "test result: {}. {} passed",
+            paint("ok", C_GREEN, color),
+            total_passed
+        )
     } else {
         format!(
-            "test result: FAILED. {} passed; {} failed",
-            total_passed, total_failed
+            "test result: {}. {} passed; {} failed",
+            paint("FAILED", C_RED, color),
+            total_passed,
+            total_failed
         )
     };
     println!("{}", summary);

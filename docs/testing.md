@@ -63,18 +63,20 @@ oxigen test ./tests         # run every *_test.oxi under a directory
 Discovery is recursive and skips hidden directories, `target/`, and
 `node_modules/`. By convention, test files end in `_test.oxi`.
 
-Example output:
+Example output (the `[ok]`/`[fail]` markers are shown in green/red when the
+terminal supports color; plain when piped or redirected):
 
 ```
 math_test.oxi
-  ok   addition works
-  FAIL comparisons and collections
+  [ok]   addition works
+  [fail] comparisons and collections
        expected 5 but got 4
 
 test result: FAILED. 1 passed; 1 failed
 ```
 
 `oxigen test` exits with a non-zero status if any test fails, so it works in CI.
+Color is suppressed when stdout is not a terminal or when `NO_COLOR` is set.
 
 ## Tests and normal runs
 
