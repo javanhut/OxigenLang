@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use cranelift_codegen::Context;
 use cranelift_codegen::ir::{
-    AbiParam, Block, BlockArg, FuncRef, InstBuilder, Signature, UserFuncName, types,
+    AbiParam, Block, FuncRef, InstBuilder, Signature, UserFuncName, types,
 };
 use cranelift_codegen::settings;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -27,9 +27,8 @@ use crate::vm::value::{
     VALUE_INT_PAYLOAD_OFFSET, VALUE_SIZE, VALUE_TAG_CLOSURE, VALUE_TAG_FLOAT, VALUE_TAG_INTEGER,
     VALUE_TAG_NONE, VALUE_TAG_STRUCT_INSTANCE,
 };
-use crate::vm::{JitFrame, JitFrameView, StackView};
+use crate::vm::JitFrame;
 
-use super::runtime;
 use super::scan;
 use super::virt_stack::{VirtConst, VirtSlot, VirtStack};
 use super::{CompiledEntries, CompiledThunk, SpecializedThunkRaw};
@@ -42,7 +41,7 @@ pub(crate) use cache::{
     CallCacheEntry, FieldCacheEntry, FieldCacheKind, GlobalCacheEntry, MethodCacheEntry,
     MethodInlineKind,
 };
-pub(crate) use counters::{HELPER_NAMES, HelperCounter, JitCounters};
+pub(crate) use counters::{HelperCounter, JitCounters};
 use counters::{counter_offsets, emit_counter_bump};
 use defs::{
     Entry, vm_jit_frame_view_len_offset, vm_jit_frame_view_ptr_offset, vm_stack_view_len_offset,
@@ -173,13 +172,6 @@ impl JitInner {
     /// JitInner's lifetime.
     pub(crate) fn counters_ptr(&self) -> *const JitCounters {
         self.counters.as_ref() as *const _
-    }
-
-    /// Dump counters to stderr. Triggered from the Drop impl when the
-    /// env var is set. Public so other code (a future /jit-stats flag)
-    /// can invoke it on demand.
-    pub(crate) fn dump_counters(&self) {
-        self.counters.dump();
     }
 
     /// Allocate a fresh inline-cache slot for a GetGlobal call site.
@@ -4329,8 +4321,6 @@ pub(crate) struct DetectedInlineMethod {
 /// plus the field name and addend so the caller can stamp it into the
 /// MethodCacheEntry for inline expansion at the call site.
 pub(crate) fn detect_inline_method_info(func: &Function) -> Option<DetectedInlineMethod> {
-    use crate::vm::value::Value;
-
     let code = &func.chunk.code;
     // Need at least the 16-byte peephole + a 1-byte trailing `Return`.
     // (The compiler emits an implicit None/Return tail when the method
@@ -4998,7 +4988,7 @@ enum IntArithOp {
 fn emit_int_fast_arith(
     builder: &mut FunctionBuilder<'_>,
     exit_block: Block,
-    refs: &HelperRefs,
+    _refs: &HelperRefs,
     vm_val: cranelift_codegen::ir::Value,
     op: IntArithOp,
     slow_helper: FuncRef,
@@ -5598,7 +5588,7 @@ fn emit_inline_push_float(
 fn emit_int_fast_divmod(
     builder: &mut FunctionBuilder<'_>,
     exit_block: Block,
-    refs: &HelperRefs,
+    _refs: &HelperRefs,
     vm_val: cranelift_codegen::ir::Value,
     is_modulo: bool,
     slow_helper: FuncRef,
@@ -6318,7 +6308,7 @@ fn emit_inline_local_scaled_arith_update(
 fn emit_int_fast_cmp(
     builder: &mut FunctionBuilder<'_>,
     exit_block: Block,
-    refs: &HelperRefs,
+    _refs: &HelperRefs,
     vm_val: cranelift_codegen::ir::Value,
     cc: cranelift_codegen::ir::condcodes::IntCC,
     slow_helper: FuncRef,

@@ -143,12 +143,6 @@ impl VirtStack {
         }
     }
 
-    /// Peek at the top slot without consuming.
-    #[inline]
-    pub(crate) fn peek(&self) -> Option<VirtSlot> {
-        self.slots.last().copied()
-    }
-
     /// Peek at slot at depth `from_top` (0 = top). Mirrors the
     /// existing `expr_stack[len - 1 - from_top]` indexing pattern.
     #[inline]

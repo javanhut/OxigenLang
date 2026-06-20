@@ -563,7 +563,6 @@ pub fn make_upvalue_int_caches(n: usize) -> (Box<[Cell<u8>]>, Box<[Cell<i64>]>) 
 /// `ObjClosure.specialized_kind`. Callers should treat these as
 /// opaque tags and compare to the constants.
 pub const SPECIALIZED_KIND_NONE: u8 = 0;
-pub const SPECIALIZED_KIND_FORWARD_TRAMPOLINE: u8 = 1;
 pub const SPECIALIZED_KIND_NATIVE_INT_BODY: u8 = 2;
 /// B2.2: closure-aware specialized body. Differs from
 /// `NATIVE_INT_BODY` only in the ABI: the thunk takes

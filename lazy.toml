@@ -13,6 +13,9 @@ libdir = "{{prefix}}/lib/oxigen/stdlib"
 [commands.build]
 run = ["cargo build --release -p oxigen"]
 
+[commands.build-with-jit]
+run = ["cargo build --release -p oxigen --features jit"]
+
 [commands.build-lsp]
 run = ["cd lsp-go && go build -o ../target/release/oxigen-lsp ."]
 
@@ -31,12 +34,28 @@ run = [
 ]
 dep = ["build"]
 
+[commands.install-with-jit]
+run = [
+  "echo \"Installing oxigen with JIT enabled to {{bindir}}...\"",
+  "install -d {{bindir}}",
+  "install -m 755 target/release/oxigen {{bindir}}/oxigen",
+  "echo \"Installing stdlib to {{libdir}}...\"",
+  "install -d {{libdir}}",
+  "install -m 644 stdlib/*.oxi {{libdir}}/",
+  "echo \"\"",
+  "echo \"Oxigen with JIT installed successfully.\"",
+  "echo \" Binary: {{bindir}}/oxigen\"",
+  "echo \" Stdlib: {{libdir}}/\"",
+]
+dep = ["build-with-jit"]
+
 [commands.install-lsp]
 run = [
   "echo \"Installing oxigen-lsp to {{bindir}}...\"",
   "install -d {{bindir}}",
   "install -m 755 target/release/oxigen-lsp {{bindir}}/oxigen-lsp",
   "echo \"oxigen-lsp installed successfully.\"",
+  "echo \" Binary: {{bindir}}/oxigen-lsp\"",
 ]
 dep = ["build-lsp"]
 
@@ -53,4 +72,8 @@ run = [
 ]
 
 [commands.clean]
-run = ["cargo clean"]
+run = [
+  "cargo clean",
+  "rm -f lsp-go/oxigen-lsp",
+]
+

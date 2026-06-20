@@ -77,6 +77,9 @@ pub(crate) struct JitFrameView {
     pub len: usize,
 }
 
+// Offsets are baked into JIT-emitted IR, so they're only referenced
+// under the `jit` feature; harmless and unused in a pure-interpreter build.
+#[cfg_attr(not(feature = "jit"), allow(dead_code))]
 impl JitFrameView {
     pub const OFFSET_PTR: i32 = 0;
     pub const OFFSET_LEN: i32 = 8;
@@ -1199,7 +1202,8 @@ impl VM {
     /// Cheap presence-only test for `active_module_globals` — the JIT
     /// global IC uses this to decide whether to bypass its cache. We
     /// don't need the dict, just to know one exists, so this avoids
-    /// the lifetime juggling on the borrow.
+    /// the lifetime juggling on the borrow. Only called from JIT code.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn has_active_module_globals(&self) -> bool {
         if self.jit_executing.get() {
