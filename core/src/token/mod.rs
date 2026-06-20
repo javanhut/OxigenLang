@@ -145,7 +145,10 @@ pub fn token_map() -> HashMap<&'static str, TokenType> {
         ("as", As),
         ("struct", Struct),
         ("enum", Enum),
-        ("includes", Includes),
+        // `includes` is a CONTEXTUAL keyword: it only acts as a keyword in the
+        // `StructName includes { ... }` position (detected in the parser). Lexing
+        // it as a plain identifier lets it be used as a function/method name
+        // (e.g. `fun includes(...)`, `arr.includes(x)`).
         ("hide", Hide),
         ("self", SelfKw),
         ("and", And),

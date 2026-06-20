@@ -160,6 +160,7 @@ pub(super) struct HelperRefs {
     pub op_shl: FuncRef,
     pub op_shr: FuncRef,
     pub op_log: FuncRef,
+    #[allow(dead_code)]
     pub dbg_check_spec_call: FuncRef,
     pub peek_truthy: FuncRef,
     pub pop_truthy: FuncRef,
@@ -200,6 +201,7 @@ pub(super) struct HelperRefs {
     pub stack_pop_n: FuncRef,
     pub stack_commit_len: FuncRef,
     pub stack_truncate: FuncRef,
+    #[allow(dead_code)]
     pub replace_top2_with_bool: FuncRef,
     #[allow(dead_code)]
     pub current_slot_offset: FuncRef,

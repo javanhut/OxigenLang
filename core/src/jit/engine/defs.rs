@@ -90,10 +90,6 @@ pub(crate) enum EntryKind {
 /// direct-call path on having a real body, not a trampoline.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SpecializedEntryKind {
-    /// A2's adapter: boxes i64 args → calls generic → unboxes result.
-    /// Correctness-preserving but pays more than it saves vs the IC
-    /// path. A3 must NOT direct-call trampolines.
-    ForwardTrampoline,
     /// The real specialized body: runs the function's opcodes with
     /// i64-resident args, no box/unbox round trip. Safe A3 target.
     NativeIntBody,

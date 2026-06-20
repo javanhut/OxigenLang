@@ -1,94 +1,186 @@
 # OxigenLang Conventions
 
+## Philosophy
+
+Oxigen optimizes for code that states its intent plainly. A few principles run
+through every convention below:
+
+- **Be explicit about types.** A declared type is locked, which turns whole
+  classes of bugs into errors and documents what a value is. Reach for a
+  dynamic variable only when a type genuinely can't be known.
+- **Read like intent.** Prefer the construct that reads most naturally — `option`
+  for a decision, `unless`/`when` for the clearer condition, named arguments at
+  the call site, string interpolation over concatenation.
+- **Returns are implicit.** The last expression is the result; `give` is a
+  rarely-used escape hatch, not the norm.
+- **Public by default.** Expose behavior by default and `hide` only what is
+  genuinely internal.
+- **Don't repeat yourself.** Inherit and reuse rather than redeclare; reach for
+  a struct only when there's shared state and behavior.
+- **One tool per job.** `option` for local decisions, `pattern` + `choose` for
+  reusable matching; `each` for collections, `repeat` for conditions.
+- **Pick a style and commit.** One block style and `snake_case` names
+  (`PascalCase` for structs), consistently.
+
+## Simplicity Over Verbosity
+
+Oxigen code should never be verbose when it can be simplified. It should read
+naturally and be reasoned about naturally — close to how you'd describe the
+problem out loud. This is the language's central goal, and it's why Oxigen
+deliberately removes redundant constructs and renames familiar ones: when there
+is exactly one clear way to express something, intent is unambiguous.
+
+These choices are purpose-built, not accidental. Some will feel unfamiliar coming
+from other languages — that's intentional. Favor the simpler, more direct form:
+if a line can be said more plainly, say it that way.
+
+### One Construct per Job
+
+Oxigen drops overlapping constructs so there's a single, obvious tool for each
+job. Each has its own section below with the details.
+
+| Instead of | Oxigen uses |
+|------------|-------------|
+| `if` / `else if` / `else` | `option` |
+| `for` loops | `each` over an iterable |
+| `while` loops | `repeat when` (loop while true) / `repeat unless` (loop while false) |
+| `break` / `continue` | `stop` / `skip` |
+| explicit `return` | implicit return — `give` only for a rare early exit |
+
+### Declarations Encode Behavior
+
+A variable's form states how it behaves — there's no `const`, `let`, or `mut`
+keyword. Mutability comes from how it's declared; the type supplies the initial
+value and drives automatic conversion where it's unambiguous, so values become
+what the context intends without manual ceremony.
+
+| Form | Behavior |
+|------|----------|
+| `x <int>` | `x` initialized to the type's zero value (`0`) |
+| `x <int> := 0` | mutable, type-locked |
+| `x <int> = 0` | constant — immutable and type-locked |
+
+### Angle Forms Carry Meaning
+
+The `<...>` angle forms are part of the same idea: one compact, consistent syntax
+that marks a type or an effect inline instead of spelling it out. Types
+(`<int>`, `<Config>`), the Error || Value system (`<Error<tag>>`, `<Value>`), and
+effects like `<log>`, `<fail>`, `<guard>`, and `<test>` all read as a single
+intentional mark rather than boilerplate.
+
 ## Variable Declarations
 
-### Prefer Type-Locked Variables Over Dynamic Variables
+Oxigen has four declaration forms. Reach for the most explicit one that fits:
 
-When initializing a default value, declare it as a type-locked variable rather than a dynamic variable where both type and value are mutable. Type-locked variables prevent accidental type changes that can introduce subtle bugs.
+| Form | Meaning |
+|------|---------|
+| `x <type>` | Type-locked, zero-initialized, value-mutable |
+| `x <type> := value` | Type-locked with an initial value, value-mutable |
+| `x <type> = value` | Type-locked **and immutable** (a constant) |
+| `x := value` | Dynamic — both type and value can change (avoid) |
+
+### Always Declare the Expected Type
+
+A type-locked variable prevents accidental type changes that cause subtle bugs,
+and the declared type documents intent. Prefer a type even when initializing
+with `:=`. Zero-initialized variables (`x <type>`) are the cleanest choice when
+the default value is what you want.
 
 ```oxi
-// Good — type-locked, value-mutable, zero-initialized
+// Good — type-locked, zero-initialized (defaults: 0, "", [], False)
 counter <int>
 names <array>
 
-// Good — type-locked with initial value
+// Good — type-locked with an initial value
 limit <int> := 100
+result <int> := compute()
 
-// Avoid — dynamic, type and value can both change
+// Avoid — dynamic; type and value can both drift
 counter := 0
-names := []
+result := compute()
 ```
 
-### Use Shadowing Over Dynamic Reassignment
+### Reserve Dynamic `:=` for Genuinely Unknown Types
 
-If you need to change a variable's type, use a rescoped shadowed value rather than assigning it dynamically. This makes the type change explicit and intentional.
+Use a bare `:=` only when neither the type nor a sensible primitive can be known
+ahead of time — and even then, prefer `<generic>` to say "this is intentionally
+dynamic" rather than leaving a reader guessing whether it was deliberate.
 
 ```oxi
-// Good — shadowed in a new scope with a clear type change
+// Acceptable — a generic callback result whose type isn't known
+acc := initial
+
+// Better — explicit that the type is dynamic
+acc <generic> := initial
+
+fun identity(val <generic>) {
+    result <generic> := val
+    result
+}
+```
+
+### Change a Type by Shadowing, Not Reassignment
+
+To change a variable's type, shadow it with a new binding. This keeps the change
+explicit instead of silently mutating the type in place.
+
+```oxi
+// Good — shadowed with a clear type change
 x <int> := 42
 x <str> := str(x)
 
-// Avoid — silently changes type through dynamic assignment
+// Avoid — silent type change
 x := 42
 x := "now a string"
 ```
 
-### When to Use Dynamic Variables
+### Convert with `<type>`
 
-Dynamic variables (`:=` without a type annotation) should only be used when the value or the value's type cannot be determined from the basic primitives. In these cases, a `<generic>` type or `<None>` type is often a better choice.
-
-```oxi
-// Acceptable — type is truly unknown (generic callback result)
-acc := initial
-
-// Better — declare the expected type when you can
-acc <generic> := initial
-```
-
-### Zero-Initialized Values
-
-Zero-initialized values using `variable <type>` are more predictable and don't require explicit declaration of the initial value. Use them when the default zero value is what you need.
+Use explicit `<type>` conversion so the intent is visible at a glance.
 
 ```oxi
-// Clean — zero-initialized, no explicit value needed
-count <int>          // 0
-name <str>           // ""
-items <array>        // []
-active <bool>        // False
-```
-
-### Always Declare the Expected Type
-
-In most cases, use a typed or type-locked variable when the variable's value will change. Use dynamic only when the type truly cannot be known, but even then it's better to declare the expected type than not.
-
-```oxi
-// Good — type is declared even with walrus
-result <int> := compute()
-buffer <array> := get_items()
-
-// Avoid — type left implicit
-result := compute()
-buffer := get_items()
-```
-
-### Use Type Conversion with `<type>`
-
-Use explicit type conversion with `<type>` when possible, as it makes the intent clear.
-
-```oxi
-// Explicit — clear conversion intent
 value <int> := int("42")
 ratio <float> := float(count) / float(total)
+```
 
-// Implicit — less clear
-value := int("42")
+### Constants
+
+Oxigen has no `const` keyword. A type-locked **strict** assignment (`=`) is both
+type-locked and immutable.
+
+```oxi
+PI <float> = 3.14159
+MAX_RETRIES <int> = 5
+APP_NAME <str> = "Oxigen"
+
+PI = 3.0          // error — cannot reassign an immutable variable
+PI := "something" // error — type is locked
+```
+
+If a value is meant to change, declare it mutable with `<type> :=` instead. You
+can override an immutable binding by shadowing, but only when the intent is clear.
+
+```oxi
+// Good — mutable because it's expected to change
+retries <int> := 5
+retries = retries - 1
+
+// Acceptable — shadowing to override with clear intent
+MAX <int> = 100
+MAX <int> := 200
+
+// Avoid — walrus silently overriding an immutable binding
+MAX <int> = 100
+MAX := 200
 ```
 
 ## Scripts and Modules
 
 ### Use `main` for Script Entry Points
 
-Keep reusable definitions at the top level and put executable script logic inside `main`. This keeps module imports predictable because `main` is skipped when a file is brought in with `introduce`.
+Keep reusable definitions at the top level and put executable script logic inside
+`main`. `main` is skipped when a file is brought in with `introduce`, so a file
+can serve as both a runnable script and an importable module.
 
 ```oxi
 introduce strings
@@ -102,13 +194,15 @@ main {
 }
 ```
 
-Top-level statements still run when a file is executed directly, but `main` is the preferred convention for files that may serve as both scripts and modules.
+Top-level statements still run when a file is executed directly, but `main` is
+the preferred home for script logic.
 
 ## Functions
 
 ### Named Functions Over Anonymous Functions
 
-Functions should use explicit named definitions (`fun name() {}`) where clarity is key. Use anonymous functions only when an explicit reusable function isn't needed, such as inline callbacks.
+Use explicit named definitions (`fun name() {}`) for anything reusable. Reserve
+anonymous functions for inline callbacks.
 
 ```oxi
 // Good — named function, clear and reusable
@@ -118,15 +212,16 @@ fun calculate_area(width <int>, height <int>) {
 
 // Good — anonymous function as an inline callback
 introduce array
-doubled := array.map([1, 2, 3], fun(x <int>) { x * 2 })
+doubled <array> := array.map([1, 2, 3], fun(x <int>) { x * 2 })
 
-// Avoid — anonymous function assigned to a variable when a named function is clearer
+// Avoid — anonymous function bound to a name when a named function is clearer
 calculate_area := fun(width, height) { width * height }
 ```
 
 ### Type Your Parameters
 
-Always use type annotations on function parameters. The function signature should communicate what types are expected.
+Always annotate parameter types — the signature should communicate what's
+expected. Use union types (`<a> || <b>`) for genuine flexibility.
 
 ```oxi
 // Good — typed parameters
@@ -147,22 +242,24 @@ fun greet(name) {
 
 ### Use Default Values Over `None` Checks
 
-When a parameter has a natural default, declare it in the signature rather than checking for `None` inside the body.
+When a parameter has a natural default, declare it in the signature instead of
+checking for `None` in the body.
 
 ```oxi
-// Good — default value in signature
+// Good — default value in the signature
 fun connect(host <str>, port <int> = 8080) {
     println("Connecting to {host}:{port}")
 }
 
 // Avoid — checking None manually
 fun connect(host <str>, port? <int>) {
-    actual_port := option { port == None -> 8080, port }
+    actual_port <int> := option { port == None -> 8080, port }
     println("Connecting to {host}:{actual_port}")
 }
 ```
 
-Use `?` (optional parameters) when there is genuinely no sensible default and the caller may or may not provide a value:
+Use `?` (optional parameters) only when there's genuinely no sensible default and
+the caller may or may not provide a value.
 
 ```oxi
 // Good — tag is truly optional, no sensible default
@@ -176,33 +273,58 @@ fun log(msg <str>, level <str> = "INFO", tag? <str>) {
 
 ### Use Named Arguments for Clarity at Call Sites
 
-When a function has multiple parameters of the same type or boolean flags, use named arguments to make the call self-documenting:
+When a call has several same-typed parameters or boolean flags, use named
+arguments so the call documents itself. They also let you skip defaults.
 
 ```oxi
-// Good — named arguments make intent clear
 fun create_user(name <str>, email <str>, admin <bool> = False) { ... }
+
+// Good — intent is clear
 create_user("Alice", email="alice@example.com", admin=True)
 
 // Avoid — positional args are ambiguous
 create_user("Alice", "alice@example.com", True)
-```
 
-Named arguments are especially useful for skipping default parameters:
-
-```oxi
 // Good — skip port, only set tls
 fun connect(host <str>, port <int> = 8080, tls? <bool>) { ... }
 connect("example.com", tls=True)
+```
+
+### Returns Are Implicit — `give` Is a Last Resort
+
+A function returns the value of its last expression. Because Oxigen has no
+semicolons, lean on this rather than an explicit return: write the value, don't
+announce it. Explicit return exists as `give` — named differently from `return`
+on purpose, so it isn't reached for out of habit. Use it only for the rare early
+exit where it genuinely reads clearer; to break a loop, prefer `stop`.
+
+```oxi
+// Good — the option is the function body; its value is returned
+fun is_even(val <int>) {
+    option {
+        val % 2 == 0 -> True,
+        False
+    }
+}
+
+// Not recommended — give adds a keyword and clutters with no benefit
+fun is_even(val <int>) {
+    option {
+        val % 2 == 0 -> give True,
+        give False
+    }
+}
 ```
 
 ## Conditionals and Pattern Matching
 
 ### Use `option` for Conditional Logic
 
-Use `option` when you need conditional branching based on expressions. It's the right tool for inline decisions, ternary-style expressions, and multi-arm conditionals within a single file.
+`option` is the tool for conditional branching on expressions — inline decisions,
+ternary-style expressions, and multi-arm conditionals within a single file.
 
 ```oxi
-// Good — option for conditional logic
+// Good — multi-arm option
 status <str> := option {
     age < 13 -> "child"
     age < 20 -> "teenager"
@@ -215,12 +337,12 @@ sign <int> := option { x >= 0 -> 1, -1 }
 
 ### Use `pattern` + `choose` for Reusable Matching
 
-Patterns defined with the `pattern` keyword are meant for reuse across multiple files. They define named, reusable conditions that can be shared through the module system. Use `choose` to match against them.
-
-Don't use `pattern` + `choose` for conditions that only matter in one place — that's what `option` is for.
+Patterns defined with `pattern` are named, reusable conditions meant to be shared
+across files through the module system; match against them with `choose`. For a
+condition that only matters in one place, use `option` instead.
 
 ```oxi
-// Good — patterns for reusable conditions shared across files
+// Good — reusable patterns shared across files
 pattern is_even(n) when n % 2 == 0
 pattern is_odd(n) when n % 2 != 0
 
@@ -231,14 +353,14 @@ each n in range(10) {
     }
 }
 
-// Avoid — using pattern + choose for a one-off condition
+// Avoid — pattern + choose for a one-off condition
 pattern is_positive(x) when x > 0
 choose value {
     is_positive -> println("positive")
     else -> println("not positive")
 }
 
-// Better — use option for one-off conditions
+// Better — option for one-off conditions
 option {
     value > 0 -> println("positive")
     println("not positive")
@@ -247,28 +369,12 @@ option {
 
 ## Structs
 
-### Use `variable <Struct>` Over Constructor Functions
+### Instantiate with `variable <Struct>`
 
-Instantiate structs using the `variable <Struct>` convention rather than writing explicit `new()` factory functions. The struct definition already declares the field types, so inference from the struct is more predictable and idiomatic.
-
-```oxi
-struct Point {
-    x <int>
-    y <int>
-}
-
-// Good — types are inferred from the struct definition
-origin <Point>
-p <Point> := Point(10, 20)
-
-// Avoid — wrapping instantiation in a new() function
-fun new_point(x <int>, y <int>) {
-    Point(x, y)
-}
-p := new_point(10, 20)
-```
-
-The struct definition is the source of truth for types. Using `<Struct>` at the declaration site keeps the type visible and lets the struct enforce its own field constraints.
+Create struct instances with the `variable <Struct>` form rather than writing
+`new()` factory functions. The struct definition is the source of truth for field
+types, so declaring the type at the instantiation site keeps it visible and lets
+the struct enforce its own constraints.
 
 ```oxi
 struct Config {
@@ -277,34 +383,22 @@ struct Config {
     debug <bool>
 }
 
-// Good — struct type is explicit, fields are type-checked by the struct
+// Good — type is explicit, fields are checked by the struct
 settings <Config> := Config("localhost", 8080, False)
 
 // Zero-initialized struct
 defaults <Config>
-```
 
-### Use `<generic>` for Dynamic Types, Not Untyped Variables
-
-When a variable's type is truly dynamic inside a function, use `<generic>` rather than leaving it untyped. Being explicit about dynamic behavior makes it easier for readers to understand how the variable will be used.
-
-```oxi
-// Good — explicit that the type is dynamic
-fun identity(val <generic>) {
-    result <generic> := val
-    result
-}
-
-// Avoid — untyped, reader can't tell if this is intentional or lazy
-fun identity(val) {
-    result := val
-    result
+// Avoid — wrapping instantiation in a new() function
+fun new_config(host <str>, port <int>, debug <bool>) {
+    Config(host, port, debug)
 }
 ```
 
 ### Inherit Behavior, Don't Redeclare It
 
-When a child struct inherits from a parent, use the parent's existing functionality. Only declare new methods or override methods that need different behavior. Don't redeclare methods that already work correctly from the parent.
+A child struct automatically has its parent's methods. Only add new methods or
+override the ones that need to differ — never copy a parent method unchanged.
 
 ```oxi
 struct Animal {
@@ -313,36 +407,34 @@ struct Animal {
 }
 
 Animal includes {
-    fun speak() { println(name, "says", sound) }
-    fun describe() { println("Animal:", name) }
+    fun speak() { println(self.name, "says", self.sound) }
+    fun describe() { println("Animal:", self.name) }
 }
 
 struct Dog(Animal) {
     breed <str>
 }
 
-// Good — only add new functionality and override what's different
+// Good — add new behavior, override only what's different
 Dog includes {
-    fun fetch() { println(name, "fetches the ball!") }
-    fun describe() { println("Dog:", name, "- Breed:", breed) }
+    fun fetch() { println(self.name, "fetches the ball!") }
+    fun describe() { println("Dog:", self.name, "- Breed:", self.breed) }
 }
 
-// Avoid — redeclaring speak() when Animal's version already works
+// Avoid — redeclaring speak() when the parent's version already works
 Dog includes {
-    fun speak() { println(name, "says", sound) }  // identical to parent
-    fun fetch() { println(name, "fetches the ball!") }
-    fun describe() { println("Dog:", name, "- Breed:", breed) }
+    fun speak() { println(self.name, "says", self.sound) }
+    fun fetch() { println(self.name, "fetches the ball!") }
 }
 ```
 
-The parent struct's methods are automatically available to the child. Only write a method on the child if it needs to do something different.
-
 ### Structs Are for Shared Behavior, Not One-Off Logic
 
-Structs should define expected behavior and group related functionality together. If something is a one-off function or a case that can be handled by a standalone function or found elsewhere, don't create a struct for it.
+Use a struct to group related state and behavior. If there's no real state — just
+a single operation — a plain function is clearer.
 
 ```oxi
-// Good — struct groups related state and behavior
+// Good — groups related state and behavior
 struct HttpResponse {
     status <int>
     body <str>
@@ -350,17 +442,16 @@ struct HttpResponse {
 }
 
 HttpResponse includes {
-    fun is_ok() { status >= 200 and status < 300 }
-    fun is_error() { status >= 400 }
+    fun is_ok() { self.status >= 200 and self.status < 300 }
+    fun is_error() { self.status >= 400 }
 }
 
-// Avoid — struct wrapping a single function with no real state
+// Avoid — a struct wrapping a single function with no real state
 struct Greeter {
     name <str>
 }
-
 Greeter includes {
-    fun greet() { println("Hello, {name}!") }
+    fun greet() { println("Hello, {self.name}!") }
 }
 
 // Better — just a function
@@ -371,7 +462,9 @@ fun greet(name <str>) {
 
 ### No Empty or Untyped Structs
 
-Every struct should have typed fields. Don't create empty structs or leave fields untyped unless a parent struct needs to be generic.
+Every struct field should be typed. Don't create empty structs or leave fields
+untyped — the one exception is a `<generic>` field on a parent meant to be
+specialized by its children.
 
 ```oxi
 // Good — all fields typed
@@ -381,16 +474,15 @@ struct User {
     active <bool>
 }
 
-// Good — generic parent where children define the specifics
+// Good — generic parent, children add specifics
 struct Container {
     value <generic>
 }
-
 struct IntBox(Container) {
     label <str>
 }
 
-// Avoid — empty struct with no fields
+// Avoid — empty struct
 struct Utils {}
 
 // Avoid — untyped fields
@@ -400,9 +492,11 @@ struct User {
 }
 ```
 
-### Encapsulation with `hide`
+### Encapsulate with `hide`
 
-Oxigen is public by default. Everything on a struct is accessible unless you explicitly hide it with the `hide` keyword. Use `hide` on fields that are internal implementation details — things others don't need to see or touch.
+Oxigen is public by default; everything on a struct is accessible unless marked
+with `hide`. Hide only genuine implementation details, and keep anything that's
+part of the public interface visible.
 
 ```oxi
 struct Account {
@@ -417,17 +511,16 @@ Account includes {
 }
 
 a <Account> := Account("Alice", 1000, 1234)
-println(a.name)        // works — public
+println(a.name)          // works — public
 println(a.get_balance()) // works — public method
-println(a.balance)     // error — hidden field
-println(a.pin)         // error — hidden field
+println(a.balance)       // error — hidden field
 ```
-
-If a field or behavior should be part of the struct's public interface, leave it visible. Only `hide` what's genuinely internal.
 
 ### Always Use `self.field` in Methods
 
-Inside struct methods, always use `self.field` to access fields rather than the bare field name. Oxigen allows both, but explicit `self` makes it immediately clear that you're reading or writing struct state, not a local variable.
+Inside methods, access fields through `self.field`. Oxigen allows the bare name,
+but explicit `self` makes it clear you're touching struct state, not a local.
+This matters most in setters, where a parameter shares a field's name.
 
 ```oxi
 struct Player {
@@ -438,28 +531,12 @@ struct Player {
 // Good — explicit self
 Player includes {
     fun add_score(points <int>) { self.score = self.score + points }
-    fun display() { println(self.name, ":", self.score) }
+    fun set_name(name <str>) { self.name = name }
 }
 
 // Avoid — implicit field access
 Player includes {
     fun add_score(points <int>) { score = score + points }
-    fun display() { println(name, ":", score) }
-}
-```
-
-When a function parameter shares the same name as a struct field (like a setter), use `self.field = field` to distinguish between them. Both implicit and explicit `self` are acceptable here, but prefer explicit when the behavior isn't obvious.
-
-```oxi
-struct User {
-    name <str>
-    age <int>
-}
-
-// Good — self disambiguates the struct field from the parameter
-User includes {
-    fun set_name(name <str>) { self.name = name }
-    fun set_age(age <int>) { self.age = age }
 }
 ```
 
@@ -467,7 +544,8 @@ User includes {
 
 ### Pick a Block Style and Stick With It
 
-Braces `{}` are the default expected formatting. If you prefer `#[indent]` for indentation-based blocks, that's welcome — but commit to one style across all your code. Don't mix formats.
+Braces `{}` are the default. Indentation blocks via `#[indent]` are welcome too —
+but commit to one style across a project; don't mix them.
 
 ```oxi
 // Good — braces throughout
@@ -489,13 +567,9 @@ fun greet(name <str>):
         println("Hello, stranger!")
 ```
 
-```oxi
-// Avoid — mixing braces and indentation in the same project
-```
-
 ### Use String Interpolation Over Concatenation
 
-Use string interpolation instead of concatenating strings with `+`. Both work, but interpolation is cleaner.
+Both work, but interpolation reads cleaner.
 
 ```oxi
 name <str> := "Oxigen"
@@ -510,7 +584,8 @@ println("Welcome to " + name + " v" + str(version) + "!")
 
 ### Use Snake Case
 
-Use `snake_case` for variable names, function names, and field names. Avoid `camelCase` or `PascalCase` for these. Struct names are the exception — they use `PascalCase`.
+Use `snake_case` for variables, functions, and fields. Struct names are the
+exception — they use `PascalCase`.
 
 ```oxi
 // Good
@@ -525,51 +600,17 @@ struct HttpResponse {
 // Avoid
 maxRetries <int> := 3
 fun getUserName(userId <int>) { ... }
-
-struct HttpResponse {
-    statusCode <int>
-    responseBody <str>
-}
-```
-
-### Constants
-
-Oxigen has no `const` keyword. To create a constant, use a typed strict assignment (`=`). This makes the variable both type-locked and immutable.
-
-```oxi
-// Good — immutable, type-locked constant
-PI <float> = 3.14159
-MAX_RETRIES <int> = 5
-APP_NAME <str> = "Oxigen"
-
-PI = 3.0          // error — cannot reassign immutable variable
-PI := "something"  // error — type is locked
-```
-
-If you find yourself needing to change a value later, it's probably best to use a type-locked mutable assignment (`<type> :=`) instead of a strict immutable one. You can technically get around immutability by shadowing or reassigning with the walrus operator, but be clear about your intent.
-
-```oxi
-// Good — type-locked but mutable, value is expected to change
-retries <int> := 5
-retries = retries - 1
-
-// Acceptable — shadowing to override an immutable value with clear intent
-MAX <int> = 100
-MAX <int> := 200  // shadowed, new mutable binding
-
-// Avoid — using walrus to silently override immutable behavior
-MAX <int> = 100
-MAX := 200  // works but unclear why it was immutable in the first place
 ```
 
 ## Loops
 
-### `each` for Iterables, `repeat` for Continuous Conditions
+### `each` for Iterables, `repeat` for Conditions
 
-Use `each` when iterating over a collection of values that don't need to be continuous. Use `repeat when` or `repeat unless` when the loop could run indefinitely and depends on a condition.
+Use `each` to iterate a known collection. Use `repeat when` / `repeat unless` for
+condition-based loops that could run indefinitely.
 
 ```oxi
-// Good — each for iterating a known collection
+// Good — each over a collection
 each item in items {
     println(item)
 }
@@ -589,22 +630,15 @@ repeat when retries > 0 {
 }
 ```
 
-### Pick `when` or `unless` for Clarity
+### Pick `when` or `unless` for Readability
 
-Use whichever reads more naturally for the condition. The goal is that the line reads like plain intent — pick the one where the condition is simpler and more obvious.
+Choose whichever makes the condition read most directly — favor the form that
+avoids a double negative. It's about readability, not a rigid rule.
 
 ```oxi
 // Good — unless reads cleaner here
 repeat unless i >= size { ... }
 
-// Less clear — double negative logic
-repeat when i < size { ... }  // equivalent but the "unless" version is more direct
-
 // Good — when reads cleaner here
 repeat when retries > 0 { ... }
-
-// Less clear — negated condition
-repeat unless retries <= 0 { ... }  // equivalent but awkward
 ```
-
-Choose based on which condition is easier to read at a glance, not on a rigid rule.

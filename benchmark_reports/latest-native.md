@@ -1,16 +1,16 @@
 # Oxigen vs Python — native harness (interleaved A/B)
 
-- Generated: `2026-06-08T13:41:22Z`
+- Generated: `2026-06-20T07:12:22Z`
 - Host:      `Javans-MacBook-Pro.local`
 - Kernel:    `Darwin 25.5.0 arm64`
 - Oxigen:    `oxigen 0.1.2`
 - Python:    `Python 3.14.5`
 - Bun:       `1.3.14`
-- Node:      `v26.0.0` (built-in type-stripping)
+- Node:      `v26.3.0` (built-in type-stripping)
 - Warmups:   `3`
 - Runs:      `5`
-- Git commit: `0842ce2`
-- Git branch: `jit-improvements`
+- Git commit: `9dfd845`
+- Git branch: `new_lib`
 
 ## Min times (ms)
 
@@ -24,26 +24,26 @@ throttle after sustained full-CPU work. See
 
 | benchmark | no-jit | default | jit | python | bun (ts) | node (ts) | jit vs py | jit vs bun | jit vs node |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| bench_arith | 76 | 10 | 10 | 28 | 9 | 59 | 2.8x | 0.9x | 5.9x |
-| bench_closure | 42 | 8 | 8 | 25 | 8 | 57 | 3.13x | 1x | 7.13x |
-| bench_collatz | 422 | 11 | 12 | 156 | 18 | 61 | 13x | 1.5x | 5.08x |
-| bench_fib | 184 | 19 | 20 | 47 | 11 | 60 | 2.35x | 0.55x | 3x |
-| bench_loop | 57 | 3 | 3 | 33 | 8 | 58 | 11x | 2.67x | 19.33x |
-| bench_nested_loop | 16 | 2 | 3 | 16 | 8 | 55 | 5.33x | 2.67x | 18.33x |
-| bench_nested_loop_big | 223 | 3 | 4 | 87 | 10 | 62 | 21.75x | 2.5x | 15.5x |
-| bench_struct_method | 147 | 7 | 8 | 35 | 10 | 57 | 4.38x | 1.25x | 7.13x |
+| bench_arith | 76 | 10 | 11 | 29 | 10 | 61 | 2.64x | 0.91x | 5.55x |
+| bench_closure | 42 | 8 | 9 | 25 | 9 | 62 | 2.78x | 1x | 6.89x |
+| bench_collatz | 429 | 12 | 12 | 161 | 18 | 69 | 13.42x | 1.5x | 5.75x |
+| bench_fib | 182 | 19 | 20 | 48 | 11 | 62 | 2.4x | 0.55x | 3.1x |
+| bench_loop | 58 | 3 | 3 | 34 | 9 | 60 | 11.33x | 3x | 20x |
+| bench_nested_loop | 16 | 3 | 3 | 17 | 8 | 62 | 5.67x | 2.67x | 20.67x |
+| bench_nested_loop_big | 225 | 4 | 4 | 90 | 10 | 68 | 22.5x | 2.5x | 17x |
+| bench_struct_method | 147 | 7 | 8 | 37 | 10 | 61 | 4.63x | 1.25x | 7.63x |
 
 ## JIT min / p50 (ms)
 
 | benchmark | jit min | jit p50 |
 | --- | ---: | ---: |
-| bench_arith | 10 | 10 |
-| bench_closure | 8 | 9 |
+| bench_arith | 11 | 11 |
+| bench_closure | 9 | 9 |
 | bench_collatz | 12 | 12 |
 | bench_fib | 20 | 20 |
 | bench_loop | 3 | 3 |
 | bench_nested_loop | 3 | 3 |
-| bench_nested_loop_big | 4 | 4 |
+| bench_nested_loop_big | 4 | 5 |
 | bench_struct_method | 8 | 8 |
 
-Per-benchmark JSON (per-round samples + summary stats) in `/Users/javanhutchinson/Development/OxigenLang/benchmark_reports/`.
+Per-benchmark JSON (per-round samples + summary stats) in `/Users/javanhutchinson/Development/ToolsForRaven/OxigenLang/benchmark_reports/`.

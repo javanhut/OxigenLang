@@ -544,7 +544,8 @@ impl Compiler {
             | Statement::DotAssign { token, .. }
             | Statement::Introduce { token, .. }
             | Statement::IndexAssign { token, .. }
-            | Statement::Main { token, .. } => token.span.line as u32,
+            | Statement::Main { token, .. }
+            | Statement::Test { token, .. } => token.span.line as u32,
             Statement::TypedLet { name, .. }
             | Statement::TypedDeclare { name, .. }
             | Statement::Assign { name, .. } => name.token.span.line as u32,
@@ -609,7 +610,8 @@ impl Compiler {
             | Statement::DotAssign { token, .. }
             | Statement::Introduce { token, .. }
             | Statement::IndexAssign { token, .. }
-            | Statement::Main { token, .. } => token.span.column as u32,
+            | Statement::Main { token, .. }
+            | Statement::Test { token, .. } => token.span.column as u32,
             Statement::TypedLet { name, .. }
             | Statement::TypedDeclare { name, .. }
             | Statement::Assign { name, .. } => name.token.span.column as u32,
@@ -1039,6 +1041,10 @@ impl Compiler {
                 }
                 self.patch_jump(skip_jump);
             }
+
+            // `<test>` blocks are only executed by `oxigen test` (via the
+            // tree-walking runner). Under normal compilation/`run`, skip them.
+            Statement::Test { .. } => {}
 
             Statement::StructDef {
                 name,

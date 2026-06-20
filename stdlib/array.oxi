@@ -66,3 +66,209 @@ fun includes(arr <array>, val <generic>) {
 }
 
 fun sort(arr <array>) { __sort(arr) }
+
+// ── Folds ──
+
+fun sum(arr <array>) {
+    total <generic> := 0
+    each x in arr {
+        total = total + x
+    }
+    total
+}
+
+fun product(arr <array>) {
+    total <generic> := 1
+    each x in arr {
+        total = total * x
+    }
+    total
+}
+
+fun min(arr <array>) {
+    option {
+        len(arr) == 0 -> <Error<empty>>("min of empty array"),
+        reduce(arr, arr[0], fun(a <generic>, b <generic>) {
+            option { b < a -> b, a }
+        })
+    }
+}
+
+fun max(arr <array>) {
+    option {
+        len(arr) == 0 -> <Error<empty>>("max of empty array"),
+        reduce(arr, arr[0], fun(a <generic>, b <generic>) {
+            option { b > a -> b, a }
+        })
+    }
+}
+
+// ── Predicates & search ──
+
+fun any(arr <array>, pred <generic>) {
+    found <bool> := False
+    each x in arr {
+        option { pred(x) -> {
+            found = True
+            stop
+        }}
+    }
+    found
+}
+
+fun all(arr <array>, pred <generic>) {
+    ok <bool> := True
+    each x in arr {
+        option { pred(x) == False -> {
+            ok = False
+            stop
+        }}
+    }
+    ok
+}
+
+fun count(arr <array>, pred <generic>) {
+    n <int>
+    each x in arr {
+        option { pred(x) -> n = n + 1 }
+    }
+    n
+}
+
+fun find(arr <array>, pred <generic>) {
+    matches <array> := filter(arr, pred)
+    option {
+        len(matches) == 0 -> <Error<not_found>>("no element matched"),
+        matches[0]
+    }
+}
+
+fun find_index(arr <array>, pred <generic>) {
+    idx <int> := -1
+    i <int>
+    each x in arr {
+        option { pred(x) -> {
+            idx = i
+            stop
+        }}
+        i = i + 1
+    }
+    idx
+}
+
+fun index_of(arr <array>, val <generic>) {
+    idx <int> := -1
+    i <int>
+    each x in arr {
+        option { x == val -> {
+            idx = i
+            stop
+        }}
+        i = i + 1
+    }
+    idx
+}
+
+// ── Transforms ──
+
+fun unique(arr <array>) {
+    result <array>
+    each x in arr {
+        option { has(result, x) == False -> result = push(result, x) }
+    }
+    result
+}
+
+fun enumerate(arr <array>) {
+    result <array>
+    i <int>
+    each x in arr {
+        result = push(result, tuple(i, x))
+        i = i + 1
+    }
+    result
+}
+
+fun slice(arr <array>, start <int>, end <int>) { arr[start:end] }
+
+fun take(arr <array>, n <int>) { arr[0:n] }
+
+fun drop(arr <array>, n <int>) { arr[n:] }
+
+fun chunk(arr <array>, size <int>) {
+    result <array>
+    i <int>
+    repeat unless i >= len(arr) {
+        result = push(result, arr[i:i + size])
+        i = i + size
+    }
+    result
+}
+
+fun flat_map(arr <array>, f <generic>) {
+    result <array>
+    each x in arr {
+        each y in f(x) {
+            result = push(result, y)
+        }
+    }
+    result
+}
+
+fun each_with_index(arr <array>, f <generic>) {
+    i <int>
+    each x in arr {
+        f(i, x)
+        i = i + 1
+    }
+    None
+}
+
+fun group_by(arr <array>, key_fn <generic>) {
+    result <map>
+    each x in arr {
+        k <generic> := key_fn(x)
+        option {
+            has(result, k) -> {
+                result[k] = push(result[k], x)
+            }
+            {
+                result[k] = [x]
+            }
+        }
+    }
+    result
+}
+
+// ── Sorting by key (selection sort; stable for equal keys) ──
+
+fun _min_index_by(arr <array>, key_fn <generic>) {
+    best <int>
+    i <int> := 1
+    repeat unless i >= len(arr) {
+        option { key_fn(arr[i]) < key_fn(arr[best]) -> best = i }
+        i = i + 1
+    }
+    best
+}
+
+fun _remove_at(arr <array>, idx <int>) {
+    result <array>
+    i <int>
+    each x in arr {
+        option { i != idx -> result = push(result, x) }
+        i = i + 1
+    }
+    result
+}
+
+fun sort_by(arr <array>, key_fn <generic>) {
+    remaining <array> := arr
+    result <array>
+    repeat unless len(remaining) == 0 {
+        mi <int> := _min_index_by(remaining, key_fn)
+        result = push(result, remaining[mi])
+        remaining = _remove_at(remaining, mi)
+    }
+    result
+}

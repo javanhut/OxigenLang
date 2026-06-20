@@ -1,10 +1,16 @@
-// Test local file import with dot prefix
-introduce .mylib
-println(mylib.greet("Oxigen"))
-println(mylib.add(10, 20))
-println(mylib.PI)
+// Tests for local (relative) module imports. Imports `mylib.oxi` from this
+// same directory. Run with:  oxigen test example/local_import_test.oxi
 
-// Test selective local import
+introduce .mylib
 introduce {greet, PI} from .mylib
-println(greet("World"))
-println(PI)
+
+<test>("namespaced local import") {
+    expect(mylib.greet("Oxigen")).eq("Hello, Oxigen!")
+    expect(mylib.add(10, 20)).eq(30)
+    expect(mylib.PI).eq(3.14159)
+}
+
+<test>("selective local import") {
+    expect(greet("World")).eq("Hello, World!")
+    expect(PI).eq(3.14159)
+}

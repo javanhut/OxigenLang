@@ -1,51 +1,46 @@
-// Test stdlib namespace import
+// Tests for the math, strings, and array stdlib modules.
+// Run with:  oxigen test example/import_test.oxi
+
 introduce math
-println(math.sqrt(16))
-println(math.abs(-42))
-println(math.min(3, 7))
-println(math.max(3, 7))
-println(math.pow(2, 10))
-println(math.clamp(15, 0, 10))
-println(math.floor(3.7))
-println(math.ceil(3.2))
-println(math.round(3.5))
-println(math.sign(-99))
-
-// Test selective import
-introduce {upper, lower, trim} from strings
-println(upper("hello world"))
-println(lower("HELLO WORLD"))
-println(trim("  spaces  "))
-
-// Test array module
 introduce array
-result <array> := array.map([1, 2, 3, 4], fun(x <int>) { x * 2 })
-println(result)
-
-filtered <array> := array.filter([1, 2, 3, 4, 5], fun(x <int>) { x > 2 })
-println(filtered)
-
-sum <int> := array.reduce([1, 2, 3, 4], 0, fun(acc <int>, x <int>) { acc + x })
-println(sum)
-
-reversed <array> := array.reverse([1, 2, 3])
-println(reversed)
-
-sorted <array> := array.sort([3, 1, 4, 1, 5])
-println(sorted)
-
-println(array.includes([1, 2, 3], 2))
-println(array.includes([1, 2, 3], 9))
-
-// Test intro alias
-intro {split, join} from strings
-parts <array> := split("a,b,c", ",")
-println(parts)
-println(join(parts, " - "))
-
-// Test string functions
 introduce strings
-println(strings.starts_with("hello", "hel"))
-println(strings.ends_with("hello", "llo"))
-println(strings.contains_str("hello world", "world"))
-println(strings.replace("hello world", "world", "oxigen"))
+introduce {upper, lower, trim} from strings
+introduce {split, join} from strings
+
+<test>("math module") {
+    expect(math.sqrt(16)).eq(4.0)
+    expect(math.abs(-42)).eq(42)
+    expect(math.min(3, 7)).eq(3)
+    expect(math.max(3, 7)).eq(7)
+    expect(math.pow(2, 10)).eq(1024)
+    expect(math.clamp(15, 0, 10)).eq(10)
+    expect(math.floor(3.7)).eq(3.0)
+    expect(math.ceil(3.2)).eq(4.0)
+    expect(math.round(3.5)).eq(4.0)
+    expect(math.sign(-99)).eq(-1)
+}
+
+<test>("strings module") {
+    expect(upper("hello world")).eq("HELLO WORLD")
+    expect(lower("HELLO WORLD")).eq("hello world")
+    expect(trim("  spaces  ")).eq("spaces")
+    expect(strings.starts_with("hello", "hel")).truthy()
+    expect(strings.ends_with("hello", "llo")).truthy()
+    expect(strings.contains_str("hello world", "world")).truthy()
+    expect(strings.replace("hello world", "world", "oxigen")).eq("hello oxigen")
+}
+
+<test>("string split and join") {
+    expect(split("a,b,c", ",")).eq(["a", "b", "c"])
+    expect(join(["a", "b", "c"], " - ")).eq("a - b - c")
+}
+
+<test>("array module") {
+    expect(array.map([1, 2, 3, 4], fun(x <int>) { x * 2 })).eq([2, 4, 6, 8])
+    expect(array.filter([1, 2, 3, 4, 5], fun(x <int>) { x > 2 })).eq([3, 4, 5])
+    expect(array.reduce([1, 2, 3, 4], 0, fun(acc <int>, x <int>) { acc + x })).eq(10)
+    expect(array.reverse([1, 2, 3])).eq([3, 2, 1])
+    expect(array.sort([3, 1, 4, 1, 5])).eq([1, 1, 3, 4, 5])
+    expect(array.includes([1, 2, 3], 2)).truthy()
+    expect(array.includes([1, 2, 3], 9)).falsy()
+}

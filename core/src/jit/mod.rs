@@ -173,31 +173,6 @@ impl JitEngine {
         }
     }
 
-    /// Compile if hot and return the compiled thunk, if one is available.
-    /// Used by VM call sites that want to cache the thunk on the closure
-    /// and avoid the compiled-entry lookup on subsequent calls.
-    pub(crate) fn maybe_compile_thunk(
-        &mut self,
-        func: &Rc<Function>,
-        call_count: u32,
-    ) -> Option<CompiledThunk> {
-        if call_count < self.threshold {
-            return None;
-        }
-
-        #[cfg(not(feature = "jit"))]
-        {
-            let _ = func;
-            None
-        }
-
-        #[cfg(feature = "jit")]
-        {
-            let inner = self.inner.get_or_insert_with(engine::JitInner::new);
-            inner.maybe_compile_thunk(func)
-        }
-    }
-
     /// Compile if hot and return the full CompiledEntries fields,
     /// exposing generic + specialized + kind discriminator. VM call
     /// sites use this to install all three on the closure.
@@ -219,9 +194,6 @@ impl JitEngine {
         let e = inner.maybe_compile_entries(func)?;
         let kind_u8 = match e.specialized_kind {
             None => crate::vm::value::SPECIALIZED_KIND_NONE,
-            Some(engine::SpecializedEntryKind::ForwardTrampoline) => {
-                crate::vm::value::SPECIALIZED_KIND_FORWARD_TRAMPOLINE
-            }
             Some(engine::SpecializedEntryKind::NativeIntBody) => {
                 crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY
             }

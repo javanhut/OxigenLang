@@ -191,3 +191,107 @@ fn executable_script_runs_via_shebang() {
     assert!(output.status.success(), "stderr:\n{}", stderr(&output));
     assert_eq!(stdout(&output), "Alice\n");
 }
+
+fn run_oxigen_subcommand(args: &[&str]) -> Output {
+    Command::new(oxigen_bin())
+        .current_dir(workspace_root())
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn test_subcommand_runs_test_blocks() {
+    let dir = temp_dir("test-cmd");
+    write_script(
+        &dir,
+        "math_test.oxi",
+        r#"fun add(a <int>, b <int>) { a + b }
+
+<test>("addition") {
+    expect(add(2, 3)).eq(5)
+}
+
+<test>("contains") {
+    expect([1, 2, 3]).contains(2)
+}
+"#,
+    );
+
+    let output = run_oxigen_subcommand(&["test", dir.to_str().unwrap()]);
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("[ok]"), "stdout:\n{out}");
+    assert!(out.contains("addition"), "stdout:\n{out}");
+    assert!(out.contains("contains"), "stdout:\n{out}");
+    assert!(out.contains("test result: ok. 2 passed"), "stdout:\n{out}");
+    // Output is captured (not a TTY), so no ANSI color codes should leak.
+    assert!(!out.contains('\u{1b}'), "unexpected color codes:\n{out}");
+}
+
+#[test]
+fn test_subcommand_reports_failures_and_exits_nonzero() {
+    let dir = temp_dir("test-cmd-fail");
+    write_script(
+        &dir,
+        "fail_test.oxi",
+        r#"<test>("bad math") {
+    expect(2 + 2).eq(5)
+}
+"#,
+    );
+
+    let output = run_oxigen_subcommand(&["test", dir.to_str().unwrap()]);
+    assert!(!output.status.success());
+    let out = stdout(&output);
+    assert!(out.contains("[fail] bad math"), "stdout:\n{out}");
+    assert!(out.contains("expected 5 but got 4"), "stdout:\n{out}");
+    assert!(out.contains("1 failed"), "stdout:\n{out}");
+}
+
+#[test]
+fn vm_enforces_parameter_types() {
+    // Regression: the default (VM) backend must enforce parameter type
+    // annotations, not just the tree-walking interpreter.
+    let dir = temp_dir("vm-type-enforce");
+    let script = write_script(
+        &dir,
+        "bad.oxi",
+        "fun f(x <int>) { x }\nprintln(f(\"not an int\"))\n",
+    );
+    let output = run_oxigen(&script, &[]);
+    assert!(!output.status.success(), "expected non-zero exit");
+    assert!(
+        stderr(&output).contains("type mismatch for parameter 'x'"),
+        "stderr:\n{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn vm_accepts_correct_parameter_types() {
+    let dir = temp_dir("vm-type-ok");
+    let script = write_script(
+        &dir,
+        "ok.oxi",
+        "fun f(x <int>) { x + 1 }\nprintln(f(41))\n",
+    );
+    let output = run_oxigen(&script, &[]);
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+    assert_eq!(stdout(&output), "42\n");
+}
+
+#[test]
+fn vm_generic_enum_param_accepts_specific_enum() {
+    // `<Enum>` must accept any specific enum value on the VM, matching the
+    // evaluator.
+    let dir = temp_dir("vm-enum-param");
+    let script = write_script(
+        &dir,
+        "enum.oxi",
+        "enum Color { Red: 1, Green: 2 }\nfun code(c <Enum>) { c.value }\nprintln(code(Color.Green))\n",
+    );
+    let output = run_oxigen(&script, &[]);
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+    assert_eq!(stdout(&output), "2\n");
+}

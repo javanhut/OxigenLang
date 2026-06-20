@@ -186,6 +186,11 @@ pub enum Statement {
         token: Token,
         body: Vec<Statement>,
     },
+    Test {
+        token: Token,
+        name: Expression,
+        body: Vec<Statement>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

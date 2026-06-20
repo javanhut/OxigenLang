@@ -1,7 +1,12 @@
+// Tests for the toml stdlib module.
+// Run with:  oxigen test example/toml_test.oxi
+
 introduce toml
 
-config := toml.parse("title = \"Oxigen\"\nports = [8000, 8001]\n[owner]\nname = \"Javan\"")
-
-println("Title:", config["title"])
-println("First port:", config["ports"][0])
-println("Owner:", config["owner"]["name"])
+<test>("toml parsing") {
+    config <map> := toml.parse("title = \"Oxigen\"\nports = [8000, 8001]\n[owner]\nname = \"Javan\"")
+    expect(config["title"]).eq("Oxigen")
+    expect(config["ports"][0]).eq(8000)
+    expect(config["ports"][1]).eq(8001)
+    expect(config["owner"]["name"]).eq("Javan")
+}

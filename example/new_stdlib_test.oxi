@@ -1,66 +1,55 @@
-// ── Type conversion ──
-println("=== Type Conversion ===")
-println(int("42"))
-println(int("3.14"))
-println(int(True))
-println(float("3.14"))
-println(float(42))
+// Tests for type conversion and the time, random, path, and json stdlib modules.
+// Run with:  oxigen test example/new_stdlib_test.oxi
 
-// ── Time ──
-println("=== Time ===")
 introduce time
-println("Unix timestamp:", time.now())
-println("Unix ms:", time.now_ms())
-
-start <int> := time.monotonic()
-time.sleep(50)
-end <int> := time.monotonic()
-println("Slept ~50ms, elapsed:", time.elapsed_ms(start, end), "ms")
-
-// ── Random ──
-println("=== Random ===")
 introduce random
-random.seed(42)
-println("Random int [1,10]:", random.rand_int(1, 10))
-println("Random int [1,10]:", random.rand_int(1, 10))
-println("Random float:", random.rand_float())
-println("Random bool:", random.rand_bool())
-println("Choice from [a,b,c]:", random.choice(["a", "b", "c"]))
-
-// ── Path ──
-println("=== Path ===")
 introduce path
-println("Join:", path.join(["/home", "user", "file.txt"]))
-println("Ext:", path.ext("document.pdf"))
-println("Filename:", path.filename("/home/user/document.pdf"))
-println("Parent:", path.parent("/home/user/document.pdf"))
-println("Stem:", path.stem("document.pdf"))
-println("Is absolute /home:", path.is_absolute("/home"))
-println("Is absolute relative:", path.is_absolute("relative/path"))
-
-// ── JSON ──
-println("=== JSON ===")
 introduce json
 introduce io
-
-arr <array> := [1, 2, 3, "hello", True, None]
-println("Array JSON:", json.stringify(arr))
-
-data <array> := json.parse("[10, 20, 30]")
-println("Parsed array:", data)
-
-io.write_file("/tmp/oxigen_test.json", json.stringify(arr))
-read_back <array> := json.parse(io.read_file("/tmp/oxigen_test.json"))
-println("Roundtrip:", read_back)
-
 introduce os
-os.remove_file("/tmp/oxigen_test.json")
 
-m <map> := {"name": "Oxigen", "version": 1}
-println("Map JSON:", json.stringify(m))
+<test>("type conversion") {
+    expect(int("42")).eq(42)
+    expect(int("3.14")).eq(3)
+    expect(int(True)).eq(1)
+    expect(float("3.14")).eq(3.14)
+    expect(float(42)).eq(42.0)
+}
 
-// ── Net/HTTP ──
-println("=== HTTP ===")
-introduce net
-resp <map> := net.get("http://httpbin.org/get")
-println("Status:", resp["status"])
+<test>("time is monotonic") {
+    expect(time.now()).gt(0)
+    start <int> := time.monotonic()
+    time.sleep(5)
+    end <int> := time.monotonic()
+    expect(end).gte(start)
+}
+
+<test>("random is seeded and bounded") {
+    random.seed(42)
+    expect(random.rand_int(1, 10)).gte(1)
+    expect(random.rand_int(1, 10)).lte(10)
+    choice <str> := random.choice(["a", "b", "c"])
+    expect(["a", "b", "c"]).contains(choice)
+}
+
+<test>("path manipulation") {
+    expect(path.join(["/home", "user", "file.txt"])).eq("/home/user/file.txt")
+    expect(path.ext("document.pdf")).eq("pdf")
+    expect(path.filename("/home/user/document.pdf")).eq("document.pdf")
+    expect(path.parent("/home/user/document.pdf")).eq("/home/user")
+    expect(path.stem("document.pdf")).eq("document")
+    expect(path.is_absolute("/home")).truthy()
+    expect(path.is_absolute("relative/path")).falsy()
+}
+
+<test>("json array roundtrip") {
+    arr <array> := [1, 2, 3, "hello", True, None]
+    io.write_file("/tmp/oxigen_test.json", json.stringify(arr))
+    read_back <array> := json.parse(io.read_file("/tmp/oxigen_test.json"))
+    expect(read_back[0]).eq(1)
+    expect(read_back[3]).eq("hello")
+    os.remove_file("/tmp/oxigen_test.json")
+
+    parsed <array> := json.parse("[10, 20, 30]")
+    expect(parsed[1]).eq(20)
+}

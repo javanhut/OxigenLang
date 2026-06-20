@@ -38,7 +38,7 @@ fn unwrap_grouped(expr: &Expression) -> &Expression {
 
 /// Checks if `actual_type` satisfies the type constraint `expected`.
 /// Handles GENERIC (accepts anything) and union types like "INTEGER || STRING".
-fn type_matches(expected: &str, actual: &str) -> bool {
+pub(crate) fn type_matches(expected: &str, actual: &str) -> bool {
     if expected == "GENERIC" {
         return true;
     }
@@ -135,6 +135,17 @@ pub fn find_stdlib_path() -> PathBuf {
     }
     // Fallback
     PathBuf::from("stdlib")
+}
+
+/// Result of executing a single `<test>("name") { ... }` block.
+#[derive(Debug, Clone)]
+pub struct TestOutcome {
+    /// The test's name (the string passed to `<test>(...)`).
+    pub name: String,
+    /// Whether the test passed (its body produced no error).
+    pub passed: bool,
+    /// On failure, the assertion/error message that caused it.
+    pub message: Option<String>,
 }
 
 impl Default for Evaluator {
@@ -619,6 +630,97 @@ impl Evaluator {
         }
 
         result
+    }
+
+    /// Execute every `<test>("name") { ... }` block in `program`, in source
+    /// order. Non-test top-level statements (imports, struct/function
+    /// definitions, lets) are evaluated normally first time they are reached so
+    /// that later tests can use them. Each test runs in its own child scope and
+    /// fails if its body produces an error (e.g. a failed `expect(...)` matcher
+    /// or any other runtime error).
+    pub fn run_tests(
+        &mut self,
+        program: &Program,
+        env: Rc<RefCell<Environment>>,
+    ) -> Vec<TestOutcome> {
+        // Skip files with no `<test>` blocks entirely. This avoids executing
+        // the top-level code of script-style files that merely match the
+        // `*_test.oxi` discovery glob but are not written for the runner.
+        let has_tests = program
+            .statements
+            .iter()
+            .any(|s| matches!(s, Statement::Test { .. }));
+        if !has_tests {
+            return Vec::new();
+        }
+
+        // Under `oxigen test`, only `<test>` blocks should run; suppress any
+        // `main { ... }` block in the file.
+        self.is_main_context = false;
+
+        // Make `expect(...)` available without an explicit import.
+        self.preload_test_support(Rc::clone(&env));
+
+        let mut outcomes = Vec::new();
+        for stmt in &program.statements {
+            match stmt {
+                Statement::Test { name, body, .. } => {
+                    let name_obj = self.eval_expression(name, Rc::clone(&env));
+                    let test_name = match Self::error_info_from(&name_obj) {
+                        Some((_, msg)) => msg,
+                        None => name_obj.to_string(),
+                    };
+
+                    let child =
+                        Rc::new(RefCell::new(Environment::new_enclosed(Rc::clone(&env))));
+                    let result = self.eval_block(body, child);
+
+                    if result.is_error() {
+                        let message = Self::error_info_from(&result).map(|(_, msg)| msg);
+                        outcomes.push(TestOutcome {
+                            name: test_name,
+                            passed: false,
+                            message,
+                        });
+                    } else {
+                        outcomes.push(TestOutcome {
+                            name: test_name,
+                            passed: true,
+                            message: None,
+                        });
+                    }
+                }
+                other => {
+                    let result = self.eval_statement(other, Rc::clone(&env));
+                    // A failing setup statement (bad import, syntax-valid but
+                    // erroring top-level code) is surfaced as a synthetic test
+                    // failure so the run is not silently empty.
+                    if result.is_error() {
+                        let message = Self::error_info_from(&result).map(|(_, msg)| msg);
+                        outcomes.push(TestOutcome {
+                            name: "<file setup>".to_string(),
+                            passed: false,
+                            message,
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+        outcomes
+    }
+
+    /// Import `expect` from the stdlib `test` module into `env` so test files
+    /// can call it without an explicit `introduce`. Parsed as its own snippet
+    /// to avoid perturbing the test file's line numbers.
+    fn preload_test_support(&mut self, env: Rc<RefCell<Environment>>) {
+        let src = "introduce {expect} from test";
+        let lexer = Lexer::new(src);
+        let mut parser = Parser::new(lexer, src);
+        let program = parser.parse_program();
+        if parser.errors().is_empty() {
+            self.eval_program(&program, env);
+        }
     }
 
     pub fn eval_statement(
@@ -1259,6 +1361,9 @@ impl Evaluator {
                     Rc::new(Object::None)
                 }
             }
+            // `<test>` blocks do not execute during normal evaluation; they are
+            // run only by the dedicated `run_tests` driver (`oxigen test`).
+            Statement::Test { .. } => Rc::new(Object::None),
             Statement::Introduce {
                 token,
                 path,
@@ -3207,7 +3312,13 @@ impl Evaluator {
                 if !(param.optional && matches!(val.as_ref(), Object::None)) {
                     let expected = expected_ta.type_name();
                     let actual = val.effective_type_name();
-                    if !type_matches(&expected, &actual) {
+                    // Match against the specific type (e.g. `ForeGroundColors`)
+                    // OR the generic category (e.g. `ENUM`, `STRUCT`), so a
+                    // generic annotation like `<Enum>` accepts any enum value
+                    // while `<ForeGroundColors>` stays strict.
+                    if !type_matches(&expected, &actual)
+                        && !type_matches(&expected, val.type_name())
+                    {
                         return Some(self.runtime_error(
                             call_span,
                             &format!(

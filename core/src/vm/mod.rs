@@ -77,6 +77,9 @@ pub(crate) struct JitFrameView {
     pub len: usize,
 }
 
+// Offsets are baked into JIT-emitted IR, so they're only referenced
+// under the `jit` feature; harmless and unused in a pure-interpreter build.
+#[cfg_attr(not(feature = "jit"), allow(dead_code))]
 impl JitFrameView {
     pub const OFFSET_PTR: i32 = 0;
     pub const OFFSET_LEN: i32 = 8;
@@ -1199,7 +1202,8 @@ impl VM {
     /// Cheap presence-only test for `active_module_globals` — the JIT
     /// global IC uses this to decide whether to bypass its cache. We
     /// don't need the dict, just to know one exists, so this avoids
-    /// the lifetime juggling on the borrow.
+    /// the lifetime juggling on the borrow. Only called from JIT code.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn has_active_module_globals(&self) -> bool {
         if self.jit_executing.get() {
@@ -2951,6 +2955,37 @@ impl VM {
             // Fill missing args with None (for optional/default params)
             for _ in arg_count..expected {
                 self.push(Value::None);
+            }
+        }
+
+        // Enforce parameter type annotations, matching the tree-walking
+        // evaluator. Default parameters are filled later (by bytecode), so a
+        // `None` in an optional/defaulted slot is skipped here just as the
+        // evaluator skips the check for not-yet-provided optional params.
+        if expected > 0 && closure.function.params.iter().any(|p| p.type_ann.is_some()) {
+            let slot_base = self.stack.len() - expected;
+            for (i, param) in closure.function.params.iter().enumerate() {
+                let Some(expected_ty) = param.type_ann.as_deref() else {
+                    continue;
+                };
+                let val = &self.stack[slot_base + i];
+                if (param.optional || param.has_default) && matches!(val, Value::None) {
+                    continue;
+                }
+                let actual = val.effective_type_name();
+                // Match the specific type or the generic category (ENUM/STRUCT),
+                // mirroring the evaluator so `<Enum>` accepts any enum value.
+                if !crate::evaluator::type_matches(expected_ty, &actual)
+                    && !crate::evaluator::type_matches(expected_ty, val.type_name())
+                {
+                    return Err(self.runtime_error_hint(
+                        &format!(
+                            "type mismatch for parameter '{}': expected {}, got {}",
+                            param.name, expected_ty, actual
+                        ),
+                        &format!("parameter '{}' requires type {}", param.name, expected_ty),
+                    ));
+                }
             }
         }
 

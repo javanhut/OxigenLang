@@ -31,7 +31,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::compiler::opcode::{Chunk, OpCode};
-use crate::vm::value::{Function, Value};
+use crate::vm::value::Function;
+#[cfg(test)]
+use crate::vm::value::Value;
 
 // ── Lattice ───────────────────────────────────────────────────────────
 

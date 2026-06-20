@@ -1,0 +1,45 @@
+// Example test file. Run it with:  oxigen test example/calculator_test.oxi
+//
+// `<test>` blocks are only executed by `oxigen test`. `expect` is provided
+// automatically by the runner, so no `introduce` is needed.
+
+fun add(a <int>, b <int>) {
+    a + b
+}
+
+fun sub(a <int>, b <int>) {
+    a - b
+}
+
+fun mul(a <int>, b <int>) {
+    a * b
+}
+
+fun safe_div(a <int>, b <int>) {
+    option {
+        b == 0 -> <Error<div_by_zero>>("cannot divide by zero"),
+        <Value>(a / b)
+    }
+}
+
+<test>("addition") {
+    expect(add(2, 3)).eq(5)
+    expect(add(-1, 1)).eq(0)
+}
+
+<test>("subtraction and multiplication") {
+    expect(sub(10, 4)).eq(6)
+    expect(mul(3, 4)).eq(12)
+    expect(mul(3, 4)).gt(10)
+}
+
+<test>("safe division uses the Error || Value system") {
+    expect(safe_div(10, 2)).is_value()
+    expect(safe_div(10, 0)).is_error()
+}
+
+<test>("collections") {
+    nums <array> := [1, 2, 3, 4]
+    expect(nums).contains(3)
+    expect(len(nums)).eq(4)
+}

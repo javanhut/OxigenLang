@@ -15,3 +15,8 @@ fun stem(p <str>) { __path_stem(p) }
 
 // Check if path is absolute
 fun is_absolute(p <str>) { __path_is_absolute(p) }
+
+// Check if path is relative
+fun is_relative(p <str>) {
+    option { is_absolute(p) -> False, True }
+}
