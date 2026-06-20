@@ -1,32 +1,41 @@
-x <int> := 90
-y <int> := 20
+// Tests for short-circuit and distributed logical operators.
+// Run with:  oxigen test example/logical_operator_test.oxi
 
-// Normal truthy or: x is 90 (truthy), short-circuits to True
-option { x or y == 10 -> println("truthy: True"), println("truthy: False") }
+<test>("short-circuit or") {
+    x <int> := 90
+    y <int> := 20
+    // `x or y == 10` is `x or (y == 10)`; x is truthy so the whole thing is truthy.
+    expect(x or y == 10).truthy()
+}
 
-// Distributed comparison: does x or y equal 10?
-// (x or y) == 10  ->  x == 10 or y == 10  ->  False
-option { (x or y) == 10 -> println("distributed: True"), println("distributed: False") }
+<test>("distributed comparison over a group") {
+    x <int> := 90
+    y <int> := 20
+    // `(x or y) == 10` distributes: `x == 10 or y == 10` -> False
+    expect((x or y) == 10).falsy()
 
-// With y = 10: (x or y) == 10  ->  x == 10 or y == 10  ->  True
-y := 10
-option { (x or y) == 10 -> println("y is 10: True"), println("y is 10: False") }
+    y := 10
+    // now `x == 10 or y == 10` -> True
+    expect((x or y) == 10).truthy()
+}
 
-// Distributed and: both must satisfy the comparison
-a <int> := 5
-b <int> := 5
-option { (a and b) == 5 -> println("both 5: True"), println("both 5: False") }
+<test>("distributed and") {
+    a <int> := 5
+    b <int> := 5
+    expect((a and b) == 5).truthy()
+    b := 3
+    expect((a and b) == 5).falsy()
+}
 
-b := 3
-option { (a and b) == 5 -> println("both 5 after: True"), println("both 5 after: False") }
+<test>("chaining and comparison operators") {
+    x <int> := 90
+    y <int> := 10
+    z <int> := 42
+    expect((x or y or z) == 42).truthy()
 
-// Chaining: (x or y or z) == val
-z <int> := 42
-option { (x or y or z) == 42 -> println("one is 42: True"), println("one is 42: False") }
-
-// Works with all comparison operators
-option { (a or b) > 4 -> println("one > 4: True"), println("one > 4: False") }
-option { (a and b) > 4 -> println("both > 4: True"), println("both > 4: False") }
-
-// Value on either side
-option { 5 == (a or b) -> println("5 in group: True"), println("5 in group: False") }
+    a <int> := 5
+    b <int> := 3
+    expect((a or b) > 4).truthy()
+    expect((a and b) > 4).falsy()
+    expect(5 == (a or b)).truthy()
+}

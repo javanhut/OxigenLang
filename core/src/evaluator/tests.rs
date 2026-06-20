@@ -3176,3 +3176,99 @@ fn test_toml_stringify_roundtrip() {
     let result = test_eval(input);
     test_string(&result, "localhost");
 }
+
+// ==================== <test> RUNNER TESTS ====================
+
+fn run_tests_for(input: &str) -> Vec<crate::evaluator::TestOutcome> {
+    let lexer = Lexer::new(input);
+    let mut parser = Parser::new(lexer, input);
+    let program = parser.parse_program();
+    if !parser.errors().is_empty() {
+        panic!("Parser errors:\n{}", parser.format_errors());
+    }
+    let env = Rc::new(RefCell::new(Environment::new()));
+    let mut evaluator = Evaluator::new();
+    evaluator.run_tests(&program, env)
+}
+
+#[test]
+fn test_runner_passing_and_failing() {
+    let input = r#"
+        fun add(a <int>, b <int>) { a + b }
+
+        <test>("passes") {
+            expect(add(2, 3)).eq(5)
+        }
+
+        <test>("fails") {
+            expect(add(2, 3)).eq(6)
+        }
+    "#;
+    let outcomes = run_tests_for(input);
+    assert_eq!(outcomes.len(), 2);
+
+    assert_eq!(outcomes[0].name, "passes");
+    assert!(outcomes[0].passed);
+
+    assert_eq!(outcomes[1].name, "fails");
+    assert!(!outcomes[1].passed);
+    assert!(outcomes[1].message.is_some());
+}
+
+#[test]
+fn test_runner_matchers() {
+    let input = r#"
+        <test>("matchers") {
+            expect(5).gt(3)
+            expect(3).lt(5)
+            expect(4).gte(4)
+            expect("a").ne("b")
+            expect([1, 2, 3]).contains(2)
+            expect(<Value>(1)).is_value()
+            expect(<Error<x>>("boom")).is_error()
+        }
+    "#;
+    let outcomes = run_tests_for(input);
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].passed, "matchers test failed: {:?}", outcomes[0].message);
+}
+
+#[test]
+fn test_runner_ignored_during_normal_eval() {
+    // A failing <test> block must not affect a normal program run.
+    let input = r#"
+        <test>("would fail") {
+            expect(1).eq(2)
+        }
+        42
+    "#;
+    let result = test_eval(input);
+    test_integer(&result, 42);
+}
+
+#[test]
+fn test_generic_enum_param_accepts_specific_enum() {
+    // A `<Enum>` parameter must accept a value of any specific enum type
+    // (e.g. passing a `Color` to a `<Enum>` param), while still allowing
+    // `.value` access. Regression for the param type-check.
+    let input = r#"
+        enum Color { Red: 1, Green: 2 }
+        fun code(c <Enum>) { c.value }
+        code(Color.Green)
+    "#;
+    let result = test_eval(input);
+    test_integer(&result, 2);
+}
+
+#[test]
+fn test_specific_enum_param_rejects_other_enum() {
+    // A specific enum annotation must stay strict.
+    let input = r#"
+        enum Color { Red: 1 }
+        enum Size { Big: 1 }
+        fun code(c <Color>) { c.value }
+        code(Size.Big)
+    "#;
+    let result = test_eval(input);
+    assert!(result.is_error(), "expected a type error, got {:?}", result);
+}

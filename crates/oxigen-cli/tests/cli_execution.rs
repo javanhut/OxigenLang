@@ -191,3 +191,57 @@ fn executable_script_runs_via_shebang() {
     assert!(output.status.success(), "stderr:\n{}", stderr(&output));
     assert_eq!(stdout(&output), "Alice\n");
 }
+
+fn run_oxigen_subcommand(args: &[&str]) -> Output {
+    Command::new(oxigen_bin())
+        .current_dir(workspace_root())
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn test_subcommand_runs_test_blocks() {
+    let dir = temp_dir("test-cmd");
+    write_script(
+        &dir,
+        "math_test.oxi",
+        r#"fun add(a <int>, b <int>) { a + b }
+
+<test>("addition") {
+    expect(add(2, 3)).eq(5)
+}
+
+<test>("contains") {
+    expect([1, 2, 3]).contains(2)
+}
+"#,
+    );
+
+    let output = run_oxigen_subcommand(&["test", dir.to_str().unwrap()]);
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("ok   addition"), "stdout:\n{out}");
+    assert!(out.contains("ok   contains"), "stdout:\n{out}");
+    assert!(out.contains("test result: ok. 2 passed"), "stdout:\n{out}");
+}
+
+#[test]
+fn test_subcommand_reports_failures_and_exits_nonzero() {
+    let dir = temp_dir("test-cmd-fail");
+    write_script(
+        &dir,
+        "fail_test.oxi",
+        r#"<test>("bad math") {
+    expect(2 + 2).eq(5)
+}
+"#,
+    );
+
+    let output = run_oxigen_subcommand(&["test", dir.to_str().unwrap()]);
+    assert!(!output.status.success());
+    let out = stdout(&output);
+    assert!(out.contains("FAIL bad math"), "stdout:\n{out}");
+    assert!(out.contains("expected 5 but got 4"), "stdout:\n{out}");
+    assert!(out.contains("1 failed"), "stdout:\n{out}");
+}

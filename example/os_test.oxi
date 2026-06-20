@@ -1,30 +1,28 @@
+// Tests for the os stdlib module.
+// Filesystem checks below are relative to the current working directory, so run
+// this from the repository root:  oxigen test example/os_test.oxi
+
 introduce os
 
-// System info
-println("OS:", os.name())
-println("Arch:", os.arch())
-println("PID:", os.pid())
-println("CWD:", os.cwd())
+<test>("environment variables") {
+    os.env_set("OXIGEN_TEST", "hello from oxigen")
+    expect(os.env_get("OXIGEN_TEST")).eq("hello from oxigen")
+}
 
-// Environment variables
-println("HOME:", os.env_get("HOME"))
-os.env_set("OXIGEN_TEST", "hello from oxigen")
-println("OXIGEN_TEST:", os.env_get("OXIGEN_TEST"))
+<test>("filesystem checks") {
+    expect(os.is_dir("stdlib")).truthy()
+    expect(os.is_file("Cargo.toml")).truthy()
+    expect(os.is_dir("definitely_not_a_real_dir_xyz")).falsy()
+}
 
-// Directory operations
-println("Is stdlib a dir?", os.is_dir("stdlib"))
-println("Is Cargo.toml a file?", os.is_file("Cargo.toml"))
+<test>("exec a command") {
+    result <map> := os.exec("echo hello from shell")
+    expect(result["code"]).eq(0)
+}
 
-entries <array> := os.list_dir("stdlib")
-println("Stdlib modules:", entries)
-
-// Execute a command
-result <map> := os.exec("echo hello from shell")
-println("Command output:", result["stdout"])
-println("Exit code:", result["code"])
-
-// mkdir + rmdir test
-os.mkdir("/tmp/oxigen_test_dir/nested")
-println("Created dir:", os.is_dir("/tmp/oxigen_test_dir/nested"))
-os.rmdir("/tmp/oxigen_test_dir")
-println("Removed dir:", os.is_dir("/tmp/oxigen_test_dir"))
+<test>("mkdir and rmdir") {
+    os.mkdir("/tmp/oxigen_test_dir/nested")
+    expect(os.is_dir("/tmp/oxigen_test_dir/nested")).truthy()
+    os.rmdir("/tmp/oxigen_test_dir")
+    expect(os.is_dir("/tmp/oxigen_test_dir")).falsy()
+}

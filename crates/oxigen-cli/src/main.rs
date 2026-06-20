@@ -164,6 +164,183 @@ fn run_file(file_path: &str, script_args: &[String]) {
     }
 }
 
+/// Recursively collect `*_test.oxi` files under `dir`, skipping hidden
+/// directories and common build/vendor folders. Results are sorted for
+/// deterministic ordering.
+fn discover_test_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    paths.sort();
+
+    for path in paths {
+        if path.is_dir() {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if name.starts_with('.') || name == "target" || name == "node_modules" {
+                continue;
+            }
+            discover_test_files(&path, out);
+        } else if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.ends_with("_test.oxi"))
+            .unwrap_or(false)
+        {
+            out.push(path);
+        }
+    }
+}
+
+/// Outcome of running a single test file.
+struct FileResult {
+    passed: usize,
+    failed: usize,
+    /// The stdout block for this file (empty for files with no `<test>` blocks).
+    output: String,
+}
+
+/// Run every `<test>` block in a single file. The per-file output is returned
+/// in `output` rather than printed, so the caller controls separators.
+fn run_test_file(path: &std::path::Path) -> FileResult {
+    use std::fmt::Write as _;
+
+    let display = path.display();
+    let contents = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            return FileResult {
+                passed: 0,
+                failed: 1,
+                output: format!("{}\n  error reading file: {}", display, e),
+            };
+        }
+    };
+
+    let lexer = Lexer::new(&contents);
+    let mut parser = Parser::new(lexer, &contents);
+    let program = parser.parse_program();
+
+    if !parser.errors().is_empty() {
+        return FileResult {
+            passed: 0,
+            failed: 1,
+            output: format!("{}\n{}", display, parser.format_errors()),
+        };
+    }
+
+    let file_path_buf = match path.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            return FileResult {
+                passed: 0,
+                failed: 1,
+                output: format!("{}\n  could not resolve path: {}", display, e),
+            };
+        }
+    };
+
+    let env = Rc::new(RefCell::new(Environment::new()));
+    let mut evaluator = Evaluator::new_with_path(file_path_buf);
+    evaluator.set_source(&contents);
+    let outcomes = evaluator.run_tests(&program, env);
+
+    if outcomes.is_empty() {
+        return FileResult {
+            passed: 0,
+            failed: 0,
+            output: String::new(),
+        };
+    }
+
+    let mut output = format!("{}", display);
+    let mut passed = 0;
+    let mut failed = 0;
+    for outcome in &outcomes {
+        if outcome.passed {
+            passed += 1;
+            let _ = write!(output, "\n  ok   {}", outcome.name);
+        } else {
+            failed += 1;
+            let _ = write!(output, "\n  FAIL {}", outcome.name);
+            if let Some(msg) = &outcome.message {
+                let _ = write!(output, "\n       {}", msg);
+            }
+        }
+    }
+    FileResult {
+        passed,
+        failed,
+        output,
+    }
+}
+
+/// `oxigen test [path ...]` — discover and run test files.
+fn run_tests_command(paths: &[String]) {
+    let mut files: Vec<PathBuf> = Vec::new();
+
+    if paths.is_empty() {
+        let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        discover_test_files(&cwd, &mut files);
+    } else {
+        for arg in paths {
+            let p = PathBuf::from(arg);
+            if p.is_dir() {
+                discover_test_files(&p, &mut files);
+            } else if p.is_file() {
+                files.push(p);
+            } else {
+                eprintln!("No such file or directory: {}", arg);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if files.is_empty() {
+        println!("No test files found (looking for *_test.oxi).");
+        return;
+    }
+
+    let mut total_passed = 0;
+    let mut total_failed = 0;
+    let mut any_printed = false;
+    for file in &files {
+        let result = run_test_file(file);
+        if !result.output.is_empty() {
+            // Blank line between consecutive files that produced output.
+            if any_printed {
+                println!();
+            }
+            println!("{}", result.output);
+            any_printed = true;
+        }
+        total_passed += result.passed;
+        total_failed += result.failed;
+    }
+
+    if any_printed {
+        println!();
+    }
+    let summary = if total_failed == 0 {
+        format!("test result: ok. {} passed", total_passed)
+    } else {
+        format!(
+            "test result: FAILED. {} passed; {} failed",
+            total_passed, total_failed
+        )
+    };
+    println!("{}", summary);
+
+    if total_failed > 0 {
+        std::process::exit(1);
+    }
+}
+
 fn check_file(file_path: &str) {
     let contents = read_source(file_path);
 
@@ -273,6 +450,7 @@ fn main() {
             }
         }
         Some("fmt") => fmt_files(&filtered_args[2..]),
+        Some("test") => run_tests_command(&filtered_args[2..]),
         Some(path) if path.ends_with(".oxi") => {
             if use_tree_walk {
                 run_file(path, &filtered_args[2..]);

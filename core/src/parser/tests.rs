@@ -1318,3 +1318,78 @@ fn test_parse_string_no_interpolation() {
         _ => panic!("Expected plain Str expression"),
     }
 }
+
+// ==================== <test> BLOCK PARSING TESTS ====================
+
+#[test]
+fn test_parse_test_block() {
+    let program = parse_ok("<test>(\"addition works\") {\n    expect(1).eq(1)\n}");
+    assert_eq!(program.statements.len(), 1);
+
+    match &program.statements[0] {
+        Statement::Test { name, body, .. } => {
+            match name {
+                Expression::Str { value, .. } => assert_eq!(value, "addition works"),
+                other => panic!("Expected string test name, got {:?}", other),
+            }
+            assert_eq!(body.len(), 1);
+        }
+        other => panic!("Expected Statement::Test, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_test_block_does_not_break_comparisons() {
+    // A bare `<` at statement start that is not `<test` must still parse as a
+    // normal prefix/angle expression rather than a test block.
+    let program = parse_ok("x := 1\nx < 2");
+    assert_eq!(program.statements.len(), 2);
+    assert!(!matches!(program.statements[1], Statement::Test { .. }));
+}
+
+// ============ CONTEXTUAL `includes` KEYWORD TESTS ============
+
+#[test]
+fn test_includes_as_function_name() {
+    // `includes` must be usable as a normal function name, not only as the
+    // `StructName includes { }` block keyword.
+    let program = parse_ok("fun includes(arr <array>, val <generic>) {\n    val\n}");
+    assert_eq!(program.statements.len(), 1);
+    match &program.statements[0] {
+        Statement::Let { name, value } => {
+            assert_eq!(name.value, "includes");
+            assert!(matches!(value, Expression::FunctionLiteral { .. }));
+        }
+        other => panic!("expected a named function, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_includes_as_method_call() {
+    let program = parse_ok("arr.includes(2)");
+    assert_eq!(program.statements.len(), 1);
+    assert!(matches!(
+        &program.statements[0],
+        Statement::Expr(Expression::Call { .. })
+    ));
+}
+
+#[test]
+fn test_includes_block_still_parses() {
+    let program = parse_ok("Bag includes {\n    fun size() { 0 }\n}");
+    assert_eq!(program.statements.len(), 1);
+    assert!(matches!(
+        &program.statements[0],
+        Statement::IncludesDef { .. }
+    ));
+}
+
+#[test]
+fn test_fun_followed_by_keyword_does_not_hang() {
+    // Regression: `fun <keyword>` used to make the recovery loop spin forever
+    // because `synchronize()` stopped at the `fun` token without consuming it.
+    // It must now terminate with a diagnostic. (If this regresses, the test
+    // hangs rather than fails.)
+    let (_program, errors) = parse("fun struct {\n}");
+    assert!(!errors.is_empty(), "expected a parse error, got none");
+}

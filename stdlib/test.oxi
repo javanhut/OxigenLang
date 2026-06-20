@@ -1,0 +1,117 @@
+// Test support for Oxigen.
+//
+// Use inside `<test>("name") { ... }` blocks, run with `oxigen test`.
+// `expect` is auto-imported by the test runner, so no `introduce` is needed
+// in `*_test.oxi` files. A matcher fails the surrounding test by producing an
+// error (via `<fail>`), which short-circuits the test body.
+//
+//     <test>("addition works") {
+//         expect(2 + 3).eq(5)
+//         expect([1, 2, 3]).contains(2)
+//     }
+
+introduce ansi
+
+// Paint an assertion-failure message red.
+fun failed(msg <str>) {
+    ansi.add_color(msg, ansi.ForeGroundColors.Red)
+}
+
+struct Expectation {
+    actual <generic>
+}
+
+Expectation includes {
+    // actual == expected
+    fun eq(expected <generic>) {
+        option {
+            self.actual == expected -> True,
+            <fail>(failed("expected {expected} but got {self.actual}"))
+        }
+    }
+
+    // actual != expected
+    fun ne(expected <generic>) {
+        option {
+            self.actual != expected -> True,
+            <fail>(failed("expected value to differ from {expected}"))
+        }
+    }
+
+    // actual > bound
+    fun gt(bound <generic>) {
+        option {
+            self.actual > bound -> True,
+            <fail>(failed("expected {self.actual} to be greater than {bound}"))
+        }
+    }
+
+    // actual >= bound
+    fun gte(bound <generic>) {
+        option {
+            self.actual >= bound -> True,
+            <fail>(failed("expected {self.actual} to be >= {bound}"))
+        }
+    }
+
+    // actual < bound
+    fun lt(bound <generic>) {
+        option {
+            self.actual < bound -> True,
+            <fail>(failed("expected {self.actual} to be less than {bound}"))
+        }
+    }
+
+    // actual <= bound
+    fun lte(bound <generic>) {
+        option {
+            self.actual <= bound -> True,
+            <fail>(failed("expected {self.actual} to be <= {bound}"))
+        }
+    }
+
+    // actual is truthy
+    fun truthy() {
+        option {
+            self.actual -> True,
+            <fail>(failed("expected a truthy value but got {self.actual}"))
+        }
+    }
+
+    // actual is falsy
+    fun falsy() {
+        option {
+            self.actual -> <fail>(failed("expected a falsy value but got {self.actual}")),
+            True
+        }
+    }
+
+    // collection (array/set/map/tuple) contains item
+    fun contains(item <generic>) {
+        option {
+            has(self.actual, item) -> True,
+            <fail>(failed("expected {self.actual} to contain {item}"))
+        }
+    }
+
+    // actual is an error value
+    fun is_error() {
+        option {
+            is_error(self.actual) -> True,
+            <fail>(failed("expected an error but got {self.actual}"))
+        }
+    }
+
+    // actual is a (non-error) value
+    fun is_value() {
+        option {
+            is_value(self.actual) -> True,
+            <fail>(failed("expected a value but got an error: {self.actual}"))
+        }
+    }
+}
+
+// Wrap a value so it can be asserted on fluently: expect(x).eq(y)
+fun expect(actual <generic>) {
+    Expectation { actual: actual }
+}

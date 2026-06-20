@@ -477,6 +477,17 @@ impl Formatter {
                 self.push_indent();
                 self.push("}");
             }
+            Statement::Test { name, body, .. } => {
+                self.push("<test>(");
+                self.format_expression(name);
+                self.push(") {");
+                self.newline();
+                self.indent += 1;
+                self.format_block(body);
+                self.indent -= 1;
+                self.push_indent();
+                self.push("}");
+            }
         }
     }
 
@@ -1001,7 +1012,8 @@ fn top_level_section(stmt: &Statement) -> TopLevelSection {
         | Statement::StructDef { .. }
         | Statement::EnumDef { .. }
         | Statement::IncludesDef { .. }
-        | Statement::Main { .. } => TopLevelSection::Definition,
+        | Statement::Main { .. }
+        | Statement::Test { .. } => TopLevelSection::Definition,
         _ => TopLevelSection::Other,
     }
 }

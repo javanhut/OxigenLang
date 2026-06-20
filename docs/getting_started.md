@@ -124,6 +124,7 @@ The REPL maintains state across lines — variables, functions, structs, and pat
 | `oxigen` | Start the interactive REPL |
 | `oxigen fmt file.oxi [...]` | Format one or more `.oxi` files in-place |
 | `oxigen check file.oxi` | Parse a file and output diagnostics as JSON |
+| `oxigen test [path ...]` | Run `<test>` blocks. With no arguments, discovers `*_test.oxi` files recursively; a path may be a file or directory ([testing guide](testing.md)) |
 | `--version`, `-v` | Print the version and exit |
 
 Scripts can read forwarded arguments through `os.args()`:

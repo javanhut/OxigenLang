@@ -468,8 +468,17 @@ impl Parser {
             if let Some(stmt) = self.parse_statement() {
                 program.statements.push(stmt);
             } else if self.errors.len() > err_count {
-                // A new error was added — synchronize to recover and continue parsing
+                // A new error was added — synchronize to recover and continue parsing.
+                let before = self.curr_token.span;
                 self.synchronize();
+                // Guarantee forward progress. `synchronize()` stops *at* a
+                // statement-starting keyword without consuming it, so if the
+                // error occurred on such a keyword (e.g. `fun <keyword>`) the
+                // position would not move and the outer loop would spin
+                // forever. Force-consume one token in that case.
+                if self.curr_token.span == before && self.curr_token.token_type != TokenType::Eof {
+                    self.next_token();
+                }
                 continue;
             }
             self.next_token();
@@ -507,7 +516,13 @@ impl Parser {
             if self.peek_token.token_type == TokenType::Assign {
                 return self.parse_assign_statement();
             }
-            if self.peek_token.token_type == TokenType::Includes {
+            // `includes` is a contextual keyword: `StructName includes { ... }`.
+            // It only introduces a method block when the identifier `includes`
+            // is immediately followed by `{`; otherwise it is a normal name.
+            if self.peek_token.token_type == TokenType::Ident
+                && self.peek_token.literal == "includes"
+                && self.peek_nth(1).token_type == TokenType::LBrace
+            {
                 return self.parse_includes_statement();
             }
         }
@@ -516,6 +531,16 @@ impl Parser {
             && self.peek_token.token_type == TokenType::LBrace
         {
             return self.parse_main_block();
+        }
+
+        // `<test>("name") { ... }` test-case block. Recognized at statement
+        // start before the generic angle-form/expression machinery so the
+        // trailing `{ ... }` is parsed as a statement block, not a map literal.
+        if self.curr_token.token_type == TokenType::Lt
+            && self.peek_token.token_type == TokenType::Ident
+            && self.peek_token.literal == "test"
+        {
+            return self.parse_test_statement();
         }
 
         match self.curr_token.token_type {
@@ -2169,6 +2194,20 @@ impl Parser {
         Some(Statement::Main { token, body })
     }
 
+    /// Parse `<test>("name") { ... }`. Curr token is `<`.
+    fn parse_test_statement(&mut self) -> Option<Statement> {
+        let token = self.curr_token.clone(); // '<'
+        self.next_token(); // move to 'test'
+        self.expect_peek(TokenType::Gt)?; // curr is now '>'
+        self.expect_peek(TokenType::LParen)?; // curr is now '('
+        self.next_token(); // move to the name expression
+        let name = self.parse_expression(Precedence::Lowest)?;
+        self.expect_peek(TokenType::RParen)?; // curr is now ')'
+        self.expect_peek(TokenType::LBrace)?; // curr is now '{'
+        let body = self.parse_block()?;
+        Some(Statement::Test { token, name, body })
+    }
+
     fn parse_each_statement(&mut self) -> Option<Statement> {
         let token = self.curr_token.clone(); // 'each'
 
@@ -2914,7 +2953,7 @@ impl Parser {
         };
         let token = self.curr_token.clone();
 
-        self.expect_peek(TokenType::Includes)?; // 'includes'
+        self.next_token(); // consume the `includes` identifier (contextual keyword)
         self.expect_peek(TokenType::LBrace)?; // '{'
 
         let mut methods = Vec::new();
