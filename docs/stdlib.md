@@ -17,16 +17,29 @@ introduce math
 | `clamp` | `clamp(x, lo, hi)` | Constrain value to range [lo, hi] |
 | `sign` | `sign(x)` | Returns 1, -1, or 0 |
 | `sqrt` | `sqrt(x)` | Square root (returns float) |
-| `floor` | `floor(x)` | Round down to integer |
-| `ceil` | `ceil(x)` | Round up to integer |
-| `round` | `round(x)` | Round to nearest integer |
+| `floor` | `floor(x)` | Round down |
+| `ceil` | `ceil(x)` | Round up |
+| `round` | `round(x)` | Round to nearest |
+| `trunc` | `trunc(x)` | Round toward zero |
+| `gcd` | `gcd(a, b)` | Greatest common divisor |
+| `lcm` | `lcm(a, b)` | Least common multiple |
+| `factorial` | `factorial(n)` | `n!` (errors on negative) |
+| `is_even` | `is_even(n)` | True if `n` is even |
+| `is_odd` | `is_odd(n)` | True if `n` is odd |
+| `hypot` | `hypot(a, b)` | `sqrt(a*a + b*b)` |
+| `fmod` | `fmod(a, b)` | Floating-point remainder |
+| `degrees` | `degrees(rad)` | Radians → degrees |
+| `radians` | `radians(deg)` | Degrees → radians |
+
+Constants: `math.PI`, `math.E`, `math.TAU`.
 
 ```oxi
 introduce math
 println(math.sqrt(16))     // 4
 println(math.pow(2, 10))   // 1024
-println(math.clamp(15, 0, 10)) // 10
-println(math.abs(-42))     // 42
+println(math.gcd(12, 18))  // 6
+println(math.factorial(5)) // 120
+println(math.PI)           // 3.141592653589793
 ```
 
 ## strings
@@ -49,6 +62,17 @@ introduce strings
 | `starts_with` | `starts_with(s, prefix)` | Check prefix |
 | `ends_with` | `ends_with(s, suffix)` | Check suffix |
 | `contains_str` | `contains_str(s, sub)` | Check if substring exists |
+| `slice` | `slice(s, start, end)` | Substring by index range |
+| `char_at` | `char_at(s, i)` | Character at index, as a string |
+| `is_empty` | `is_empty(s)` | True if length is 0 |
+| `reverse` | `reverse(s)` | Reverse the characters |
+| `repeated` | `repeated(s, n)` | `s` repeated `n` times (`repeat` is a keyword) |
+| `pad_left` | `pad_left(s, width, fill)` | Left-pad to `width` with `fill` |
+| `pad_right` | `pad_right(s, width, fill)` | Right-pad to `width` with `fill` |
+| `capitalize` | `capitalize(s)` | Uppercase the first character |
+| `index_of` | `index_of(s, sub)` | Index of `sub`, or -1 |
+| `count` | `count(s, sub)` | Non-overlapping occurrences of `sub` |
+| `lines` | `lines(s)` | Split on newlines |
 
 ```oxi
 introduce strings
@@ -80,13 +104,35 @@ introduce array
 | `flatten` | `flatten(arr)` | Flatten nested arrays one level |
 | `includes` | `includes(arr, val)` | Check if value exists in array |
 | `sort` | `sort(arr)` | Sort array (integers, floats, or strings) |
+| `sort_by` | `sort_by(arr, key_fn)` | Sort by a key function |
+| `sum` | `sum(arr)` | Sum of elements |
+| `product` | `product(arr)` | Product of elements |
+| `min` | `min(arr)` | Smallest element (errors if empty) |
+| `max` | `max(arr)` | Largest element (errors if empty) |
+| `any` | `any(arr, pred)` | True if any element matches |
+| `all` | `all(arr, pred)` | True if all elements match |
+| `count` | `count(arr, pred)` | Number of matching elements |
+| `find` | `find(arr, pred)` | First matching element (errors if none) |
+| `find_index` | `find_index(arr, pred)` | Index of first match, or -1 |
+| `index_of` | `index_of(arr, val)` | Index of value, or -1 |
+| `unique` | `unique(arr)` | Remove duplicates, preserving order |
+| `enumerate` | `enumerate(arr)` | Array of `(index, value)` tuples |
+| `slice` | `slice(arr, start, end)` | Sub-array by index range |
+| `take` | `take(arr, n)` | First `n` elements |
+| `drop` | `drop(arr, n)` | All but the first `n` elements |
+| `chunk` | `chunk(arr, size)` | Split into sub-arrays of `size` |
+| `flat_map` | `flat_map(arr, f)` | Map then flatten one level |
+| `each_with_index` | `each_with_index(arr, f)` | Call `f(i, x)` for each element |
+| `group_by` | `group_by(arr, key_fn)` | Map of key → elements |
 
 ```oxi
 introduce array
 println(array.map([1, 2, 3], fun(x) { x * 2 }))    // [2, 4, 6]
 println(array.filter([1, 2, 3, 4], fun(x) { x > 2 })) // [3, 4]
 println(array.reduce([1, 2, 3], 0, fun(a, b) { a + b })) // 6
-println(array.sort([3, 1, 4, 1, 5]))                // [1, 1, 3, 4, 5]
+println(array.sum([1, 2, 3, 4]))                   // 10
+println(array.unique([1, 1, 2, 3, 3]))             // [1, 2, 3]
+println(array.sort([3, 1, 4, 1, 5]))               // [1, 1, 3, 4, 5]
 ```
 
 ## io
@@ -217,6 +263,7 @@ introduce path
 | `parent` | `parent(p)` | Parent directory |
 | `stem` | `stem(p)` | Filename without extension |
 | `is_absolute` | `is_absolute(p)` | Check if path is absolute |
+| `is_relative` | `is_relative(p)` | Check if path is relative |
 
 ```oxi
 introduce path
@@ -401,3 +448,30 @@ resp := net.request("GET", "https://api.example.com/secure", {"Authorization": "
 ```
 
 Supports HTTP and HTTPS.
+
+## result
+
+Helpers for the `Error || Value` system. They work with the tagged forms
+`<Error<tag>>(...)` / `<Value>(...)` and the `is_error` / `is_value` builtins: a
+value is treated as "ok" unless it is an error.
+
+```oxi
+introduce result
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `is_ok` | `is_ok(v)` | True when `v` is not an error |
+| `is_err` | `is_err(v)` | True when `v` is an error |
+| `unwrap_or` | `unwrap_or(v, default)` | `v` if ok, otherwise `default` |
+| `map_value` | `map_value(v, f)` | Apply `f` to `v` if ok; propagate the error otherwise |
+| `and_then` | `and_then(v, f)` | Like `map_value`, for an `f` that returns an Error \|\| Value |
+| `or_else` | `or_else(v, f)` | Recover with `f(v)` if `v` is an error; otherwise return `v` |
+| `ok_or` | `ok_or(v, msg)` | Convert `None` into a tagged error; pass anything else through |
+
+```oxi
+introduce result
+
+config <map> := result.unwrap_or(load_config(path), default_config())
+doubled := result.map_value(parse_int(s), fun(n <int>) { n * 2 })
+```

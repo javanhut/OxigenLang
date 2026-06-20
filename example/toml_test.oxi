@@ -4,7 +4,7 @@
 introduce toml
 
 <test>("toml parsing") {
-    config := toml.parse("title = \"Oxigen\"\nports = [8000, 8001]\n[owner]\nname = \"Javan\"")
+    config <map> := toml.parse("title = \"Oxigen\"\nports = [8000, 8001]\n[owner]\nname = \"Javan\"")
     expect(config["title"]).eq("Oxigen")
     expect(config["ports"][0]).eq(8000)
     expect(config["ports"][1]).eq(8001)

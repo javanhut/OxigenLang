@@ -1,0 +1,31 @@
+introduce strings
+
+<test>("slice and char_at") {
+    expect(strings.slice("hello", 1, 4)).eq("ell")
+    expect(strings.char_at("hello", 0)).eq("h")
+    expect(strings.is_empty("")).truthy()
+    expect(strings.is_empty("x")).falsy()
+}
+
+<test>("repeat and padding") {
+    expect(strings.repeated("ab", 3)).eq("ababab")
+    expect(strings.pad_left("7", 3, "0")).eq("007")
+    expect(strings.pad_right("7", 3, "0")).eq("700")
+}
+
+<test>("reverse and capitalize") {
+    expect(strings.reverse("abc")).eq("cba")
+    expect(strings.capitalize("hello")).eq("Hello")
+    expect(strings.capitalize("")).eq("")
+}
+
+<test>("searching") {
+    expect(strings.index_of("hello world", "world")).eq(6)
+    expect(strings.index_of("hello", "z")).eq(-1)
+    expect(strings.count("banana", "a")).eq(3)
+    expect(strings.count("aaaa", "aa")).eq(2)
+}
+
+<test>("lines") {
+    expect(strings.lines("a\nb\nc")).eq(["a", "b", "c"])
+}

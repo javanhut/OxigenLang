@@ -1,0 +1,43 @@
+// Helpers for the Error || Value system.
+//
+// These work with the tagged forms `<Error<tag>>(...)` / `<Value>(...)` and the
+// `is_error` / `is_value` builtins. A value is treated as "ok" unless it is an
+// error.
+//
+//     introduce result
+//     result.unwrap_or(parse_config(path), default_config())
+
+// True when `v` is not an error.
+fun is_ok(v <generic>) {
+    option { is_error(v) -> False, True }
+}
+
+// True when `v` is an error.
+fun is_err(v <generic>) {
+    is_error(v)
+}
+
+// Return `v` if ok, otherwise `default`.
+fun unwrap_or(v <generic>, default <generic>) {
+    option { is_error(v) -> default, v }
+}
+
+// Apply `f` to `v` if ok; propagate the error otherwise.
+fun map_value(v <generic>, f <generic>) {
+    option { is_error(v) -> v, f(v) }
+}
+
+// Like `map_value`, for an `f` that itself returns an Error || Value.
+fun and_then(v <generic>, f <generic>) {
+    option { is_error(v) -> v, f(v) }
+}
+
+// If `v` is an error, recover by calling `f(v)`; otherwise return `v`.
+fun or_else(v <generic>, f <generic>) {
+    option { is_error(v) -> f(v), v }
+}
+
+// Convert a `None` into a tagged error; pass anything else through unchanged.
+fun ok_or(v <generic>, msg <str>) {
+    option { v == None -> <Error<none>>(msg), v }
+}

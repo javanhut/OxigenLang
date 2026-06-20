@@ -1,0 +1,7 @@
+introduce path
+
+<test>("absolute vs relative") {
+    expect(path.is_absolute("/home/user")).truthy()
+    expect(path.is_relative("/home/user")).falsy()
+    expect(path.is_relative("docs/readme.md")).truthy()
+}

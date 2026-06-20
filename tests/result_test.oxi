@@ -1,0 +1,29 @@
+introduce result
+
+<test>("is_ok and is_err") {
+    expect(result.is_ok(42)).truthy()
+    expect(result.is_ok(<Error<x>>("boom"))).falsy()
+    expect(result.is_err(<Error<x>>("boom"))).truthy()
+    expect(result.is_err(42)).falsy()
+}
+
+<test>("unwrap_or") {
+    expect(result.unwrap_or(42, 0)).eq(42)
+    expect(result.unwrap_or(<Error<x>>("boom"), 99)).eq(99)
+}
+
+<test>("map_value and and_then") {
+    expect(result.map_value(10, fun(x <int>) { x * 2 })).eq(20)
+    expect(result.map_value(<Error<x>>("e"), fun(x <int>) { x * 2 })).is_error()
+    expect(result.and_then(10, fun(x <int>) { <Value>(x + 1) })).is_value()
+}
+
+<test>("or_else") {
+    expect(result.or_else(<Error<x>>("e"), fun(e <generic>) { 7 })).eq(7)
+    expect(result.or_else(5, fun(e <generic>) { 7 })).eq(5)
+}
+
+<test>("ok_or") {
+    expect(result.ok_or(None, "was none")).is_error()
+    expect(result.ok_or(5, "was none")).eq(5)
+}

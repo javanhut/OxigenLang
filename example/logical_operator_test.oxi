@@ -14,7 +14,7 @@
     // `(x or y) == 10` distributes: `x == 10 or y == 10` -> False
     expect((x or y) == 10).falsy()
 
-    y := 10
+    y = 10
     // now `x == 10 or y == 10` -> True
     expect((x or y) == 10).truthy()
 }
@@ -23,7 +23,7 @@
     a <int> := 5
     b <int> := 5
     expect((a and b) == 5).truthy()
-    b := 3
+    b = 3
     expect((a and b) == 5).falsy()
 }
 

@@ -28,7 +28,7 @@ introduce os
     random.seed(42)
     expect(random.rand_int(1, 10)).gte(1)
     expect(random.rand_int(1, 10)).lte(10)
-    choice := random.choice(["a", "b", "c"])
+    choice <str> := random.choice(["a", "b", "c"])
     expect(["a", "b", "c"]).contains(choice)
 }
 

@@ -1,0 +1,59 @@
+introduce array
+
+<test>("folds: sum and product") {
+    expect(array.sum([1, 2, 3, 4])).eq(10)
+    expect(array.product([1, 2, 3, 4])).eq(24)
+    expect(array.sum([])).eq(0)
+    expect(array.product([])).eq(1)
+}
+
+<test>("min and max") {
+    expect(array.min([3, 1, 2])).eq(1)
+    expect(array.max([3, 1, 2])).eq(3)
+    expect(array.min([])).is_error()
+    expect(array.max([])).is_error()
+}
+
+<test>("predicates and count") {
+    expect(array.any([1, 2, 3], fun(x <int>) { x > 2 })).truthy()
+    expect(array.any([1, 2, 3], fun(x <int>) { x > 9 })).falsy()
+    expect(array.all([2, 4, 6], fun(x <int>) { x % 2 == 0 })).truthy()
+    expect(array.all([2, 3], fun(x <int>) { x % 2 == 0 })).falsy()
+    expect(array.count([1, 2, 3, 4], fun(x <int>) { x % 2 == 0 })).eq(2)
+}
+
+<test>("search") {
+    expect(array.find([1, 2, 3], fun(x <int>) { x > 1 })).eq(2)
+    expect(array.find([1, 2, 3], fun(x <int>) { x > 9 })).is_error()
+    expect(array.find_index([1, 2, 3], fun(x <int>) { x == 2 })).eq(1)
+    expect(array.find_index([1, 2, 3], fun(x <int>) { x == 9 })).eq(-1)
+    expect(array.index_of([10, 20, 30], 20)).eq(1)
+    expect(array.index_of([10, 20, 30], 99)).eq(-1)
+}
+
+<test>("transforms") {
+    expect(array.unique([1, 1, 2, 3, 3])).eq([1, 2, 3])
+    expect(array.take([1, 2, 3, 4], 2)).eq([1, 2])
+    expect(array.drop([1, 2, 3, 4], 2)).eq([3, 4])
+    expect(array.slice([1, 2, 3, 4, 5], 1, 4)).eq([2, 3, 4])
+    expect(array.flat_map([1, 2], fun(x <int>) { [x, x] })).eq([1, 1, 2, 2])
+}
+
+<test>("chunk and sort_by") {
+    expect(array.chunk([1, 2, 3, 4, 5], 2)).eq([[1, 2], [3, 4], [5]])
+    expect(array.sort_by([3, 1, 2], fun(x <int>) { x })).eq([1, 2, 3])
+}
+
+<test>("group_by") {
+    g <map> := array.group_by([1, 2, 3, 4], fun(x <int>) { x % 2 })
+    expect(g[0]).eq([2, 4])
+    expect(g[1]).eq([1, 3])
+}
+
+<test>("each_with_index") {
+    seen <array>
+    array.each_with_index(["a", "b"], fun(i <int>, x <str>) {
+        seen = push(seen, tuple(i, x))
+    })
+    expect(len(seen)).eq(2)
+}
