@@ -2958,6 +2958,37 @@ impl VM {
             }
         }
 
+        // Enforce parameter type annotations, matching the tree-walking
+        // evaluator. Default parameters are filled later (by bytecode), so a
+        // `None` in an optional/defaulted slot is skipped here just as the
+        // evaluator skips the check for not-yet-provided optional params.
+        if expected > 0 && closure.function.params.iter().any(|p| p.type_ann.is_some()) {
+            let slot_base = self.stack.len() - expected;
+            for (i, param) in closure.function.params.iter().enumerate() {
+                let Some(expected_ty) = param.type_ann.as_deref() else {
+                    continue;
+                };
+                let val = &self.stack[slot_base + i];
+                if (param.optional || param.has_default) && matches!(val, Value::None) {
+                    continue;
+                }
+                let actual = val.effective_type_name();
+                // Match the specific type or the generic category (ENUM/STRUCT),
+                // mirroring the evaluator so `<Enum>` accepts any enum value.
+                if !crate::evaluator::type_matches(expected_ty, &actual)
+                    && !crate::evaluator::type_matches(expected_ty, val.type_name())
+                {
+                    return Err(self.runtime_error_hint(
+                        &format!(
+                            "type mismatch for parameter '{}': expected {}, got {}",
+                            param.name, expected_ty, actual
+                        ),
+                        &format!("parameter '{}' requires type {}", param.name, expected_ty),
+                    ));
+                }
+            }
+        }
+
         if self.frames.len().saturating_add(self.jit_frame_len()) >= FRAMES_MAX {
             return Err(self.runtime_error_hint(
                 "stack overflow",

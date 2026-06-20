@@ -245,3 +245,50 @@ fn test_subcommand_reports_failures_and_exits_nonzero() {
     assert!(out.contains("expected 5 but got 4"), "stdout:\n{out}");
     assert!(out.contains("1 failed"), "stdout:\n{out}");
 }
+
+#[test]
+fn vm_enforces_parameter_types() {
+    // Regression: the default (VM) backend must enforce parameter type
+    // annotations, not just the tree-walking interpreter.
+    let dir = temp_dir("vm-type-enforce");
+    let script = write_script(
+        &dir,
+        "bad.oxi",
+        "fun f(x <int>) { x }\nprintln(f(\"not an int\"))\n",
+    );
+    let output = run_oxigen(&script, &[]);
+    assert!(!output.status.success(), "expected non-zero exit");
+    assert!(
+        stderr(&output).contains("type mismatch for parameter 'x'"),
+        "stderr:\n{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn vm_accepts_correct_parameter_types() {
+    let dir = temp_dir("vm-type-ok");
+    let script = write_script(
+        &dir,
+        "ok.oxi",
+        "fun f(x <int>) { x + 1 }\nprintln(f(41))\n",
+    );
+    let output = run_oxigen(&script, &[]);
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+    assert_eq!(stdout(&output), "42\n");
+}
+
+#[test]
+fn vm_generic_enum_param_accepts_specific_enum() {
+    // `<Enum>` must accept any specific enum value on the VM, matching the
+    // evaluator.
+    let dir = temp_dir("vm-enum-param");
+    let script = write_script(
+        &dir,
+        "enum.oxi",
+        "enum Color { Red: 1, Green: 2 }\nfun code(c <Enum>) { c.value }\nprintln(code(Color.Green))\n",
+    );
+    let output = run_oxigen(&script, &[]);
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+    assert_eq!(stdout(&output), "2\n");
+}

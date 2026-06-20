@@ -38,7 +38,7 @@ fn unwrap_grouped(expr: &Expression) -> &Expression {
 
 /// Checks if `actual_type` satisfies the type constraint `expected`.
 /// Handles GENERIC (accepts anything) and union types like "INTEGER || STRING".
-fn type_matches(expected: &str, actual: &str) -> bool {
+pub(crate) fn type_matches(expected: &str, actual: &str) -> bool {
     if expected == "GENERIC" {
         return true;
     }
