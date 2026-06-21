@@ -1,0 +1,28 @@
+// Regular expressions (Rust regex syntax).
+//
+//     introduce regex
+//     regex.matches("\\d+", "abc123")        // True
+//     regex.find_all("\\d+", "a1 b22 c333")  // ["1", "22", "333"]
+//
+// (`pattern` is a reserved keyword, so the pattern argument is named `pat`.)
+
+// True if the pattern matches anywhere in text.
+fun matches(pat <str>, text <str>) { __regex_match(pat, text) }
+
+// First match as a string, or None if there is no match.
+fun find(pat <str>, text <str>) { __regex_find(pat, text) }
+
+// Array of all (non-overlapping) matches.
+fun find_all(pat <str>, text <str>) { __regex_find_all(pat, text) }
+
+// Replace every match with replacement (supports $1, $2 group references).
+fun replace(pat <str>, text <str>, replacement <str>) {
+    __regex_replace(pat, text, replacement)
+}
+
+// Split text on the pattern.
+fun split(pat <str>, text <str>) { __regex_split(pat, text) }
+
+// Capture groups of the first match as an array (index 0 is the whole match),
+// or None if there is no match. Groups that didn't participate are "".
+fun captures(pat <str>, text <str>) { __regex_captures(pat, text) }

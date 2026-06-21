@@ -30,6 +30,14 @@ introduce math
 | `fmod` | `fmod(a, b)` | Floating-point remainder |
 | `degrees` | `degrees(rad)` | Radians → degrees |
 | `radians` | `radians(deg)` | Degrees → radians |
+| `powf` | `powf(base, exp)` | Floating-point power (fractional/negative exponents) |
+| `sin` `cos` `tan` | `sin(x)` … | Trigonometric functions (radians) |
+| `asin` `acos` `atan` | `asin(x)` … | Inverse trig (radians) |
+| `atan2` | `atan2(y, x)` | Angle of the point `(x, y)` |
+| `exp` | `exp(x)` | `e**x` |
+| `ln` | `ln(x)` | Natural log |
+| `log2` | `log2(x)` | Base-2 log |
+| `log10` | `log10(x)` | Base-10 log |
 
 Constants: `math.PI`, `math.E`, `math.TAU`.
 
@@ -474,4 +482,99 @@ introduce result
 
 config <map> := result.unwrap_or(load_config(path), default_config())
 doubled := result.map_value(parse_int(s), fun(n <int>) { n * 2 })
+```
+
+## regex
+
+Regular expressions using Rust regex syntax. (`pattern` is a keyword, so the
+pattern argument is named `pat`.)
+
+```oxi
+introduce regex
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `matches` | `matches(pat, text)` | True if the pattern matches anywhere |
+| `find` | `find(pat, text)` | First match string, or `None` |
+| `find_all` | `find_all(pat, text)` | Array of all matches |
+| `replace` | `replace(pat, text, replacement)` | Replace all matches (`$1` group refs) |
+| `split` | `split(pat, text)` | Split text on the pattern |
+| `captures` | `captures(pat, text)` | First match's groups (index 0 = whole match), or `None` |
+
+```oxi
+introduce regex
+println(regex.matches("\\d+", "abc123"))        // True
+println(regex.find_all("\\d+", "a1 b22 c333"))  // [1, 22, 333]
+println(regex.replace("(\\w+)@(\\w+)", "x@y", "$2.$1"))  // y.x
+```
+
+## datetime
+
+Dates and times in UTC. Timestamps are unix seconds (integers). Format strings
+use strftime-style directives.
+
+```oxi
+introduce datetime
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `now` | `now()` | Current time as unix seconds |
+| `format` | `format(ts, fmt)` | Format a timestamp (UTC) |
+| `parse` | `parse(text, fmt)` | Parse to unix seconds (catchable `<Error>` on mismatch) |
+| `year` `month` `day` | `year(ts)` … | Date components |
+| `hour` `minute` `second` | `hour(ts)` … | Time components |
+| `weekday` | `weekday(ts)` | Full weekday name, e.g. `"Saturday"` |
+| `iso8601` | `iso8601(ts)` | RFC 3339 string, e.g. `"2026-06-20T13:45:00Z"` |
+
+```oxi
+introduce datetime
+now <int> := datetime.now()
+println(datetime.format(now, "%Y-%m-%d"))
+ts <int> := datetime.parse("2000-01-01 00:00:00", "%Y-%m-%d %H:%M:%S")
+println(datetime.year(ts))   // 2000
+```
+
+## encoding
+
+Base64, hex, and URL percent-encoding. All operate on UTF-8 strings; the
+`*_decode` functions return a catchable `<Error>` on invalid input.
+
+```oxi
+introduce encoding
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `base64_encode` / `base64_decode` | `base64_encode(s)` | Standard base64 |
+| `hex_encode` / `hex_decode` | `hex_encode(s)` | Lowercase hex |
+| `url_encode` / `url_decode` | `url_encode(s)` | URL percent-encoding |
+
+```oxi
+introduce encoding
+println(encoding.base64_encode("hi"))    // aGk=
+println(encoding.base64_decode("aGk="))  // hi
+println(encoding.url_encode("a b&c"))    // a%20b%26c
+```
+
+## hash
+
+Hash digests, returned as lowercase hex strings. `md5`/`sha1` are for checksums
+and compatibility, not security-sensitive use.
+
+```oxi
+introduce hash
+```
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `sha256` | `sha256(s)` | SHA-256 hex digest |
+| `sha1` | `sha1(s)` | SHA-1 hex digest |
+| `md5` | `md5(s)` | MD5 hex digest |
+
+```oxi
+introduce hash
+println(hash.sha256("hello"))
+// 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
 ```

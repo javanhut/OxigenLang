@@ -1,6 +1,8 @@
 #![allow(non_snake_case)]
 
 use crate::object::Object;
+use base64::Engine as _;
+use sha2::Digest as _;
 use std::collections::HashMap;
 use std::fs;
 use std::rc::Rc;
@@ -70,6 +72,40 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
         "__round".to_string(),
         Rc::new(Object::Builtin(builtin__round)),
     );
+    builtins.insert("__sin".to_string(), Rc::new(Object::Builtin(builtin__sin)));
+    builtins.insert("__cos".to_string(), Rc::new(Object::Builtin(builtin__cos)));
+    builtins.insert("__tan".to_string(), Rc::new(Object::Builtin(builtin__tan)));
+    builtins.insert("__asin".to_string(), Rc::new(Object::Builtin(builtin__asin)));
+    builtins.insert("__acos".to_string(), Rc::new(Object::Builtin(builtin__acos)));
+    builtins.insert("__atan".to_string(), Rc::new(Object::Builtin(builtin__atan)));
+    builtins.insert("__atan2".to_string(), Rc::new(Object::Builtin(builtin__atan2)));
+    builtins.insert("__ln".to_string(), Rc::new(Object::Builtin(builtin__ln)));
+    builtins.insert("__log2".to_string(), Rc::new(Object::Builtin(builtin__log2)));
+    builtins.insert("__log10".to_string(), Rc::new(Object::Builtin(builtin__log10)));
+    builtins.insert("__exp".to_string(), Rc::new(Object::Builtin(builtin__exp)));
+    builtins.insert("__powf".to_string(), Rc::new(Object::Builtin(builtin__powf)));
+    // regex
+    builtins.insert("__regex_match".to_string(), Rc::new(Object::Builtin(builtin__regex_match)));
+    builtins.insert("__regex_find".to_string(), Rc::new(Object::Builtin(builtin__regex_find)));
+    builtins.insert("__regex_find_all".to_string(), Rc::new(Object::Builtin(builtin__regex_find_all)));
+    builtins.insert("__regex_replace".to_string(), Rc::new(Object::Builtin(builtin__regex_replace)));
+    builtins.insert("__regex_split".to_string(), Rc::new(Object::Builtin(builtin__regex_split)));
+    builtins.insert("__regex_captures".to_string(), Rc::new(Object::Builtin(builtin__regex_captures)));
+    // datetime
+    builtins.insert("__dt_now".to_string(), Rc::new(Object::Builtin(builtin__dt_now)));
+    builtins.insert("__dt_format".to_string(), Rc::new(Object::Builtin(builtin__dt_format)));
+    builtins.insert("__dt_parse".to_string(), Rc::new(Object::Builtin(builtin__dt_parse)));
+    // encoding
+    builtins.insert("__base64_encode".to_string(), Rc::new(Object::Builtin(builtin__base64_encode)));
+    builtins.insert("__base64_decode".to_string(), Rc::new(Object::Builtin(builtin__base64_decode)));
+    builtins.insert("__hex_encode".to_string(), Rc::new(Object::Builtin(builtin__hex_encode)));
+    builtins.insert("__hex_decode".to_string(), Rc::new(Object::Builtin(builtin__hex_decode)));
+    builtins.insert("__url_encode".to_string(), Rc::new(Object::Builtin(builtin__url_encode)));
+    builtins.insert("__url_decode".to_string(), Rc::new(Object::Builtin(builtin__url_decode)));
+    // hash
+    builtins.insert("__sha256".to_string(), Rc::new(Object::Builtin(builtin__sha256)));
+    builtins.insert("__sha1".to_string(), Rc::new(Object::Builtin(builtin__sha1)));
+    builtins.insert("__md5".to_string(), Rc::new(Object::Builtin(builtin__md5)));
     builtins.insert(
         "__split".to_string(),
         Rc::new(Object::Builtin(builtin__split)),
@@ -861,6 +897,324 @@ fn builtin__round(args: Vec<Rc<Object>>) -> Rc<Object> {
             "__round: expected number, got {}",
             args[0].type_name()
         ))),
+    }
+}
+
+// Shared helpers for floating-point math builtins.
+fn unary_f64(args: &[Rc<Object>], name: &str, f: fn(f64) -> f64) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error(format!(
+            "{}: expected 1 argument, got {}",
+            name,
+            args.len()
+        )));
+    }
+    match to_f64(&args[0]) {
+        Some(n) => Rc::new(Object::Float(f(n))),
+        None => Rc::new(Object::Error(format!(
+            "{}: expected number, got {}",
+            name,
+            args[0].type_name()
+        ))),
+    }
+}
+
+fn binary_f64(args: &[Rc<Object>], name: &str, f: fn(f64, f64) -> f64) -> Rc<Object> {
+    if args.len() != 2 {
+        return Rc::new(Object::Error(format!(
+            "{}: expected 2 arguments, got {}",
+            name,
+            args.len()
+        )));
+    }
+    match (to_f64(&args[0]), to_f64(&args[1])) {
+        (Some(a), Some(b)) => Rc::new(Object::Float(f(a, b))),
+        _ => Rc::new(Object::Error(format!("{}: expected numbers", name))),
+    }
+}
+
+fn builtin__sin(args: Vec<Rc<Object>>) -> Rc<Object> {
+    unary_f64(&args, "__sin", f64::sin)
+}
+fn builtin__cos(args: Vec<Rc<Object>>) -> Rc<Object> {
+    unary_f64(&args, "__cos", f64::cos)
+}
+fn builtin__tan(args: Vec<Rc<Object>>) -> Rc<Object> {
+    unary_f64(&args, "__tan", f64::tan)
+}
+fn builtin__asin(args: Vec<Rc<Object>>) -> Rc<Object> {
+    unary_f64(&args, "__asin", f64::asin)
+}
+fn builtin__acos(args: Vec<Rc<Object>>) -> Rc<Object> {
+    unary_f64(&args, "__acos", f64::acos)
+}
+fn builtin__atan(args: Vec<Rc<Object>>) -> Rc<Object> {
+    unary_f64(&args, "__atan", f64::atan)
+}
+fn builtin__atan2(args: Vec<Rc<Object>>) -> Rc<Object> {
+    binary_f64(&args, "__atan2", f64::atan2)
+}
+fn builtin__ln(args: Vec<Rc<Object>>) -> Rc<Object> {
+    unary_f64(&args, "__ln", f64::ln)
+}
+fn builtin__log2(args: Vec<Rc<Object>>) -> Rc<Object> {
+    unary_f64(&args, "__log2", f64::log2)
+}
+fn builtin__log10(args: Vec<Rc<Object>>) -> Rc<Object> {
+    unary_f64(&args, "__log10", f64::log10)
+}
+fn builtin__exp(args: Vec<Rc<Object>>) -> Rc<Object> {
+    unary_f64(&args, "__exp", f64::exp)
+}
+fn builtin__powf(args: Vec<Rc<Object>>) -> Rc<Object> {
+    binary_f64(&args, "__powf", f64::powf)
+}
+
+// ── Shared helpers for native extension builtins ──
+
+fn hard_err(msg: impl Into<String>) -> Rc<Object> {
+    Rc::new(Object::Error(msg.into()))
+}
+
+/// A catchable (Error || Value) error, for recoverable failures like a bad
+/// decode or parse. Callers can handle it with `is_error` / the `result` module.
+fn soft_err(msg: impl Into<String>, tag: &str) -> Rc<Object> {
+    Rc::new(Object::ErrorValue {
+        msg: msg.into(),
+        tag: Some(tag.to_string()),
+    })
+}
+
+fn str_arg<'a>(obj: &'a Object) -> Option<&'a str> {
+    match obj {
+        Object::String(s) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+fn str_array(items: impl IntoIterator<Item = String>) -> Rc<Object> {
+    Rc::new(Object::Array(
+        items.into_iter().map(|s| Rc::new(Object::String(s))).collect(),
+    ))
+}
+
+// ── regex ──
+
+fn compile_re(pattern: &str, name: &str) -> Result<regex::Regex, Rc<Object>> {
+    regex::Regex::new(pattern).map_err(|e| hard_err(format!("{}: invalid pattern: {}", name, e)))
+}
+
+fn builtin__regex_match(args: Vec<Rc<Object>>) -> Rc<Object> {
+    match (args.first().and_then(|a| str_arg(a)), args.get(1).and_then(|a| str_arg(a))) {
+        (Some(pat), Some(text)) if args.len() == 2 => match compile_re(pat, "__regex_match") {
+            Ok(re) => Rc::new(Object::Boolean(re.is_match(text))),
+            Err(e) => e,
+        },
+        _ => hard_err("__regex_match: expected (pattern, text) strings"),
+    }
+}
+
+fn builtin__regex_find(args: Vec<Rc<Object>>) -> Rc<Object> {
+    match (args.first().and_then(|a| str_arg(a)), args.get(1).and_then(|a| str_arg(a))) {
+        (Some(pat), Some(text)) if args.len() == 2 => match compile_re(pat, "__regex_find") {
+            Ok(re) => match re.find(text) {
+                Some(m) => Rc::new(Object::String(m.as_str().to_string())),
+                None => Rc::new(Object::None),
+            },
+            Err(e) => e,
+        },
+        _ => hard_err("__regex_find: expected (pattern, text) strings"),
+    }
+}
+
+fn builtin__regex_find_all(args: Vec<Rc<Object>>) -> Rc<Object> {
+    match (args.first().and_then(|a| str_arg(a)), args.get(1).and_then(|a| str_arg(a))) {
+        (Some(pat), Some(text)) if args.len() == 2 => match compile_re(pat, "__regex_find_all") {
+            Ok(re) => str_array(re.find_iter(text).map(|m| m.as_str().to_string())),
+            Err(e) => e,
+        },
+        _ => hard_err("__regex_find_all: expected (pattern, text) strings"),
+    }
+}
+
+fn builtin__regex_replace(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 3 {
+        return hard_err("__regex_replace: expected 3 arguments");
+    }
+    match (str_arg(&args[0]), str_arg(&args[1]), str_arg(&args[2])) {
+        (Some(pat), Some(text), Some(rep)) => match compile_re(pat, "__regex_replace") {
+            Ok(re) => Rc::new(Object::String(re.replace_all(text, rep).into_owned())),
+            Err(e) => e,
+        },
+        _ => hard_err("__regex_replace: expected (pattern, text, replacement) strings"),
+    }
+}
+
+fn builtin__regex_split(args: Vec<Rc<Object>>) -> Rc<Object> {
+    match (args.first().and_then(|a| str_arg(a)), args.get(1).and_then(|a| str_arg(a))) {
+        (Some(pat), Some(text)) if args.len() == 2 => match compile_re(pat, "__regex_split") {
+            Ok(re) => str_array(re.split(text).map(|s| s.to_string())),
+            Err(e) => e,
+        },
+        _ => hard_err("__regex_split: expected (pattern, text) strings"),
+    }
+}
+
+fn builtin__regex_captures(args: Vec<Rc<Object>>) -> Rc<Object> {
+    match (args.first().and_then(|a| str_arg(a)), args.get(1).and_then(|a| str_arg(a))) {
+        (Some(pat), Some(text)) if args.len() == 2 => match compile_re(pat, "__regex_captures") {
+            Ok(re) => match re.captures(text) {
+                Some(caps) => str_array(
+                    caps.iter()
+                        .map(|m| m.map(|x| x.as_str().to_string()).unwrap_or_default()),
+                ),
+                None => Rc::new(Object::None),
+            },
+            Err(e) => e,
+        },
+        _ => hard_err("__regex_captures: expected (pattern, text) strings"),
+    }
+}
+
+// ── datetime (UTC) ──
+
+fn builtin__dt_now(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if !args.is_empty() {
+        return hard_err("__dt_now: expected 0 arguments");
+    }
+    Rc::new(Object::Integer(chrono::Utc::now().timestamp()))
+}
+
+fn builtin__dt_format(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 2 {
+        return hard_err("__dt_format: expected (timestamp, format) arguments");
+    }
+    let secs = match args[0].as_ref() {
+        Object::Integer(n) => *n,
+        _ => return hard_err("__dt_format: timestamp must be an integer (unix seconds)"),
+    };
+    let fmt = match str_arg(&args[1]) {
+        Some(f) => f,
+        None => return hard_err("__dt_format: format must be a string"),
+    };
+    match chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0) {
+        Some(dt) => Rc::new(Object::String(dt.format(fmt).to_string())),
+        None => soft_err("timestamp out of range", "datetime"),
+    }
+}
+
+fn builtin__dt_parse(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 2 {
+        return hard_err("__dt_parse: expected (text, format) arguments");
+    }
+    match (str_arg(&args[0]), str_arg(&args[1])) {
+        (Some(text), Some(fmt)) => {
+            match chrono::NaiveDateTime::parse_from_str(text, fmt) {
+                Ok(ndt) => Rc::new(Object::Integer(ndt.and_utc().timestamp())),
+                Err(e) => soft_err(format!("could not parse '{}': {}", text, e), "datetime"),
+            }
+        }
+        _ => hard_err("__dt_parse: expected (text, format) strings"),
+    }
+}
+
+// ── encoding ──
+
+fn builtin__base64_encode(args: Vec<Rc<Object>>) -> Rc<Object> {
+    match args.first().and_then(|a| str_arg(a)) {
+        Some(s) if args.len() == 1 => Rc::new(Object::String(
+            base64::engine::general_purpose::STANDARD.encode(s.as_bytes()),
+        )),
+        _ => hard_err("__base64_encode: expected 1 string argument"),
+    }
+}
+
+fn builtin__base64_decode(args: Vec<Rc<Object>>) -> Rc<Object> {
+    match args.first().and_then(|a| str_arg(a)) {
+        Some(s) if args.len() == 1 => {
+            match base64::engine::general_purpose::STANDARD.decode(s.as_bytes()) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(text) => Rc::new(Object::String(text)),
+                    Err(_) => soft_err("decoded bytes are not valid UTF-8", "encoding"),
+                },
+                Err(e) => soft_err(format!("invalid base64: {}", e), "encoding"),
+            }
+        }
+        _ => hard_err("__base64_decode: expected 1 string argument"),
+    }
+}
+
+fn builtin__hex_encode(args: Vec<Rc<Object>>) -> Rc<Object> {
+    match args.first().and_then(|a| str_arg(a)) {
+        Some(s) if args.len() == 1 => Rc::new(Object::String(hex::encode(s.as_bytes()))),
+        _ => hard_err("__hex_encode: expected 1 string argument"),
+    }
+}
+
+fn builtin__hex_decode(args: Vec<Rc<Object>>) -> Rc<Object> {
+    match args.first().and_then(|a| str_arg(a)) {
+        Some(s) if args.len() == 1 => match hex::decode(s) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => Rc::new(Object::String(text)),
+                Err(_) => soft_err("decoded bytes are not valid UTF-8", "encoding"),
+            },
+            Err(e) => soft_err(format!("invalid hex: {}", e), "encoding"),
+        },
+        _ => hard_err("__hex_decode: expected 1 string argument"),
+    }
+}
+
+fn builtin__url_encode(args: Vec<Rc<Object>>) -> Rc<Object> {
+    match args.first().and_then(|a| str_arg(a)) {
+        Some(s) if args.len() == 1 => {
+            Rc::new(Object::String(urlencoding::encode(s).into_owned()))
+        }
+        _ => hard_err("__url_encode: expected 1 string argument"),
+    }
+}
+
+fn builtin__url_decode(args: Vec<Rc<Object>>) -> Rc<Object> {
+    match args.first().and_then(|a| str_arg(a)) {
+        Some(s) if args.len() == 1 => match urlencoding::decode(s) {
+            Ok(text) => Rc::new(Object::String(text.into_owned())),
+            Err(e) => soft_err(format!("invalid url encoding: {}", e), "encoding"),
+        },
+        _ => hard_err("__url_decode: expected 1 string argument"),
+    }
+}
+
+// ── hash (hex digests) ──
+
+fn builtin__sha256(args: Vec<Rc<Object>>) -> Rc<Object> {
+    match args.first().and_then(|a| str_arg(a)) {
+        Some(s) if args.len() == 1 => {
+            let mut h = sha2::Sha256::new();
+            h.update(s.as_bytes());
+            Rc::new(Object::String(hex::encode(h.finalize())))
+        }
+        _ => hard_err("__sha256: expected 1 string argument"),
+    }
+}
+
+fn builtin__sha1(args: Vec<Rc<Object>>) -> Rc<Object> {
+    match args.first().and_then(|a| str_arg(a)) {
+        Some(s) if args.len() == 1 => {
+            let mut h = sha1::Sha1::new();
+            h.update(s.as_bytes());
+            Rc::new(Object::String(hex::encode(h.finalize())))
+        }
+        _ => hard_err("__sha1: expected 1 string argument"),
+    }
+}
+
+fn builtin__md5(args: Vec<Rc<Object>>) -> Rc<Object> {
+    match args.first().and_then(|a| str_arg(a)) {
+        Some(s) if args.len() == 1 => {
+            let mut h = md5::Md5::new();
+            h.update(s.as_bytes());
+            Rc::new(Object::String(hex::encode(h.finalize())))
+        }
+        _ => hard_err("__md5: expected 1 string argument"),
     }
 }
 

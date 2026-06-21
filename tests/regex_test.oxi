@@ -1,0 +1,26 @@
+introduce regex
+
+<test>("matches and find") {
+    expect(regex.matches("\\d+", "abc123")).truthy()
+    expect(regex.matches("\\d+", "abcdef")).falsy()
+    expect(regex.find("\\d+", "a1 b22")).eq("1")
+    expect(regex.find("\\d+", "no digits")).eq(None)
+}
+
+<test>("find_all and split") {
+    expect(regex.find_all("\\d+", "a1 b22 c333")).eq(["1", "22", "333"])
+    expect(regex.split("\\s+", "a  b   c")).eq(["a", "b", "c"])
+}
+
+<test>("replace") {
+    expect(regex.replace("\\d+", "a1b2c3", "#")).eq("a#b#c#")
+    expect(regex.replace("(\\w+)@(\\w+)", "x@y", "$2.$1")).eq("y.x")
+}
+
+<test>("captures") {
+    caps <array> := regex.captures("(\\d+)-(\\d+)", "12-34")
+    expect(caps[0]).eq("12-34")
+    expect(caps[1]).eq("12")
+    expect(caps[2]).eq("34")
+    expect(regex.captures("(\\d+)", "none")).eq(None)
+}

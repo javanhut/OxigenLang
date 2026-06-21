@@ -1,0 +1,11 @@
+// Hash digests, returned as lowercase hex strings.
+//
+//     introduce hash
+//     hash.sha256("hello")  // "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+//
+// Note: md5 and sha1 are provided for checksums and compatibility, not for
+// security-sensitive use.
+
+fun sha256(s <str>) { __sha256(s) }
+fun sha1(s <str>) { __sha1(s) }
+fun md5(s <str>) { __md5(s) }
