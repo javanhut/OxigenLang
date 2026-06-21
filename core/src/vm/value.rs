@@ -864,6 +864,51 @@ impl Value {
         }
     }
 
+    /// Produce a value that is independent from `self` for the mutable
+    /// heap-collection variants (Array, Map, Set), recursively deep-copying
+    /// their contents so the result shares no `Rc<RefCell<…>>` backing store
+    /// with the original. All other variants fall back to an ordinary
+    /// `clone()` (a cheap `Rc` refcount bump or a `Copy`), so this is only
+    /// more expensive than `clone()` when a fresh, unaliased collection is
+    /// actually required.
+    ///
+    /// V5 fix: a typed zero-init heap default — `arr <array>` with no
+    /// initializer — is produced once by the compiler and parked in the
+    /// function's constant pool. A plain `clone()` of that constant on every
+    /// call shares the SAME `Rc<RefCell<Vec<Value>>>`, so mutations from one
+    /// call leak into the next (`b()` called 3× printed `1,2,3` instead of
+    /// `1,1,1`). Materializing the default through `fresh_clone` gives each
+    /// initialization its own empty collection, matching the tree-walker.
+    pub fn fresh_clone(&self) -> Value {
+        match self {
+            Value::Array(arr) => {
+                let fresh: Vec<Value> = arr.borrow().iter().map(|v| v.fresh_clone()).collect();
+                Value::Array(Rc::new(RefCell::new(fresh)))
+            }
+            Value::Map(map) => {
+                let mut fresh = crate::vm::collections::OxMap::new();
+                for (k, v) in map.borrow().iter() {
+                    fresh.insert(k.fresh_clone(), v.fresh_clone());
+                }
+                Value::Map(Rc::new(RefCell::new(fresh)))
+            }
+            Value::Set(set) => {
+                let mut fresh = crate::vm::collections::OxSet::new();
+                for v in set.borrow().iter() {
+                    fresh.insert(v.fresh_clone());
+                }
+                Value::Set(Rc::new(RefCell::new(fresh)))
+            }
+            // Tuples are immutable (`Rc<Vec<Value>>` with no interior
+            // mutability) so sharing the Rc is observationally identical to a
+            // deep copy — a plain clone is correct and cheaper. Strings,
+            // closures, struct/enum instances, etc. are likewise either
+            // immutable at this default-materialization point or intentionally
+            // shared by identity.
+            other => other.clone(),
+        }
+    }
+
     pub fn is_truthy(&self) -> bool {
         match self {
             Value::Boolean(b) => *b,

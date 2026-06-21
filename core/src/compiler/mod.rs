@@ -179,6 +179,13 @@ struct CompilerFrame {
     /// can emit balancing `PopHandler`s for handlers opened inside the loop body
     /// before jumping out of / around the body.
     loop_handler_depths: Vec<usize>,
+    /// Lexical nesting depth of `each` loop BODIES currently being compiled in
+    /// this frame. The tree-walker gives every `each` iteration a fresh enclosed
+    /// env (so a typed re-declaration `x <int> := …` of an untyped outer global
+    /// SHADOWS), while `repeat`/plain blocks reuse the enclosing env (so the same
+    /// re-declaration UPDATES the global). `repeat` therefore does NOT bump this;
+    /// only `each` bodies do, and the V1-typed update-vs-shadow choice keys off it.
+    each_body_depth: usize,
 }
 
 impl CompilerFrame {
@@ -205,6 +212,7 @@ impl CompilerFrame {
             loop_exit_floors: Vec::new(),
             handler_depth: 0,
             loop_handler_depths: Vec::new(),
+            each_body_depth: 0,
         }
     }
 }
@@ -242,6 +250,16 @@ pub struct Compiler {
     /// local — matching the tree-walker, whose `:=` updates an existing binding
     /// found anywhere up the scope chain.
     declared_globals: std::collections::HashSet<String>,
+    /// Subset of `declared_globals` that were declared WITH a type annotation
+    /// (`x <int> = 0` / `x <int> := 0` / `x <int>`). A typed re-declaration of an
+    /// existing *untyped* global from a nested block UPDATES that global (matching
+    /// the tree-walker, where `repeat` shares the enclosing environment so
+    /// `set_typed` overwrites the existing binding). A typed re-declaration of an
+    /// already-*typed* global instead SHADOWS (the documented shadowing example:
+    /// `x <int> = 10; each { x <str> = "hi" }` leaves the outer `x` at 10),
+    /// matching the tree-walker, where `each` introduces a fresh per-iteration
+    /// environment that `set_typed` writes the shadow into.
+    typed_globals: std::collections::HashSet<String>,
 }
 
 impl Compiler {
@@ -256,6 +274,7 @@ impl Compiler {
             struct_parents: std::collections::HashMap::new(),
             method_field_stack: Vec::new(),
             declared_globals: std::collections::HashSet::new(),
+            typed_globals: std::collections::HashSet::new(),
         };
         // Push the top-level script frame.
         compiler.frames.push(CompilerFrame::new(None, 0));
@@ -852,18 +871,45 @@ impl Compiler {
                     if let Some(slot) = self.resolve_local(&name.value) {
                         self.emit_op_u16(OpCode::SetLocal, slot, line);
                         self.emit_op(OpCode::Pop, line);
+                    } else if self.declared_globals.contains(&name.value)
+                        && !self.typed_globals.contains(&name.value)
+                        && self.current_frame().each_body_depth == 0
+                    {
+                        // V1-typed UPDATE: a typed re-declaration of an existing
+                        // UNTYPED global from a nested block updates the global
+                        // (re-binding it WITH the new type) rather than creating a
+                        // shadowing local that never stores. Mirrors the tree-
+                        // walker, where `repeat` shares the enclosing env so
+                        // `set_typed` overwrites the existing untyped binding.
+                        // Without this, `x := 0; repeat when x <= 5 { x <int> := x + 1 }`
+                        // shadows and hangs. The value on the stack was already
+                        // TypeWrapped above, so DefineGlobalTyped re-binds with the
+                        // type lock (matching `set_typed`).
+                        // Inside an `each` body (each_body_depth > 0) the tree-walker
+                        // uses a fresh per-iteration env, so we fall through to the
+                        // SHADOW branch instead — `x := 0; each i in [1,2,3] { x <int>
+                        // := x + 1 }` leaves the outer `x` at 0.
+                        self.typed_globals.insert(name.value.clone());
+                        let name_const =
+                            self.make_constant(Value::String(rc_str(name.value.as_str())), line);
+                        let type_const =
+                            self.make_constant(Value::String(rc_str(type_name.as_str())), line);
+                        self.emit_op_u16(OpCode::DefineGlobalTyped, name_const, line);
+                        self.emit_byte(if mutable { 1 } else { 0 }, line);
+                        self.current_chunk().write_u16(type_const, line);
                     } else {
-                        // A typed re-declaration in an inner scope SHADOWS
-                        // (documented behavior — see the "Shadowing" example:
-                        // `x <int> = 10; each { x <str> = "hi" }` leaves the
-                        // outer `x` untouched). Matching the tree-walker's
-                        // mutability-aware update-vs-shadow rule for the typed
-                        // walrus is a separate task; the untyped `:=` global
-                        // update (V1) is handled in `Statement::Let`.
+                        // A typed re-declaration in an inner scope SHADOWS when the
+                        // outer binding is ALSO typed (documented behavior — the
+                        // "Shadowing" example `x <int> = 10; each { x <str> = "hi" }`
+                        // leaves the outer `x` untouched), or when there is no outer
+                        // global of that name. Mirrors the tree-walker, where `each`
+                        // introduces a fresh per-iteration env that the shadow is
+                        // written into.
                         self.add_local(&name.value, mutable, Some(type_name));
                     }
                 } else {
                     self.declared_globals.insert(name.value.clone());
+                    self.typed_globals.insert(name.value.clone());
                     let name_const =
                         self.make_constant(Value::String(rc_str(name.value.as_str())), line);
                     let type_const =
@@ -893,15 +939,35 @@ impl Compiler {
                     if let Some(slot) = self.resolve_local(&name.value) {
                         self.emit_op_u16(OpCode::SetLocal, slot, line);
                         self.emit_op(OpCode::Pop, line);
+                    } else if self.declared_globals.contains(&name.value)
+                        && !self.typed_globals.contains(&name.value)
+                        && self.current_frame().each_body_depth == 0
+                    {
+                        // V1-typed UPDATE (zero-init form): a typed re-declaration
+                        // of an existing UNTYPED global from a nested block updates
+                        // the global (re-binding with the new type) instead of
+                        // shadowing. See the matching note on `TypedLet`. Inside an
+                        // `each` body we fall through to SHADOW (fresh per-iteration
+                        // env in the tree-walker).
+                        self.typed_globals.insert(name.value.clone());
+                        let name_const =
+                            self.make_constant(Value::String(rc_str(name.value.as_str())), line);
+                        let type_const =
+                            self.make_constant(Value::String(rc_str(type_name.as_str())), line);
+                        self.emit_op_u16(OpCode::DefineGlobalTyped, name_const, line);
+                        self.emit_byte(1, line); // TypedDeclare is mutable
+                        self.current_chunk().write_u16(type_const, line);
                     } else {
                         // Zero-init `x <int>` is a declaration, not a
                         // reassignment, so inside a block it introduces a fresh
-                        // block-local (shadowing any global) — matching the
-                        // tree-walker, which leaves the outer value untouched.
+                        // block-local (shadowing any typed global, or any local) —
+                        // matching the tree-walker, which leaves the outer value
+                        // untouched.
                         self.add_local(&name.value, true, Some(type_name));
                     }
                 } else {
                     self.declared_globals.insert(name.value.clone());
+                    self.typed_globals.insert(name.value.clone());
                     let name_const =
                         self.make_constant(Value::String(rc_str(name.value.as_str())), line);
                     let type_const =
@@ -923,6 +989,37 @@ impl Compiler {
                             ),
                             line,
                         );
+                    }
+                }
+                // Implicit-self field WRITE: a bare-name assignment inside a
+                // method whose name is NOT a local/param but IS a field of the
+                // enclosing method's struct resolves to `self.field = value` —
+                // mirroring the tree-walker and the implicit-self READ in
+                // compile_identifier_inner. The read path resolves a bare name
+                // as local -> field -> upvalue -> global (field BEFORE upvalue
+                // and global, with NO global short-circuit), so the write must
+                // use the SAME order: only a local/param of the same name
+                // shadows the field (handled by the SetLocal branch below); a
+                // same-named upvalue OR global does NOT win over the field.
+                if self.resolve_local(&name.value).is_none() {
+                    let is_field = self
+                        .method_field_stack
+                        .last()
+                        .is_some_and(|f| f.contains(&name.value));
+                    if is_field {
+                        if let Some(self_slot) = self.resolve_local("self") {
+                            // self.field = value : GetLocal self, RHS, SetField.
+                            // SetField pops both object and value (net -2), so
+                            // no trailing Pop is needed (mirrors DotAssign).
+                            self.emit_op_u16(OpCode::GetLocal, self_slot, line);
+                            self.compile_expression(value);
+                            let field_const = self.make_constant(
+                                Value::String(rc_str(name.value.as_str())),
+                                line,
+                            );
+                            self.emit_op_u16(OpCode::SetField, field_const, line);
+                            return;
+                        }
                     }
                 }
                 self.compile_expression(value);
@@ -1090,9 +1187,14 @@ impl Compiler {
 
                 // Compile body in its own scope (so TypedLet locals are cleaned up per iteration)
                 self.begin_scope();
+                // Mark that we're inside an `each` body: the tree-walker runs each
+                // iteration in a fresh enclosed env, so a typed re-declaration of an
+                // untyped outer global must SHADOW here (not update the global).
+                self.current_frame_mut().each_body_depth += 1;
                 for s in body {
                     self.compile_statement(s);
                 }
+                self.current_frame_mut().each_body_depth -= 1;
                 self.end_scope(line);
 
                 // Continue target: `skip` lands here, with the loop variable
@@ -2126,7 +2228,20 @@ impl Compiler {
     /// Compile the last statement of a block keeping its value on the stack.
     /// For Expr, keeps the expression value. For Choose/If, suppresses the
     /// trailing Pop so the result is preserved.
+    /// Emit a compile error if a statement in a value-producing position is a
+    /// bare `skip`/`stop`. The tree-walker treats these as `Object::Skip`/
+    /// `Object::Stop` sentinels which error the moment they are consumed as a
+    /// value (e.g. `1 + skip` => `INTEGER + SKIP`). VM/JIT must reject the same
+    /// programs instead of silently pushing a bogus value. Control-flow uses of
+    /// `skip`/`stop` (non-terminal in a loop body) never reach here.
     fn compile_last_statement_as_value(&mut self, stmt: &Statement, line: u32) {
+        // NOTE: skip/stop in the value-producing position are intentionally NOT
+        // rejected at compile time. The tree-walker (parity oracle) compiles
+        // them and only errors at RUNTIME when the resulting sentinel is
+        // consumed by an operation (e.g. `INTEGER + STOP`). A `stop`/`skip` in
+        // an arm body whose result is DISCARDED (statement position) is valid
+        // loop control flow and must run, so a blanket compile-time rejection
+        // would over-reject relative to the oracle.
         match stmt {
             Statement::Expr(expr) => {
                 self.compile_expression(expr);
@@ -2204,6 +2319,13 @@ impl Compiler {
             self.emit_op(OpCode::None, line);
             return;
         }
+        // NOTE: a `skip`/`stop` in the value-producing (last) position is NOT
+        // rejected at compile time. The tree-walker (parity oracle) compiles it
+        // and only errors at RUNTIME when the sentinel is consumed (`INTEGER +
+        // STOP`); a `stop`/`skip` in an arm body whose result is discarded
+        // (e.g. `each { each { option { ... <Error> -> { stop } } } }`) is
+        // valid loop control flow and must run. A blanket compile rejection
+        // here over-rejects that legitimate control flow.
         // Wrap in a scope so locals are cleaned up.
         self.begin_scope();
         for (i, stmt) in stmts.iter().enumerate() {

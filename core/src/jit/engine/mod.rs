@@ -3044,12 +3044,14 @@ impl JitInner {
                                 // overflow exits the thunk cleanly with a
                                 // graceful "stack overflow" error instead of
                                 // overrunning the jit_frames buffer.
-                                // CAVEAT: this bounds the heap jit_frames
-                                // buffer, but a deep *indirect*/mutual chain
-                                // burns one native machine-stack frame per
-                                // nested thunk call and can SIGABRT on the
-                                // native stack (~11k deep) before FRAMES_MAX
-                                // (16384) is reached — tracked as V8.
+                                // V8 (resolved): this bounds the heap
+                                // jit_frames buffer. A deep *indirect*/mutual
+                                // chain burns one native machine-stack frame
+                                // per nested thunk call; the CLI/run driver now
+                                // executes on a 256 MB-stack thread so all
+                                // 16384 JitFrames fit on the native stack and
+                                // THIS FRAMES_MAX guard becomes the graceful
+                                // limit (no native-stack SIGABRT below 16384).
                                 emit_fallible(
                                     &mut builder,
                                     exit_block,
@@ -3259,12 +3261,13 @@ impl JitInner {
                             // mutually-recursive chain would overrun the
                             // jit_frames buffer. Same FRAMES_MAX bound as the
                             // VM's call_closure, checked before the push.
-                            // CAVEAT: the indirect call to the cached thunk
-                            // consumes a real native stack frame, so a deep
-                            // mutual-recursion chain can abort on the native
-                            // machine stack (~11k deep) before this FRAMES_MAX
-                            // (16384) bound fires — separate issue, V8. This
-                            // guard still correctly bounds the heap buffer.
+                            // V8 (resolved): the indirect call to the cached
+                            // thunk consumes a real native stack frame, so a
+                            // deep mutual-recursion chain walks the native
+                            // stack — but the CLI/run driver now executes on a
+                            // 256 MB-stack thread, so all 16384 JitFrames fit
+                            // and this FRAMES_MAX guard fires gracefully before
+                            // the native stack is exhausted (no SIGABRT).
                             emit_fallible(
                                 &mut builder,
                                 exit_block,
@@ -3808,11 +3811,13 @@ impl JitInner {
                                 // graceful "stack overflow" error as the VM's
                                 // call_closure rather than overrunning the
                                 // jit_frames buffer.
-                                // CAVEAT: same as the indirect-call path — a
-                                // deep mutually-recursive *method* chain burns
-                                // native stack per nested thunk and can SIGABRT
-                                // before FRAMES_MAX fires (V8); the heap buffer
-                                // is still correctly bounded here.
+                                // V8 (resolved): same as the indirect-call path
+                                // — a deep mutually-recursive *method* chain
+                                // burns native stack per nested thunk, but the
+                                // CLI/run driver now executes on a 256 MB-stack
+                                // thread so all 16384 JitFrames fit and this
+                                // FRAMES_MAX guard fires gracefully before the
+                                // native stack overflows (no SIGABRT).
                                 emit_fallible(
                                     &mut builder,
                                     exit_block,

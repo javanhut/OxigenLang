@@ -895,15 +895,13 @@ impl Evaluator {
                         Some(&hint_parts.join(". ")),
                     );
                 }
+                // `=` reassigns an existing binding. Matching the VM
+                // (handle_set_global / SetLocal): the variable must exist, the
+                // binding must be mutable, and a declared type-lock (if any) is
+                // enforced. An untyped binding (`s := 0`) carries no constraint
+                // and is mutable, so `=` simply mutates it (any accumulator).
                 let tc = env.borrow().get_type_constraint(&name.value);
-                if tc.is_none() {
-                    return self.runtime_error(
-                        name.token.span,
-                        &format!("`=` requires typed variable, use `:=` for '{}'", name.value),
-                        Some("declare with a type first: x <type> := value"),
-                    );
-                }
-                // Immutable check: = cannot reassign an immutable binding
+                // Immutable check: = cannot reassign an immutable binding.
                 if env.borrow().is_immutable(&name.value) {
                     return self.runtime_error(
                         name.token.span,
@@ -911,24 +909,27 @@ impl Evaluator {
                         Some("use `:=` to override an immutable binding"),
                     );
                 }
-                let target_type = tc.unwrap();
                 let val = self.eval_expression(value, Rc::clone(&env));
                 if val.is_error() {
                     return val;
                 }
-                if !type_matches(&target_type, &val.effective_type_name()) {
-                    return self.runtime_error(
-                        name.token.span,
-                        &format!(
-                            "type mismatch: expected {}, got {}",
-                            target_type,
-                            val.effective_type_name()
-                        ),
-                        Some(&format!(
-                            "'{}' is locked to type {}",
-                            name.value, target_type
-                        )),
-                    );
+                // Enforce the declared type lock, if any. Untyped bindings
+                // (tc.is_none()) accept any value.
+                if let Some(target_type) = tc {
+                    if !type_matches(&target_type, &val.effective_type_name()) {
+                        return self.runtime_error(
+                            name.token.span,
+                            &format!(
+                                "type mismatch: expected {}, got {}",
+                                target_type,
+                                val.effective_type_name()
+                            ),
+                            Some(&format!(
+                                "'{}' is locked to type {}",
+                                name.value, target_type
+                            )),
+                        );
+                    }
                 }
                 env.borrow_mut().update(&name.value, val.clone());
                 val
@@ -3008,10 +3009,15 @@ impl Evaluator {
             "+" => Rc::new(Object::String(format!("{}{}", left, right))),
             "==" => Rc::new(Object::Boolean(left == right)),
             "!=" => Rc::new(Object::Boolean(left != right)),
+            // Lexicographic ordering. The VM only implements `<` for
+            // String<->String (compare_less); `<=`, `>`, `>=` have no String
+            // arm and error. To match the VM exactly (no over-permitting), only
+            // `<` is accepted here.
+            "<" => Rc::new(Object::Boolean(left < right)),
             _ => self.runtime_error(
                 span,
                 &format!("unknown operator: STRING {} STRING", operator),
-                Some("strings only support +, ==, and != operators"),
+                Some("strings only support +, ==, !=, and < operators"),
             ),
         }
     }
@@ -3068,11 +3074,8 @@ impl Evaluator {
         if env.borrow().is_immutable(&ident_name) {
             return self.runtime_error(
                 span,
-                &format!(
-                    "cannot mutate immutable variable '{}'. use := to override",
-                    ident_name
-                ),
-                Some("immutable variables cannot be changed with ++ or --; use := to reassign"),
+                &format!("cannot reassign immutable variable '{}'", ident_name),
+                Some("use `:=` to override an immutable binding"),
             );
         }
 
@@ -3108,37 +3111,39 @@ impl Evaluator {
     fn eval_index_expression(&self, left: Rc<Object>, index: Rc<Object>, span: Span) -> Rc<Object> {
         match (left.as_ref(), index.as_ref()) {
             (Object::Array(arr), Object::Integer(idx)) => {
-                let idx = *idx as usize;
-                if idx >= arr.len() {
-                    Rc::new(Object::None)
+                // Negative indices count from the end, matching the VM
+                // (eval_index): arr[-1] == last. Out-of-range yields None.
+                let idx = if *idx < 0 {
+                    (arr.len() as i64 + *idx) as usize
                 } else {
-                    Rc::clone(&arr[idx])
-                }
+                    *idx as usize
+                };
+                arr.get(idx).map(Rc::clone).unwrap_or(Rc::new(Object::None))
             }
             (Object::String(s), Object::Integer(idx)) => {
-                let idx = *idx as usize;
-                if s.is_ascii() {
-                    // Fast path: O(1) byte indexing for ASCII strings
-                    if idx >= s.len() {
-                        Rc::new(Object::None)
-                    } else {
-                        Rc::new(Object::String(String::from(s.as_bytes()[idx] as char)))
-                    }
+                // Match the VM's eval_index arithmetic: the negative offset is
+                // applied against the BYTE length, then resolved by char
+                // position (identical to byte position for ASCII).
+                let idx = if *idx < 0 {
+                    (s.len() as i64 + *idx) as usize
                 } else {
-                    // Slow path: O(n) char iteration for UTF-8
-                    match s.chars().nth(idx) {
-                        Some(c) => Rc::new(Object::String(c.to_string())),
-                        None => Rc::new(Object::None),
-                    }
+                    *idx as usize
+                };
+                match s.chars().nth(idx) {
+                    Some(c) => Rc::new(Object::String(c.to_string())),
+                    None => Rc::new(Object::None),
                 }
             }
             (Object::Tuple(elements), Object::Integer(idx)) => {
-                let idx = *idx as usize;
-                if idx >= elements.len() {
-                    Rc::new(Object::None)
+                let idx = if *idx < 0 {
+                    (elements.len() as i64 + *idx) as usize
                 } else {
-                    Rc::clone(&elements[idx])
-                }
+                    *idx as usize
+                };
+                elements
+                    .get(idx)
+                    .map(Rc::clone)
+                    .unwrap_or(Rc::new(Object::None))
             }
             (Object::Map(entries), _) => {
                 for (k, v) in entries {

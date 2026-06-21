@@ -323,7 +323,10 @@ pub unsafe extern "C" fn jit_local_add_array_mod_index(
     vm.jit.bump_helper(HelperCounter::LocalAddArrayModIndex);
     vm.sync_stack_from_view();
     if modulus == 0 {
-        vm.jit.stash_error(vm.runtime_error("modulo by zero"));
+        vm.jit.stash_error(vm.runtime_error_hint(
+            "modulo by zero",
+            "ensure the divisor is not zero before using %",
+        ));
         return 1;
     }
 

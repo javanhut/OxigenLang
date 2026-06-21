@@ -1029,14 +1029,18 @@ impl VM {
     /// Clone the constant at `idx` from the current frame's chunk. Used by
     /// the JIT runtime's `jit_push_constant` helper.
     pub(crate) fn current_constant(&self, idx: u16) -> Value {
+        // V5: `fresh_clone` mirrors the interpreter `Constant` opcode so the
+        // JIT's `jit_push_constant` helper also materializes a fresh, unaliased
+        // collection for typed zero-init heap defaults instead of sharing one
+        // `Rc<RefCell<…>>` across calls.
         if self.jit_executing.get() {
             if let Some(frame) = self.jit_frame_top() {
                 let closure = unsafe { &*frame.closure_raw };
-                return closure.function.chunk.constants[idx as usize].clone();
+                return closure.function.chunk.constants[idx as usize].fresh_clone();
             }
         }
         let frame = self.frames.last().unwrap();
-        frame.closure.function.chunk.constants[idx as usize].clone()
+        frame.closure.function.chunk.constants[idx as usize].fresh_clone()
     }
 
     #[allow(dead_code)]
@@ -1479,7 +1483,13 @@ impl VM {
                 // ── Constants & Literals ────────────────────────────
                 OpCode::Constant => {
                     let idx = self.frames[frame_idx].read_u16();
-                    let value = self.frames[frame_idx].read_constant(idx).clone();
+                    // V5: `fresh_clone` (not `clone`) so a typed zero-init heap
+                    // default (`arr <array>`/`<map>`/`<set>`) parked in the
+                    // constant pool materializes a FRESH, unaliased collection
+                    // per load instead of sharing one `Rc<RefCell<…>>` across
+                    // every call. For all other constants this is an ordinary
+                    // clone (single discriminant branch of overhead).
+                    let value = self.frames[frame_idx].read_constant(idx).fresh_clone();
                     self.push(value);
                 }
                 OpCode::None => self.push(Value::None),
@@ -2503,9 +2513,12 @@ impl VM {
                 new.extend((**r).clone());
                 Ok(Value::Tuple(Rc::new(new)))
             }
+            // Hint wording matches the tree-walker's infix type-mismatch arm
+            // (evaluator/mod.rs `eval_infix_expression`) so file vs REPL output
+            // agrees.
             _ => Err(self.runtime_error_hint(
                 &format!("type mismatch: {} + {}", a.type_name(), b.type_name()),
-                "operands must be compatible numeric types, strings, or collections",
+                "operands must be the same type for this operator",
             )),
         }
     }
@@ -2530,7 +2543,7 @@ impl VM {
             (Value::Integer(l), Value::Uint(r)) => Ok(Value::Integer(l - *r as i64)),
             _ => Err(self.runtime_error_hint(
                 &format!("type mismatch: {} - {}", a.type_name(), b.type_name()),
-                "operands must be compatible numeric types",
+                "operands must be the same type for this operator",
             )),
         }
     }
@@ -2545,7 +2558,7 @@ impl VM {
             (Value::Uint(l), Value::Uint(r)) => Ok(Value::Uint(l.wrapping_mul(*r))),
             _ => Err(self.runtime_error_hint(
                 &format!("type mismatch: {} * {}", a.type_name(), b.type_name()),
-                "operands must be compatible numeric types",
+                "operands must be the same type for this operator",
             )),
         }
     }
@@ -2554,7 +2567,12 @@ impl VM {
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 if *r == 0 {
-                    Err(self.runtime_error("division by zero"))
+                    // Match the tree-walker's hint (evaluator/mod.rs
+                    // `eval_integer_infix`) so file vs REPL output agrees.
+                    Err(self.runtime_error_hint(
+                        "division by zero",
+                        "ensure the divisor is not zero before dividing",
+                    ))
                 } else {
                     Ok(Value::Integer(l / r))
                 }
@@ -2564,14 +2582,17 @@ impl VM {
             (Value::Float(l), Value::Integer(r)) => Ok(Value::Float(l / *r as f64)),
             (Value::Uint(l), Value::Uint(r)) => {
                 if *r == 0 {
-                    Err(self.runtime_error("division by zero"))
+                    Err(self.runtime_error_hint(
+                        "division by zero",
+                        "ensure the divisor is not zero before dividing",
+                    ))
                 } else {
                     Ok(Value::Uint(l / r))
                 }
             }
             _ => Err(self.runtime_error_hint(
                 &format!("type mismatch: {} / {}", a.type_name(), b.type_name()),
-                "operands must be compatible numeric types",
+                "operands must be the same type for this operator",
             )),
         }
     }
@@ -2580,7 +2601,12 @@ impl VM {
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 if *r == 0 {
-                    Err(self.runtime_error("modulo by zero"))
+                    // Match the tree-walker's hint (evaluator/mod.rs
+                    // `eval_integer_infix`) so file vs REPL output agrees.
+                    Err(self.runtime_error_hint(
+                        "modulo by zero",
+                        "ensure the divisor is not zero before using %",
+                    ))
                 } else {
                     Ok(Value::Integer(l % r))
                 }
@@ -2590,14 +2616,17 @@ impl VM {
             (Value::Float(l), Value::Integer(r)) => Ok(Value::Float(l % *r as f64)),
             (Value::Uint(l), Value::Uint(r)) => {
                 if *r == 0 {
-                    Err(self.runtime_error("modulo by zero"))
+                    Err(self.runtime_error_hint(
+                        "modulo by zero",
+                        "ensure the divisor is not zero before using %",
+                    ))
                 } else {
                     Ok(Value::Uint(l % r))
                 }
             }
             _ => Err(self.runtime_error_hint(
                 &format!("type mismatch: {} % {}", a.type_name(), b.type_name()),
-                "operands must be compatible numeric types",
+                "operands must be the same type for this operator",
             )),
         }
     }
@@ -3508,6 +3537,33 @@ impl VM {
                 } else {
                     Ok(Value::String(rc_str("")))
                 }
+            }
+            ValueRepr::Tuple(t) => {
+                // Match the tree-walker oracle's Tuple slice semantics exactly.
+                // The tree-walker converts the slice bounds with `n as usize`
+                // BEFORE clamping (evaluator `Expression::Slice` -> `eval_slice`),
+                // so a negative index wraps to a huge `usize` and then trips the
+                // `s > len` / `s > e` guards, yielding an empty tuple — it does
+                // NOT count from the end. (The VM's Array arm, by contrast, maps
+                // negatives via `len + i`; the two backends already differ there,
+                // and the oracle is the tree-walker, so tuples follow it.)
+                let len = t.len();
+                let s = match start {
+                    Some(Value::Integer(i)) => i as usize,
+                    None => 0,
+                    _ => return Err(self.runtime_error("slice index must be integer")),
+                };
+                let e = match end {
+                    Some(Value::Integer(i)) => (i as usize).min(len),
+                    None => len,
+                    _ => return Err(self.runtime_error("slice index must be integer")),
+                };
+                let sliced: Vec<Value> = if s > e || s > len {
+                    Vec::new()
+                } else {
+                    t[s..e].to_vec()
+                };
+                Ok(Value::Tuple(Rc::new(sliced)))
             }
             _ => Err(self.runtime_error_hint(
                 &format!("cannot slice {}", collection.type_name()),

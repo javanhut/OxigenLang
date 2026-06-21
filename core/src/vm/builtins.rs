@@ -312,9 +312,11 @@ fn builtin_int(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Integer(n) => Value::Integer(n),
         ValueRepr::Float(f) => Value::Integer(f as i64),
-        ValueRepr::String(s) => match s.parse::<i64>() {
+        // Trim surrounding whitespace before parsing, matching the
+        // tree-walker (int(" 5 ") == 5).
+        ValueRepr::String(s) => match s.trim().parse::<i64>() {
             Ok(n) => Value::Integer(n),
-            Err(_) => match s.parse::<f64>() {
+            Err(_) => match s.trim().parse::<f64>() {
                 Ok(f) => Value::Integer(f as i64),
                 Err(_) => Value::Error(rc_str(format!("cannot convert '{}' to int", s))),
             },
@@ -337,10 +339,14 @@ fn builtin_float(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Float(f) => Value::Float(f),
         ValueRepr::Integer(n) => Value::Float(n as f64),
-        ValueRepr::String(s) => match s.parse::<f64>() {
+        // Trim surrounding whitespace before parsing, matching the
+        // tree-walker (float(" 1.5 ") == 1.5).
+        ValueRepr::String(s) => match s.trim().parse::<f64>() {
             Ok(f) => Value::Float(f),
             Err(_) => Value::Error(rc_str(format!("cannot convert '{}' to float", s))),
         },
+        // float(True) == 1.0, float(False) == 0.0, matching the tree-walker.
+        ValueRepr::Boolean(b) => Value::Float(if b { 1.0 } else { 0.0 }),
         ValueRepr::Byte(b) => Value::Float(b as f64),
         ValueRepr::Uint(u) => Value::Float(u as f64),
         _ => Value::Error(rc_str(format!(

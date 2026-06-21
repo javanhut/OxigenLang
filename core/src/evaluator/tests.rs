@@ -1250,7 +1250,7 @@ fn test_immutable_assign_blocked() {
 fn test_immutable_postfix_increment_blocked() {
     let result = test_eval("x <int> = 5\nx++");
     match result.as_ref() {
-        Object::Error(msg) => assert!(msg.contains("cannot mutate immutable"), "got: {}", msg),
+        Object::Error(msg) => assert!(msg.contains("cannot reassign immutable"), "got: {}", msg),
         _ => panic!("Expected immutability error, got {:?}", result),
     }
 }
@@ -1259,7 +1259,7 @@ fn test_immutable_postfix_increment_blocked() {
 fn test_immutable_postfix_decrement_blocked() {
     let result = test_eval("x <int> = 5\nx--");
     match result.as_ref() {
-        Object::Error(msg) => assert!(msg.contains("cannot mutate immutable"), "got: {}", msg),
+        Object::Error(msg) => assert!(msg.contains("cannot reassign immutable"), "got: {}", msg),
         _ => panic!("Expected immutability error, got {:?}", result),
     }
 }
@@ -1370,11 +1370,14 @@ fn test_mutable_typed_walrus_reassign_wrong_type() {
 // --- Untyped / undeclared errors ---
 
 #[test]
-fn test_assign_untyped_variable_errors() {
-    let result = test_eval("x := 10\nx = 20");
+fn test_assign_untyped_variable_reassigns() {
+    // TW1 parity fix: `=` reassignment of an existing untyped binding now
+    // mutates freely (matching the VM's handle_set_global), instead of
+    // erroring with "requires typed variable".
+    let result = test_eval("x := 10\nx = 20\nx");
     match result.as_ref() {
-        Object::Error(msg) => assert!(msg.contains("requires typed variable"), "got: {}", msg),
-        _ => panic!("Expected error, got {:?}", result),
+        Object::Integer(20) => {}
+        _ => panic!("Expected Integer(20), got {:?}", result),
     }
 }
 

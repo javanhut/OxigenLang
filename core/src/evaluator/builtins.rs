@@ -457,8 +457,9 @@ fn builtin_rest(args: Vec<Rc<Object>>) -> Rc<Object> {
 
     match args[0].as_ref() {
         Object::Array(arr) => {
+            // Match the VM: rest([]) -> [] (empty array), not None.
             if arr.is_empty() {
-                Rc::new(Object::None)
+                Rc::new(Object::Array(Vec::new()))
             } else {
                 Rc::new(Object::Array(arr[1..].to_vec()))
             }
@@ -573,10 +574,9 @@ fn builtin_str(args: Vec<Rc<Object>>) -> Rc<Object> {
         Object::String(s) => Rc::new(Object::String(s.clone())),
         Object::Byte(n) => Rc::new(Object::String(n.to_string())),
         Object::Uint(n) => Rc::new(Object::String(n.to_string())),
-        obj => Rc::new(Object::Error(format!(
-            "cannot convert {} to STRING",
-            obj.type_name()
-        ))),
+        // Match the VM: fall back to the Display form for everything else
+        // (arrays, maps, None, etc.) instead of erroring.
+        obj => Rc::new(Object::String(obj.to_string())),
     }
 }
 
@@ -602,26 +602,36 @@ fn builtin_chars(args: Vec<Rc<Object>>) -> Rc<Object> {
 }
 
 fn builtin_range(args: Vec<Rc<Object>>) -> Rc<Object> {
-    if args.len() != 1 {
-        return Rc::new(Object::Error(format!(
-            "range function requires at 1 argument. got={}, want=1",
-            args.len()
-        )));
-    }
-    match args[0].as_ref() {
-        Object::Integer(n) => {
-            let n = *n;
-            let mut num_range: Vec<Rc<Object>> = Vec::with_capacity(n as usize);
-            for i in 0..n {
-                num_range.push(Rc::new(Object::Integer(i)));
+    // Match the VM: range(n) -> 0..n, range(start, end) -> start..end.
+    let (start, end) = match args.len() {
+        1 => match args[0].as_ref() {
+            Object::Integer(n) => (0i64, *n),
+            _ => {
+                return Rc::new(Object::Error(
+                    "range() requires integer arguments".to_string(),
+                ));
             }
-            Rc::new(Object::Array(num_range))
+        },
+        2 => match (args[0].as_ref(), args[1].as_ref()) {
+            (Object::Integer(s), Object::Integer(e)) => (*s, *e),
+            _ => {
+                return Rc::new(Object::Error(
+                    "range() requires integer arguments".to_string(),
+                ));
+            }
+        },
+        _ => {
+            return Rc::new(Object::Error(format!(
+                "range() takes 1 or 2 arguments, got {}",
+                args.len()
+            )));
         }
-        obj => Rc::new(Object::Error(format!(
-            "argument require a integer, got {}",
-            obj.type_name()
-        ))),
+    };
+    let mut num_range: Vec<Rc<Object>> = Vec::new();
+    for i in start..end {
+        num_range.push(Rc::new(Object::Integer(i)));
     }
+    Rc::new(Object::Array(num_range))
 }
 
 fn builtin_byte(args: Vec<Rc<Object>>) -> Rc<Object> {
