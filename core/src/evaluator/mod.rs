@@ -3509,9 +3509,12 @@ impl Evaluator {
             }
         };
 
-        // Reuse a single loop environment instead of allocating per iteration
-        let loop_env = Rc::new(RefCell::new(Environment::new_enclosed(Rc::clone(&env))));
         for element in elements {
+            // Fresh environment per iteration so a closure created in the body
+            // captures that iteration's value (per-iteration capture), matching
+            // the VM/JIT. Reusing one env would make all closures share the
+            // final value.
+            let loop_env = Rc::new(RefCell::new(Environment::new_enclosed(Rc::clone(&env))));
             loop_env
                 .borrow_mut()
                 .set(variable.value.clone(), Rc::clone(&element));

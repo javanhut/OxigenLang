@@ -237,3 +237,126 @@ fn test_interpolated_string_escape_sequences_include_ansi_escape() {
     assert_eq!(tokens[5].token_type, TokenType::String);
     assert_eq!(tokens[5].literal, "\x1b[0m");
 }
+
+#[test]
+fn test_unterminated_string_at_eof_is_illegal() {
+    // No closing quote, end of input: must report an unterminated string,
+    // not silently produce a String token.
+    let tokens = collect_tokens(r#"x := "hello"#);
+
+    let illegal = tokens
+        .iter()
+        .find(|t| t.token_type == TokenType::Illegal)
+        .expect("unterminated string should emit an Illegal token");
+    assert!(
+        illegal.literal.contains("unterminated"),
+        "Illegal literal should describe the problem, got {:?}",
+        illegal.literal
+    );
+    // No bogus String token for the unterminated literal.
+    assert!(
+        !tokens.iter().any(|t| t.token_type == TokenType::String),
+        "unterminated string must not produce a String token"
+    );
+}
+
+#[test]
+fn test_unterminated_string_anchored_at_opening_quote() {
+    // The opening quote is on line 1 at column 6 (1-based). The Illegal token
+    // must point THERE, not at the next line where lexing recovers.
+    let src = "x := \"hello\ny := 5\n";
+    let tokens = collect_tokens(src);
+
+    let illegal = tokens
+        .iter()
+        .find(|t| t.token_type == TokenType::Illegal)
+        .expect("unterminated string should emit an Illegal token");
+    assert_eq!(
+        illegal.span.line, 1,
+        "error should be anchored at the opening quote's line"
+    );
+    assert_eq!(
+        illegal.span.column, 6,
+        "error should be anchored at the opening quote's column"
+    );
+}
+
+#[test]
+fn test_unterminated_string_does_not_swallow_following_line() {
+    // After the unterminated string the lexer must keep making progress and
+    // still tokenize the next line, so we should see a Newline then `y`.
+    let src = "x := \"hello\ny := 5\n";
+    let tokens = collect_tokens(src);
+
+    assert!(
+        tokens
+            .iter()
+            .any(|t| t.token_type == TokenType::Ident && t.literal == "y"),
+        "the line after an unterminated string must still be tokenized"
+    );
+    // And the run terminates cleanly with Eof (no infinite loop / hang).
+    assert_eq!(tokens.last().unwrap().token_type, TokenType::Eof);
+}
+
+#[test]
+fn test_unterminated_single_quote_string_is_illegal() {
+    let tokens = collect_tokens("x := 'oops\n");
+    assert!(
+        tokens.iter().any(|t| t.token_type == TokenType::Illegal
+            && t.literal.contains("unterminated")),
+        "unterminated single-quoted string should also be reported"
+    );
+}
+
+#[test]
+fn test_unterminated_interpolated_string_is_illegal() {
+    // Interpolation that never closes its outer quote (raw newline before the
+    // closing delimiter). Should be one clean unterminated error anchored at
+    // the opening quote, not a cascade of interpolation part tokens.
+    let src = "msg := \"hi {name}\nx := 1\n";
+    let tokens = collect_tokens(src);
+
+    let illegal = tokens
+        .iter()
+        .find(|t| t.token_type == TokenType::Illegal)
+        .expect("unterminated interpolated string should emit an Illegal token");
+    assert!(illegal.literal.contains("unterminated"));
+    assert_eq!(illegal.span.line, 1);
+    // No interpolation part tokens should leak out for the broken string.
+    assert!(
+        !tokens
+            .iter()
+            .any(|t| t.token_type == TokenType::InterpStart),
+        "broken interpolated string must not leak InterpStart"
+    );
+    // Recovery: the next line is still tokenized.
+    assert!(
+        tokens
+            .iter()
+            .any(|t| t.token_type == TokenType::Ident && t.literal == "x")
+    );
+}
+
+#[test]
+fn test_well_terminated_strings_still_lex() {
+    // Regression guard: normal strings, escaped quotes, escaped newlines, and
+    // interpolation must all keep working unchanged.
+    let tokens = collect_tokens(r#""hello world""#);
+    assert_eq!(tokens[0].token_type, TokenType::String);
+    assert_eq!(tokens[0].literal, "hello world");
+
+    let tokens = collect_tokens(r#""line\nbreak""#);
+    assert_eq!(tokens[0].token_type, TokenType::String);
+    assert_eq!(tokens[0].literal, "line\nbreak");
+
+    let tokens = collect_tokens(r#""say \"hi\"""#);
+    assert_eq!(tokens[0].token_type, TokenType::String);
+    assert_eq!(tokens[0].literal, "say \"hi\"");
+
+    let tokens = collect_tokens(r#""hi {name}!""#);
+    assert_eq!(tokens[0].token_type, TokenType::InterpStart);
+    assert!(
+        !tokens.iter().any(|t| t.token_type == TokenType::Illegal),
+        "a well-formed interpolated string must not emit Illegal"
+    );
+}

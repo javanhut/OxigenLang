@@ -1692,6 +1692,10 @@ fn transfer(
             // [value] → [value, bool] — peeks.
             next.stack.push(SlotType::Value);
         }
+        // Error-handler bookkeeping has no operand-stack effect. (Functions
+        // that use these never reach the JIT — `scan` rejects them — so this
+        // arm exists only for exhaustiveness.)
+        OpCode::PushHandler | OpCode::PopHandler => {}
     }
 
     (next, terminates, targets)
@@ -1733,6 +1737,7 @@ fn opcode_len(op: OpCode, code: &[u8], ip: usize, chunk: &Chunk) -> usize {
         | OpCode::IterLen
         | OpCode::IterGet
         | OpCode::ValueConstruct
+        | OpCode::PopHandler
         | OpCode::Fail => 1,
 
         // 1-byte opcode + 1-byte operand
@@ -1772,7 +1777,8 @@ fn opcode_len(op: OpCode, code: &[u8], ip: usize, chunk: &Chunk) -> usize {
         | OpCode::TypeWrap
         | OpCode::IsMut
         | OpCode::IsType
-        | OpCode::IsTypeMut => 3,
+        | OpCode::IsTypeMut
+        | OpCode::PushHandler => 3,
 
         // 1-byte opcode + u16 + u8
         OpCode::StructLiteral
@@ -1782,7 +1788,9 @@ fn opcode_len(op: OpCode, code: &[u8], ip: usize, chunk: &Chunk) -> usize {
         | OpCode::MethodCall
         | OpCode::Import => 4,
         // 1-byte opcode + 2*u16
-        OpCode::TestPattern | OpCode::Guard => 5,
+        OpCode::TestPattern => 5,
+        // 1-byte opcode + 3*u16 (jump offset, binding, tag filter)
+        OpCode::Guard => 7,
 
         // MethodCallNamed: u16 + u8 + u8
         OpCode::MethodCallNamed => 5,

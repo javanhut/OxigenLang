@@ -209,12 +209,21 @@ pub enum OpCode {
     /// Define a global with mutability/type metadata.
     /// Operands: u16 name constant, u8 mutable flag, u16 type_name constant (0xFFFF = no type).
     DefineGlobalTyped,
+
+    // --- Recoverable errors ---
+    /// Install an error handler covering the following protected region.
+    /// Operand: u16 forward offset to the catch target. On a runtime error
+    /// (or `<fail>`) raised within the region, the VM unwinds to this handler,
+    /// pushes the error value, and resumes at the catch target.
+    PushHandler,
+    /// Remove the innermost error handler (normal-path exit of a region).
+    PopHandler,
 }
 
 impl OpCode {
     /// Convert a raw byte to an OpCode. Returns None for invalid bytes.
     pub fn from_byte(byte: u8) -> Option<OpCode> {
-        if byte <= OpCode::DefineGlobalTyped as u8 {
+        if byte <= OpCode::PopHandler as u8 {
             // SAFETY: OpCode is repr(u8) and we verified the range.
             Some(unsafe { std::mem::transmute(byte) })
         } else {

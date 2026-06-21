@@ -385,6 +385,7 @@ impl JitInner {
                 let err = err_opt.unwrap_or_else(|| VMError {
                     message: "JIT runtime error with no stashed detail".to_string(),
                     line: 0,
+                    tag: None,
                 });
                 InvokeOutcome::RuntimeError(err)
             }
@@ -1387,13 +1388,39 @@ impl JitInner {
                                         VALUE_INT_PAYLOAD_OFFSET as i32,
                                     )
                                 });
-                                emit_inline_set_local(
-                                    &mut builder,
-                                    &refs,
-                                    vm_val,
-                                    slot_offset_val,
-                                    slot,
-                                );
+                                let constrained = func
+                                    .locals
+                                    .get(slot as usize)
+                                    .map(|li| li.type_constraint.is_some())
+                                    .unwrap_or(false);
+                                if constrained {
+                                    // Type-locked slot: enforce the lock via the
+                                    // fallible checked helper and bail on a
+                                    // mismatch, so a set type is never ignored
+                                    // even once the function is JIT-compiled.
+                                    maybe_emit_current_line(
+                                        &mut builder,
+                                        vm_val,
+                                        line,
+                                        col,
+                                        &mut last_emitted_loc,
+                                    );
+                                    let slot_arg =
+                                        builder.ins().iconst(types::I32, slot as i64);
+                                    let call = builder
+                                        .ins()
+                                        .call(refs.set_local_checked, &[vm_val, slot_arg]);
+                                    let status = builder.inst_results(call)[0];
+                                    emit_early_exit_on_err(&mut builder, exit_block, status);
+                                } else {
+                                    emit_inline_set_local(
+                                        &mut builder,
+                                        &refs,
+                                        vm_val,
+                                        slot_offset_val,
+                                        slot,
+                                    );
+                                }
                                 if let (Some(&var), Some(payload)) =
                                     (int_locals.get(&slot), top_payload)
                                 {
@@ -2600,6 +2627,24 @@ impl JitInner {
                                 // allocation needed; payload comes back in
                                 // the second SSA result of the call.
 
+                                // V7: recursion-depth guard. The A3 direct
+                                // self-recursion path pushes a JitFrame
+                                // inline; without a bound check it overruns
+                                // the pre-allocated jit_frames buffer and
+                                // SIGSEGVs at deep recursion. Replicate the
+                                // VM's `call_closure` FRAMES_MAX guard exactly
+                                // (single load+compare on the recursive call
+                                // path); on overflow the helper stashes a
+                                // graceful "stack overflow" error and we
+                                // early-exit the thunk with status 1, so the
+                                // JIT rejects what the VM rejects.
+                                emit_fallible(
+                                    &mut builder,
+                                    exit_block,
+                                    refs.check_recursion_depth,
+                                    vm_val,
+                                );
+
                                 // Push JitFrame for the callee (using our own closure_ptr
                                 // — we just proved equality with it).
                                 let jit_frames_ptr = builder.ins().load(
@@ -2696,6 +2741,22 @@ impl JitInner {
                                 let results = builder.inst_results(call);
                                 let status = results[0];
                                 let payload = results[1];
+
+                                // Specialized-return status: 0 = i64 payload
+                                // (re-box as Integer below), 3 = boxed result
+                                // already on the stack (non-int return — frame
+                                // already torn down), 1/2 = error/bailout.
+                                let three_a3 = builder.ins().iconst(types::I32, 3);
+                                let is_boxed_a3 = builder.ins().icmp(
+                                    cranelift_codegen::ir::condcodes::IntCC::Equal,
+                                    status,
+                                    three_a3,
+                                );
+                                let dispatch_a3 = builder.create_block();
+                                builder
+                                    .ins()
+                                    .brif(is_boxed_a3, post_call_block, &[], dispatch_a3, &[]);
+                                builder.switch_to_block(dispatch_a3);
 
                                 // Error / bailout propagate.
                                 let ok_block_a3 = builder.create_block();
@@ -2974,6 +3035,28 @@ impl JitInner {
 
                                 // ── ca_dispatch_block: take the call ──
                                 builder.switch_to_block(ca_dispatch_block);
+
+                                // V7: recursion-depth guard for the
+                                // closure-aware specialized dispatch, which
+                                // also pushes a JitFrame inline below. Same
+                                // FRAMES_MAX bound as the VM's call_closure;
+                                // checked before we mutate any state so an
+                                // overflow exits the thunk cleanly with a
+                                // graceful "stack overflow" error instead of
+                                // overrunning the jit_frames buffer.
+                                // CAVEAT: this bounds the heap jit_frames
+                                // buffer, but a deep *indirect*/mutual chain
+                                // burns one native machine-stack frame per
+                                // nested thunk call and can SIGABRT on the
+                                // native stack (~11k deep) before FRAMES_MAX
+                                // (16384) is reached — tracked as V8.
+                                emit_fallible(
+                                    &mut builder,
+                                    exit_block,
+                                    refs.check_recursion_depth,
+                                    vm_val,
+                                );
+
                                 let arg_payload = builder.ins().load(
                                     types::I64,
                                     flags,
@@ -3099,6 +3182,29 @@ impl JitInner {
                                 let ca_status = ca_results[0];
                                 let ca_payload = ca_results[1];
 
+                                // Shared post-call block, used by both the
+                                // int-payload and result-on-stack paths.
+                                let ca_pcb = match shared_post_call_block {
+                                    Some(b) => b,
+                                    None => {
+                                        let b = builder.create_block();
+                                        shared_post_call_block = Some(b);
+                                        b
+                                    }
+                                };
+                                // status 3 = boxed result already on the stack
+                                // (non-int return); the callee already tore down
+                                // its frame, so no rollback and no push.
+                                let three_ca = builder.ins().iconst(types::I32, 3);
+                                let is_boxed_ca = builder.ins().icmp(
+                                    cranelift_codegen::ir::condcodes::IntCC::Equal,
+                                    ca_status,
+                                    three_ca,
+                                );
+                                let ca_dispatch = builder.create_block();
+                                builder.ins().brif(is_boxed_ca, ca_pcb, &[], ca_dispatch, &[]);
+                                builder.switch_to_block(ca_dispatch);
+
                                 let ca_ok_block = builder.create_block();
                                 let ca_err_block = builder.create_block();
                                 builder.append_block_param(ca_err_block, types::I32);
@@ -3135,15 +3241,7 @@ impl JitInner {
                                     );
                                 }
                                 emit_inline_push_integer(&mut builder, vm_val, ca_payload);
-                                let pcb = match shared_post_call_block {
-                                    Some(b) => b,
-                                    None => {
-                                        let b = builder.create_block();
-                                        shared_post_call_block = Some(b);
-                                        b
-                                    }
-                                };
-                                builder.ins().jump(pcb, &[]);
+                                builder.ins().jump(ca_pcb, &[]);
 
                                 // builder is now in post_ca_block (the
                                 // continuation when CA attempt failed).
@@ -3153,6 +3251,26 @@ impl JitInner {
                                 None
                             };
                             let _ = post_ca_dispatch_block;
+
+                            // V7: recursion-depth guard for the generic
+                            // inline-cache indirect-call dispatch. Like the
+                            // A3/CA paths this pushes a JitFrame inline and
+                            // indirect-calls the cached thunk; an unbounded
+                            // mutually-recursive chain would overrun the
+                            // jit_frames buffer. Same FRAMES_MAX bound as the
+                            // VM's call_closure, checked before the push.
+                            // CAVEAT: the indirect call to the cached thunk
+                            // consumes a real native stack frame, so a deep
+                            // mutual-recursion chain can abort on the native
+                            // machine stack (~11k deep) before this FRAMES_MAX
+                            // (16384) bound fires — separate issue, V8. This
+                            // guard still correctly bounds the heap buffer.
+                            emit_fallible(
+                                &mut builder,
+                                exit_block,
+                                refs.check_recursion_depth,
+                                vm_val,
+                            );
 
                             let jit_frames_ptr = builder.ins().load(
                                 ptr_ty,
@@ -3680,6 +3798,27 @@ impl JitInner {
                                 // We need BOTH: the RcBox pointer for writing
                                 // to the stack as a live `Value::Closure`, and
                                 // the T pointer for `JitFrame.closure_raw`.
+                                //
+                                // V7: recursion-depth guard for the method-call
+                                // IC dispatch, which also pushes a JitFrame
+                                // inline for the callee method. Checked at the
+                                // top of the hit block, before any stack/Rc
+                                // mutation, so an overflowing recursive method
+                                // chain exits the thunk cleanly with the same
+                                // graceful "stack overflow" error as the VM's
+                                // call_closure rather than overrunning the
+                                // jit_frames buffer.
+                                // CAVEAT: same as the indirect-call path — a
+                                // deep mutually-recursive *method* chain burns
+                                // native stack per nested thunk and can SIGABRT
+                                // before FRAMES_MAX fires (V8); the heap buffer
+                                // is still correctly bounded here.
+                                emit_fallible(
+                                    &mut builder,
+                                    exit_block,
+                                    refs.check_recursion_depth,
+                                    vm_val,
+                                );
                                 let closure_raw_box = builder.ins().load(
                                     ptr_ty,
                                     flags,
@@ -3951,20 +4090,61 @@ impl JitInner {
                                     }
                                 }
                                 EntryKind::IntSpecialized => {
-                                    // Track B: multi-return specialized ABI.
-                                    // Source the i64 payload (from expr_stack
-                                    // when virtualized; else from the VM
-                                    // stack top), tear down the frame inline,
-                                    // and jump to exit_block with (0,
-                                    // payload). The exit-tail emits
-                                    // return_(&[status, payload]) for the
-                                    // multi-return signature.
+                                    // Track B: multi-return specialized ABI. A
+                                    // success Return reports `(0, i64 payload)`
+                                    // and the caller re-boxes the payload as an
+                                    // Integer — valid ONLY when the return value
+                                    // really is an Integer:
+                                    //   * a virt-SSA return is provably Int → fast
+                                    //     i64 payload.
+                                    //   * a VM-stack return is tag-checked at
+                                    //     runtime. A non-Integer (float / string /
+                                    //     None / heap) can't be reported as a raw
+                                    //     i64, so it's returned the generic way
+                                    //     (boxed, left on the stack) with status 3
+                                    //     = "result already on stack", which the
+                                    //     direct-call sites read off the stack.
                                     use cranelift_codegen::ir::MemFlags;
+                                    use cranelift_codegen::ir::condcodes::IntCC;
                                     let flags = MemFlags::trusted();
 
-                                    let payload = if let Some(top) = virt_stack.pop_int_ssa() {
-                                        top
+                                    // Inline frame teardown (mirrors jit_op_return
+                                    // minus the FFI): stack_view.len = slot_offset;
+                                    // jit_frame_view.len -= 1.
+                                    macro_rules! emit_intspec_teardown {
+                                        () => {{
+                                            builder.ins().store(
+                                                flags,
+                                                slot_offset_val,
+                                                vm_val,
+                                                vm_stack_view_len_offset(),
+                                            );
+                                            let fl = builder.ins().load(
+                                                types::I64,
+                                                flags,
+                                                vm_val,
+                                                vm_jit_frame_view_len_offset(),
+                                            );
+                                            let one = builder.ins().iconst(types::I64, 1);
+                                            let new_fl = builder.ins().isub(fl, one);
+                                            builder.ins().store(
+                                                flags,
+                                                new_fl,
+                                                vm_val,
+                                                vm_jit_frame_view_len_offset(),
+                                            );
+                                        }};
+                                    }
+
+                                    if let Some(top) = virt_stack.pop_int_ssa() {
+                                        // Provably Integer — fast i64 return.
+                                        emit_intspec_teardown!();
+                                        let zero32 = builder.ins().iconst(types::I32, 0);
+                                        builder
+                                            .ins()
+                                            .jump(exit_block, &[zero32.into(), top.into()]);
                                     } else {
+                                        // Return value is on the VM stack; tag-check.
                                         let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
                                         let stack_len = emit_load_stack_len(&mut builder, vm_val);
                                         let value_size =
@@ -3973,43 +4153,44 @@ impl JitInner {
                                         let top_idx = builder.ins().isub(stack_len, one);
                                         let byte_off = builder.ins().imul(top_idx, value_size);
                                         let top_addr = builder.ins().iadd(stack_ptr, byte_off);
-                                        builder.ins().load(
+                                        let tag = builder.ins().load(types::I8, flags, top_addr, 0);
+                                        let int_tag = builder
+                                            .ins()
+                                            .iconst(types::I8, VALUE_TAG_INTEGER as i64);
+                                        let is_int =
+                                            builder.ins().icmp(IntCC::Equal, tag, int_tag);
+                                        let int_block = builder.create_block();
+                                        let boxed_block = builder.create_block();
+                                        builder
+                                            .ins()
+                                            .brif(is_int, int_block, &[], boxed_block, &[]);
+
+                                        // Integer → fast i64 return.
+                                        builder.switch_to_block(int_block);
+                                        let payload = builder.ins().load(
                                             types::I64,
                                             flags,
                                             top_addr,
                                             VALUE_INT_PAYLOAD_OFFSET as i32,
-                                        )
-                                    };
+                                        );
+                                        emit_intspec_teardown!();
+                                        let zero32 = builder.ins().iconst(types::I32, 0);
+                                        builder
+                                            .ins()
+                                            .jump(exit_block, &[zero32.into(), payload.into()]);
 
-                                    // Inline frame teardown. Mirrors
-                                    // `jit_op_return` minus the helper FFI:
-                                    //   1. stack_view.len = slot_offset
-                                    //   2. jit_frame_view.len -= 1
-                                    builder.ins().store(
-                                        flags,
-                                        slot_offset_val,
-                                        vm_val,
-                                        vm_stack_view_len_offset(),
-                                    );
-                                    let jit_frames_len = builder.ins().load(
-                                        types::I64,
-                                        flags,
-                                        vm_val,
-                                        vm_jit_frame_view_len_offset(),
-                                    );
-                                    let one = builder.ins().iconst(types::I64, 1);
-                                    let new_fl = builder.ins().isub(jit_frames_len, one);
-                                    builder.ins().store(
-                                        flags,
-                                        new_fl,
-                                        vm_val,
-                                        vm_jit_frame_view_len_offset(),
-                                    );
-
-                                    let zero32 = builder.ins().iconst(types::I32, 0);
-                                    builder
-                                        .ins()
-                                        .jump(exit_block, &[zero32.into(), payload.into()]);
+                                        // Non-Integer → generic boxed return
+                                        // (pops result, closes upvalues, truncates,
+                                        // re-pushes result, pops the JitFrame) and
+                                        // report status 3 = result on stack.
+                                        builder.switch_to_block(boxed_block);
+                                        builder.ins().call(refs.op_return, &[vm_val]);
+                                        let three = builder.ins().iconst(types::I32, 3);
+                                        let zero64 = builder.ins().iconst(types::I64, 0);
+                                        builder
+                                            .ins()
+                                            .jump(exit_block, &[three.into(), zero64.into()]);
+                                    }
                                 }
                             }
                             terminated = true;

@@ -876,6 +876,15 @@ impl Parser {
         let mut left = match prefix {
             Some(f) => f(self)?,
             None => {
+                if self.curr_token.token_type == TokenType::Illegal
+                    && self.curr_token.literal != "?"
+                {
+                    self.errors.push(Diagnostic::error(
+                        self.curr_token.span,
+                        self.curr_token.literal.clone(),
+                    ));
+                    return None;
+                }
                 self.errors.push(Diagnostic::error(
                     self.curr_token.span,
                     format!("unexpected token {:?}", self.curr_token.literal),

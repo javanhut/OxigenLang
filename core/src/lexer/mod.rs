@@ -460,15 +460,25 @@ impl Lexer {
         let has_interp = self.string_has_interpolation(delimiter);
 
         if !has_interp {
-            // Simple string, no interpolation — process escape sequences
+            // Simple string, no interpolation — process escape sequences.
+            // Stop at the closing delimiter, EOF ('\0'), or a raw newline.
+            // Oxigen strings are single-line (newlines are written with the
+            // `\n` escape), so reaching a raw newline or EOF before the
+            // closing quote means the string is unterminated.
             let mut literal = std::string::String::new();
-            while self.ch != delimiter && self.ch != '\0' {
+            while self.ch != delimiter && self.ch != '\0' && self.ch != '\n' {
                 if self.ch == '\\' {
                     self.push_escape_sequence(&mut literal, delimiter);
                 } else {
                     literal.push(self.ch);
                     self.read_char();
                 }
+            }
+            if self.ch != delimiter {
+                // Unterminated: do NOT consume the newline/EOF sentinel so the
+                // lexer keeps making forward progress and the rest of the line
+                // is still tokenized (avoiding a misleading cascade).
+                return self.unterminated_string_token(span);
             }
             self.read_char(); // closing quote
             return Token {
@@ -479,10 +489,15 @@ impl Lexer {
         }
 
         // String has interpolation — emit InterpStart, then queue all parts
-        // Collect literal parts and expression tokens
+        // Collect literal parts and expression tokens. Remember how many
+        // pending tokens existed before so we can roll back cleanly if the
+        // string turns out to be unterminated.
+        let pending_mark = self.pending_tokens.len();
         let mut literal_buf = std::string::String::new();
 
-        while self.ch != delimiter && self.ch != '\0' {
+        // Stop at the closing delimiter, EOF, or a raw newline (strings are
+        // single-line; see the non-interpolation branch above).
+        while self.ch != delimiter && self.ch != '\0' && self.ch != '\n' {
             if self.ch == '{' {
                 // Emit any accumulated literal as a String token
                 if !literal_buf.is_empty() {
@@ -569,6 +584,14 @@ impl Lexer {
             }
         }
 
+        if self.ch != delimiter {
+            // Unterminated interpolated string: discard the partial part tokens
+            // we queued and report a single error anchored at the opening quote.
+            // Leave the newline/EOF sentinel unconsumed for forward progress.
+            self.pending_tokens.truncate(pending_mark);
+            return self.unterminated_string_token(span);
+        }
+
         // Emit any trailing literal
         if !literal_buf.is_empty() {
             self.pending_tokens.push_back(Token {
@@ -591,6 +614,24 @@ impl Lexer {
         Token {
             token_type: TokenType::InterpStart,
             literal: "".into(),
+            span,
+        }
+    }
+
+    /// Build the diagnostic token for a string literal that was never closed.
+    ///
+    /// Oxigen has no multi-line string literals (newlines are written with the
+    /// `\n` escape), so a string that reaches end-of-line or end-of-input
+    /// before its closing delimiter is a missing-quote typo. We surface this as
+    /// a `TokenType::Illegal` token whose `literal` is the human-readable
+    /// message and whose `span` points at the OPENING quote — the actual
+    /// location of the mistake — instead of letting the lexer swallow the rest
+    /// of the file and produce a misleading cascade of parser errors. The
+    /// parser turns this `Illegal` token into a reported diagnostic.
+    fn unterminated_string_token(&self, span: Span) -> Token {
+        Token {
+            token_type: TokenType::Illegal,
+            literal: "unterminated string literal".to_string(),
             span,
         }
     }
@@ -654,7 +695,10 @@ impl Lexer {
         let mut pos = self.position;
         while pos < self.input.len() {
             let c = self.input[pos];
-            if c == delimiter || c == '\0' {
+            // A raw newline ends the line before any closing delimiter: the
+            // string is unterminated, so route it to the non-interpolation
+            // branch which reports the error (single-line strings only).
+            if c == delimiter || c == '\0' || c == '\n' {
                 return false;
             }
             if c == '\\' {

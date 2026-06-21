@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 const STACK_MAX: usize = 262144; // 256K stack slots
-const FRAMES_MAX: usize = 16384; // 16K call frames — supports deep recursion
+pub(crate) const FRAMES_MAX: usize = 16384; // 16K call frames — supports deep recursion
 
 /// A call frame: one per active function invocation.
 #[derive(Debug)]
@@ -90,6 +90,10 @@ impl JitFrameView {
 pub struct VMError {
     pub message: String,
     pub line: u32,
+    /// Error category tag, if any (e.g. from `<fail>(<Error<network>>(...))`).
+    /// Preserved across a `guard`/`option <Error>` recovery so tag filters
+    /// (`<guard<Error<tag>>>`) can match.
+    pub tag: Option<String>,
 }
 
 impl std::fmt::Display for VMError {
@@ -166,8 +170,28 @@ pub struct VM {
     /// Used by the JIT's GetGlobal inline cache to detect staleness.
     pub(crate) globals_version: u64,
 
+    /// Active error handlers (innermost last). `PushHandler`/`PopHandler` manage
+    /// this; on a runtime error the interpreter loop unwinds to the top handler
+    /// whose frame is still within the current `execute_until` scope.
+    error_handlers: Vec<ErrorHandler>,
+
     /// Baseline JIT engine. Stub/no-op when the `jit` feature is off.
     pub jit: JitEngine,
+}
+
+/// A recoverable-error landing pad installed by `PushHandler`. Records the
+/// machine state to restore so an error raised in the protected region can be
+/// turned back into an in-band error value at the catch target.
+#[derive(Clone, Copy)]
+struct ErrorHandler {
+    /// Absolute ip in the catching frame to resume at.
+    catch_ip: usize,
+    /// `self.frames.len()` at install time — frames to unwind to.
+    frame_len: usize,
+    /// Operand-stack height at install time — truncate to this, then push error.
+    stack_len: usize,
+    /// `jit_frame_view.len` at install time — reset to clean leaked JIT frames.
+    jit_frame_len: usize,
 }
 
 impl VM {
@@ -210,6 +234,7 @@ impl VM {
             global_mutability: HashMap::new(),
             global_type_constraints: HashMap::new(),
             globals_version: 0,
+            error_handlers: Vec::new(),
             jit: JitEngine::new(),
         }
     }
@@ -379,6 +404,21 @@ impl VM {
                 "use `:=` to override an immutable binding",
             ));
         }
+        // Enforce the declared type lock, if any. Mutable typed variables keep
+        // their type fixed across reassignment (`x <int> := 10; x = "hi"` errors).
+        let constraint = self
+            .global_type_constraints
+            .get(name.as_ref())
+            .and_then(|c| c.clone());
+        if let Some(expected) = constraint {
+            let actual = self.peek(0).effective_type_name();
+            if !crate::evaluator::type_matches(&expected, &actual) {
+                return Err(self.runtime_error_hint(
+                    &format!("type mismatch: expected {}, got {}", expected, actual),
+                    &format!("'{}' is locked to type {}", name, expected),
+                ));
+            }
+        }
         let val = self.peek(0).clone();
         self.globals.insert(name.to_string(), val);
         self.globals_version = self.globals_version.wrapping_add(1);
@@ -387,6 +427,26 @@ impl VM {
 
     pub(crate) fn handle_define_global(&mut self, name_idx: u16) -> Result<(), VMError> {
         let name = self.name_constant(name_idx)?;
+        // A bare walrus on an existing type-locked global keeps the lock:
+        // `x <int> := 10; x := "hi"` errors. Untyped vars carry no constraint,
+        // so free retyping still works; explicit `x <T> := ...` retyping goes
+        // through DefineGlobalTyped and is allowed to relock.
+        let constraint = self
+            .global_type_constraints
+            .get(name.as_ref())
+            .and_then(|c| c.clone());
+        if let Some(expected) = constraint {
+            let actual = self.peek(0).effective_type_name();
+            if !crate::evaluator::type_matches(&expected, &actual) {
+                return Err(self.runtime_error_hint(
+                    &format!(
+                        "type mismatch: '{}' is locked to {}, got {}",
+                        name, expected, actual
+                    ),
+                    "use an explicit type annotation to change the locked type",
+                ));
+            }
+        }
         let val = self.pop();
         self.globals.insert(name.to_string(), val);
         self.globals_version = self.globals_version.wrapping_add(1);
@@ -754,6 +814,10 @@ impl VM {
                     },
                 }
             }
+            ValueRepr::Wrapped(inner) => match fname.as_str() {
+                "value" => Ok((**inner).clone()),
+                _ => Err(self.runtime_error(&format!("Value wrapper has no field '{}'", fname))),
+            },
             _ => Err(self.runtime_error_hint(
                 &format!("cannot access field '{}' on {}", fname, object.type_name()),
                 "field access is supported on structs, enums, modules, maps, and error values",
@@ -1315,6 +1379,7 @@ impl VM {
         VMError {
             message: self.format_error(message, None),
             line,
+            tag: None,
         }
     }
 
@@ -1323,6 +1388,7 @@ impl VM {
         VMError {
             message: self.format_error(message, Some(hint)),
             line,
+            tag: None,
         }
     }
 
@@ -1351,9 +1417,49 @@ impl VM {
         // frame. Save + restore in case we are called from within a
         // JIT thunk (nested interpreter → JIT → interpreter → ...).
         let prev_jit_exec = self.jit_executing.replace(false);
-        let result = self.execute_until_inner(stop_depth);
+        let result = loop {
+            match self.execute_until_inner(stop_depth) {
+                Ok(()) => break Ok(()),
+                Err(e) => match self.recover_to_handler(stop_depth, e) {
+                    // Recovered into a `guard`/`option <Error>`/`Error||Value`
+                    // catch target — resume the interpreter loop there.
+                    Ok(()) => continue,
+                    // No handler in this scope — propagate.
+                    Err(e) => break Err(e),
+                },
+            }
+        };
         self.jit_executing.set(prev_jit_exec);
         result
+    }
+
+    /// On a raised error, look for the innermost installed error handler that
+    /// lives within the current `execute_until` scope (`frame_len > stop_depth`).
+    /// If found, unwind frames + operand stack + JIT frames to its saved state,
+    /// push the error as an in-band `ErrorValue`, set `ip` to the catch target,
+    /// and return `Ok(())`. Otherwise return the error for propagation.
+    fn recover_to_handler(&mut self, stop_depth: usize, err: VMError) -> Result<(), VMError> {
+        match self.error_handlers.last().copied() {
+            Some(h) if h.frame_len > stop_depth => {
+                self.error_handlers.pop();
+                self.frames.truncate(h.frame_len);
+                // Reset JIT frames (a JIT callee that errored leaves its frame
+                // behind — see `call_compiled`'s RuntimeError arm).
+                self.jit_frame_view.len = h.jit_frame_len;
+                // Close any upvalues that captured locals inside the unwound
+                // region before discarding those stack slots.
+                self.close_upvalues(h.stack_len);
+                self.stack_truncate(h.stack_len);
+                self.push(Value::ErrorValue(Rc::new(ErrorValueData {
+                    msg: rc_str(err.message),
+                    tag: err.tag.map(|t| rc_str(t)),
+                })));
+                let fi = self.frames.len() - 1;
+                self.frames[fi].ip = h.catch_ip;
+                Ok(())
+            }
+            _ => Err(err),
+        }
     }
 
     #[inline(always)]
@@ -1425,12 +1531,12 @@ impl VM {
                 OpCode::Equal => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(Value::Boolean(a == b));
+                    self.push(Value::Boolean(Self::values_equal(&a, &b)));
                 }
                 OpCode::NotEqual => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(Value::Boolean(a != b));
+                    self.push(Value::Boolean(!Self::values_equal(&a, &b)));
                 }
                 OpCode::Less => {
                     let b = self.pop();
@@ -1533,6 +1639,24 @@ impl VM {
                 }
                 OpCode::SetLocal => {
                     let slot = self.frames[frame_idx].read_u16() as usize;
+                    // Enforce a declared type lock on the local, if any. A set
+                    // type stays locked; only an explicitly dynamic variable
+                    // (`<generic>`/untyped) carries no constraint.
+                    let constraint = self.frames[frame_idx]
+                        .closure
+                        .function
+                        .locals
+                        .get(slot)
+                        .and_then(|li| li.type_constraint.clone());
+                    if let Some(expected) = constraint {
+                        let actual = self.peek(0).effective_type_name();
+                        if !crate::evaluator::type_matches(&expected, &actual) {
+                            return Err(self.runtime_error_hint(
+                                &format!("type mismatch: expected {}, got {}", expected, actual),
+                                &format!("variable is locked to type {}", expected),
+                            ));
+                        }
+                    }
                     let offset = self.frames[frame_idx].slot_offset;
                     let value = self.peek(0).clone();
                     self.stack[offset + slot] = value;
@@ -1641,6 +1765,17 @@ impl VM {
                 OpCode::Return => {
                     let result = self.pop();
                     let frame = self.frames.pop().unwrap();
+
+                    // Drop any error handlers that belonged to the returning
+                    // frame — a `give` inside a guarded option arm exits via
+                    // Return and would otherwise skip its `PopHandler`.
+                    while self
+                        .error_handlers
+                        .last()
+                        .is_some_and(|h| h.frame_len > self.frames.len())
+                    {
+                        self.error_handlers.pop();
+                    }
 
                     // Close upvalues
                     self.close_upvalues(frame.slot_offset);
@@ -1795,18 +1930,57 @@ impl VM {
                     let binding_hi = self.frames[frame_idx].read_byte();
                     let binding_lo = self.frames[frame_idx].read_byte();
                     let binding_idx = ((binding_hi as u16) << 8) | (binding_lo as u16);
+                    let tag_hi = self.frames[frame_idx].read_byte();
+                    let tag_lo = self.frames[frame_idx].read_byte();
+                    let tag_idx = ((tag_hi as u16) << 8) | (tag_lo as u16);
                     let binding_name = self.frames[frame_idx].read_constant(binding_idx).clone();
 
                     let value = self.peek(0).clone();
-                    if let Some(_) = value.as_error_value() {
-                        // Error case: bind the error value, jump to fallback
-                        if let Some(name) = binding_name.as_string() {
-                            self.globals.insert(name.to_string(), value);
+                    // Inspect the error (if any) and whether the tag filter
+                    // matches, ending the borrow of `value` before we act.
+                    let err: Option<(bool, String, Option<String>)> =
+                        if let Some(data) = value.as_error_value() {
+                            let matches = if tag_idx == 0xFFFF {
+                                true // no filter → catch any error
+                            } else {
+                                let filter =
+                                    self.frames[frame_idx].read_constant(tag_idx).clone();
+                                match (filter.as_string(), data.tag.as_ref()) {
+                                    (Some(f), Some(t)) => f.as_str() == t.as_str(),
+                                    _ => false,
+                                }
+                            };
+                            Some((
+                                matches,
+                                data.msg.to_string(),
+                                data.tag.as_ref().map(|t| t.to_string()),
+                            ))
+                        } else {
+                            None
+                        };
+
+                    match err {
+                        Some((true, _, _)) => {
+                            // Matching error: bind it, then jump to the fallback.
+                            if let Some(name) = binding_name.as_string() {
+                                self.globals.insert(name.to_string(), value);
+                            }
+                            self.pop();
+                            self.frames[frame_idx].ip += jump_offset;
                         }
-                        self.pop(); // pop the error
-                        self.frames[frame_idx].ip += jump_offset;
+                        Some((false, msg, tag)) => {
+                            // Tag filter didn't match → keep propagating.
+                            self.pop();
+                            return Err(VMError {
+                                message: msg,
+                                line: self.current_line(),
+                                tag,
+                            });
+                        }
+                        // Not an error: keep the value on the stack as-is
+                        // (including Value(...) wrappers).
+                        None => {}
                     }
-                    // Not an error: keep value on stack as-is (including Value(...) wrappers)
                 }
 
                 OpCode::Fail => {
@@ -1816,15 +1990,32 @@ impl VM {
                             return Err(VMError {
                                 message: data.msg.to_string(),
                                 line: self.current_line(),
+                                tag: data.tag.as_ref().map(|t| t.to_string()),
                             });
                         }
                         _ => {
                             return Err(VMError {
                                 message: format!("{}", value),
                                 line: self.current_line(),
+                                tag: None,
                             });
                         }
                     }
+                }
+
+                // ── Recoverable errors ──────────────────────────────
+                OpCode::PushHandler => {
+                    let offset = self.frames[frame_idx].read_u16() as usize;
+                    let catch_ip = self.frames[frame_idx].ip + offset;
+                    self.error_handlers.push(ErrorHandler {
+                        catch_ip,
+                        frame_len: self.frames.len(),
+                        stack_len: self.stack.len(),
+                        jit_frame_len: self.jit_frame_view.len,
+                    });
+                }
+                OpCode::PopHandler => {
+                    self.error_handlers.pop();
                 }
 
                 // ── Modules ─────────────────────────────────────────
@@ -2133,7 +2324,7 @@ impl VM {
                     let arg_count = self.frames[frame_idx].read_byte() as usize;
                     let variant_name = self.frames[frame_idx].read_constant(variant_idx).clone();
                     let start = self.stack.len() - arg_count;
-                    let args: Vec<Value> = self.stack.drain(start..).collect();
+                    let args: Vec<Value> = self.stack_drain_from(start);
                     let enum_val = self.pop();
                     let vname = if let Some(s) = variant_name.as_string() {
                         Rc::clone(s)
@@ -2192,7 +2383,7 @@ impl VM {
                     let field_count = self.frames[frame_idx].read_byte() as usize;
                     let variant_name = self.frames[frame_idx].read_constant(variant_idx).clone();
                     let start = self.stack.len() - field_count * 2;
-                    let flat: Vec<Value> = self.stack.drain(start..).collect();
+                    let flat: Vec<Value> = self.stack_drain_from(start);
                     let mut fields: Vec<(String, Value)> = Vec::new();
                     for pair in flat.chunks(2) {
                         if let Some(fname) = pair[0].as_string() {
@@ -2466,6 +2657,42 @@ impl VM {
 
     // ── Comparison Helpers ──────────────────────────────────────────────
 
+    /// Equality for the `==` / `!=` opcodes (B8 / decision D1).
+    ///
+    /// `Value::eq` is kept STRICT because it backs map-key hashing — there,
+    /// `2` and `2.0` must remain distinct keys. The surface `==` operator,
+    /// however, coerces across numeric kinds exactly like the ordering
+    /// operators (`<`, `<=`, …) already do, so the VM stays internally
+    /// consistent and matches the tree-walker oracle:
+    ///   `2 == 2.0` → True, `2 == 3.0` → False, `byte(1) == 1` → True,
+    ///   `uint(1) == 1` → True. Non-numeric cross-kind pairs (`1 == "1"`)
+    ///   stay unequal, and same-kind pairs (including enum / struct / map
+    ///   keys) fall through to the strict `Value::eq`.
+    pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            // int ⇆ float
+            (Value::Integer(l), Value::Float(r)) => (*l as f64) == *r,
+            (Value::Float(l), Value::Integer(r)) => *l == (*r as f64),
+            // byte ⇆ int (promote to int, mirrors eval_integer_infix)
+            (Value::Byte(l), Value::Integer(r)) => (*l as i64) == *r,
+            (Value::Integer(l), Value::Byte(r)) => *l == (*r as i64),
+            // byte ⇆ float
+            (Value::Byte(l), Value::Float(r)) => (*l as f64) == *r,
+            (Value::Float(l), Value::Byte(r)) => *l == (*r as f64),
+            // uint ⇆ int (cast uint to i64, mirrors eval_integer_infix)
+            (Value::Uint(l), Value::Integer(r)) => (*l as i64) == *r,
+            (Value::Integer(l), Value::Uint(r)) => *l == (*r as i64),
+            // uint ⇆ float
+            (Value::Uint(l), Value::Float(r)) => (*l as f64) == *r,
+            (Value::Float(l), Value::Uint(r)) => *l == (*r as f64),
+            // uint ⇆ byte (promote to uint, mirrors eval_uint_infix)
+            (Value::Uint(l), Value::Byte(r)) => *l == (*r as u64),
+            (Value::Byte(l), Value::Uint(r)) => (*l as u64) == *r,
+            // Same-kind (and every non-numeric pair) → strict equality.
+            _ => a == b,
+        }
+    }
+
     pub(crate) fn compare_less(&self, a: Value, b: Value) -> Result<Value, VMError> {
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l < r)),
@@ -2562,6 +2789,7 @@ impl VM {
                     return Err(VMError {
                         message: msg.to_string(),
                         line: self.current_line(),
+                        tag: None,
                     });
                 }
                 self.push(result);
@@ -2765,7 +2993,7 @@ impl VM {
                                 )));
                             }
                             let start = self.stack.len() - arg_count;
-                            let args: Vec<Value> = self.stack.drain(start..).collect();
+                            let args: Vec<Value> = self.stack_drain_from(start);
                             self.pop(); // receiver (EnumDef)
                             self.push(Value::EnumInstance(Rc::new(
                                 crate::vm::value::ObjEnumInstance {
@@ -3097,6 +3325,7 @@ impl VM {
     }
 
     pub(crate) fn close_upvalues(&mut self, last: usize) {
+        let stack_len = self.stack.len();
         let mut i = 0;
         while i < self.open_upvalues.len() {
             let should_close = {
@@ -3106,10 +3335,26 @@ impl VM {
 
             if should_close {
                 let uv = self.open_upvalues.remove(i);
+                // Snapshot the captured value. An Open upvalue whose slot is
+                // at or beyond the current stack length points at a slot that
+                // has already been relocated/removed (this happens when a
+                // block-local captured inside an `option`/`choose` arm becomes
+                // the arm's result value and the arm's cleanup leaves the
+                // open upvalue dangling — see V6). Reading `self.stack[slot]`
+                // there is an out-of-bounds index that aborts the VM. Close
+                // such a stale upvalue to `None` instead of indexing past the
+                // stack: the only closure that holds it has already finished
+                // executing (it observed the live value before the slot was
+                // removed), so its post-mortem value is unobservable, and the
+                // important invariant is simply not to crash.
                 let value = {
                     let borrow = uv.borrow();
                     if let Upvalue::Open(slot) = &*borrow {
-                        self.stack[*slot].clone()
+                        if *slot < stack_len {
+                            self.stack[*slot].clone()
+                        } else {
+                            Value::None
+                        }
                     } else {
                         continue;
                     }
@@ -3449,6 +3694,19 @@ impl VM {
             let has_value = parts.iter().any(|p| *p == "VALUE");
             let has_error = parts.iter().any(|p| p.starts_with("ERROR"));
             if has_value && has_error {
+                // Idempotency (V4): a value already normalized to the SUCCESS
+                // side of the union must not be wrapped again. The canonical
+                // idiom `res <Error || Value> := <Value>("hi")` feeds an
+                // already-`Wrapped` value into this declaration-position
+                // TypeWrap; re-wrapping produced `Value(Value(hi))` so that
+                // `res.value` returned `Value(hi)` instead of `hi`. Return it
+                // untouched. (An incoming `ErrorValue`/`Error` still flows
+                // through `error_info_from_value` below so the union's default
+                // tag, per B16, is applied — that path is already content-
+                // idempotent.)
+                if let Value::Wrapped(_) = value {
+                    return Ok(value);
+                }
                 // Error/Value union: wrap based on whether value is an error
                 if let Some((tag, msg)) = Self::error_info_from_value(&value) {
                     // Find the error tag from the target spec
