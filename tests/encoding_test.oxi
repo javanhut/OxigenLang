@@ -1,0 +1,22 @@
+introduce encoding
+
+<test>("base64 round-trip") {
+    expect(encoding.base64_encode("hi")).eq("aGk=")
+    expect(encoding.base64_decode("aGk=")).eq("hi")
+    expect(encoding.base64_decode(encoding.base64_encode("Oxigen!"))).eq("Oxigen!")
+}
+
+<test>("hex round-trip") {
+    expect(encoding.hex_encode("AB")).eq("4142")
+    expect(encoding.hex_decode("4142")).eq("AB")
+}
+
+<test>("url round-trip") {
+    expect(encoding.url_encode("a b&c")).eq("a%20b%26c")
+    expect(encoding.url_decode("a%20b%26c")).eq("a b&c")
+}
+
+<test>("decode errors are catchable") {
+    expect(encoding.base64_decode("!!!not base64")).is_error()
+    expect(encoding.hex_decode("zz")).is_error()
+}

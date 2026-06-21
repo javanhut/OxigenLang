@@ -1,0 +1,15 @@
+// Base64, hex, and URL percent-encoding. All operate on UTF-8 strings.
+// The `*_decode` functions return a catchable <Error> on invalid input.
+//
+//     introduce encoding
+//     encoding.base64_encode("hi")   // "aGk="
+//     encoding.base64_decode("aGk=") // "hi"
+
+fun base64_encode(s <str>) { __base64_encode(s) }
+fun base64_decode(s <str>) { __base64_decode(s) }
+
+fun hex_encode(s <str>) { __hex_encode(s) }
+fun hex_decode(s <str>) { __hex_decode(s) }
+
+fun url_encode(s <str>) { __url_encode(s) }
+fun url_decode(s <str>) { __url_decode(s) }

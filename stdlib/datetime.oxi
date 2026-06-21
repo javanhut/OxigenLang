@@ -1,0 +1,31 @@
+// Dates and times in UTC. Timestamps are unix seconds (integers).
+//
+//     introduce datetime
+//     now <int> := datetime.now()
+//     datetime.format(now, "%Y-%m-%d")     // "2026-06-20"
+//     datetime.parse("2026-06-20", "%Y-%m-%d")  // unix seconds
+
+// Current time as unix seconds.
+fun now() { __dt_now() }
+
+// Format a timestamp using strftime-style directives (UTC).
+fun format(ts <int>, fmt <str>) { __dt_format(ts, fmt) }
+
+// Parse text into unix seconds using a strftime-style format. Returns a
+// catchable <Error> if the text doesn't match the format.
+fun parse(text <str>, fmt <str>) { __dt_parse(text, fmt) }
+
+// ── Components (UTC) ──
+
+fun year(ts <int>) { int(__dt_format(ts, "%Y")) }
+fun month(ts <int>) { int(__dt_format(ts, "%m")) }
+fun day(ts <int>) { int(__dt_format(ts, "%d")) }
+fun hour(ts <int>) { int(__dt_format(ts, "%H")) }
+fun minute(ts <int>) { int(__dt_format(ts, "%M")) }
+fun second(ts <int>) { int(__dt_format(ts, "%S")) }
+
+// Full weekday name, e.g. "Saturday".
+fun weekday(ts <int>) { __dt_format(ts, "%A") }
+
+// ISO 8601 / RFC 3339 string in UTC, e.g. "2026-06-20T13:45:00Z".
+fun iso8601(ts <int>) { __dt_format(ts, "%Y-%m-%dT%H:%M:%SZ") }

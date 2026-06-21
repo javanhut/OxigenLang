@@ -1,0 +1,25 @@
+introduce datetime
+
+<test>("format and components at the unix epoch") {
+    expect(datetime.format(0, "%Y-%m-%d")).eq("1970-01-01")
+    expect(datetime.year(0)).eq(1970)
+    expect(datetime.month(0)).eq(1)
+    expect(datetime.day(0)).eq(1)
+    expect(datetime.hour(0)).eq(0)
+    expect(datetime.weekday(0)).eq("Thursday")
+    expect(datetime.iso8601(0)).eq("1970-01-01T00:00:00Z")
+}
+
+<test>("parse round-trips") {
+    formatted <str> := datetime.format(0, "%Y-%m-%d %H:%M:%S")
+    expect(datetime.parse(formatted, "%Y-%m-%d %H:%M:%S")).eq(0)
+    expect(datetime.parse("2000-01-01 00:00:00", "%Y-%m-%d %H:%M:%S")).eq(946684800)
+}
+
+<test>("parse failure is a catchable error") {
+    expect(datetime.parse("not a date", "%Y-%m-%d")).is_error()
+}
+
+<test>("now advances past the epoch") {
+    expect(datetime.now()).gt(0)
+}

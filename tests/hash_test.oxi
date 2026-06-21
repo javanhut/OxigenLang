@@ -1,0 +1,12 @@
+introduce hash
+
+<test>("sha256 known vector") {
+    expect(hash.sha256("hello")).eq("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+    expect(len(hash.sha256("anything"))).eq(64)
+}
+
+<test>("md5 and sha1") {
+    expect(hash.md5("hello")).eq("5d41402abc4b2a76b9719d911017c592")
+    expect(len(hash.md5("anything"))).eq(32)
+    expect(len(hash.sha1("anything"))).eq(40)
+}

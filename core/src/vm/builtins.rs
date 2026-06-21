@@ -1,4 +1,6 @@
 use crate::vm::value::{ErrorValueData, Value, ValueRepr, rc_str};
+use base64::Engine as _;
+use sha2::Digest as _;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -65,6 +67,41 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("__floor".to_string(), Value::Builtin(builtin_floor));
     globals.insert("__ceil".to_string(), Value::Builtin(builtin_ceil));
     globals.insert("__round".to_string(), Value::Builtin(builtin_round));
+    globals.insert("__sin".to_string(), Value::Builtin(builtin_sin));
+    globals.insert("__cos".to_string(), Value::Builtin(builtin_cos));
+    globals.insert("__tan".to_string(), Value::Builtin(builtin_tan));
+    globals.insert("__asin".to_string(), Value::Builtin(builtin_asin));
+    globals.insert("__acos".to_string(), Value::Builtin(builtin_acos));
+    globals.insert("__atan".to_string(), Value::Builtin(builtin_atan));
+    globals.insert("__atan2".to_string(), Value::Builtin(builtin_atan2));
+    globals.insert("__ln".to_string(), Value::Builtin(builtin_ln));
+    globals.insert("__log2".to_string(), Value::Builtin(builtin_log2));
+    globals.insert("__log10".to_string(), Value::Builtin(builtin_log10));
+    globals.insert("__exp".to_string(), Value::Builtin(builtin_exp));
+    globals.insert("__powf".to_string(), Value::Builtin(builtin_powf));
+
+    // regex
+    globals.insert("__regex_match".to_string(), Value::Builtin(builtin_regex_match));
+    globals.insert("__regex_find".to_string(), Value::Builtin(builtin_regex_find));
+    globals.insert("__regex_find_all".to_string(), Value::Builtin(builtin_regex_find_all));
+    globals.insert("__regex_replace".to_string(), Value::Builtin(builtin_regex_replace));
+    globals.insert("__regex_split".to_string(), Value::Builtin(builtin_regex_split));
+    globals.insert("__regex_captures".to_string(), Value::Builtin(builtin_regex_captures));
+    // datetime
+    globals.insert("__dt_now".to_string(), Value::Builtin(builtin_dt_now));
+    globals.insert("__dt_format".to_string(), Value::Builtin(builtin_dt_format));
+    globals.insert("__dt_parse".to_string(), Value::Builtin(builtin_dt_parse));
+    // encoding
+    globals.insert("__base64_encode".to_string(), Value::Builtin(builtin_base64_encode));
+    globals.insert("__base64_decode".to_string(), Value::Builtin(builtin_base64_decode));
+    globals.insert("__hex_encode".to_string(), Value::Builtin(builtin_hex_encode));
+    globals.insert("__hex_decode".to_string(), Value::Builtin(builtin_hex_decode));
+    globals.insert("__url_encode".to_string(), Value::Builtin(builtin_url_encode));
+    globals.insert("__url_decode".to_string(), Value::Builtin(builtin_url_decode));
+    // hash
+    globals.insert("__sha256".to_string(), Value::Builtin(builtin_sha256));
+    globals.insert("__sha1".to_string(), Value::Builtin(builtin_sha1));
+    globals.insert("__md5".to_string(), Value::Builtin(builtin_md5));
 
     // I/O builtins
     globals.insert("__input".to_string(), Value::Builtin(builtin_input));
@@ -729,6 +766,315 @@ fn builtin_round(args: &[Value]) -> Value {
         ValueRepr::Float(f) => Value::Integer(f.round() as i64),
         ValueRepr::Integer(n) => Value::Integer(n),
         _ => Value::Error(rc_str("__round() requires a number")),
+    }
+}
+
+// Shared helpers for floating-point math builtins.
+fn unary_f64(args: &[Value], name: &str, f: fn(f64) -> f64) -> Value {
+    if args.len() != 1 {
+        return Value::Error(rc_str(format!("{}() takes 1 argument", name)));
+    }
+    match args[0].repr() {
+        ValueRepr::Float(x) => Value::Float(f(x)),
+        ValueRepr::Integer(n) => Value::Float(f(n as f64)),
+        _ => Value::Error(rc_str(format!("{}() requires a number", name))),
+    }
+}
+
+fn binary_f64(args: &[Value], name: &str, f: fn(f64, f64) -> f64) -> Value {
+    if args.len() != 2 {
+        return Value::Error(rc_str(format!("{}() takes 2 arguments", name)));
+    }
+    let a = match args[0].repr() {
+        ValueRepr::Float(x) => x,
+        ValueRepr::Integer(n) => n as f64,
+        _ => return Value::Error(rc_str(format!("{}() requires numbers", name))),
+    };
+    let b = match args[1].repr() {
+        ValueRepr::Float(x) => x,
+        ValueRepr::Integer(n) => n as f64,
+        _ => return Value::Error(rc_str(format!("{}() requires numbers", name))),
+    };
+    Value::Float(f(a, b))
+}
+
+fn builtin_sin(args: &[Value]) -> Value {
+    unary_f64(args, "__sin", f64::sin)
+}
+fn builtin_cos(args: &[Value]) -> Value {
+    unary_f64(args, "__cos", f64::cos)
+}
+fn builtin_tan(args: &[Value]) -> Value {
+    unary_f64(args, "__tan", f64::tan)
+}
+fn builtin_asin(args: &[Value]) -> Value {
+    unary_f64(args, "__asin", f64::asin)
+}
+fn builtin_acos(args: &[Value]) -> Value {
+    unary_f64(args, "__acos", f64::acos)
+}
+fn builtin_atan(args: &[Value]) -> Value {
+    unary_f64(args, "__atan", f64::atan)
+}
+fn builtin_atan2(args: &[Value]) -> Value {
+    binary_f64(args, "__atan2", f64::atan2)
+}
+fn builtin_ln(args: &[Value]) -> Value {
+    unary_f64(args, "__ln", f64::ln)
+}
+fn builtin_log2(args: &[Value]) -> Value {
+    unary_f64(args, "__log2", f64::log2)
+}
+fn builtin_log10(args: &[Value]) -> Value {
+    unary_f64(args, "__log10", f64::log10)
+}
+fn builtin_exp(args: &[Value]) -> Value {
+    unary_f64(args, "__exp", f64::exp)
+}
+fn builtin_powf(args: &[Value]) -> Value {
+    binary_f64(args, "__powf", f64::powf)
+}
+
+// ── Shared helpers for native extension builtins ──
+
+fn vm_hard_err(msg: impl Into<String>) -> Value {
+    Value::Error(rc_str(msg))
+}
+
+/// A catchable (Error || Value) error for recoverable failures.
+fn vm_soft_err(msg: impl Into<String>, tag: &str) -> Value {
+    Value::ErrorValue(Rc::new(ErrorValueData {
+        msg: rc_str(msg),
+        tag: Some(rc_str(tag)),
+    }))
+}
+
+fn vm_str_arg(v: &Value) -> Option<&str> {
+    match v {
+        Value::String(s) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+fn vm_str_array(items: impl IntoIterator<Item = String>) -> Value {
+    Value::Array(Rc::new(RefCell::new(
+        items.into_iter().map(|s| Value::String(rc_str(s))).collect(),
+    )))
+}
+
+// ── regex ──
+
+fn vm_compile_re(pattern: &str, name: &str) -> Result<regex::Regex, Value> {
+    regex::Regex::new(pattern).map_err(|e| vm_hard_err(format!("{}: invalid pattern: {}", name, e)))
+}
+
+fn builtin_regex_match(args: &[Value]) -> Value {
+    match (args.first().and_then(vm_str_arg), args.get(1).and_then(vm_str_arg)) {
+        (Some(pat), Some(text)) if args.len() == 2 => match vm_compile_re(pat, "__regex_match") {
+            Ok(re) => Value::Boolean(re.is_match(text)),
+            Err(e) => e,
+        },
+        _ => vm_hard_err("__regex_match: expected (pattern, text) strings"),
+    }
+}
+
+fn builtin_regex_find(args: &[Value]) -> Value {
+    match (args.first().and_then(vm_str_arg), args.get(1).and_then(vm_str_arg)) {
+        (Some(pat), Some(text)) if args.len() == 2 => match vm_compile_re(pat, "__regex_find") {
+            Ok(re) => match re.find(text) {
+                Some(m) => Value::String(rc_str(m.as_str())),
+                None => Value::None,
+            },
+            Err(e) => e,
+        },
+        _ => vm_hard_err("__regex_find: expected (pattern, text) strings"),
+    }
+}
+
+fn builtin_regex_find_all(args: &[Value]) -> Value {
+    match (args.first().and_then(vm_str_arg), args.get(1).and_then(vm_str_arg)) {
+        (Some(pat), Some(text)) if args.len() == 2 => match vm_compile_re(pat, "__regex_find_all") {
+            Ok(re) => vm_str_array(re.find_iter(text).map(|m| m.as_str().to_string())),
+            Err(e) => e,
+        },
+        _ => vm_hard_err("__regex_find_all: expected (pattern, text) strings"),
+    }
+}
+
+fn builtin_regex_replace(args: &[Value]) -> Value {
+    if args.len() != 3 {
+        return vm_hard_err("__regex_replace: expected 3 arguments");
+    }
+    match (vm_str_arg(&args[0]), vm_str_arg(&args[1]), vm_str_arg(&args[2])) {
+        (Some(pat), Some(text), Some(rep)) => match vm_compile_re(pat, "__regex_replace") {
+            Ok(re) => Value::String(rc_str(re.replace_all(text, rep).into_owned())),
+            Err(e) => e,
+        },
+        _ => vm_hard_err("__regex_replace: expected (pattern, text, replacement) strings"),
+    }
+}
+
+fn builtin_regex_split(args: &[Value]) -> Value {
+    match (args.first().and_then(vm_str_arg), args.get(1).and_then(vm_str_arg)) {
+        (Some(pat), Some(text)) if args.len() == 2 => match vm_compile_re(pat, "__regex_split") {
+            Ok(re) => vm_str_array(re.split(text).map(|s| s.to_string())),
+            Err(e) => e,
+        },
+        _ => vm_hard_err("__regex_split: expected (pattern, text) strings"),
+    }
+}
+
+fn builtin_regex_captures(args: &[Value]) -> Value {
+    match (args.first().and_then(vm_str_arg), args.get(1).and_then(vm_str_arg)) {
+        (Some(pat), Some(text)) if args.len() == 2 => match vm_compile_re(pat, "__regex_captures") {
+            Ok(re) => match re.captures(text) {
+                Some(caps) => vm_str_array(
+                    caps.iter()
+                        .map(|m| m.map(|x| x.as_str().to_string()).unwrap_or_default()),
+                ),
+                None => Value::None,
+            },
+            Err(e) => e,
+        },
+        _ => vm_hard_err("__regex_captures: expected (pattern, text) strings"),
+    }
+}
+
+// ── datetime (UTC) ──
+
+fn builtin_dt_now(args: &[Value]) -> Value {
+    if !args.is_empty() {
+        return vm_hard_err("__dt_now: expected 0 arguments");
+    }
+    Value::Integer(chrono::Utc::now().timestamp())
+}
+
+fn builtin_dt_format(args: &[Value]) -> Value {
+    if args.len() != 2 {
+        return vm_hard_err("__dt_format: expected (timestamp, format) arguments");
+    }
+    let secs = match args[0].repr() {
+        ValueRepr::Integer(n) => n,
+        _ => return vm_hard_err("__dt_format: timestamp must be an integer (unix seconds)"),
+    };
+    let fmt = match vm_str_arg(&args[1]) {
+        Some(f) => f,
+        None => return vm_hard_err("__dt_format: format must be a string"),
+    };
+    match chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0) {
+        Some(dt) => Value::String(rc_str(dt.format(fmt).to_string())),
+        None => vm_soft_err("timestamp out of range", "datetime"),
+    }
+}
+
+fn builtin_dt_parse(args: &[Value]) -> Value {
+    if args.len() != 2 {
+        return vm_hard_err("__dt_parse: expected (text, format) arguments");
+    }
+    match (vm_str_arg(&args[0]), vm_str_arg(&args[1])) {
+        (Some(text), Some(fmt)) => match chrono::NaiveDateTime::parse_from_str(text, fmt) {
+            Ok(ndt) => Value::Integer(ndt.and_utc().timestamp()),
+            Err(e) => vm_soft_err(format!("could not parse '{}': {}", text, e), "datetime"),
+        },
+        _ => vm_hard_err("__dt_parse: expected (text, format) strings"),
+    }
+}
+
+// ── encoding ──
+
+fn builtin_base64_encode(args: &[Value]) -> Value {
+    match args.first().and_then(vm_str_arg) {
+        Some(s) if args.len() == 1 => {
+            Value::String(rc_str(base64::engine::general_purpose::STANDARD.encode(s.as_bytes())))
+        }
+        _ => vm_hard_err("__base64_encode: expected 1 string argument"),
+    }
+}
+
+fn builtin_base64_decode(args: &[Value]) -> Value {
+    match args.first().and_then(vm_str_arg) {
+        Some(s) if args.len() == 1 => {
+            match base64::engine::general_purpose::STANDARD.decode(s.as_bytes()) {
+                Ok(bytes) => match String::from_utf8(bytes) {
+                    Ok(text) => Value::String(rc_str(text)),
+                    Err(_) => vm_soft_err("decoded bytes are not valid UTF-8", "encoding"),
+                },
+                Err(e) => vm_soft_err(format!("invalid base64: {}", e), "encoding"),
+            }
+        }
+        _ => vm_hard_err("__base64_decode: expected 1 string argument"),
+    }
+}
+
+fn builtin_hex_encode(args: &[Value]) -> Value {
+    match args.first().and_then(vm_str_arg) {
+        Some(s) if args.len() == 1 => Value::String(rc_str(hex::encode(s.as_bytes()))),
+        _ => vm_hard_err("__hex_encode: expected 1 string argument"),
+    }
+}
+
+fn builtin_hex_decode(args: &[Value]) -> Value {
+    match args.first().and_then(vm_str_arg) {
+        Some(s) if args.len() == 1 => match hex::decode(s) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => Value::String(rc_str(text)),
+                Err(_) => vm_soft_err("decoded bytes are not valid UTF-8", "encoding"),
+            },
+            Err(e) => vm_soft_err(format!("invalid hex: {}", e), "encoding"),
+        },
+        _ => vm_hard_err("__hex_decode: expected 1 string argument"),
+    }
+}
+
+fn builtin_url_encode(args: &[Value]) -> Value {
+    match args.first().and_then(vm_str_arg) {
+        Some(s) if args.len() == 1 => Value::String(rc_str(urlencoding::encode(s).into_owned())),
+        _ => vm_hard_err("__url_encode: expected 1 string argument"),
+    }
+}
+
+fn builtin_url_decode(args: &[Value]) -> Value {
+    match args.first().and_then(vm_str_arg) {
+        Some(s) if args.len() == 1 => match urlencoding::decode(s) {
+            Ok(text) => Value::String(rc_str(text.into_owned())),
+            Err(e) => vm_soft_err(format!("invalid url encoding: {}", e), "encoding"),
+        },
+        _ => vm_hard_err("__url_decode: expected 1 string argument"),
+    }
+}
+
+// ── hash (hex digests) ──
+
+fn builtin_sha256(args: &[Value]) -> Value {
+    match args.first().and_then(vm_str_arg) {
+        Some(s) if args.len() == 1 => {
+            let mut h = sha2::Sha256::new();
+            h.update(s.as_bytes());
+            Value::String(rc_str(hex::encode(h.finalize())))
+        }
+        _ => vm_hard_err("__sha256: expected 1 string argument"),
+    }
+}
+
+fn builtin_sha1(args: &[Value]) -> Value {
+    match args.first().and_then(vm_str_arg) {
+        Some(s) if args.len() == 1 => {
+            let mut h = sha1::Sha1::new();
+            h.update(s.as_bytes());
+            Value::String(rc_str(hex::encode(h.finalize())))
+        }
+        _ => vm_hard_err("__sha1: expected 1 string argument"),
+    }
+}
+
+fn builtin_md5(args: &[Value]) -> Value {
+    match args.first().and_then(vm_str_arg) {
+        Some(s) if args.len() == 1 => {
+            let mut h = md5::Md5::new();
+            h.update(s.as_bytes());
+            Value::String(rc_str(hex::encode(h.finalize())))
+        }
+        _ => vm_hard_err("__md5: expected 1 string argument"),
     }
 }
 

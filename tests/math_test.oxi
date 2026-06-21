@@ -32,3 +32,23 @@ introduce math
     expect(math.hypot(3, 4)).eq(5.0)
     expect(math.fmod(7.5, 2.0)).eq(1.5)
 }
+
+<test>("trigonometry") {
+    expect(math.sin(0)).eq(0.0)
+    expect(math.cos(0)).eq(1.0)
+    expect(math.tan(0)).eq(0.0)
+    expect(math.atan2(1, 1)).eq(0.7853981633974483)
+}
+
+<test>("exponential and logarithmic") {
+    expect(math.exp(0)).eq(1.0)
+    expect(math.round(math.ln(math.E))).eq(1)
+    expect(math.round(math.log10(1000))).eq(3)
+    expect(math.round(math.log2(8))).eq(3)
+}
+
+<test>("float power") {
+    expect(math.powf(2, 10)).eq(1024.0)
+    expect(math.powf(2, 0.5)).eq(1.4142135623730951)
+    expect(math.round(math.powf(9, 0.5))).eq(3)
+}

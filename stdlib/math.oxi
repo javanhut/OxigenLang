@@ -41,6 +41,26 @@ fun floor(x <int> || <float>) { __floor(x) }
 fun ceil(x <int> || <float>) { __ceil(x) }
 fun round(x <int> || <float>) { __round(x) }
 
+// ── Trigonometry (radians) ──
+
+fun sin(x <int> || <float>) { __sin(x) }
+fun cos(x <int> || <float>) { __cos(x) }
+fun tan(x <int> || <float>) { __tan(x) }
+fun asin(x <int> || <float>) { __asin(x) }
+fun acos(x <int> || <float>) { __acos(x) }
+fun atan(x <int> || <float>) { __atan(x) }
+fun atan2(y <int> || <float>, x <int> || <float>) { __atan2(y, x) }
+
+// ── Exponential & logarithmic ──
+
+fun exp(x <int> || <float>) { __exp(x) }
+fun ln(x <int> || <float>) { __ln(x) }
+fun log2(x <int> || <float>) { __log2(x) }
+fun log10(x <int> || <float>) { __log10(x) }
+
+// Floating-point exponentiation (handles fractional/negative exponents).
+fun powf(base <int> || <float>, exp <int> || <float>) { __powf(base, exp) }
+
 // ── Constants ──
 
 PI <float> = 3.141592653589793
