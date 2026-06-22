@@ -1,12 +1,14 @@
 [package]
 name = "oxigen-core"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 
 [features]
-default = []
-# Enables the baseline JIT compiler (Cranelift-backed). Off by default —
-# keeps cranelift's heavy dep tree out of plain builds.
+# JIT on by default: the Cranelift-backed compiler is the standard backend and
+# carries the VM correctness/perf work (and is at full tree-walker parity).
+# Build with `--no-default-features` for a VM-interpreter-only binary that omits
+# the cranelift dep tree.
+default = ["jit"]
 jit = [
     "dep:cranelift-jit",
     "dep:cranelift-module",
@@ -21,14 +23,14 @@ ureq = "3"
 regex = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 base64 = "0.22"
-sha2 = "0.10"
-md-5 = "0.10"
-sha1 = "0.10"
+sha2 = "0.11"
+md-5 = "0.11"
+sha1 = "0.11"
 hex = "0.4"
 urlencoding = "2"
 
-cranelift-jit       = { version = "0.131", optional = true }
-cranelift-module    = { version = "0.131", optional = true }
-cranelift-codegen   = { version = "0.131", optional = true }
-cranelift-frontend  = { version = "0.131", optional = true }
-cranelift-native    = { version = "0.131", optional = true }
+cranelift-jit       = { version = "0.132", optional = true }
+cranelift-module    = { version = "0.132", optional = true }
+cranelift-codegen   = { version = "0.132", optional = true }
+cranelift-frontend  = { version = "0.132", optional = true }
+cranelift-native    = { version = "0.132", optional = true }

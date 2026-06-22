@@ -1,15 +1,15 @@
 # Oxigen vs Python — native harness (interleaved A/B)
 
-- Generated: `2026-06-21T15:18:41Z`
+- Generated: `2026-06-22T14:07:02Z`
 - Host:      `Javans-MacBook-Pro.local`
 - Kernel:    `Darwin 25.5.0 arm64`
-- Oxigen:    `oxigen 0.1.2`
+- Oxigen:    `oxigen 0.1.3`
 - Python:    `Python 3.14.5`
 - Bun:       `1.3.14`
 - Node:      `v26.3.0` (built-in type-stripping)
 - Warmups:   `3`
 - Runs:      `5`
-- Git commit: `79443cc`
+- Git commit: `dc5a1fd`
 - Git branch: `vm_parity_and_bug_fixes`
 
 ## Min times (ms)
@@ -24,22 +24,22 @@ throttle after sustained full-CPU work. See
 
 | benchmark | no-jit | default | jit | python | bun (ts) | node (ts) | jit vs py | jit vs bun | jit vs node |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| bench_arith | 75 | 13 | 13 | 29 | 9 | 61 | 2.23x | 0.69x | 4.69x |
-| bench_closure | 82 | 28 | 28 | 25 | 8 | 62 | 0.89x | 0.29x | 2.21x |
-| bench_collatz | 790 | 15 | 16 | 158 | 18 | 67 | 9.88x | 1.13x | 4.19x |
-| bench_fib | 177 | 23 | 24 | 48 | 11 | 62 | 2x | 0.46x | 2.58x |
-| bench_loop | 58 | 4 | 5 | 30 | 8 | 62 | 6x | 1.6x | 12.4x |
-| bench_nested_loop | 18 | 4 | 5 | 16 | 8 | 61 | 3.2x | 1.6x | 12.2x |
-| bench_nested_loop_big | 223 | 5 | 6 | 91 | 10 | 66 | 15.17x | 1.67x | 11x |
-| bench_struct_method | 175 | 9 | 10 | 36 | 10 | 61 | 3.6x | 1x | 6.1x |
+| bench_arith | 77 | 13 | 14 | 28 | 10 | 62 | 2x | 0.71x | 4.43x |
+| bench_closure | 77 | 28 | 29 | 25 | 9 | 62 | 0.86x | 0.31x | 2.14x |
+| bench_collatz | 785 | 16 | 16 | 158 | 18 | 65 | 9.88x | 1.13x | 4.06x |
+| bench_fib | 180 | 23 | 24 | 47 | 11 | 64 | 1.96x | 0.46x | 2.67x |
+| bench_loop | 59 | 5 | 5 | 34 | 9 | 62 | 6.8x | 1.8x | 12.4x |
+| bench_nested_loop | 18 | 5 | 5 | 16 | 8 | 62 | 3.2x | 1.6x | 12.4x |
+| bench_nested_loop_big | 224 | 6 | 6 | 88 | 10 | 66 | 14.67x | 1.67x | 11x |
+| bench_struct_method | 143 | 10 | 10 | 37 | 10 | 63 | 3.7x | 1x | 6.3x |
 
 ## JIT min / p50 (ms)
 
 | benchmark | jit min | jit p50 |
 | --- | ---: | ---: |
-| bench_arith | 13 | 14 |
-| bench_closure | 28 | 29 |
-| bench_collatz | 16 | 16 |
+| bench_arith | 14 | 14 |
+| bench_closure | 29 | 29 |
+| bench_collatz | 16 | 17 |
 | bench_fib | 24 | 24 |
 | bench_loop | 5 | 5 |
 | bench_nested_loop | 5 | 5 |

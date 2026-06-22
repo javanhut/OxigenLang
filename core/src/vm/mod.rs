@@ -3130,6 +3130,11 @@ impl VM {
         None
     }
 
+    // Only the JIT runtime helpers resolve methods by struct NAME (the static
+    // `Struct.method()` IC path); the interpreter resolves instance methods via
+    // the instance's carried def (`find_method_on_def`). Gated so a VM-only
+    // (`--no-default-features`) build doesn't warn it unused.
+    #[cfg(feature = "jit")]
     pub(crate) fn find_struct_method(
         &self,
         struct_name: &str,
