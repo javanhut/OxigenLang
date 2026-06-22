@@ -2003,7 +2003,10 @@ impl Evaluator {
                             return v;
                         }
                         match v.as_ref() {
-                            Object::Integer(n) => Some(*n as usize),
+                            // Keep the i64 sign so `eval_slice` can normalize
+                            // negative bounds (count from the end) the same way
+                            // the VM does, instead of wrapping to a huge usize.
+                            Object::Integer(n) => Some(*n),
                             _ => {
                                 return self.runtime_error(
                                     slice_token.span,
@@ -2022,7 +2025,7 @@ impl Evaluator {
                             return v;
                         }
                         match v.as_ref() {
-                            Object::Integer(n) => Some(*n as usize),
+                            Object::Integer(n) => Some(*n),
                             _ => {
                                 return self.runtime_error(
                                     slice_token.span,
@@ -3255,32 +3258,49 @@ impl Evaluator {
     fn eval_slice(
         &self,
         left: Rc<Object>,
-        start: Option<usize>,
-        end: Option<usize>,
+        start: Option<i64>,
+        end: Option<i64>,
         span: Span,
     ) -> Rc<Object> {
+        // Normalize an array/string slice bound that counts from the end on a
+        // negative value (`len + i`), then clamp into `[0, len]`. Mirrors the
+        // VM's `eval_slice` (vm/mod.rs) so the two backends agree on negatives.
+        fn norm_from_end(idx: Option<i64>, len: usize, default: usize) -> usize {
+            match idx {
+                None => default,
+                Some(i) => {
+                    let adj = if i < 0 { len as i64 + i } else { i };
+                    adj.clamp(0, len as i64) as usize
+                }
+            }
+        }
         match left.as_ref() {
             Object::Array(arr) => {
-                let s = start.unwrap_or(0);
-                let e = end.unwrap_or(arr.len()).min(arr.len());
-                if s > e || s > arr.len() {
+                let s = norm_from_end(start, arr.len(), 0);
+                let e = norm_from_end(end, arr.len(), arr.len());
+                if s >= e {
                     return Rc::new(Object::Array(Vec::new()));
                 }
                 Rc::new(Object::Array(arr[s..e].to_vec()))
             }
             Object::String(string) => {
                 let chars: Vec<char> = string.chars().collect();
-                let s = start.unwrap_or(0);
-                let e = end.unwrap_or(chars.len()).min(chars.len());
-                if s > e || s > chars.len() {
+                let s = norm_from_end(start, chars.len(), 0);
+                let e = norm_from_end(end, chars.len(), chars.len());
+                if s >= e {
                     return Rc::new(Object::String(String::new()));
                 }
                 Rc::new(Object::String(chars[s..e].iter().collect()))
             }
             Object::Tuple(elements) => {
-                let s = start.unwrap_or(0);
-                let e = end.unwrap_or(elements.len()).min(elements.len());
-                if s > e || s > elements.len() {
+                // Tuples deliberately do NOT count from the end on a negative
+                // bound — a negative wraps to a huge `usize` and yields an empty
+                // tuple. This matches the VM's Tuple arm (vm/mod.rs eval_slice),
+                // keeping the two backends in agreement for tuple slicing.
+                let len = elements.len();
+                let s = start.map(|i| i as usize).unwrap_or(0);
+                let e = end.map(|i| (i as usize).min(len)).unwrap_or(len);
+                if s > e || s > len {
                     return Rc::new(Object::Tuple(Vec::new()));
                 }
                 Rc::new(Object::Tuple(elements[s..e].to_vec()))

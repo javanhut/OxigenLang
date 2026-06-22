@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-const STACK_MAX: usize = 262144; // 256K stack slots
+pub(crate) const STACK_MAX: usize = 262144; // 256K stack slots
 pub(crate) const FRAMES_MAX: usize = 16384; // 16K call frames — supports deep recursion
 
 /// A call frame: one per active function invocation.
@@ -3252,6 +3252,20 @@ impl VM {
         }
 
         if self.frames.len().saturating_add(self.jit_frame_len()) >= FRAMES_MAX {
+            return Err(self.runtime_error_hint(
+                "stack overflow",
+                "check for infinite recursion or deeply nested calls",
+            ));
+        }
+
+        // Guard the value stack as well: a recursive frame with many locals can
+        // exhaust the pre-allocated stack (STACK_MAX slots) well before
+        // FRAMES_MAX frames are reached, which would otherwise hit the hard
+        // `push` panic (an abort under panic=abort). Trip the same graceful
+        // "stack overflow" runtime error (rc=1) the tree-walker returns. The
+        // margin reserves room for the next frame's locals + operand temporaries.
+        const STACK_GUARD_MARGIN: usize = 8192;
+        if self.stack.len() >= STACK_MAX - STACK_GUARD_MARGIN {
             return Err(self.runtime_error_hint(
                 "stack overflow",
                 "check for infinite recursion or deeply nested calls",

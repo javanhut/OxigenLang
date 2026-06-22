@@ -82,6 +82,63 @@ println(f(200000))
     );
 }
 
+/// Like `run_result`, but on a 256 MB-stack thread (mirroring the CLI's
+/// `run_file_vm`). Deep JIT self-recursion consumes a native call frame per
+/// level; the default test-harness thread stack overflows natively at ~16k
+/// frames before the VALUE-stack guard can trip, so the value-stack overflow
+/// path must be exercised with the same large stack the CLI uses.
+fn run_result_big_stack(source: &str, jit_threshold: Option<u32>) -> Result<String, String> {
+    let source = source.to_string();
+    std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(move || run_result(&source, jit_threshold))
+        .expect("spawn 256MB thread")
+        .join()
+        .expect("execution thread must not abort (a SIGSEGV here is the bug)")
+}
+
+/// A SECOND overflow axis (the value stack, not the frame count): a recursive
+/// function with MANY LOCALS pushes many operand-stack slots per frame, so deep
+/// recursion fills the pre-allocated value stack (STACK_MAX) long before
+/// FRAMES_MAX frames. Before the fix the JIT's inline operand pushes had no
+/// STACK_MAX bound, so this overran the value-stack buffer on the heap and
+/// SIGSEGV'd (an 8-local function died near ~16k frames while the 1-local
+/// functions above reach FRAMES_MAX cleanly). The recursion-depth guard now
+/// also bounds `stack_view.len`, so this returns a graceful Err on every
+/// backend instead of aborting.
+#[test]
+fn jit_many_locals_recursion_overflows_value_stack_gracefully() {
+    let src = r#"
+fun rec(a, b, c, d, e, f, g, h) {
+    p := a + b + c + d + e + f + g + h
+    q := p * 2
+    r := q - a
+    s := r + b
+    t := s * c
+    u := t - d
+    v := u + e
+    w := v * f
+    option { a <= 0 -> 0, rec(a - 1, b, c, d, e, f, g, h) + w }
+}
+println(rec(200000, 1, 2, 3, 4, 5, 6, 7))
+"#;
+    // JIT path: must be a graceful Err (value-stack guard), NOT a SIGSEGV.
+    // Run on a 256 MB stack so the value stack fills before the native stack.
+    let jit =
+        run_result_big_stack(src, Some(1)).expect_err("deep many-local recursion must return Err");
+    assert!(
+        jit.to_lowercase().contains("stack overflow"),
+        "JIT: expected a stack-overflow error, got: {jit:?}"
+    );
+    // VM (interpreter) path: same graceful Err via call_closure's STACK_MAX guard.
+    let vm =
+        run_result_big_stack(src, None).expect_err("deep many-local recursion must return Err on VM");
+    assert!(
+        vm.to_lowercase().contains("stack overflow"),
+        "VM: expected a stack-overflow error, got: {vm:?}"
+    );
+}
+
 /// The guard is a pure bound check: a moderate-depth recursion that stays
 /// well under `FRAMES_MAX` must still compute the correct result under the
 /// JIT. `f(n)` returns `n` (sums 1 a thousand times down from 1000).

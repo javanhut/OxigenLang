@@ -16,6 +16,13 @@ use crate::vm::value::ValueRepr;
 pub struct ScanInfo {
     /// Absolute bytecode offsets that are branch targets.
     pub branch_targets: Vec<usize>,
+    /// Loop body ranges `[target, loop_op_pos)` — one per `OpCode::Loop`
+    /// back-edge (`target` is the back-edge destination, `loop_op_pos` is the
+    /// `Loop` opcode's own offset). An ip within any range executes inside a
+    /// loop, which the translator uses to disable peephole optimizations whose
+    /// inline memory loads would be hoisted/CSE'd across iterations (e.g. the
+    /// struct-field-add peephole, which otherwise reuses a stale field value).
+    pub loop_ranges: Vec<(usize, usize)>,
     /// True if the function body contains `OpCode::Closure`, i.e. can
     /// create closures that capture locals of the current frame. When
     /// false, `VM::close_upvalues(frame.slot_offset)` at Return time is
@@ -219,6 +226,7 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
                 }
                 let target = after - off as usize;
                 info.branch_targets.push(target);
+                info.loop_ranges.push((target, ip));
             }
             _ => {}
         }

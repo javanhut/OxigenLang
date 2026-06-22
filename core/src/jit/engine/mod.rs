@@ -1163,8 +1163,25 @@ impl JitInner {
                             // Peephole matches read the real VM stack; if we
                             // have staged int temps, flush them first so the
                             // peephole sees a consistent stack.
-                            if let Some(m) = match_struct_field_add_update(code, chunk, ip, &blocks)
-                            {
+                            //
+                            // The struct-field-add peephole emits an inline
+                            // load/add/store of the field's i64 payload. Inside
+                            // a loop, Cranelift hoists that load across
+                            // iterations (it does not see the store as
+                            // invalidating it), so `self.f = self.f + x` reuses
+                            // the field's pre-loop value and the accumulation is
+                            // lost (returns the initial value). Disable the
+                            // peephole when this site is inside a loop body and
+                            // fall through to the correct per-op field-IC path
+                            // (still JIT-compiled); keep the peephole everywhere
+                            // else for speed.
+                            let sf_in_loop =
+                                info.loop_ranges.iter().any(|&(t, p)| ip >= t && ip < p);
+                            if let Some(m) = if sf_in_loop {
+                                None
+                            } else {
+                                match_struct_field_add_update(code, chunk, ip, &blocks)
+                            } {
                                 if !virt_stack.is_empty() {
                                     virt_stack.flush_to_memory(&mut builder, vm_val);
                                 }
@@ -1920,6 +1937,20 @@ impl JitInner {
                                     let rhs = virt_stack.pop_int_ssa().unwrap();
                                     let lhs = virt_stack.pop_int_ssa().unwrap();
                                     let pred = builder.ins().icmp(cc, lhs, rhs);
+                                    // Flush any virt slots still pending BELOW the
+                                    // two comparison operands before branching.
+                                    // The successor blocks reset the virt stack,
+                                    // so an un-flushed pending value would be lost
+                                    // and later read as garbage from its slot —
+                                    // e.g. a walrus-initialized non-virtualized
+                                    // local (`val := n + 100`) that is returned
+                                    // from a conditional `option`/`choose` arm.
+                                    // In tight loops the virt stack is empty after
+                                    // popping the operands, so this is a no-op and
+                                    // the hot compare-branch path is unaffected.
+                                    if !virt_stack.is_empty() {
+                                        virt_stack.flush_to_memory(&mut builder, vm_val);
+                                    }
                                     let (true_block, false_block) = match branch_op {
                                         // JumpIfFalse/PopJumpIfFalse: branch
                                         // taken when predicate is FALSE.

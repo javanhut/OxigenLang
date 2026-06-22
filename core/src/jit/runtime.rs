@@ -618,11 +618,22 @@ pub unsafe extern "C" fn jit_set_local_checked(vm: *mut VM, slot: u32) -> u32 {
 /// fast path beyond the bound check itself.
 pub unsafe extern "C" fn jit_check_recursion_depth(vm: *mut VM) -> u32 {
     let vm = unsafe { &mut *vm };
-    // Mirror the interpreter's bound in `call_closure` /
-    // `call_closure_fast_path`: total live activations =
-    // interpreter frames + inline JIT frames.
-    let depth = vm.frames_len().saturating_add(vm.jit_frame_len());
-    if depth >= crate::vm::FRAMES_MAX {
+    // Mirror the interpreter's `call_closure` bounds for the inline JIT
+    // recursion paths, which push frames AND operands directly (bypassing the
+    // VM's frame/`push` guards). Two bounds, both raising the SAME graceful
+    // "stack overflow" the cold VM raises:
+    //   1. Frame count — interpreter frames + inline JIT frames vs FRAMES_MAX
+    //      (bounds the pre-allocated `jit_frames` buffer).
+    //   2. Operand stack — a recursive frame with many locals pushes many slots
+    //      into the pre-allocated value stack (STACK_MAX) via inline IR. Without
+    //      this bound a deep-enough recursion overruns that buffer on the HEAP
+    //      and SIGSEGVs: empirically an 8-local fn dies near ~16k frames (the
+    //      value stack fills) while a 1-local fn reaches FRAMES_MAX cleanly.
+    //      The margin reserves room for the next frame's locals + temporaries.
+    let frame_overflow =
+        vm.frames_len().saturating_add(vm.jit_frame_len()) >= crate::vm::FRAMES_MAX;
+    let stack_overflow = vm.stack_view.len >= crate::vm::STACK_MAX - 8192;
+    if frame_overflow || stack_overflow {
         let e = vm.runtime_error_hint(
             "stack overflow",
             "check for infinite recursion or deeply nested calls",
