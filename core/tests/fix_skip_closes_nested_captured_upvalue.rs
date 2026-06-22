@@ -18,15 +18,18 @@
 //! tree-walker for value-producing blocks with locals, including captured
 //! NON-floor locals.
 //!
-//! ONE residual case remains and is GATED ON A CROSS-FILE OPCODE: when the
-//! block's FLOOR local is itself captured by a surviving closure, the
-//! value-preserving stash overwrites that slot before its upvalue can be closed,
-//! and no existing opcode can close a buried slot while keeping the result on
-//! top. That is exactly the original BUG A repro shape (`x` is the floor local
-//! of the outer option arm). Completing it needs a slot-indexed `CloseUpvalue`
-//! (or a `Swap`) opcode in the VM/JIT — see `floor_captured_local_*` ignored
-//! tests below, which encode the expected tree-walker oracle for when the
-//! opcode lands.
+//! The remaining case — when the block's FLOOR local is itself captured by a
+//! surviving closure — is now closed too. The value-preserving stash would
+//! overwrite that slot before its upvalue could be closed, and no top-of-stack
+//! op can close a buried slot while keeping the result on top. So the compiler
+//! emits a slot-indexed `CloseUpvalueAt floor` (opcode.rs) BEFORE the stash; it
+//! snapshots and closes the buried floor upvalue in place. The VM interpreter
+//! implements it (`close_upvalue_at_slot`); the JIT scan does NOT allow-list
+//! `CloseUpvalueAt`, so a hot function containing it falls back to the
+//! interpreter (the same way `BuildArray`/`Index` functions do). The original
+//! BUG A repro shape (`x` is the floor local of the outer option arm) therefore
+//! agrees across all three backends — see the `floor_captured_local_*` tests
+//! below (run under JIT threshold 1, exercising that fallback).
 
 #![cfg(feature = "jit")]
 
@@ -192,12 +195,12 @@ out";
     assert_parity(src, "[100, 200]");
 }
 
-// ── Residual cross-file case: captured FLOOR local in a value block ──────────
+// ── Captured FLOOR local in a value block (the original BUG A, now fixed) ────
 //
-// These encode the original BUG A and its variants. They are #[ignore]d because
-// the complete fix is gated on a slot-indexed `CloseUpvalue` / `Swap` opcode in
-// the VM/JIT (recorded in cross_file_needed). The asserted strings are the
-// TREE-WALKER oracle outputs; flip `#[ignore]` once the opcode lands.
+// These encode the original BUG A and its no-skip variant. The complete fix is
+// the slot-indexed `CloseUpvalueAt` opcode emitted by `end_scope_keeping_value`
+// and implemented in both the VM interpreter and the JIT. The asserted strings
+// are the tree-walker oracle outputs; all three backends now agree.
 
 #[test]
 fn floor_captured_local_skip_bug_a() {
@@ -232,4 +235,36 @@ out := []
 each f in acc { out = push(out, f()) }
 out";
     assert_parity(src, "[100, 200]");
+}
+
+// ── Function-scoped captured FLOOR local in a value block ────────────────────
+//
+// A different shape from the loop cases above: the captured-floor value block is
+// the body of a RETURNING function, with no arrays or iteration. This is the
+// only otherwise-JIT-eligible carrier of `CloseUpvalueAt` (arrays/`each` already
+// force interpreter fallback). Because the JIT scan does not allow-list
+// `CloseUpvalueAt`, calling `f` hot under threshold 1 falls back to the
+// interpreter rather than running `slot_types` virtualization over the
+// value-block cleanup — and all three backends agree.
+
+#[test]
+fn function_returning_captured_floor_value_block() {
+    // `x` is the option arm's floor local, captured by `g`; the arm's value is
+    // `g()` (== x). `f(n)` must return `n * 2` on every backend, including when
+    // the JIT threshold makes `f` a hot call.
+    let src = "\
+fun f(n) {
+  r := option { True -> {
+    x := n * 2
+    g := fun(){ x }
+    g()
+  } }
+  give r
+}
+acc := 0
+acc = f(10)
+acc = f(20)
+acc = f(30)
+acc";
+    assert_parity(src, "60");
 }
