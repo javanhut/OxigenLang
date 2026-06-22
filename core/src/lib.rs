@@ -6,5 +6,6 @@ pub mod jit;
 pub mod lexer;
 pub mod object;
 pub mod parser;
+pub mod test_runner;
 pub mod token;
 pub mod vm;

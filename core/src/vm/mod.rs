@@ -613,25 +613,24 @@ impl VM {
         &self,
         struct_name: &str,
     ) -> Result<Rc<crate::vm::value::FieldLayout>, VMError> {
-        let Some(Value::StructDef(def)) = self.globals.get(struct_name) else {
-            return Err(self.runtime_error(&format!(
+        let def = self.get_struct_def(struct_name).ok_or_else(|| {
+            self.runtime_error(&format!(
                 "struct '{}' is not defined in this scope",
                 struct_name
-            )));
-        };
+            ))
+        })?;
         if let Some(layout) = def.layout.get() {
             return Ok(Rc::clone(layout));
         }
 
-        // Walk the inheritance chain, collecting fields parent-first.
+        // Walk the inheritance chain, collecting fields parent-first. Parent
+        // lookups go through `get_struct_def` so a module-scoped struct's
+        // parents (also module-scoped) resolve via the module globals too.
         let mut chain: Vec<Rc<crate::vm::value::ObjStructDef>> = Vec::new();
-        let mut cur = Some(Rc::clone(def));
+        let mut cur = Some(Rc::clone(&def));
         while let Some(d) = cur {
             cur = match &d.parent {
-                Some(p) => match self.globals.get(p) {
-                    Some(Value::StructDef(parent_def)) => Some(Rc::clone(parent_def)),
-                    _ => None,
-                },
+                Some(p) => self.get_struct_def(p),
                 None => None,
             };
             chain.push(d);
@@ -2925,21 +2924,30 @@ impl VM {
                     return self.call_closure(closure, arg_count, named_args, None);
                 }
 
-                // Look up method on struct def (with inheritance)
-                let method = self.find_struct_method(&inst.struct_name, method_name)?;
+                // Look up the method on the instance's OWN carried def (with
+                // inheritance). Resolving via the instance — not a by-name
+                // lookup in the current scope — is essential when the instance
+                // is used OUTSIDE its defining module: e.g. a `test`-module
+                // `Expectation` returned by `expect` and asserted on
+                // (`.eq(..)`) in a test file, where `Expectation` is not in the
+                // test file's globals and no module frame is active.
+                let method = self
+                    .find_method_on_def(&inst.def, method_name)
+                    .ok_or_else(|| {
+                        self.runtime_error_hint(
+                            &format!(
+                                "method '{}' not found on {}",
+                                method_name, inst.struct_name
+                            ),
+                            "check the struct definition and its parent for available methods",
+                        )
+                    })?;
 
-                // Pull the owning struct def's `module_globals` so the
-                // method call can see its own file-local helpers
-                // (functions defined at the top of the same .oxi file
-                // as the struct). Without this, calling
-                // e.g. `Parser.parse_args()` from another module fails
-                // when the method body references file-local
-                // `normalize_array`.
-                let owning_module_globals = self
-                    .globals
-                    .get(&inst.struct_name)
-                    .and_then(|v| v.as_struct_def())
-                    .and_then(|def| def.module_globals.borrow().clone());
+                // The method runs with its defining module's globals so its body
+                // can reach that module's file-local helpers (e.g. a struct
+                // method imported from another module calling a top-level fn in
+                // the same file). Taken from the instance's carried def.
+                let owning_module_globals = inst.def.module_globals.borrow().clone();
 
                 if let Some(closure) = method.as_closure().cloned() {
                     // Method has implicit `self` as first param.
@@ -3073,14 +3081,55 @@ impl VM {
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn get_struct_def(&self, name: &str) -> Option<Rc<crate::vm::value::ObjStructDef>> {
-        match self.globals.get(name) {
-            Some(Value::StructDef(def)) => Some(Rc::clone(def)),
-            _ => None,
+        if let Some(Value::StructDef(def)) = self.globals.get(name) {
+            return Some(Rc::clone(def));
         }
+        // Fall back to the active frame's module globals: a function imported
+        // from another module (e.g. `expect` from the `test` module) must be
+        // able to construct/inherit structs defined in ITS module (e.g.
+        // `Expectation`), which live in the module's globals, not the importing
+        // file's globals.
+        if let Some(mg) = self.active_module_globals() {
+            if let Some(Value::StructDef(def)) = mg.get(name) {
+                return Some(Rc::clone(def));
+            }
+        }
+        None
     }
 
     /// Look up a method on a struct def, following the inheritance chain.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    /// Resolve a method starting from a struct INSTANCE's carried def, walking
+    /// the inheritance chain. Parent defs are resolved via the def's own module
+    /// globals first (parents are module-scoped like the child), then the
+    /// current scope's globals. Unlike `find_struct_method` (which looks the def
+    /// up by name in the active scope), this works for instances used outside
+    /// their defining module.
+    fn find_method_on_def(
+        &self,
+        def: &Rc<crate::vm::value::ObjStructDef>,
+        method_name: &str,
+    ) -> Option<Value> {
+        let mut cur = Some(Rc::clone(def));
+        while let Some(d) = cur {
+            if let Some(m) = d.methods.borrow().get(method_name).cloned() {
+                return Some(m);
+            }
+            cur = d.parent.as_ref().and_then(|p| {
+                if let Some(mg) = d.module_globals.borrow().as_ref() {
+                    if let Some(Value::StructDef(pd)) = mg.get(p) {
+                        return Some(Rc::clone(pd));
+                    }
+                }
+                if let Some(Value::StructDef(pd)) = self.globals.get(p) {
+                    return Some(Rc::clone(pd));
+                }
+                None
+            });
+        }
+        None
+    }
+
     pub(crate) fn find_struct_method(
         &self,
         struct_name: &str,
@@ -3088,7 +3137,11 @@ impl VM {
     ) -> Result<Value, VMError> {
         let mut current = struct_name.to_string();
         loop {
-            if let Some(def) = self.globals.get(&current).and_then(|v| v.as_struct_def()) {
+            // `get_struct_def` consults the active frame's module globals, so a
+            // method defined on a struct imported from another module (e.g.
+            // `Expectation.eq` from the `test` module) resolves even though the
+            // struct isn't in the importing file's globals.
+            if let Some(def) = self.get_struct_def(&current) {
                 let methods = def.methods.borrow();
                 if let Some(method) = methods.get(method_name) {
                     return Ok(method.clone());
