@@ -530,14 +530,17 @@ impl Compiler {
     /// The RESULT ends up alone at the floor slot — exactly where the block's
     /// value belongs — with every captured body local closed.
     ///
-    /// One residual case (see cross_file_needed): when the FLOOR local L0 itself
-    /// is captured, step 1 overwrites it before its upvalue can be closed
-    /// (`CloseUpvalue` only acts on the stack top, and the result sits above L0).
-    /// Closing a specific buried slot needs a slot-indexed close / `Swap` opcode,
-    /// which lives in the VM/JIT, not here. Until then this helper falls back to
-    /// the top-down `end_scope` cleanup for blocks whose floor local is captured
-    /// (no worse than before for that narrow case), and uses the value-preserving
-    /// path for everything else.
+    /// The one tricky case is when the FLOOR local L0 itself is captured: step 1
+    /// would overwrite its slot before its upvalue could be closed (`CloseUpvalue`
+    /// only acts on the stack top, and the result sits above L0). That is what the
+    /// slot-indexed `CloseUpvalueAt floor` op below handles — it snapshots and
+    /// closes the buried floor upvalue IN PLACE (without needing the value on top
+    /// or popping) before the stash repurposes the slot. The VM interpreter
+    /// implements `CloseUpvalueAt` (`close_upvalue_at_slot`); the JIT does not
+    /// allow-list it, so any hot function containing it cleanly falls back to the
+    /// interpreter (like `BuildArray`/`Index` and other non-JIT opcodes). All
+    /// three backends therefore agree on value-producing blocks with captured
+    /// floor locals.
     fn end_scope_keeping_value(&mut self, line: u32) {
         self.current_frame_mut().scope_depth -= 1;
         let depth = self.current_frame().scope_depth;
