@@ -63,7 +63,7 @@ local function oxigen_collect_symbols(bufnr)
             end
 
             for name in line:gmatch("([%a_][%w_]*)%s+<[^>]+>") do
-                if name ~= "struct" and name ~= "hide" then
+                if name ~= "struct" and name ~= "hide" and name ~= "hidden" then
                     typed_vars[name] = true
                 end
             end
@@ -127,8 +127,8 @@ vim.cmd([[
 " Keywords with nextgroup for name highlighting
 syn keyword oxigenKeyword fun nextgroup=oxigenFuncName skipwhite
 syn keyword oxigenKeyword introduce intro from nextgroup=oxigenModule skipwhite
-syn keyword oxigenKeyword struct nextgroup=oxigenStructName skipwhite
-syn keyword oxigenKeyword contains
+syn keyword oxigenKeyword struct enum nextgroup=oxigenStructName skipwhite
+syn keyword oxigenKeyword includes hidden
 syn keyword oxigenKeyword main
 syn keyword oxigenKeyword each repeat if option unless choose pattern when
 syn keyword oxigenKeyword guard fail give skip stop
@@ -146,8 +146,8 @@ syn match oxigenStructName /\w\+/ contained
 syn match oxigenMethodCall /\<\w\+\.\zs\w\+\ze\s*(/
 syn match oxigenModuleRef /\<\w\+\ze\.\w\+\s*(/
 
-" Struct reference before `contains`: LinkedList contains { ... }
-syn match oxigenStructRef /\<\w\+\>\ze\s\+contains\>/
+" Struct reference before `includes`: LinkedList includes { ... }
+syn match oxigenStructRef /\<\w\+\>\ze\s\+includes\>/
 
 " Builtins
 syn keyword oxigenBuiltin print println len push first last rest
@@ -160,6 +160,7 @@ syn match oxigenDirective /<log\(<[^>]*>\)\?>/
 syn match oxigenDirective /<fail>/
 syn match oxigenDirective /<guard\(<[^>]*>\)\?>/
 syn match oxigenDirective /<Value>/
+syn match oxigenDirective /<test>/
 
 " Error/type constructors: <Error>, <Error<tag>>, <type<...>>
 syn match oxigenErrorType /<Error\(<[^>]*>\)\?>/

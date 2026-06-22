@@ -7,8 +7,10 @@ import (
 
 var (
 	funRe       = regexp.MustCompile(`^\s*fun\s+(\w+)\s*\(`)
-	structRe    = regexp.MustCompile(`^\s*struct\s+(\w+)\s*\{`)
-	containsRe  = regexp.MustCompile(`^\s*contains\s+(\w+)\s*\{`)
+	structRe    = regexp.MustCompile(`^\s*struct\s+(\w+)`)
+	enumRe      = regexp.MustCompile(`^\s*enum\s+(\w+)\s*\{`)
+	includesRe  = regexp.MustCompile(`^\s*(\w+)\s+includes\s*\{`)
+	testRe      = regexp.MustCompile(`^\s*<test>\s*\(\s*"([^"]*)"`)
 	patternRe   = regexp.MustCompile(`^\s*pattern\s+(\w+)\s*\(`)
 	introduceRe = regexp.MustCompile(`^\s*intro(?:duce)?\s+(.+)`)
 	letRe       = regexp.MustCompile(`^\s*(\w+)\s*:=`)
@@ -19,7 +21,7 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 	symbols := make([]SymbolInformation, 0)
 	lines := strings.Split(source, "\n")
 
-	var currentContains string
+	var currentStruct string
 
 	for i, line := range lines {
 		lineNum := uint32(i)
@@ -29,8 +31,8 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 			name := line[m[2]:m[3]]
 			col := uint32(m[2])
 			displayName := name
-			if currentContains != "" {
-				displayName = currentContains + "." + name
+			if currentStruct != "" {
+				displayName = currentStruct + "." + name
 				symbols = append(symbols, makeSymbol(displayName, SymbolKindMethod, uri, lineNum, col))
 			} else {
 				symbols = append(symbols, makeSymbol(displayName, SymbolKindFunction, uri, lineNum, col))
@@ -50,6 +52,7 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 				if fieldLine == "}" || fieldLine == "" {
 					break
 				}
+				fieldLine = strings.TrimPrefix(fieldLine, "hidden ")
 				fieldLine = strings.TrimPrefix(fieldLine, "hide ")
 				parts := strings.Fields(fieldLine)
 				if len(parts) >= 1 && isIdentStart(parts[0]) {
@@ -59,16 +62,31 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 			continue
 		}
 
-		// Contains block start
-		if m := containsRe.FindStringSubmatchIndex(line); m != nil {
-			currentContains = line[m[2]:m[3]]
+		// Enum definition: enum Name { Variant(...) ... }
+		if m := enumRe.FindStringSubmatchIndex(line); m != nil {
+			name := line[m[2]:m[3]]
+			col := uint32(m[2])
+			symbols = append(symbols, makeSymbol(name, SymbolKindEnum, uri, lineNum, col))
 			continue
 		}
 
-		// Contains block end (unindented closing brace)
-		if currentContains != "" && strings.TrimSpace(line) == "}" {
+		// Test block: <test>("name") { ... }
+		if m := testRe.FindStringSubmatchIndex(line); m != nil {
+			name := line[m[2]:m[3]]
+			symbols = append(symbols, makeSymbol("test: "+name, SymbolKindFunction, uri, lineNum, 0))
+			continue
+		}
+
+		// `StructName includes { ... }` — method block start.
+		if m := includesRe.FindStringSubmatchIndex(line); m != nil {
+			currentStruct = line[m[2]:m[3]]
+			continue
+		}
+
+		// `includes` block end (unindented closing brace).
+		if currentStruct != "" && strings.TrimSpace(line) == "}" {
 			if len(line) > 0 && line[0] == '}' {
-				currentContains = ""
+				currentStruct = ""
 			}
 			continue
 		}
@@ -113,7 +131,7 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 			indent := countLeadingSpaces(line)
 			if indent == 0 {
 				trimmed := strings.TrimSpace(line)
-				if !strings.HasPrefix(trimmed, "fun ") && !strings.HasPrefix(trimmed, "hide ") {
+				if !strings.HasPrefix(trimmed, "fun ") && !strings.HasPrefix(trimmed, "hide ") && !strings.HasPrefix(trimmed, "hidden ") {
 					name := line[m[2]:m[3]]
 					col := uint32(m[2])
 					symbols = append(symbols, makeSymbol(name, SymbolKindVariable, uri, lineNum, col))

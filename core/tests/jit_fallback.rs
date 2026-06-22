@@ -1590,3 +1590,190 @@ go()
     assert_eq!(jitted, baseline, "builtin call in JIT loop must match interpreter");
     assert!(j_ok >= 1, "go should JIT-compile");
 }
+
+/// B4c: a declared type lock on a *local* must be enforced on reassignment in
+/// BOTH the interpreter and the JIT — never "enforced while cold, ignored once
+/// hot". Before B4c the eager JIT silently accepted wrong-typed primitive
+/// stores (the inline SetLocal fast path skipped the tag check).
+#[test]
+fn jit_enforces_local_type_lock_on_reassignment() {
+    for src in [
+        "fun f(){ x <int> := 1\nx = \"hi\"\nx }\nf()", // string into int-locked
+        "fun f(){ x <int> := 1\nx = 2.5\nx }\nf()",     // float into int-locked
+        "fun f(){ x <float> := 1.0\nx = 2\nx }\nf()",   // int into float-locked
+    ] {
+        assert!(
+            run_result(src, None).is_err(),
+            "interpreter must reject local type-lock violation: {src}"
+        );
+        assert!(
+            run_result(src, Some(1)).is_err(),
+            "eager JIT must reject local type-lock violation (no tiering bypass): {src}"
+        );
+    }
+
+    // A valid typed-local hot loop (virtualized int accumulators) must compile
+    // under the JIT and match the interpreter exactly — enforcement adds cost
+    // only on the violation path, not the hot path.
+    let ok = "fun run(n <int>){ i <int> := 0\ntotal <int> := 0\nrepeat when i < n { total = total + i\ni = i + 1 }\ntotal }\nrun(1000)";
+    assert_eq!(run_result(ok, None).unwrap(), "499500");
+    assert_eq!(
+        run_result(ok, Some(1)),
+        run_result(ok, None),
+        "valid typed hot loop under the JIT must match the interpreter"
+    );
+}
+
+/// B12: a bare identifier in a method body that names a struct field resolves
+/// to `self.field` (implicit self) — in the interpreter and the JIT alike.
+#[test]
+fn jit_resolves_implicit_self_field_read() {
+    let read = "struct C { r <float> }\nC includes { fun area(){ 3.14 * r * r } }\nC(2.0).area()";
+    assert_eq!(run_result(read, None).unwrap(), "12.56");
+    assert_eq!(
+        run_result(read, Some(1)),
+        run_result(read, None),
+        "implicit-self field read under the JIT must match the interpreter"
+    );
+
+    // A parameter shadows a same-named field.
+    let shadow = "struct C { r <int> }\nC includes { fun set(r <int>){ r } }\nC(1).set(99)";
+    assert_eq!(run_result(shadow, Some(1)).unwrap(), "99");
+
+    // A bare name that is not a field still falls through to the global.
+    let glob = "g := 42\nstruct C { r <int> }\nC includes { fun h(){ g } }\nC(1).h()";
+    assert_eq!(run_result(glob, Some(1)).unwrap(), "42");
+
+    // Implicit-self field read inside a JIT-hot loop.
+    let hot = "struct A { v <int> }\nA includes { fun g(){ v } }\nfun run(){ a := A(7)\ns := 0\neach i in range(1000){ s = s + a.g() }\ns }\nrun()";
+    assert_eq!(run_result(hot, None).unwrap(), "7000");
+    assert_eq!(run_result(hot, Some(1)).unwrap(), "7000");
+}
+
+/// C1: `skip` (continue) must clean up the loop body's operand stack and
+/// continue correctly. Previously it bare-jumped to the loop top, leaking the
+/// loop variable / body locals every iteration until a stack-overflow abort.
+#[test]
+fn skip_in_loop_does_not_leak_stack() {
+    // `each` with a guard and a live body local (`x`).
+    let each = "fun f(){ s := 0\neach i in range(6){ x := i * 10\nskip when i % 2 == 0\ns = s + x }\ns }\nf()";
+    assert_eq!(run_result(each, None).unwrap(), "90"); // 10 + 30 + 50
+    assert_eq!(run_result(each, Some(1)).unwrap(), "90");
+
+    // Bare `skip` on every iteration must still terminate.
+    let bare = "fun f(){ each i in range(4){ skip }\n42 }\nf()";
+    assert_eq!(run_result(bare, None).unwrap(), "42");
+    assert_eq!(run_result(bare, Some(1)).unwrap(), "42");
+
+    // `skip` in `repeat` with a live body local (`y`).
+    let rep = "fun f(){ i := 0\ns := 0\nrepeat when i < 5 { i = i + 1\ny := i * 10\nskip when i == 3\ns = s + y }\ns }\nf()";
+    assert_eq!(run_result(rep, None).unwrap(), "120"); // 10 + 20 + 40 + 50
+    assert_eq!(run_result(rep, Some(1)).unwrap(), "120");
+}
+
+/// C2: a closure capturing an `each` loop variable must not leave a dangling
+/// open upvalue (previously crashed with an index-out-of-bounds), and each
+/// closure captures its own iteration's value (per-iteration capture, D2).
+#[test]
+fn loop_var_capture_is_per_iteration() {
+    let src = "fun f(){ fns := []\neach i in range(4){ fns := push(fns, fun(){ i * i }) }\ns := 0\neach g in fns { s = s + g() }\ns }\nf()";
+    assert_eq!(run_result(src, None).unwrap(), "14"); // 0 + 1 + 4 + 9
+    assert_eq!(run_result(src, Some(1)).unwrap(), "14");
+}
+
+/// Error-model rework (B14-B17 + L1): `guard` (angle/keyword/tag-filtered),
+/// the `option` `<Error>` arm, `<Value>.value`, and `<type<Error||Value>>`
+/// normalization all recover runtime errors / `<fail>` in-band, identically
+/// under the interpreter and the JIT-mode bailout path (handler opcodes aren't
+/// JIT-compiled, so `--jit` runs the same VM path — equality guards drift).
+#[test]
+fn error_model_recovery() {
+    let cases: &[(&str, &str)] = &[
+        ("fun rn(){ <fail>(\"no\") }\nrn() <guard>(\"Guest\")", "Guest"),
+        ("fun bad(){ 1/0 }\nbad() <guard>(\"safe\")", "safe"),
+        ("fun ok(){ 42 }\nok() <guard>(\"x\")", "42"),
+        ("fun n(){ None }\nn() <guard>(\"fb\")", "None"), // guard does NOT catch None
+        ("fail \"boom\" guard err -> err.msg", "boom"),
+        ("fun risky(){ <fail>(\"boom\") }\noption { risky() -> \"ok\", <Error> -> \"fb\" }", "fb"),
+        ("option { True -> \"ok\", <Error> -> \"fb\" }", "ok"), // <Error> only on error
+        ("option { False -> \"x\" }", "None"),                  // no-match => None
+        ("<Value>(\"ok\").value", "ok"),
+        ("(<type<Error || Value>>(\"x\")).value", "x"),
+        ("r := <type<Error || Value>>(<fail>(\"boom\"))\nr.msg", "boom"),
+        ("fun rn(){ <fail>(<Error<retry>>(\"lost\")) }\nrn() <guard<Error<retry>>>(\"Guest\")", "Guest"),
+        // tag mismatch re-propagates to an outer (untagged) guard
+        ("fun rn(){ <fail>(<Error<retry>>(\"lost\")) }\nrn() <guard<Error<x>>>(\"inner\") <guard>(\"outer\")", "outer"),
+        ("fun a(){ <fail>(\"e1\") }\nfun b(){ <fail>(\"e2\") }\na() <guard>(b() <guard>(\"both\"))", "both"),
+    ];
+    for (src, expected) in cases {
+        assert_eq!(run_result(src, None).unwrap(), *expected, "interp: {src}");
+        assert_eq!(run_result(src, Some(1)).unwrap(), *expected, "jit: {src}");
+    }
+}
+
+/// `stop` (break) must clean the loop variable + body locals off the operand
+/// stack before exiting — otherwise an enclosing loop's iterator slot is
+/// corrupted (previously crashed with "cannot iterate over INTEGER"), including
+/// when `stop` runs from inside a recovered `option` `<Error>` arm.
+#[test]
+fn stop_does_not_leak_loop_locals() {
+    // Plain nested `stop` (no error handling).
+    let nested = "fun f(){ s := 0\neach i in range(3){ each k in range(3){ stop when k == 1\ns = s + 1 } }\ns }\nf()";
+    assert_eq!(run_result(nested, None).unwrap(), "3");
+    assert_eq!(run_result(nested, Some(1)).unwrap(), "3");
+    // `stop` from inside a recovered `<Error>` arm in a nested loop (C4).
+    let in_arm = "fun f(){ each i in range(2){ each k in range(3){ option { k == 1 -> <fail>(\"x\"), <Error> -> { stop }, k } } }\n\"done\" }\nf()";
+    assert_eq!(run_result(in_arm, None).unwrap(), "done");
+    assert_eq!(run_result(in_arm, Some(1)).unwrap(), "done");
+    // `stop` that breaks past a captured loop variable (push happens before
+    // the stop, so i=0,1,2 are all captured, then break at i==2).
+    let cap = "fun f(){ fns := []\neach i in range(5){ fns := push(fns, fun(){ i })\nstop when i == 2 }\ns := 0\neach g in fns { s = s + g() }\ns }\nf()";
+    assert_eq!(run_result(cap, None).unwrap(), "3"); // 0 + 1 + 2
+    assert_eq!(run_result(cap, Some(1)).unwrap(), "3");
+}
+
+/// V1: a `:=` reassignment of a top-level/global variable from inside a nested
+/// block must update the global, not create a shadowing local that never stores
+/// (previously hung / produced 0). A genuinely-new block-local `:=` stays local.
+#[test]
+fn global_walrus_reassign_in_nested_block() {
+    let loop_src = "x := 0\nrepeat when x < 1 { x := 1 }\nx"; // was an infinite loop
+    assert_eq!(run_result(loop_src, None).unwrap(), "1");
+    assert_eq!(run_result(loop_src, Some(1)).unwrap(), "1");
+    let acc = "total := 0\neach i in range(4){ total := total + i }\ntotal";
+    assert_eq!(run_result(acc, None).unwrap(), "6"); // was 0
+    assert_eq!(run_result(acc, Some(1)).unwrap(), "6");
+    // A new block-local `:=` (no outer binding) stays a block-local.
+    let local = "fun f(){ s := 0\neach i in range(3){ t := i + 1\ns = s + t }\ns }\nf()";
+    assert_eq!(run_result(local, None).unwrap(), "6"); // 1 + 2 + 3
+    assert_eq!(run_result(local, Some(1)).unwrap(), "6");
+}
+
+/// V2: a JIT-specialized self-recursive function that can return a NON-integer
+/// (float/string/None) must not report the boxed value's raw bits as an i64.
+/// The spec entry's success Return now tag-checks the result and returns
+/// non-ints the generic (boxed) way; the JIT must match the interpreter, and
+/// int self-recursion must stay correct (and on the fast i64 path).
+#[test]
+fn jit_specialized_recursion_non_int_return() {
+    let cases: &[(&str, &str)] = &[
+        ("fun f(n) { option { n <= 0 -> 3.5, f(n - 1) } }\nf(3)", "3.5"),
+        ("fun f(n) { option { n <= 0 -> \"done\", f(n - 1) } }\nf(3)", "done"),
+        ("fun f(n) { option { n <= 0 -> None, f(n - 1) } }\nf(3)", "None"),
+        ("fun f(n) { option { n <= 0 -> 2, n == 1 -> 3.5, f(n - 1) } }\nf(3)", "3.5"),
+        ("fun fib(n) { give n when n < 2\nfib(n-1) + fib(n-2) }\nfib(15)", "610"),
+    ];
+    for (src, expected) in cases {
+        assert_eq!(run_result(src, None).unwrap(), *expected, "interp: {src}");
+        assert_eq!(run_result(src, Some(1)).unwrap(), *expected, "eager-jit: {src}");
+    }
+}
+
+/// A `guard` inside a hot loop must not leak handlers or desync the stack
+/// across iterations — the recoverable-error unwind runs every iteration.
+#[test]
+fn guard_in_loop_no_leak() {
+    let src = "fun boom(){ <fail>(\"e\") }\nfun f(){ s := 0\neach i in range(100){ x := boom() <guard>(i)\ns = s + x }\ns }\nf()";
+    assert_eq!(run_result(src, None).unwrap(), "4950"); // sum 0..99
+    assert_eq!(run_result(src, Some(1)).unwrap(), "4950");
+}

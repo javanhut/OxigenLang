@@ -876,6 +876,15 @@ impl Parser {
         let mut left = match prefix {
             Some(f) => f(self)?,
             None => {
+                if self.curr_token.token_type == TokenType::Illegal
+                    && self.curr_token.literal != "?"
+                {
+                    self.errors.push(Diagnostic::error(
+                        self.curr_token.span,
+                        self.curr_token.literal.clone(),
+                    ));
+                    return None;
+                }
                 self.errors.push(Diagnostic::error(
                     self.curr_token.span,
                     format!("unexpected token {:?}", self.curr_token.literal),
@@ -2723,7 +2732,13 @@ impl Parser {
             value: self.curr_token.literal.clone(),
         };
 
-        // Optional parent: struct American(Person)
+        // Optional parent (struct inheritance). Two surface forms are accepted:
+        //   struct American(Person) { ... }          parenthesized form
+        //   struct Dog includes Animal { ... }        `includes ParentName` form
+        // The `includes` here is the same CONTEXTUAL keyword used for method
+        // blocks (`Name includes { ... }`), but in the struct-declaration
+        // position it is followed by the parent's NAME (an identifier) rather
+        // than `{`, which keeps the two unambiguous.
         let parent = if self.peek_token.token_type == TokenType::LParen {
             self.next_token(); // consume '('
             self.next_token(); // move to parent name
@@ -2732,6 +2747,17 @@ impl Parser {
                 value: self.curr_token.literal.clone(),
             };
             self.expect_peek(TokenType::RParen)?; // consume ')'
+            Some(parent_ident)
+        } else if self.peek_token.token_type == TokenType::Ident
+            && self.peek_token.literal == "includes"
+            && self.peek_nth(1).token_type == TokenType::Ident
+        {
+            self.next_token(); // consume the `includes` contextual keyword
+            self.next_token(); // move to parent name
+            let parent_ident = Identifier {
+                token: self.curr_token.clone(),
+                value: self.curr_token.literal.clone(),
+            };
             Some(parent_ident)
         } else {
             None
@@ -2766,8 +2792,20 @@ impl Parser {
                 });
             }
 
+            // A field may be marked private with a leading visibility modifier:
+            //   hide secret <int>      (the `hide` keyword)
+            //   hidden secret <int>    (`hidden`, a contextual keyword)
+            // `hidden` lexes as a plain identifier, so it is only treated as a
+            // modifier when it is followed by another identifier (the real field
+            // name); `hidden <int>` is still a field literally named `hidden`.
             let hidden = if self.curr_token.token_type == TokenType::Hide {
                 self.next_token(); // consume 'hide', now at field name
+                true
+            } else if self.curr_token.token_type == TokenType::Ident
+                && self.curr_token.literal == "hidden"
+                && self.peek_token.token_type == TokenType::Ident
+            {
+                self.next_token(); // consume `hidden`, now at field name
                 true
             } else {
                 false

@@ -99,8 +99,14 @@ func keywordHover(word string) string {
 		return "**fun** — Define a function\n\n```oxigen\nfun name(param <type>) {\n    body\n}\n```"
 	case "struct":
 		return "**struct** — Define a composite data type\n\n```oxigen\nstruct Name {\n    field <type>\n}\n```"
-	case "contains":
-		return "**contains** — Define methods for a struct\n\n```oxigen\ncontains StructName {\n    fun method(self) { body }\n}\n```"
+	case "enum":
+		return "**enum** — Define an enumeration\n\n```oxigen\nenum Shape {\n    Circle(radius <float>)\n    Square(side <float>)\n}\n```"
+	case "includes":
+		return "**includes** — Add methods to a struct\n\n```oxigen\nStructName includes {\n    fun method() { self.field }\n}\n```"
+	case "main":
+		return "**main** — Top-level entry block. Skipped when the file is run with `oxigen test`.\n\n```oxigen\nmain {\n    println(\"hello\")\n}\n```"
+	case "test":
+		return "**test** — A test block, run by `oxigen test` (on the VM). Passes unless its body raises an error; assert with `expect`.\n\n```oxigen\n<test>(\"name\") {\n    expect(2 + 3).eq(5)\n}\n```"
 	case "introduce", "intro":
 		return "**introduce** — Import a module\n\n```oxigen\nintroduce math\nintroduce {split, join} from strings\n```"
 	case "each":
@@ -116,9 +122,13 @@ func keywordHover(word string) string {
 	case "pattern":
 		return "**pattern** — Define a named pattern for use with choose\n\n```oxigen\npattern name(x) = condition\n```"
 	case "guard":
-		return "**guard** — Error recovery expression\n\n```oxigen\nresult guard err -> fallback\n```"
+		return "**guard** — Recover from an error in the error/value model. Recovers only on a matching tag, else re-raises.\n\n```oxigen\nresult := <guard<Error<not_found>>> {\n    risky()\n}\n```"
 	case "fail":
-		return "**fail** — Propagate an error value up the call stack\n\n```oxigen\nfail expression\n```"
+		return "**fail** — Raise an error value, short-circuiting the current body.\n\n```oxigen\n<fail>(\"something went wrong\")\n```"
+	case "Error":
+		return "**<Error>** — Error wrapper in the error/value model. Optionally tagged.\n\n```oxigen\n<Error>(\"boom\")\n<Error<div_by_zero>>(\"cannot divide by zero\")\n```"
+	case "Value":
+		return "**<Value>** — Value (success) wrapper in the error/value model.\n\n```oxigen\noption {\n    n < 0 -> <Error>(\"neg\"),\n    <Value>(n * 2)\n}\n```"
 	case "give":
 		return "**give** — Return a value from a function\n\n```oxigen\ngive value\n```"
 	case "skip":
@@ -137,8 +147,8 @@ func keywordHover(word string) string {
 		return "**in** — Membership test or iteration keyword"
 	case "as":
 		return "**as** — Type conversion\n\n```oxigen\nvalue as <type>\n```"
-	case "hide":
-		return "**hide** — Mark a struct field as private"
+	case "hide", "hidden":
+		return "**hidden** — Mark a struct field as private\n\n```oxigen\nstruct Account {\n    name <str>\n    hidden balance <int>\n}\n```"
 	case "self":
 		return "**self** — Reference to the current struct instance in methods"
 	case "True":
@@ -169,7 +179,7 @@ func builtinHover(word string) string {
 	case "len":
 		return "**len**(collection) -> int\n\nReturn the length of a string, array, map, tuple, or set."
 	case "push":
-		return "**push**(array, value) -> array\n\nAppend a value to the end of an array."
+		return "**push**(array, value) -> array\n\nAppend a value to the end of an array, **mutating it in place** (and returning it)."
 	case "first":
 		return "**first**(array) -> value\n\nReturn the first element of an array."
 	case "last":
@@ -203,7 +213,7 @@ func builtinHover(word string) string {
 	case "values":
 		return "**values**(map) -> array\n\nReturn the values of a map as an array."
 	case "insert":
-		return "**insert**(map, key, value) -> map\n\nInsert a key-value pair into a map."
+		return "**insert**(map, key, value) -> map\n\nInsert a key-value pair into a map (or an element into a set), **mutating it in place** (and returning it)."
 	case "remove":
 		return "**remove**(collection, item) -> collection\n\nRemove an item from a collection."
 	case "has":

@@ -323,7 +323,10 @@ pub unsafe extern "C" fn jit_local_add_array_mod_index(
     vm.jit.bump_helper(HelperCounter::LocalAddArrayModIndex);
     vm.sync_stack_from_view();
     if modulus == 0 {
-        vm.jit.stash_error(vm.runtime_error("modulo by zero"));
+        vm.jit.stash_error(vm.runtime_error_hint(
+            "modulo by zero",
+            "ensure the divisor is not zero before using %",
+        ));
         return 1;
     }
 
@@ -567,6 +570,80 @@ pub unsafe extern "C" fn jit_set_local(vm: *mut VM, slot: u32) {
     vm.set_stack_slot(base + slot as usize, value);
 }
 
+/// Type-lock-enforcing variant of `jit_set_local`. The JIT emits this only
+/// for slots that carry a declared type constraint, so unconstrained stores
+/// keep the infallible fast path. Returns 0 on success, 1 if the stored value
+/// violates the lock (the error is stashed for the thunk to surface).
+pub unsafe extern "C" fn jit_set_local_checked(vm: *mut VM, slot: u32) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.jit.bump_helper(HelperCounter::SetLocal);
+    vm.sync_stack_from_view();
+    let constraint = vm
+        .active_closure()
+        .function
+        .locals
+        .get(slot as usize)
+        .and_then(|li| li.type_constraint.clone());
+    if let Some(expected) = constraint {
+        let actual = vm.peek(0).effective_type_name();
+        if !crate::evaluator::type_matches(&expected, &actual) {
+            let e = vm.runtime_error_hint(
+                &format!("type mismatch: expected {}, got {}", expected, actual),
+                &format!("variable is locked to type {}", expected),
+            );
+            vm.jit.stash_error(e);
+            return 1;
+        }
+    }
+    let base = vm.current_slot_offset();
+    let value = vm.peek(0).clone();
+    vm.set_stack_slot(base + slot as usize, value);
+    0
+}
+
+/// Recursion-depth guard for the JIT call paths that push a `JitFrame`
+/// inline (the A3 self-recursion direct call and the closure-aware
+/// specialized dispatch). The interpreter's `call_closure` /
+/// `call_closure_fast_path` reject a call once
+/// `frames.len() + jit_frame_view.len >= FRAMES_MAX`, raising a graceful
+/// "stack overflow" error; the inline JIT frame-push sites had no such
+/// check, so deep self-recursion overran the pre-allocated `jit_frames`
+/// buffer and SIGSEGV'd. This helper replicates the VM's bound exactly:
+/// it must be called immediately BEFORE the inline frame push. Returns 0
+/// when there is room for one more frame, 1 (with the error stashed for
+/// the thunk to surface) when the call would overflow.
+///
+/// The cost is a single load+compare on the recursive call path; it never
+/// touches the operand stack, so it does not perturb the hot int-return
+/// fast path beyond the bound check itself.
+pub unsafe extern "C" fn jit_check_recursion_depth(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    // Mirror the interpreter's `call_closure` bounds for the inline JIT
+    // recursion paths, which push frames AND operands directly (bypassing the
+    // VM's frame/`push` guards). Two bounds, both raising the SAME graceful
+    // "stack overflow" the cold VM raises:
+    //   1. Frame count — interpreter frames + inline JIT frames vs FRAMES_MAX
+    //      (bounds the pre-allocated `jit_frames` buffer).
+    //   2. Operand stack — a recursive frame with many locals pushes many slots
+    //      into the pre-allocated value stack (STACK_MAX) via inline IR. Without
+    //      this bound a deep-enough recursion overruns that buffer on the HEAP
+    //      and SIGSEGVs: empirically an 8-local fn dies near ~16k frames (the
+    //      value stack fills) while a 1-local fn reaches FRAMES_MAX cleanly.
+    //      The margin reserves room for the next frame's locals + temporaries.
+    let frame_overflow =
+        vm.frames_len().saturating_add(vm.jit_frame_len()) >= crate::vm::FRAMES_MAX;
+    let stack_overflow = vm.stack_view.len >= crate::vm::STACK_MAX - 8192;
+    if frame_overflow || stack_overflow {
+        let e = vm.runtime_error_hint(
+            "stack overflow",
+            "check for infinite recursion or deeply nested calls",
+        );
+        vm.jit.stash_error(e);
+        return 1;
+    }
+    0
+}
+
 // ── Arithmetic — return 0 on ok, 1 on runtime error ────────────────────
 
 macro_rules! binop_fallible {
@@ -639,7 +716,7 @@ pub unsafe extern "C" fn jit_op_eq(vm: *mut VM) {
     vm.sync_stack_from_view();
     let b = vm.pop();
     let a = vm.pop();
-    vm.push(Value::Boolean(a == b));
+    vm.push(Value::Boolean(VM::values_equal(&a, &b)));
 }
 
 pub unsafe extern "C" fn jit_op_ne(vm: *mut VM) {
@@ -648,7 +725,7 @@ pub unsafe extern "C" fn jit_op_ne(vm: *mut VM) {
     vm.sync_stack_from_view();
     let b = vm.pop();
     let a = vm.pop();
-    vm.push(Value::Boolean(a != b));
+    vm.push(Value::Boolean(!VM::values_equal(&a, &b)));
 }
 
 // ── Logical / unary ────────────────────────────────────────────────────

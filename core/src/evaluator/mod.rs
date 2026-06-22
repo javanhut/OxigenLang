@@ -26,7 +26,29 @@ pub struct Evaluator {
     import_stack: Vec<PathBuf>,
     source: String,
     is_main_context: bool,
+    /// Current user-function call depth. Guards against unbounded native-stack
+    /// recursion: when it exceeds `RECURSION_LIMIT`, function application
+    /// returns a graceful "stack overflow" error instead of SIGABRT-ing the
+    /// process (matching the VM's FRAMES_MAX behavior).
+    recursion_depth: usize,
 }
+
+/// Maximum tree-walker user-function call depth before a graceful "stack
+/// overflow" error. The VM's bound is `FRAMES_MAX` (16384), but a single
+/// tree-walker call recurses through many heavier native Rust frames
+/// (eval_expression -> apply_function -> eval_block -> eval_statement -> ...),
+/// so 16384 Oxigen frames would overrun even a 256 MB native stack. We pick a
+/// lower bound that fits comfortably within the 256 MB stack the CLI runs the
+/// tree-walk path on (see run_file), so the guard — not the native stack — is
+/// the limit that fires (graceful rc=1 instead of SIGABRT rc=134). Exact-depth
+/// parity with the VM is not required.
+///
+/// 2000 is chosen so the guard fires well before the native ceiling even in an
+/// unoptimized (debug) build, where each Oxigen call consumes ~80 KB of native
+/// stack and a 256 MB thread overruns around ~3200 frames. Release builds have
+/// far smaller frames and comfortable headroom; this single constant keeps the
+/// debug test-thread path graceful too (no SIGABRT).
+pub(crate) const RECURSION_LIMIT: usize = 2000;
 
 /// Unwraps nested `Grouped(...)` wrappers to get the inner expression.
 fn unwrap_grouped(expr: &Expression) -> &Expression {
@@ -170,6 +192,7 @@ impl Evaluator {
             import_stack: Vec::new(),
             source: String::new(),
             is_main_context: true,
+            recursion_depth: 0,
         }
     }
 
@@ -188,6 +211,7 @@ impl Evaluator {
             import_stack: Vec::new(),
             source: String::new(),
             is_main_context: true,
+            recursion_depth: 0,
         }
     }
 
@@ -246,6 +270,25 @@ impl Evaluator {
 
     fn find_stdlib_path() -> PathBuf {
         find_stdlib_path()
+    }
+
+    /// If `obj` is a loop control-flow object (`Skip`/`Stop`) that has escaped
+    /// every enclosing loop and reached a value-consuming context (a Let/walrus
+    /// RHS, or the top-level program), convert it into a runtime error matching
+    /// the VM/JIT, which reject `skip`/`stop` outside a loop. Returns the
+    /// original object unchanged otherwise. `eval_each`/`eval_repeat` intercept
+    /// Skip/Stop *before* they reach here, so valid in-loop control flow is
+    /// unaffected.
+    fn reject_escaped_loop_control(&self, obj: Rc<Object>, span: Span) -> Rc<Object> {
+        match obj.as_ref() {
+            Object::Skip => {
+                self.runtime_error(span, "skip used outside of loop", None)
+            }
+            Object::Stop => {
+                self.runtime_error(span, "stop used outside of loop", None)
+            }
+            _ => obj,
+        }
     }
 
     fn encode_error_message(msg: &str, tag: Option<&str>) -> String {
@@ -616,10 +659,33 @@ impl Evaluator {
     }
 
     pub fn eval_program(&mut self, program: &Program, env: Rc<RefCell<Environment>>) -> Rc<Object> {
+        // Parity gate for `skip`/`stop` used as a VALUE. The bytecode compiler
+        // statically rejects a `skip`/`stop` in any consumed position (operand,
+        // Let/walrus RHS, call argument, function/program tail), regardless of
+        // whether that arm is dynamically reached. Run the SAME analysis here so
+        // the tree-walker rejects exactly the programs the VM/JIT reject — without
+        // it, a `skip`/`stop` in a dynamically-unreached arm (dead code) would run
+        // here but compile-error there. We surface ONLY the skip/stop-as-value
+        // diagnostic; any other compile error is ignored, so the tree-walker still
+        // handles constructs the bytecode compiler may not.
+        if let Err(errs) = crate::compiler::Compiler::new().compile(program) {
+            if let Some(e) = errs.iter().find(|e| {
+                e.message.contains("cannot be used as a value")
+                    || e.message.contains("used outside of loop")
+            }) {
+                return self.runtime_error(Span::new(e.line as usize, 1), &e.message, None);
+            }
+        }
+
         let mut result = Rc::new(Object::None);
 
         for stmt in &program.statements {
             result = self.eval_statement(stmt, Rc::clone(&env));
+
+            // A `skip`/`stop` that propagated past every loop up to the
+            // top-level program is invalid (VM/JIT reject it as "used outside
+            // of loop"). Convert it to a runtime error here.
+            result = self.reject_escaped_loop_control(result, Span::default());
 
             // Handle return values and errors
             match result.as_ref() {
@@ -731,6 +797,10 @@ impl Evaluator {
         match stmt {
             Statement::Let { name, value } => {
                 let val = self.eval_expression(value, Rc::clone(&env));
+                // A `skip`/`stop` that bubbled out of an `option`/expression
+                // into a Let RHS has escaped all loops: reject it (VM/JIT treat
+                // bare skip/stop outside a loop as an error).
+                let val = self.reject_escaped_loop_control(val, name.token.span);
                 if val.is_error() {
                     return val;
                 }
@@ -895,15 +965,13 @@ impl Evaluator {
                         Some(&hint_parts.join(". ")),
                     );
                 }
+                // `=` reassigns an existing binding. Matching the VM
+                // (handle_set_global / SetLocal): the variable must exist, the
+                // binding must be mutable, and a declared type-lock (if any) is
+                // enforced. An untyped binding (`s := 0`) carries no constraint
+                // and is mutable, so `=` simply mutates it (any accumulator).
                 let tc = env.borrow().get_type_constraint(&name.value);
-                if tc.is_none() {
-                    return self.runtime_error(
-                        name.token.span,
-                        &format!("`=` requires typed variable, use `:=` for '{}'", name.value),
-                        Some("declare with a type first: x <type> := value"),
-                    );
-                }
-                // Immutable check: = cannot reassign an immutable binding
+                // Immutable check: = cannot reassign an immutable binding.
                 if env.borrow().is_immutable(&name.value) {
                     return self.runtime_error(
                         name.token.span,
@@ -911,24 +979,27 @@ impl Evaluator {
                         Some("use `:=` to override an immutable binding"),
                     );
                 }
-                let target_type = tc.unwrap();
                 let val = self.eval_expression(value, Rc::clone(&env));
                 if val.is_error() {
                     return val;
                 }
-                if !type_matches(&target_type, &val.effective_type_name()) {
-                    return self.runtime_error(
-                        name.token.span,
-                        &format!(
-                            "type mismatch: expected {}, got {}",
-                            target_type,
-                            val.effective_type_name()
-                        ),
-                        Some(&format!(
-                            "'{}' is locked to type {}",
-                            name.value, target_type
-                        )),
-                    );
+                // Enforce the declared type lock, if any. Untyped bindings
+                // (tc.is_none()) accept any value.
+                if let Some(target_type) = tc {
+                    if !type_matches(&target_type, &val.effective_type_name()) {
+                        return self.runtime_error(
+                            name.token.span,
+                            &format!(
+                                "type mismatch: expected {}, got {}",
+                                target_type,
+                                val.effective_type_name()
+                            ),
+                            Some(&format!(
+                                "'{}' is locked to type {}",
+                                name.value, target_type
+                            )),
+                        );
+                    }
                 }
                 env.borrow_mut().update(&name.value, val.clone());
                 val
@@ -1223,7 +1294,24 @@ impl Evaluator {
                         }
                         fields.borrow_mut().insert(field.value.clone(), val.clone());
                         if is_self_access {
-                            env.borrow_mut().set(field.value.clone(), val.clone());
+                            // Mirror the mutation onto the method-env binding for
+                            // this field so the post-method write-back (which reads
+                            // each field from the method env) stays consistent with
+                            // the direct instance mutation above. Use `update`, not
+                            // `set`: inside an `each` loop the body runs in a fresh
+                            // per-iteration env, and a `set` here would write the new
+                            // value into that throwaway env, leaving the method-env
+                            // binding stale (0) — the write-back would then clobber
+                            // the instance's mutated value. `update` walks the scope
+                            // chain to the field's actual binding in the method env.
+                            // Fall back to `set` if no binding exists upstream.
+                            if env
+                                .borrow_mut()
+                                .update(&field.value, val.clone())
+                                .is_none()
+                            {
+                                env.borrow_mut().set(field.value.clone(), val.clone());
+                            }
                         }
                         val
                     }
@@ -1915,7 +2003,10 @@ impl Evaluator {
                             return v;
                         }
                         match v.as_ref() {
-                            Object::Integer(n) => Some(*n as usize),
+                            // Keep the i64 sign so `eval_slice` can normalize
+                            // negative bounds (count from the end) the same way
+                            // the VM does, instead of wrapping to a huge usize.
+                            Object::Integer(n) => Some(*n),
                             _ => {
                                 return self.runtime_error(
                                     slice_token.span,
@@ -1934,7 +2025,7 @@ impl Evaluator {
                             return v;
                         }
                         match v.as_ref() {
-                            Object::Integer(n) => Some(*n as usize),
+                            Object::Integer(n) => Some(*n),
                             _ => {
                                 return self.runtime_error(
                                     slice_token.span,
@@ -3008,10 +3099,15 @@ impl Evaluator {
             "+" => Rc::new(Object::String(format!("{}{}", left, right))),
             "==" => Rc::new(Object::Boolean(left == right)),
             "!=" => Rc::new(Object::Boolean(left != right)),
+            // Lexicographic ordering. The VM only implements `<` for
+            // String<->String (compare_less); `<=`, `>`, `>=` have no String
+            // arm and error. To match the VM exactly (no over-permitting), only
+            // `<` is accepted here.
+            "<" => Rc::new(Object::Boolean(left < right)),
             _ => self.runtime_error(
                 span,
                 &format!("unknown operator: STRING {} STRING", operator),
-                Some("strings only support +, ==, and != operators"),
+                Some("strings only support +, ==, !=, and < operators"),
             ),
         }
     }
@@ -3068,11 +3164,8 @@ impl Evaluator {
         if env.borrow().is_immutable(&ident_name) {
             return self.runtime_error(
                 span,
-                &format!(
-                    "cannot mutate immutable variable '{}'. use := to override",
-                    ident_name
-                ),
-                Some("immutable variables cannot be changed with ++ or --; use := to reassign"),
+                &format!("cannot reassign immutable variable '{}'", ident_name),
+                Some("use `:=` to override an immutable binding"),
             );
         }
 
@@ -3108,37 +3201,39 @@ impl Evaluator {
     fn eval_index_expression(&self, left: Rc<Object>, index: Rc<Object>, span: Span) -> Rc<Object> {
         match (left.as_ref(), index.as_ref()) {
             (Object::Array(arr), Object::Integer(idx)) => {
-                let idx = *idx as usize;
-                if idx >= arr.len() {
-                    Rc::new(Object::None)
+                // Negative indices count from the end, matching the VM
+                // (eval_index): arr[-1] == last. Out-of-range yields None.
+                let idx = if *idx < 0 {
+                    (arr.len() as i64 + *idx) as usize
                 } else {
-                    Rc::clone(&arr[idx])
-                }
+                    *idx as usize
+                };
+                arr.get(idx).map(Rc::clone).unwrap_or(Rc::new(Object::None))
             }
             (Object::String(s), Object::Integer(idx)) => {
-                let idx = *idx as usize;
-                if s.is_ascii() {
-                    // Fast path: O(1) byte indexing for ASCII strings
-                    if idx >= s.len() {
-                        Rc::new(Object::None)
-                    } else {
-                        Rc::new(Object::String(String::from(s.as_bytes()[idx] as char)))
-                    }
+                // Match the VM's eval_index arithmetic: the negative offset is
+                // applied against the BYTE length, then resolved by char
+                // position (identical to byte position for ASCII).
+                let idx = if *idx < 0 {
+                    (s.len() as i64 + *idx) as usize
                 } else {
-                    // Slow path: O(n) char iteration for UTF-8
-                    match s.chars().nth(idx) {
-                        Some(c) => Rc::new(Object::String(c.to_string())),
-                        None => Rc::new(Object::None),
-                    }
+                    *idx as usize
+                };
+                match s.chars().nth(idx) {
+                    Some(c) => Rc::new(Object::String(c.to_string())),
+                    None => Rc::new(Object::None),
                 }
             }
             (Object::Tuple(elements), Object::Integer(idx)) => {
-                let idx = *idx as usize;
-                if idx >= elements.len() {
-                    Rc::new(Object::None)
+                let idx = if *idx < 0 {
+                    (elements.len() as i64 + *idx) as usize
                 } else {
-                    Rc::clone(&elements[idx])
-                }
+                    *idx as usize
+                };
+                elements
+                    .get(idx)
+                    .map(Rc::clone)
+                    .unwrap_or(Rc::new(Object::None))
             }
             (Object::Map(entries), _) => {
                 for (k, v) in entries {
@@ -3163,32 +3258,49 @@ impl Evaluator {
     fn eval_slice(
         &self,
         left: Rc<Object>,
-        start: Option<usize>,
-        end: Option<usize>,
+        start: Option<i64>,
+        end: Option<i64>,
         span: Span,
     ) -> Rc<Object> {
+        // Normalize an array/string slice bound that counts from the end on a
+        // negative value (`len + i`), then clamp into `[0, len]`. Mirrors the
+        // VM's `eval_slice` (vm/mod.rs) so the two backends agree on negatives.
+        fn norm_from_end(idx: Option<i64>, len: usize, default: usize) -> usize {
+            match idx {
+                None => default,
+                Some(i) => {
+                    let adj = if i < 0 { len as i64 + i } else { i };
+                    adj.clamp(0, len as i64) as usize
+                }
+            }
+        }
         match left.as_ref() {
             Object::Array(arr) => {
-                let s = start.unwrap_or(0);
-                let e = end.unwrap_or(arr.len()).min(arr.len());
-                if s > e || s > arr.len() {
+                let s = norm_from_end(start, arr.len(), 0);
+                let e = norm_from_end(end, arr.len(), arr.len());
+                if s >= e {
                     return Rc::new(Object::Array(Vec::new()));
                 }
                 Rc::new(Object::Array(arr[s..e].to_vec()))
             }
             Object::String(string) => {
                 let chars: Vec<char> = string.chars().collect();
-                let s = start.unwrap_or(0);
-                let e = end.unwrap_or(chars.len()).min(chars.len());
-                if s > e || s > chars.len() {
+                let s = norm_from_end(start, chars.len(), 0);
+                let e = norm_from_end(end, chars.len(), chars.len());
+                if s >= e {
                     return Rc::new(Object::String(String::new()));
                 }
                 Rc::new(Object::String(chars[s..e].iter().collect()))
             }
             Object::Tuple(elements) => {
-                let s = start.unwrap_or(0);
-                let e = end.unwrap_or(elements.len()).min(elements.len());
-                if s > e || s > elements.len() {
+                // Tuples deliberately do NOT count from the end on a negative
+                // bound — a negative wraps to a huge `usize` and yields an empty
+                // tuple. This matches the VM's Tuple arm (vm/mod.rs eval_slice),
+                // keeping the two backends in agreement for tuple slicing.
+                let len = elements.len();
+                let s = start.map(|i| i as usize).unwrap_or(0);
+                let e = end.map(|i| (i as usize).min(len)).unwrap_or(len);
+                if s > e || s > len {
                     return Rc::new(Object::Tuple(Vec::new()));
                 }
                 Rc::new(Object::Tuple(elements[s..e].to_vec()))
@@ -3371,11 +3483,26 @@ impl Evaluator {
                     return err;
                 }
 
+                // Recursion-depth guard: return a graceful runtime error rather
+                // than overrunning the native stack (SIGABRT / rc=134).
+                if self.recursion_depth >= RECURSION_LIMIT {
+                    return self.runtime_error(
+                        call_span,
+                        "stack overflow",
+                        Some("check for infinite recursion or deeply nested calls"),
+                    );
+                }
+                self.recursion_depth += 1;
                 let result = self.eval_block(body, extended_env);
-                match result.as_ref() {
+                self.recursion_depth -= 1;
+                let ret = match result.as_ref() {
                     Object::Return(val) => Rc::clone(val),
                     _ => result,
-                }
+                };
+                // A `skip`/`stop` that escaped every loop in the body and reaches
+                // the function-return value (via `give` or an implicit tail) is
+                // not a value — reject it, matching the VM/JIT compile error.
+                self.reject_escaped_loop_control(ret, call_span)
             }
             Object::BoundMethod {
                 parameters,
@@ -3391,19 +3518,42 @@ impl Evaluator {
                     return err;
                 }
 
+                // Recursion-depth guard (see the Function arm above).
+                if self.recursion_depth >= RECURSION_LIMIT {
+                    return self.runtime_error(
+                        call_span,
+                        "stack overflow",
+                        Some("check for infinite recursion or deeply nested calls"),
+                    );
+                }
+                self.recursion_depth += 1;
                 let result = self.eval_block(body, Rc::clone(&extended_env));
+                self.recursion_depth -= 1;
 
-                // Write back any changed field values to the instance
+                // Write back any changed field values to the instance. A
+                // parameter whose name shadows a field must NOT participate in
+                // the write-back: inside the method the param wins, but the
+                // underlying field is left untouched (matching VM/JIT). Without
+                // this skip, env.get(field) would return the shadowing param's
+                // final value and clobber the field.
+                let param_names: std::collections::HashSet<&str> =
+                    parameters.iter().map(|p| p.ident.value.as_str()).collect();
                 for field_name in field_names {
+                    if param_names.contains(field_name.as_str()) {
+                        continue;
+                    }
                     if let Some(val) = extended_env.borrow().get(field_name) {
                         instance_fields.borrow_mut().insert(field_name.clone(), val);
                     }
                 }
 
-                match result.as_ref() {
+                let ret = match result.as_ref() {
                     Object::Return(val) => Rc::clone(val),
                     _ => result,
-                }
+                };
+                // See the Function arm: a `skip`/`stop` escaping to the method's
+                // return value is rejected, matching VM/JIT.
+                self.reject_escaped_loop_control(ret, call_span)
             }
             Object::StructDef { name, fields, .. } => {
                 // Positional instantiation: Person("Alice", 30)
@@ -3509,9 +3659,12 @@ impl Evaluator {
             }
         };
 
-        // Reuse a single loop environment instead of allocating per iteration
-        let loop_env = Rc::new(RefCell::new(Environment::new_enclosed(Rc::clone(&env))));
         for element in elements {
+            // Fresh environment per iteration so a closure created in the body
+            // captures that iteration's value (per-iteration capture), matching
+            // the VM/JIT. Reusing one env would make all closures share the
+            // final value.
+            let loop_env = Rc::new(RefCell::new(Environment::new_enclosed(Rc::clone(&env))));
             loop_env
                 .borrow_mut()
                 .set(variable.value.clone(), Rc::clone(&element));

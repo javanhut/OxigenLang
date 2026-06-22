@@ -599,7 +599,24 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
             // slot. Per plan: default is still to record and let the
             // downstream handler do a real pop; missing a scope pop
             // is safer than claiming a spurious one.
-            if matches!(op, OpCode::Pop) {
+            //
+            // `depth_before` can legitimately be 0 here: the abstract
+            // operand-stack height is best-effort. The transfer for
+            // `SetGlobal`/`SetUpvalue` pops, but the real VM PEEKS those
+            // (it leaves the assigned value on the stack for a following
+            // explicit `Pop`; see `handle_set_global`). So a function
+            // whose body reassigns globals as statements — e.g. a hot
+            // top-level script under `--jit` doing `acc = f(x)` repeatedly
+            // — drifts the abstract stack one below the real stack per
+            // such statement and can bottom out at 0 by a later `Pop`.
+            // A Pop at abstract depth 0 has no slot position to attribute,
+            // so skip it rather than underflow — consistent with the
+            // "missing a scope-pop is safe" rule above (the slot stays
+            // conservatively live; only a SPURIOUS pop would be wrong, and
+            // the drift is always toward a SHORTER stack, i.e. less
+            // virtualization, never more). Verified crash-free and
+            // divergence-free across the differential corpus under --jit.
+            if matches!(op, OpCode::Pop) && depth_before > 0 {
                 let popped_pos = depth_before - 1;
                 if popped_pos < num_slots {
                     // Consult the CURRENT state (before this Pop) to
@@ -1417,6 +1434,10 @@ fn transfer(
             next.stack.pop();
         }
         OpCode::CloseUpvalue => {}
+        // Closes a buried slot's upvalue in place; no stack effect. (Functions
+        // containing it are rejected by the JIT scan, so this branch is never
+        // actually reached during analysis — it exists for match exhaustiveness.)
+        OpCode::CloseUpvalueAt => {}
 
         // Control flow.
         OpCode::Jump => {
@@ -1692,6 +1713,10 @@ fn transfer(
             // [value] → [value, bool] — peeks.
             next.stack.push(SlotType::Value);
         }
+        // Error-handler bookkeeping has no operand-stack effect. (Functions
+        // that use these never reach the JIT — `scan` rejects them — so this
+        // arm exists only for exhaustiveness.)
+        OpCode::PushHandler | OpCode::PopHandler => {}
     }
 
     (next, terminates, targets)
@@ -1733,6 +1758,7 @@ fn opcode_len(op: OpCode, code: &[u8], ip: usize, chunk: &Chunk) -> usize {
         | OpCode::IterLen
         | OpCode::IterGet
         | OpCode::ValueConstruct
+        | OpCode::PopHandler
         | OpCode::Fail => 1,
 
         // 1-byte opcode + 1-byte operand
@@ -1750,6 +1776,7 @@ fn opcode_len(op: OpCode, code: &[u8], ip: usize, chunk: &Chunk) -> usize {
         | OpCode::DefineGlobal
         | OpCode::GetUpvalue
         | OpCode::SetUpvalue
+        | OpCode::CloseUpvalueAt
         | OpCode::Jump
         | OpCode::JumpIfFalse
         | OpCode::JumpIfTrue
@@ -1772,7 +1799,8 @@ fn opcode_len(op: OpCode, code: &[u8], ip: usize, chunk: &Chunk) -> usize {
         | OpCode::TypeWrap
         | OpCode::IsMut
         | OpCode::IsType
-        | OpCode::IsTypeMut => 3,
+        | OpCode::IsTypeMut
+        | OpCode::PushHandler => 3,
 
         // 1-byte opcode + u16 + u8
         OpCode::StructLiteral
@@ -1782,7 +1810,9 @@ fn opcode_len(op: OpCode, code: &[u8], ip: usize, chunk: &Chunk) -> usize {
         | OpCode::MethodCall
         | OpCode::Import => 4,
         // 1-byte opcode + 2*u16
-        OpCode::TestPattern | OpCode::Guard => 5,
+        OpCode::TestPattern => 5,
+        // 1-byte opcode + 3*u16 (jump offset, binding, tag filter)
+        OpCode::Guard => 7,
 
         // MethodCallNamed: u16 + u8 + u8
         OpCode::MethodCallNamed => 5,

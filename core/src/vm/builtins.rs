@@ -298,7 +298,11 @@ fn builtin_str(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("str() takes exactly 1 argument"));
     }
-    Value::String(rc_str(format!("{}", args[0])))
+    match args[0].repr() {
+        // A char stringifies to its bare character, not the `x`-quoted Display form.
+        ValueRepr::Char(c) => Value::String(rc_str(c.to_string())),
+        _ => Value::String(rc_str(format!("{}", args[0]))),
+    }
 }
 
 fn builtin_int(args: &[Value]) -> Value {
@@ -308,9 +312,11 @@ fn builtin_int(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Integer(n) => Value::Integer(n),
         ValueRepr::Float(f) => Value::Integer(f as i64),
-        ValueRepr::String(s) => match s.parse::<i64>() {
+        // Trim surrounding whitespace before parsing, matching the
+        // tree-walker (int(" 5 ") == 5).
+        ValueRepr::String(s) => match s.trim().parse::<i64>() {
             Ok(n) => Value::Integer(n),
-            Err(_) => match s.parse::<f64>() {
+            Err(_) => match s.trim().parse::<f64>() {
                 Ok(f) => Value::Integer(f as i64),
                 Err(_) => Value::Error(rc_str(format!("cannot convert '{}' to int", s))),
             },
@@ -333,10 +339,14 @@ fn builtin_float(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Float(f) => Value::Float(f),
         ValueRepr::Integer(n) => Value::Float(n as f64),
-        ValueRepr::String(s) => match s.parse::<f64>() {
+        // Trim surrounding whitespace before parsing, matching the
+        // tree-walker (float(" 1.5 ") == 1.5).
+        ValueRepr::String(s) => match s.trim().parse::<f64>() {
             Ok(f) => Value::Float(f),
             Err(_) => Value::Error(rc_str(format!("cannot convert '{}' to float", s))),
         },
+        // float(True) == 1.0, float(False) == 0.0, matching the tree-walker.
+        ValueRepr::Boolean(b) => Value::Float(if b { 1.0 } else { 0.0 }),
         ValueRepr::Byte(b) => Value::Float(b as f64),
         ValueRepr::Uint(u) => Value::Float(u as f64),
         _ => Value::Error(rc_str(format!(
@@ -443,11 +453,11 @@ fn builtin_insert(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Map(m) => {
             m.borrow_mut().insert(args[1].clone(), args[2].clone());
-            Value::None
+            args[0].clone()
         }
         ValueRepr::Set(s) => {
             s.borrow_mut().insert(args[1].clone());
-            Value::None
+            args[0].clone()
         }
         _ => Value::Error(rc_str("insert() requires a map or set")),
     }
@@ -460,11 +470,11 @@ fn builtin_remove(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Map(m) => {
             m.borrow_mut().remove(&args[1]);
-            Value::None
+            args[0].clone()
         }
         ValueRepr::Set(s) => {
             s.borrow_mut().remove(&args[1]);
-            Value::None
+            args[0].clone()
         }
         _ => Value::Error(rc_str("remove() requires a map or set")),
     }
@@ -477,7 +487,9 @@ fn builtin_has(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Map(m) => Value::Boolean(m.borrow().contains_key(&args[1])),
         ValueRepr::Set(s) => Value::Boolean(s.borrow().contains(&args[1])),
-        _ => Value::Error(rc_str("has() requires a map or set")),
+        ValueRepr::Array(a) => Value::Boolean(a.borrow().iter().any(|e| e == &args[1])),
+        ValueRepr::Tuple(t) => Value::Boolean(t.iter().any(|e| e == &args[1])),
+        _ => Value::Error(rc_str("has() requires a collection")),
     }
 }
 
@@ -496,8 +508,28 @@ fn builtin_byte(args: &[Value]) -> Value {
         return Value::Error(rc_str("byte() takes exactly 1 argument"));
     }
     match args[0].repr() {
-        ValueRepr::Integer(n) => Value::Byte(n as u8),
-        ValueRepr::Uint(n) => Value::Byte(n as u8),
+        ValueRepr::Byte(b) => Value::Byte(b),
+        ValueRepr::Integer(n) => {
+            if !(0..=255).contains(&n) {
+                Value::Error(rc_str(format!(
+                    "byte() argument out of range (0-255): {}",
+                    n
+                )))
+            } else {
+                Value::Byte(n as u8)
+            }
+        }
+        ValueRepr::Uint(n) => {
+            if n > 255 {
+                Value::Error(rc_str(format!(
+                    "byte() argument out of range (0-255): {}",
+                    n
+                )))
+            } else {
+                Value::Byte(n as u8)
+            }
+        }
+        ValueRepr::Char(c) => Value::Byte(c as u8),
         _ => Value::Error(rc_str(format!(
             "cannot convert {} to byte",
             args[0].type_name()
@@ -510,8 +542,21 @@ fn builtin_uint(args: &[Value]) -> Value {
         return Value::Error(rc_str("uint() takes exactly 1 argument"));
     }
     match args[0].repr() {
-        ValueRepr::Integer(n) => Value::Uint(n as u64),
-        ValueRepr::Float(f) => Value::Uint(f as u64),
+        ValueRepr::Uint(u) => Value::Uint(u),
+        ValueRepr::Integer(n) => {
+            if n < 0 {
+                Value::Error(rc_str(format!("uint() cannot convert negative: {}", n)))
+            } else {
+                Value::Uint(n as u64)
+            }
+        }
+        ValueRepr::Float(f) => {
+            if f < 0.0 {
+                Value::Error(rc_str(format!("uint() cannot convert negative: {}", f)))
+            } else {
+                Value::Uint(f as u64)
+            }
+        }
         ValueRepr::Byte(b) => Value::Uint(b as u64),
         ValueRepr::String(s) => match s.parse::<u64>() {
             Ok(n) => Value::Uint(n),
