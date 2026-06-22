@@ -313,10 +313,11 @@ fn run_test_file(path: &std::path::Path, color: bool) -> FileResult {
         }
     };
 
-    let env = Rc::new(RefCell::new(Environment::new()));
-    let mut evaluator = Evaluator::new_with_path(file_path_buf);
-    evaluator.set_source(&contents);
-    let outcomes = evaluator.run_tests(&program, env);
+    // `oxigen test` runs each `<test>` block on the bytecode VM (not the
+    // tree-walker), so tests observe the same semantics as `oxigen file.oxi`
+    // — notably in-place `push`/`insert`. The REPL stays on the tree-walker.
+    let outcomes =
+        oxigen_core::test_runner::run_vm_tests(&program, &contents, Some(file_path_buf));
 
     if outcomes.is_empty() {
         return FileResult {
