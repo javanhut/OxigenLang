@@ -1702,6 +1702,11 @@ impl VM {
                 OpCode::CloseUpvalue => {
                     self.handle_close_upvalue();
                 }
+                OpCode::CloseUpvalueAt => {
+                    let slot = self.frames[frame_idx].read_u16() as usize;
+                    let offset = self.frames[frame_idx].slot_offset;
+                    self.close_upvalue_at_slot(offset + slot);
+                }
 
                 // ── Control Flow ────────────────────────────────────
                 OpCode::Jump => {
@@ -3387,6 +3392,34 @@ impl VM {
                     } else {
                         continue;
                     }
+                };
+                *uv.borrow_mut() = Upvalue::Closed(value);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Close any open upvalue captured at EXACTLY `slot`, snapshotting its
+    /// live value from `self.stack[slot]`. Unlike `close_upvalues`, this does
+    /// not touch upvalues at higher slots and never pops the stack — it is
+    /// used for `OpCode::CloseUpvalueAt`, where a block's result value sits
+    /// above the captured floor local whose upvalue must be closed in place
+    /// before the slot is repurposed.
+    pub(crate) fn close_upvalue_at_slot(&mut self, slot: usize) {
+        let stack_len = self.stack.len();
+        let mut i = 0;
+        while i < self.open_upvalues.len() {
+            let should_close = {
+                let uv = self.open_upvalues[i].borrow();
+                matches!(&*uv, Upvalue::Open(s) if *s == slot)
+            };
+            if should_close {
+                let uv = self.open_upvalues.remove(i);
+                let value = if slot < stack_len {
+                    self.stack[slot].clone()
+                } else {
+                    Value::None
                 };
                 *uv.borrow_mut() = Upvalue::Closed(value);
             } else {

@@ -227,6 +227,17 @@ pub struct Compiler {
     /// When true, Choose/If won't pop their result value (used when they're
     /// the last statement of a block that needs to produce a value).
     suppress_statement_pop: bool,
+    /// Whether the value produced by the expression currently being compiled
+    /// is CONSUMED by an enclosing operation (operator operand, call argument,
+    /// assignment/Let RHS, give/return value, etc.) vs. DISCARDED (the top
+    /// expression of an expression-statement, whose value is immediately
+    /// Pop'd). Default `true`; set `false` only for the single top expression
+    /// directly under a `Statement::Expr`. Used to make a `skip`/`stop` whose
+    /// value is consumed an `option`/`choose` arm tail a COMPILE error
+    /// (matching the tree-walker, which errors at runtime on `INTEGER + SKIP`),
+    /// while leaving a `skip`/`stop` in a discarded arm (legitimate loop
+    /// control flow) compiling and running.
+    value_consumed: bool,
     /// Column stack for source-location tracking. Pushed at the start of
     /// `compile_expression`/`compile_statement` with the current node's
     /// column, popped at exit. `emit_byte` reads the top before each
@@ -269,6 +280,7 @@ impl Compiler {
             errors: Vec::new(),
             dup_next_define: false,
             suppress_statement_pop: false,
+            value_consumed: true,
             loc_column_stack: Vec::new(),
             struct_fields: std::collections::HashMap::new(),
             struct_parents: std::collections::HashMap::new(),
@@ -494,6 +506,94 @@ impl Compiler {
             } else {
                 self.emit_op(OpCode::Pop, line);
             }
+        }
+    }
+
+    /// Close the current scope when its block produced a RESULT VALUE that is
+    /// currently on top of the operand stack (block-as-expression: option/choose
+    /// arm bodies, default/error bodies whose tail is a value).
+    ///
+    /// The plain `end_scope` emits `Pop`/`CloseUpvalue`, both of which act on the
+    /// TOP of the operand stack — so calling it here would discard the RESULT
+    /// instead of the block's locals (the result sits ABOVE the locals). That is
+    /// the long-standing block-as-expression corruption:
+    ///   `r := option { True -> { y := 5  y + 1 } }`  →  VM gave `5`, not `6`.
+    ///
+    /// Cleanup that preserves the result and still closes captured locals:
+    ///   stack on entry: [.. L0, L1, .., L_{k-1}, RESULT]
+    /// 1. `SetLocal floor` copies RESULT into the lowest local slot (L0), leaving
+    ///    RESULT on top:                       [.. RESULT, L1, .., L_{k-1}, RESULT]
+    /// 2. `Pop` removes the duplicate top:      [.. RESULT, L1, .., L_{k-1}]
+    /// 3. Close/pop L_{k-1}..L1 top-down (each is on top in turn) — `CloseUpvalue`
+    ///    when captured (snapshots the still-live slot), else `Pop`:
+    ///                                          [.. RESULT]
+    /// The RESULT ends up alone at the floor slot — exactly where the block's
+    /// value belongs — with every captured body local closed.
+    ///
+    /// One residual case (see cross_file_needed): when the FLOOR local L0 itself
+    /// is captured, step 1 overwrites it before its upvalue can be closed
+    /// (`CloseUpvalue` only acts on the stack top, and the result sits above L0).
+    /// Closing a specific buried slot needs a slot-indexed close / `Swap` opcode,
+    /// which lives in the VM/JIT, not here. Until then this helper falls back to
+    /// the top-down `end_scope` cleanup for blocks whose floor local is captured
+    /// (no worse than before for that narrow case), and uses the value-preserving
+    /// path for everything else.
+    fn end_scope_keeping_value(&mut self, line: u32) {
+        self.current_frame_mut().scope_depth -= 1;
+        let depth = self.current_frame().scope_depth;
+
+        // Slots (floor..n) of locals being removed, innermost (top) last.
+        let floor = {
+            let locals = &self.current_frame().locals;
+            let mut f = locals.len();
+            while f > 0 && locals[f - 1].depth > depth {
+                f -= 1;
+            }
+            f
+        };
+        let n = self.current_frame().locals.len();
+
+        // Capture flags for the locals being removed, then drop them from the
+        // compile-time scope.
+        let mut captured: Vec<bool> = Vec::with_capacity(n - floor);
+        for i in floor..n {
+            captured.push(self.current_frame().locals[i].is_captured);
+        }
+        self.current_frame_mut().locals.truncate(floor);
+
+        // No locals: the result is already correctly on top.
+        if floor == n {
+            return;
+        }
+
+        // Captured floor local: the value-preserving stash below overwrites the
+        // floor slot with the block's result, so the floor local's open upvalue
+        // must be closed (snapshotted from its live slot value) BEFORE the stash.
+        // `CloseUpvalueAt floor` does exactly that — it closes the upvalue at the
+        // buried floor slot in place, without requiring the value on top and
+        // without popping. After this the slot is free to be repurposed, and the
+        // remaining body locals (floor+1..n) are closed/popped top-down below.
+        if captured[0] {
+            self.emit_op_u16(OpCode::CloseUpvalueAt, floor as u16, line);
+        }
+
+        // Value-preserving cleanup. Stash the result into the floor slot, drop
+        // the duplicate, then close/pop the remaining body locals top-down.
+        // The floor slot is being repurposed to hold the block's RESULT, whose
+        // type is unrelated to the (now-removed) floor local's declared type, so
+        // clear that slot's type lock first — otherwise the SetLocal below would
+        // enforce the stale constraint against the result value.
+        if let Some(info) = self.current_frame_mut().function.locals.get_mut(floor) {
+            info.type_constraint = None;
+        }
+        self.emit_op_u16(OpCode::SetLocal, floor as u16, line);
+        self.emit_op(OpCode::Pop, line);
+        // Locals above the floor, innermost first (top of stack first).
+        for &cap in captured.iter().skip(1).rev() {
+            self.emit_op(
+                if cap { OpCode::CloseUpvalue } else { OpCode::Pop },
+                line,
+            );
         }
     }
 
@@ -732,7 +832,13 @@ impl Compiler {
     fn compile_statement_inner(&mut self, stmt: &Statement, line: u32) {
         match stmt {
             Statement::Expr(expr) => {
+                // The value of an expression-statement's top expression is
+                // DISCARDED (Pop). A `skip`/`stop` tail in an `option`/`choose`
+                // here is legitimate loop control flow, so mark it not-consumed.
+                let prev = self.value_consumed;
+                self.value_consumed = false;
                 self.compile_expression(expr);
+                self.value_consumed = prev;
                 self.emit_op(OpCode::Pop, line);
             }
 
@@ -1554,6 +1660,11 @@ impl Compiler {
             }
 
             Statement::Choose { subject, arms, .. } => {
+                // A `choose` statement's value is consumed only when an
+                // enclosing block needs it (`suppress_statement_pop`); otherwise
+                // it is discarded, so a `skip`/`stop` arm tail is legit control
+                // flow. Capture before compiling the subject (which clears it).
+                let choose_consumed = self.suppress_statement_pop;
                 // Store subject as a temporary global so pattern functions can access it
                 // without affecting the local stack layout
                 self.compile_expression(subject);
@@ -1567,7 +1678,7 @@ impl Compiler {
                 for arm in arms {
                     if arm.pattern_name == "else" {
                         has_else = true;
-                        self.compile_block_as_expression(&arm.body, line);
+                        self.compile_block_as_expression(&arm.body, line, choose_consumed);
                         break;
                     }
 
@@ -1598,7 +1709,7 @@ impl Compiler {
                     self.emit_op(OpCode::Pop, line); // pop True
 
                     // Compile arm body — result goes on stack
-                    self.compile_block_as_expression(&arm.body, line);
+                    self.compile_block_as_expression(&arm.body, line, choose_consumed);
                     let end = self.emit_jump(OpCode::Jump, line);
                     end_jumps.push(end);
 
@@ -1668,6 +1779,13 @@ impl Compiler {
     }
 
     fn compile_expression_inner(&mut self, expr: &Expression, line: u32) {
+        // Capture whether THIS expression's value is consumed, then default
+        // nested sub-expressions to consumed=true: any operand/argument/RHS a
+        // node recurses into has its value used by the current operation. Only
+        // a transparent wrapper (`Grouped`) and `option`/`choose` forward the
+        // captured context; everything else descends as consumed.
+        let consumed = self.value_consumed;
+        self.value_consumed = true;
         match expr {
             Expression::Int { value, .. } => {
                 self.emit_constant(Value::Integer(*value), line);
@@ -1689,6 +1807,10 @@ impl Compiler {
             }
 
             Expression::Grouped(inner) => {
+                // A parenthesised group is transparent: it neither consumes nor
+                // discards its inner value, so forward the captured context so a
+                // discarded `(option{... -> {stop}})` stays legitimate.
+                self.value_consumed = consumed;
                 self.compile_expression(inner);
             }
 
@@ -2069,8 +2191,11 @@ impl Compiler {
                     self.compile_expression(&arm.condition);
                     let skip = self.emit_jump(OpCode::JumpIfFalse, line);
                     self.emit_op(OpCode::Pop, line);
-                    // Condition true → compile body (last expr is the value)
-                    self.compile_block_as_expression(&arm.body, line);
+                    // Condition true → compile body (last expr is the value).
+                    // `consumed` (captured before the reset above) says whether
+                    // this whole `option` value is consumed by an enclosing
+                    // operation; a `skip`/`stop` tail is only rejected then.
+                    self.compile_block_as_expression(&arm.body, line, consumed);
                     let end = self.emit_jump(OpCode::Jump, line);
                     end_jumps.push(end);
                     self.patch_jump(skip);
@@ -2080,7 +2205,7 @@ impl Compiler {
                 // No-match default (the `<Error>` arm is never the no-match
                 // default — it only fires on error, handled below).
                 if let Some(default_body) = default {
-                    self.compile_block_as_expression(default_body, line);
+                    self.compile_block_as_expression(default_body, line, consumed);
                 } else {
                     self.emit_op(OpCode::None, line);
                 }
@@ -2098,7 +2223,7 @@ impl Compiler {
                     // on top. Discard it, then run the `<Error>` body.
                     self.patch_jump(handler);
                     self.emit_op(OpCode::Pop, line);
-                    self.compile_block_as_expression(error_body, line);
+                    self.compile_block_as_expression(error_body, line, consumed);
                     self.patch_jump(skip_catch);
                 }
             }
@@ -2229,22 +2354,34 @@ impl Compiler {
     /// For Expr, keeps the expression value. For Choose/If, suppresses the
     /// trailing Pop so the result is preserved.
     /// Emit a compile error if a statement in a value-producing position is a
-    /// bare `skip`/`stop`. The tree-walker treats these as `Object::Skip`/
+    /// bare `skip`/`stop` AND `consumed` is true (the produced value is used by
+    /// an enclosing operation). The tree-walker treats these as `Object::Skip`/
     /// `Object::Stop` sentinels which error the moment they are consumed as a
     /// value (e.g. `1 + skip` => `INTEGER + SKIP`). VM/JIT must reject the same
-    /// programs instead of silently pushing a bogus value. Control-flow uses of
-    /// `skip`/`stop` (non-terminal in a loop body) never reach here.
-    fn compile_last_statement_as_value(&mut self, stmt: &Statement, line: u32) {
-        // NOTE: skip/stop in the value-producing position are intentionally NOT
-        // rejected at compile time. The tree-walker (parity oracle) compiles
-        // them and only errors at RUNTIME when the resulting sentinel is
-        // consumed by an operation (e.g. `INTEGER + STOP`). A `stop`/`skip` in
-        // an arm body whose result is DISCARDED (statement position) is valid
-        // loop control flow and must run, so a blanket compile-time rejection
-        // would over-reject relative to the oracle.
+    /// programs instead of silently pushing a bogus value. A `skip`/`stop` whose
+    /// value is DISCARDED (the enclosing `option`/`choose` is a bare expression-
+    /// statement) is legitimate loop control flow (`consumed == false`) and is
+    /// left to compile + run.
+    fn compile_last_statement_as_value(&mut self, stmt: &Statement, line: u32, consumed: bool) {
         match stmt {
+            Statement::Skip | Statement::Stop if consumed => {
+                let kw = if matches!(stmt, Statement::Skip) { "skip" } else { "stop" };
+                self.error(
+                    &format!("'{kw}' cannot be used as a value"),
+                    line,
+                );
+            }
             Statement::Expr(expr) => {
+                // Propagate the consumed/discarded context into the inner
+                // expression. Without this, a nested option/choose whose tail is
+                // `skip`/`stop` captures the stale `value_consumed = true` and is
+                // wrongly rejected even when the OUTER construct is discarded
+                // (legitimate loop control flow), e.g.
+                //   each i in range(2){ choose i { else -> { option { True -> { skip } } } } }
+                let prev = self.value_consumed;
+                self.value_consumed = consumed;
                 self.compile_expression(expr);
+                self.value_consumed = prev;
             }
             Statement::Choose { .. } => {
                 // Choose produces a value but normally pops it.
@@ -2314,18 +2451,18 @@ impl Compiler {
         }
     }
 
-    fn compile_block_as_expression(&mut self, stmts: &[Statement], line: u32) {
+    /// Compile a block as a value-producing expression (option/choose arm,
+    /// default/error body). `consumed` says whether the surrounding construct's
+    /// value is used by an enclosing operation: when true, a bare `skip`/`stop`
+    /// tail is a COMPILE error (it would become a consumed sentinel, which the
+    /// tree-walker errors on, e.g. `INTEGER + SKIP`); when false (the construct
+    /// is a bare expression-statement whose value is discarded), a `skip`/`stop`
+    /// tail is legitimate loop control flow and is left to compile + run.
+    fn compile_block_as_expression(&mut self, stmts: &[Statement], line: u32, consumed: bool) {
         if stmts.is_empty() {
             self.emit_op(OpCode::None, line);
             return;
         }
-        // NOTE: a `skip`/`stop` in the value-producing (last) position is NOT
-        // rejected at compile time. The tree-walker (parity oracle) compiles it
-        // and only errors at RUNTIME when the sentinel is consumed (`INTEGER +
-        // STOP`); a `stop`/`skip` in an arm body whose result is discarded
-        // (e.g. `each { each { option { ... <Error> -> { stop } } } }`) is
-        // valid loop control flow and must run. A blanket compile rejection
-        // here over-rejects that legitimate control flow.
         // Wrap in a scope so locals are cleaned up.
         self.begin_scope();
         for (i, stmt) in stmts.iter().enumerate() {
@@ -2336,8 +2473,15 @@ impl Compiler {
                 // block locals, then clean up.
                 match stmt {
                     Statement::Expr(_) => {
-                        self.compile_last_statement_as_value(stmt, line);
-                        self.end_scope(line);
+                        self.compile_last_statement_as_value(stmt, line, consumed);
+                        self.end_scope_keeping_value(line);
+                    }
+                    Statement::Skip | Statement::Stop if consumed => {
+                        // A `skip`/`stop` whose value is consumed by an enclosing
+                        // expression (e.g. `1 + option{... -> {skip}}`) is the
+                        // same error the tree-walker raises on `INTEGER + SKIP`.
+                        self.compile_last_statement_as_value(stmt, line, consumed);
+                        self.end_scope_keeping_value(line);
                     }
                     _ => {
                         self.compile_statement(stmt);
@@ -2345,6 +2489,18 @@ impl Compiler {
                         self.emit_op(OpCode::None, line);
                     }
                 }
+            } else if consumed && matches!(stmt, Statement::Skip | Statement::Stop) {
+                // A NON-tail bare `skip`/`stop` in a block whose value is CONSUMED
+                // makes the block's value ill-defined: the `skip`/`stop` jumps
+                // before the tail value is produced, so the enclosing expression
+                // never receives a value. Reject it like the tail case (the
+                // tree-walker surfaces the same error via the eval_program gate).
+                // Discarded blocks (`consumed == false`) keep legitimate loop
+                // control flow, and a `skip`/`stop` nested inside an inner loop is
+                // a Statement::Each/Repeat here, not a bare Skip/Stop, so it is
+                // unaffected.
+                let kw = if matches!(stmt, Statement::Skip) { "skip" } else { "stop" };
+                self.error(&format!("'{kw}' cannot be used as a value"), line);
             } else {
                 self.compile_statement(stmt);
             }
@@ -2642,7 +2798,9 @@ impl Compiler {
             for (i, stmt) in body.iter().enumerate() {
                 let is_last = i == body.len() - 1;
                 if is_last {
-                    self.compile_last_statement_as_value(stmt, line);
+                    // A function's tail value is returned to (consumed by) the
+                    // caller, so a bare `skip`/`stop` tail is a value error.
+                    self.compile_last_statement_as_value(stmt, line, true);
                     self.emit_op(OpCode::Return, line);
                 } else {
                     self.compile_statement(stmt);

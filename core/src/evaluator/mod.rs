@@ -26,7 +26,29 @@ pub struct Evaluator {
     import_stack: Vec<PathBuf>,
     source: String,
     is_main_context: bool,
+    /// Current user-function call depth. Guards against unbounded native-stack
+    /// recursion: when it exceeds `RECURSION_LIMIT`, function application
+    /// returns a graceful "stack overflow" error instead of SIGABRT-ing the
+    /// process (matching the VM's FRAMES_MAX behavior).
+    recursion_depth: usize,
 }
+
+/// Maximum tree-walker user-function call depth before a graceful "stack
+/// overflow" error. The VM's bound is `FRAMES_MAX` (16384), but a single
+/// tree-walker call recurses through many heavier native Rust frames
+/// (eval_expression -> apply_function -> eval_block -> eval_statement -> ...),
+/// so 16384 Oxigen frames would overrun even a 256 MB native stack. We pick a
+/// lower bound that fits comfortably within the 256 MB stack the CLI runs the
+/// tree-walk path on (see run_file), so the guard — not the native stack — is
+/// the limit that fires (graceful rc=1 instead of SIGABRT rc=134). Exact-depth
+/// parity with the VM is not required.
+///
+/// 2000 is chosen so the guard fires well before the native ceiling even in an
+/// unoptimized (debug) build, where each Oxigen call consumes ~80 KB of native
+/// stack and a 256 MB thread overruns around ~3200 frames. Release builds have
+/// far smaller frames and comfortable headroom; this single constant keeps the
+/// debug test-thread path graceful too (no SIGABRT).
+pub(crate) const RECURSION_LIMIT: usize = 2000;
 
 /// Unwraps nested `Grouped(...)` wrappers to get the inner expression.
 fn unwrap_grouped(expr: &Expression) -> &Expression {
@@ -170,6 +192,7 @@ impl Evaluator {
             import_stack: Vec::new(),
             source: String::new(),
             is_main_context: true,
+            recursion_depth: 0,
         }
     }
 
@@ -188,6 +211,7 @@ impl Evaluator {
             import_stack: Vec::new(),
             source: String::new(),
             is_main_context: true,
+            recursion_depth: 0,
         }
     }
 
@@ -246,6 +270,25 @@ impl Evaluator {
 
     fn find_stdlib_path() -> PathBuf {
         find_stdlib_path()
+    }
+
+    /// If `obj` is a loop control-flow object (`Skip`/`Stop`) that has escaped
+    /// every enclosing loop and reached a value-consuming context (a Let/walrus
+    /// RHS, or the top-level program), convert it into a runtime error matching
+    /// the VM/JIT, which reject `skip`/`stop` outside a loop. Returns the
+    /// original object unchanged otherwise. `eval_each`/`eval_repeat` intercept
+    /// Skip/Stop *before* they reach here, so valid in-loop control flow is
+    /// unaffected.
+    fn reject_escaped_loop_control(&self, obj: Rc<Object>, span: Span) -> Rc<Object> {
+        match obj.as_ref() {
+            Object::Skip => {
+                self.runtime_error(span, "skip used outside of loop", None)
+            }
+            Object::Stop => {
+                self.runtime_error(span, "stop used outside of loop", None)
+            }
+            _ => obj,
+        }
     }
 
     fn encode_error_message(msg: &str, tag: Option<&str>) -> String {
@@ -616,10 +659,33 @@ impl Evaluator {
     }
 
     pub fn eval_program(&mut self, program: &Program, env: Rc<RefCell<Environment>>) -> Rc<Object> {
+        // Parity gate for `skip`/`stop` used as a VALUE. The bytecode compiler
+        // statically rejects a `skip`/`stop` in any consumed position (operand,
+        // Let/walrus RHS, call argument, function/program tail), regardless of
+        // whether that arm is dynamically reached. Run the SAME analysis here so
+        // the tree-walker rejects exactly the programs the VM/JIT reject — without
+        // it, a `skip`/`stop` in a dynamically-unreached arm (dead code) would run
+        // here but compile-error there. We surface ONLY the skip/stop-as-value
+        // diagnostic; any other compile error is ignored, so the tree-walker still
+        // handles constructs the bytecode compiler may not.
+        if let Err(errs) = crate::compiler::Compiler::new().compile(program) {
+            if let Some(e) = errs.iter().find(|e| {
+                e.message.contains("cannot be used as a value")
+                    || e.message.contains("used outside of loop")
+            }) {
+                return self.runtime_error(Span::new(e.line as usize, 1), &e.message, None);
+            }
+        }
+
         let mut result = Rc::new(Object::None);
 
         for stmt in &program.statements {
             result = self.eval_statement(stmt, Rc::clone(&env));
+
+            // A `skip`/`stop` that propagated past every loop up to the
+            // top-level program is invalid (VM/JIT reject it as "used outside
+            // of loop"). Convert it to a runtime error here.
+            result = self.reject_escaped_loop_control(result, Span::default());
 
             // Handle return values and errors
             match result.as_ref() {
@@ -731,6 +797,10 @@ impl Evaluator {
         match stmt {
             Statement::Let { name, value } => {
                 let val = self.eval_expression(value, Rc::clone(&env));
+                // A `skip`/`stop` that bubbled out of an `option`/expression
+                // into a Let RHS has escaped all loops: reject it (VM/JIT treat
+                // bare skip/stop outside a loop as an error).
+                let val = self.reject_escaped_loop_control(val, name.token.span);
                 if val.is_error() {
                     return val;
                 }
@@ -1224,7 +1294,24 @@ impl Evaluator {
                         }
                         fields.borrow_mut().insert(field.value.clone(), val.clone());
                         if is_self_access {
-                            env.borrow_mut().set(field.value.clone(), val.clone());
+                            // Mirror the mutation onto the method-env binding for
+                            // this field so the post-method write-back (which reads
+                            // each field from the method env) stays consistent with
+                            // the direct instance mutation above. Use `update`, not
+                            // `set`: inside an `each` loop the body runs in a fresh
+                            // per-iteration env, and a `set` here would write the new
+                            // value into that throwaway env, leaving the method-env
+                            // binding stale (0) — the write-back would then clobber
+                            // the instance's mutated value. `update` walks the scope
+                            // chain to the field's actual binding in the method env.
+                            // Fall back to `set` if no binding exists upstream.
+                            if env
+                                .borrow_mut()
+                                .update(&field.value, val.clone())
+                                .is_none()
+                            {
+                                env.borrow_mut().set(field.value.clone(), val.clone());
+                            }
                         }
                         val
                     }
@@ -3376,11 +3463,26 @@ impl Evaluator {
                     return err;
                 }
 
+                // Recursion-depth guard: return a graceful runtime error rather
+                // than overrunning the native stack (SIGABRT / rc=134).
+                if self.recursion_depth >= RECURSION_LIMIT {
+                    return self.runtime_error(
+                        call_span,
+                        "stack overflow",
+                        Some("check for infinite recursion or deeply nested calls"),
+                    );
+                }
+                self.recursion_depth += 1;
                 let result = self.eval_block(body, extended_env);
-                match result.as_ref() {
+                self.recursion_depth -= 1;
+                let ret = match result.as_ref() {
                     Object::Return(val) => Rc::clone(val),
                     _ => result,
-                }
+                };
+                // A `skip`/`stop` that escaped every loop in the body and reaches
+                // the function-return value (via `give` or an implicit tail) is
+                // not a value — reject it, matching the VM/JIT compile error.
+                self.reject_escaped_loop_control(ret, call_span)
             }
             Object::BoundMethod {
                 parameters,
@@ -3396,19 +3498,42 @@ impl Evaluator {
                     return err;
                 }
 
+                // Recursion-depth guard (see the Function arm above).
+                if self.recursion_depth >= RECURSION_LIMIT {
+                    return self.runtime_error(
+                        call_span,
+                        "stack overflow",
+                        Some("check for infinite recursion or deeply nested calls"),
+                    );
+                }
+                self.recursion_depth += 1;
                 let result = self.eval_block(body, Rc::clone(&extended_env));
+                self.recursion_depth -= 1;
 
-                // Write back any changed field values to the instance
+                // Write back any changed field values to the instance. A
+                // parameter whose name shadows a field must NOT participate in
+                // the write-back: inside the method the param wins, but the
+                // underlying field is left untouched (matching VM/JIT). Without
+                // this skip, env.get(field) would return the shadowing param's
+                // final value and clobber the field.
+                let param_names: std::collections::HashSet<&str> =
+                    parameters.iter().map(|p| p.ident.value.as_str()).collect();
                 for field_name in field_names {
+                    if param_names.contains(field_name.as_str()) {
+                        continue;
+                    }
                     if let Some(val) = extended_env.borrow().get(field_name) {
                         instance_fields.borrow_mut().insert(field_name.clone(), val);
                     }
                 }
 
-                match result.as_ref() {
+                let ret = match result.as_ref() {
                     Object::Return(val) => Rc::clone(val),
                     _ => result,
-                }
+                };
+                // See the Function arm: a `skip`/`stop` escaping to the method's
+                // return value is rejected, matching VM/JIT.
+                self.reject_escaped_loop_control(ret, call_span)
             }
             Object::StructDef { name, fields, .. } => {
                 // Positional instantiation: Person("Alice", 30)

@@ -1417,6 +1417,10 @@ fn transfer(
             next.stack.pop();
         }
         OpCode::CloseUpvalue => {}
+        // Closes a buried slot's upvalue in place; no stack effect. (Functions
+        // containing it are rejected by the JIT scan, so this branch is never
+        // actually reached during analysis — it exists for match exhaustiveness.)
+        OpCode::CloseUpvalueAt => {}
 
         // Control flow.
         OpCode::Jump => {
@@ -1755,6 +1759,7 @@ fn opcode_len(op: OpCode, code: &[u8], ip: usize, chunk: &Chunk) -> usize {
         | OpCode::DefineGlobal
         | OpCode::GetUpvalue
         | OpCode::SetUpvalue
+        | OpCode::CloseUpvalueAt
         | OpCode::Jump
         | OpCode::JumpIfFalse
         | OpCode::JumpIfTrue

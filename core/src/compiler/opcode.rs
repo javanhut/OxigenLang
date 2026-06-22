@@ -74,6 +74,16 @@ pub enum OpCode {
     SetUpvalue,
     /// Close the topmost open upvalue.
     CloseUpvalue,
+    /// Close any open upvalue captured at a specific stack slot, snapshotting
+    /// its live value from that slot. Unlike `CloseUpvalue`, this does NOT
+    /// require the captured value on top of the stack and does NOT pop — it
+    /// operates on the buried slot in place. Operand: u16 stack slot.
+    ///
+    /// Used by block-as-expression cleanup when the block's FLOOR local is
+    /// itself captured by a surviving closure: the block's result sits ABOVE
+    /// the floor local, so the floor's upvalue must be closed (snapshotted)
+    /// before the result is stashed into that slot.
+    CloseUpvalueAt,
 
     // --- Control Flow ---
     /// Unconditional forward jump. Operand: u16 offset.

@@ -338,7 +338,9 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
 
 fn builtin_print(args: Vec<Rc<Object>>) -> Rc<Object> {
     let output: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-    println!("{}", output.join(" "));
+    // `print` does NOT append a newline (that's `println`); match the VM/JIT
+    // (vm/builtins.rs `builtin_print` uses `print!`) so file output is identical.
+    print!("{}", output.join(" "));
     Rc::new(Object::None)
 }
 

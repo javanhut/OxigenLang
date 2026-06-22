@@ -151,35 +151,52 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
 
 fn run_file(file_path: &str, script_args: &[String]) {
     let contents = read_source(file_path);
-
-    let lexer = Lexer::new(&contents);
-    let mut parser = Parser::new(lexer, &contents);
-    let program = parser.parse_program();
-
-    let errors = parser.errors();
-    if !errors.is_empty() {
-        eprintln!("{}", parser.format_errors());
-        std::process::exit(1);
-    }
-
     let file_path_buf = PathBuf::from(file_path)
         .canonicalize()
         .expect("Could not resolve file path");
-    let env = Rc::new(RefCell::new(Environment::new()));
-    let mut evaluator = Evaluator::new_with_path(file_path_buf);
-    evaluator.set_source(&contents);
-    evaluator.set_script_args(script_args);
-    let result = evaluator.eval_program(&program, env);
 
-    match result.as_ref() {
-        object::Object::None => {}
-        object::Object::Error(msg) => {
-            eprintln!("{}", msg);
-            std::process::exit(1);
+    // Run parse/eval on a large-stack thread so the tree-walker's RECURSION_LIMIT
+    // depth guard fires gracefully (rc=1) instead of the default 8MB CLI main
+    // thread overflowing first (rc=134). Mirrors run_file_vm. Rc-backed
+    // Evaluator/Environment/Program are created INSIDE the closure so only Send
+    // values (contents/file_path_buf/script_args) cross the thread boundary.
+    const STACK_SIZE: usize = 256 << 20; // 256 MB
+    let run = {
+        let script_args: Vec<String> = script_args.to_vec();
+        move || {
+            let lexer = Lexer::new(&contents);
+            let mut parser = Parser::new(lexer, &contents);
+            let program = parser.parse_program();
+
+            let errors = parser.errors();
+            if !errors.is_empty() {
+                eprintln!("{}", parser.format_errors());
+                std::process::exit(1);
+            }
+
+            let env = Rc::new(RefCell::new(Environment::new()));
+            let mut evaluator = Evaluator::new_with_path(file_path_buf);
+            evaluator.set_source(&contents);
+            evaluator.set_script_args(&script_args);
+            let result = evaluator.eval_program(&program, env);
+
+            match result.as_ref() {
+                object::Object::None => {}
+                object::Object::Error(msg) => {
+                    eprintln!("{}", msg);
+                    std::process::exit(1);
+                }
+                object::Object::ErrorValue { .. } => println!("{}", result),
+                _ => println!("{}", result),
+            }
         }
-        object::Object::ErrorValue { .. } => println!("{}", result),
-        _ => println!("{}", result),
-    }
+    };
+    std::thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(run)
+        .expect("failed to spawn execution thread")
+        .join()
+        .expect("execution thread panicked");
 }
 
 // ── Terminal colors for `oxigen test` output ──
