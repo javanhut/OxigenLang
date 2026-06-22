@@ -1,21 +1,24 @@
 # OxigenLang
 
-OxigenLang is a modern, lightweight, interpreted programming language implemented in Rust. It features a clean, expressive syntax, support for pattern matching, a module system with a standard library, and an optional indentation-based block syntax.
+OxigenLang is a modern, lightweight, interpreted programming language implemented in Rust. It features a clean, expressive syntax, pattern matching, enums, a two-tier error model, a built-in test runner, a module system with a standard library, and an optional indentation-based block syntax.
 
 ## Features
 
 - **Module System**: Import standard library modules or local files with `introduce`/`intro`. Namespace imports, selective imports, and module caching.
-- **Standard Library**: 11 built-in modules — math, strings, array, io, os, time, random, path, json, toml, and net (HTTP client with HTTPS support).
+- **Standard Library**: 18 modules — math, strings, array, io, os, path, time, datetime, random, json, toml, encoding, hash, regex, net (HTTP/HTTPS client), ansi (terminal colors), parse_args (CLI flag parsing), and result (Error/Value helpers).
 - **Flexible Block Styles**: Choose between traditional brace-based blocks or Python-style indentation blocks with the `#[indent]` directive.
 - **Conditional Expressions**: Multi-arm `option` blocks, ternary shorthand, `unless` inverse conditionals, `unless ... then ...` fallback expressions, `when`/`unless` postfix guards, and short-circuit `and`/`or` logical operators.
 - **Pattern Matching**: Define reusable patterns with the `pattern` keyword and match against them with `choose`.
-- **Rich Type System**: Dynamic typing by default with optional type annotations for locking types and controlling mutability. Four declaration forms give precise control over value and type mutability.
+- **Enums**: Rust-style enumerations with unit, tuple, and struct variants, explicit or auto-assigned discriminants, and field access by name or index.
+- **Rich Type System**: Dynamic typing by default with optional type annotations for locking types and controlling mutability. Four declaration forms give precise control over value and type mutability, and parameter type annotations are enforced on the default bytecode backend.
 - **Data Types**: Integers, Floats, Strings (with escape sequences and interpolation), Characters, Booleans, Arrays, Bytes, Uints, Tuples, Maps, Sets, and `None`.
 - **Structs**: Composite data types with typed fields, single-inheritance, methods via `includes` blocks, `self` access, hidden fields, and dot-chaining.
 - **First-Class Functions**: Named and anonymous functions, closures, typed parameters, default values, optional parameters, and implicit/explicit returns.
 - **Unpacking**: Destructure arrays and tuples into multiple variables with `a, b := [1, 2]`.
 - **Index Assignment**: Set map keys and array elements directly with `m[key] = value` and `arr[i] = value`.
 - **Built-in Functions**: Built-in functions for I/O, collection manipulation, type conversion, and introspection.
+- **Two-Tier Error Model**: Propagating errors that halt execution alongside error *values* you can pass around — construct them with `<Error>`/`<Error<tag>>`, wrap success with `<Value>`, normalize fallible calls with `<type<Error || Value>>`, and inspect them with the `is_error`/`is_value` built-ins and the `result` module.
+- **Testing**: A built-in test runner — write `<test>("name") { ... }` blocks with `expect(...)` matchers and run them with `oxigen test`. Exits non-zero on failure for CI.
 - **REPL**: Interactive shell for quick experimentation with persistent state across lines.
 
 ## Installation
@@ -74,17 +77,17 @@ cargo run -p oxigen --              # starts the REPL
 cargo run -p oxigen -- --version    # print version
 cargo run -p oxigen -- fmt file.oxi # format a file
 cargo run -p oxigen -- check file.oxi # parse and report errors as JSON
+cargo run -p oxigen -- test         # discover and run every *_test.oxi file
 ```
 
 ### Optional JIT (experimental)
 
-OxigenLang ships with a baseline Cranelift-backed JIT that's off by
-default. It now beats CPython 3.14 on *every* bench in the suite
-(4.6×–19.8×), including the recursion and method-dispatch cases that
-previously trailed — closed by self-recursion direct calls and
-specialized register-args entries. It's kept experimental pending
-broader real-world hardening. Build it in with the `jit` feature and
-opt in at run time with `--jit`:
+OxigenLang ships with a baseline Cranelift-backed JIT that's compiled
+out by default. It's competitive with or faster than CPython 3.14
+across the benchmark suite, with the largest wins on tight loops and
+arithmetic (see `benchmark_reports/` for the latest numbers on your
+machine). It's kept experimental pending broader real-world hardening.
+Build it in with the `jit` feature and opt in at run time with `--jit`:
 
 ```bash
 cargo build --release --features jit -p oxigen
@@ -167,6 +170,12 @@ Person includes {
     fun is_adult() { self.age >= 18 }
 }
 
+enum Role {
+    Guest
+    Member
+    Admin
+}
+
 pattern is_even(n) when n % 2 == 0
 
 fun connect(host <str>, port <int> = 8080, tls? <bool>) {
@@ -177,6 +186,10 @@ main {
     p <Person> := Person("Alice", 30)
     println(p.greet())
     println(p.is_adult())
+
+    // Enums
+    role := Role.Admin
+    println("{p.name} is {role.name}")
 
     each i in range(6) {
         choose i {
@@ -251,6 +264,32 @@ If Oxigen is on your `PATH`, `#!/usr/bin/env oxigen` also works.
 
 Oxigen also accepts a top-of-file `#[location=/path/to/oxigen]` directive and preserves it during formatting. That directive is file metadata for tooling and should match the interpreter path you expect, but direct execution still depends on the real `#!` line because the OS only reads the shebang.
 
+## Testing
+
+Oxigen has a built-in test runner. Write `<test>("name") { ... }` blocks with
+`expect(...)` matchers — `expect` is provided automatically, no import needed:
+
+```oxi
+fun add(a <int>, b <int>) { a + b }
+
+<test>("addition works") {
+    expect(add(2, 3)).eq(5)
+    expect([1, 2, 3]).contains(2)
+}
+```
+
+Run them with `oxigen test`, which discovers every `*_test.oxi` file recursively:
+
+```bash
+oxigen test                 # run every *_test.oxi under the cwd
+oxigen test math_test.oxi   # run a single file
+oxigen test ./tests         # run every *_test.oxi under a directory
+```
+
+A test passes when its body runs without error and fails at the first failing
+matcher. `oxigen test` exits non-zero if any test fails, so it works in CI. See
+[docs/testing.md](docs/testing.md) for the full matcher list.
+
 ## Documentation
 
 For detailed information, see the [docs](docs/) directory:
@@ -268,10 +307,12 @@ For detailed information, see the [docs](docs/) directory:
 | [Functions](docs/functions.md) | Named/anonymous functions, closures, typed parameters |
 | [Pattern Matching](docs/pattern_matching.md) | Patterns, choose expressions, inline patterns |
 | [Structs](docs/structs.md) | Fields, methods, inheritance, hidden fields |
+| [Enums](docs/enums.md) | Unit, tuple, and struct variants; discriminants; field access |
 | [Type System](docs/type_system.md) | Type annotations, conversions, mutability control |
 | [Imports and Modules](docs/imports.md) | The `introduce` keyword and module system |
 | [Built-in Functions](docs/builtins.md) | Complete reference for all built-ins |
-| [Standard Library](docs/stdlib.md) | Full reference for all 11 stdlib modules |
+| [Standard Library](docs/stdlib.md) | Full reference for the stdlib modules |
+| [Testing](docs/testing.md) | The built-in test runner, `expect` matchers, `oxigen test` |
 | [JIT Architecture](docs/JIT_ARCHITECTURE.md) | **Experimental** — baseline Cranelift JIT: how to build it in, runtime flags, supported opcodes, safety invariants, benchmark status vs CPython |
 
 ## License
