@@ -194,6 +194,7 @@ const (
 
 const (
 	SymbolKindModule   = 2
+	SymbolKindEnum     = 10
 	SymbolKindStruct   = 23
 	SymbolKindMethod   = 6
 	SymbolKindField    = 8

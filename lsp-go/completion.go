@@ -10,7 +10,9 @@ type keywordInfo struct {
 var keywords = []keywordInfo{
 	{"fun", "Define a function"},
 	{"struct", "Define a struct"},
-	{"contains", "Define methods for a struct"},
+	{"enum", "Define an enumeration"},
+	{"includes", "Add methods to a struct: StructName includes { ... }"},
+	{"main", "Top-level entry block: main { ... } (skipped under `oxigen test`)"},
 	{"introduce", "Import a module"},
 	{"intro", "Import a module (shorthand)"},
 	{"from", "Selective import from a module"},
@@ -21,7 +23,7 @@ var keywords = []keywordInfo{
 	{"choose", "Pattern matching expression"},
 	{"pattern", "Define a named pattern"},
 	{"when", "Postfix conditional guard"},
-	{"guard", "Error recovery expression"},
+	{"guard", "Error recovery expression (<guard<Error<tag>>>)"},
 	{"fail", "Propagate an error"},
 	{"give", "Return a value from a function"},
 	{"skip", "Skip to next loop iteration"},
@@ -33,10 +35,21 @@ var keywords = []keywordInfo{
 	{"then", "Consequence in postfix conditional"},
 	{"as", "Type conversion"},
 	{"hide", "Mark struct field as private"},
+	{"hidden", "Mark a struct field as private (StructName includes { hidden field })"},
 	{"self", "Reference to current struct instance"},
 	{"True", "Boolean true literal"},
 	{"False", "Boolean false literal"},
 	{"None", "Absence of a value"},
+}
+
+// Angle-bracket constructs offered after `<`: the error/value model wrappers
+// and the test block, alongside the plain type names.
+var angleConstructs = []keywordInfo{
+	{"Error", "Error wrapper: <Error>(\"msg\") or tagged <Error<tag>>(\"msg\")"},
+	{"Value", "Value wrapper: <Value>(expr) — the success arm of the error/value model"},
+	{"fail", "Raise an error: <fail>(\"msg\") — short-circuits the current body"},
+	{"guard", "Recover from an error: <guard<Error<tag>>> { ... }"},
+	{"test", "Test block: <test>(\"name\") { ... } (run with `oxigen test`)"},
 }
 
 var builtins = []keywordInfo{
@@ -82,6 +95,7 @@ var typeNames = []keywordInfo{
 	{"map", "Key-value pairs"},
 	{"set", "Unique unordered collection"},
 	{"generic", "Dynamic type (any)"},
+	{"Error||Value", "A value that is either an Error or a Value (error/value model)"},
 }
 
 type completionContext int
@@ -232,12 +246,22 @@ func generalCompletions() []CompletionItem {
 
 func typeCompletions() []CompletionItem {
 	tpKind := CompletionKindTypeParameter
-	items := make([]CompletionItem, 0, len(typeNames))
+	kwKind := CompletionKindKeyword
+	items := make([]CompletionItem, 0, len(typeNames)+len(angleConstructs))
 	for _, t := range typeNames {
 		items = append(items, CompletionItem{
 			Label:  t.name,
 			Kind:   &tpKind,
 			Detail: t.detail,
+		})
+	}
+	// `<` also begins the error/value model wrappers and a `<test>` block, not
+	// only a type annotation.
+	for _, c := range angleConstructs {
+		items = append(items, CompletionItem{
+			Label:  c.name,
+			Kind:   &kwKind,
+			Detail: c.detail,
 		})
 	}
 	return items
