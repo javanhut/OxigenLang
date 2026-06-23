@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::ast::{Expression, Statement};
 use crate::compiler::Compiler;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
@@ -102,15 +103,39 @@ pub fn is_worker() -> bool {
     IS_WORKER.with(|w| w.get())
 }
 
-/// Build a VM with the program's top-level function definitions registered but
-/// without executing `main`'s body.
+/// A top-level statement a worker needs in order to resolve spawned functions:
+/// type/function/pattern/import declarations only. Everything else (the `main`
+/// block, bare expression statements, value bindings, control flow) is the
+/// program's *work* and belongs to the main thread — running it during worker
+/// init would re-execute the driver (e.g. a top-level `spawn`) on every worker
+/// and recurse. Function *bodies* are kept; they only run when the task calls
+/// them, not at init.
+fn is_declaration(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::StructDef { .. }
+        | Statement::EnumDef { .. }
+        | Statement::IncludesDef { .. }
+        | Statement::Pattern { .. }
+        | Statement::Introduce { .. } => true,
+        Statement::Let { value, .. } | Statement::TypedLet { value, .. } => {
+            matches!(value, Expression::FunctionLiteral { .. })
+        }
+        _ => false,
+    }
+}
+
+/// Build a VM with the program's top-level declarations (functions, types,
+/// patterns, imports) registered but no executable top-level code run.
 fn build_worker_vm(src: &str) -> Result<VM, String> {
     let lexer = Lexer::new(src);
     let mut parser = Parser::new(lexer, src);
-    let program = parser.parse_program();
+    let mut program = parser.parse_program();
     if !parser.errors().is_empty() {
         return Err(format!("worker parse error: {}", parser.format_errors()));
     }
+    // Workers load declarations only — drop all executable top-level statements
+    // so no top-level `spawn`/`join`/side effect ever runs at worker init.
+    program.statements.retain(is_declaration);
     let compiler = Compiler::new();
     let function = compiler
         .compile(&program)

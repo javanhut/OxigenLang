@@ -80,7 +80,7 @@ Legend: ☐ not started · ◐ in progress · ✅ landed · ❌ attempted & aban
 | **Phase 0 — Plumbing** | | | | |
 | P0.1 | `Sendable` + `detach`/`attach` (Int/Float/Bool/Str/Arr/Unit subset) | ✅ | — | `core/src/concurrent.rs` |
 | P0.2 | Pool + worker loop + queue (std `mpsc` + `Arc<Mutex<Receiver>>`) | ✅ | P0.1 | `core/src/concurrent.rs` |
-| P0.3 | Load defs without `main` | ◐ | — | `core/src/vm/mod.rs` |
+| P0.3 | Load defs without `main` (declarations-only AST filter) | ✅ | — | `core/src/concurrent.rs` |
 | P0.4 | `VM::call_with_args` + `VM::get_global` | ✅ | P0.1 | `core/src/vm/mod.rs` |
 | **Phase 1 — Parallel-compute win (go/no-go)** | | | | |
 | P1.1 | Task handle — `Value::Uint(id)` + thread-local table (no new `Value` variant) | ✅ | P0.* | `core/src/concurrent.rs` |
@@ -108,7 +108,7 @@ A time-boxed YAGNI spike proved the architecture end-to-end:
 
 - **~5.1× speedup** on 8 `spawn`/`join` tasks (prime-counting, trial division) on a 14-core box: sequential ~5006 ms → parallel ~984 ms (debug build). Totals match exactly — correctness verified.
 - **Footprint:** 265 lines in `core/src/concurrent.rs` + ~29 lines across existing files (`lib.rs`, `vm/builtins.rs`, `vm/mod.rs`, cli `main.rs`). **No new dependency** (std `mpsc` + `Arc<Mutex<Receiver>>`); no `Value` variant, no opcode, no parser change.
-- **Known sharp edge (→ finish P0.3):** `spawn`/`join` driver code must live inside `main { … }`. Workers build their VM by re-running the source with `is_main_context = false`, which skips the `main` body (`Main` opcode, `vm/mod.rs:2137`) but **not** free-standing top-level statements — so a top-level `spawn` re-executes during worker init and recurses until the worker stack overflows. Idiomatic Oxigen already puts driver code in `main`, so this is a documented constraint for now; the proper fix is P0.3 done right (register `fun`/`struct`/`pattern`/`introduce` declarations only, skip all top-level execution).
+- **~~Known sharp edge~~ → fixed (P0.3):** top-level `spawn`/`join` driver code no longer needs a `main { … }` block. Workers now build their VM from a **declarations-only** filter of the AST (`is_declaration` in `concurrent.rs`: functions, structs, enums, patterns, imports) — all executable top-level statements are dropped, so no top-level `spawn` can run at worker init and the recursion is structurally impossible. Verified: top-level driver and main-block driver both work; transitive function calls and imports survive the filter; 478 core tests green.
 
 ---
 
@@ -235,4 +235,4 @@ Only if profiling or usage asks: auto-join-on-use sugar; closure transfer (funct
 - **`spawn` keyword is a placeholder.** Final surface syntax undecided; backend is syntax-agnostic. The spike ships them as builtins, so `spawn(fn, args…)` is a plain call today.
 - **Spike used builtins + `Value::Uint` handles, not opcodes + `Value::Task`.** Faster to land and arguably more YAGNI (zero hot-path churn). Revisit only if we want auto-join-on-use or stronger handle typing (P3.1).
 - **`call_with_args` reuses the existing `call_value`/`execute_until` path** rather than duplicating call machinery (DRY).
-- **P0.3 is only partially done (◐):** worker VM skips the `main` body but not free-standing top-level statements. Finish before relying on top-level driver code (see Spike results).
+- **P0.3 done (✅):** worker VM is built from a declarations-only filter of the AST (`is_declaration` in `concurrent.rs`) — keeps function/type/pattern/import decls, drops `main` and all executable top-level statements. Top-level driver code now works.
