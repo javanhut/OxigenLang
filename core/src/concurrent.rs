@@ -75,12 +75,25 @@ struct Task {
     reply: mpsc::Sender<Result<Sendable, String>>,
 }
 
-static TASK_TX: OnceLock<mpsc::Sender<Task>> = OnceLock::new();
+/// The worker pool: the task sender plus what's needed to grow it on demand.
+struct Pool {
+    tx: mpsc::Sender<Task>,
+    rx: Arc<Mutex<mpsc::Receiver<Task>>>,
+    src: String,
+}
+
+static POOL: OnceLock<Pool> = OnceLock::new();
 static SRC: OnceLock<String> = OnceLock::new();
 
 /// Count of tasks handed to the pool but not yet finished by a worker. Drained
 /// at program exit so fire-and-forget spawns aren't killed when the process ends.
 static OUTSTANDING: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of live worker threads. The pool grows toward `MAX_WORKERS` when every
+/// worker is busy, so I/O fan-out isn't capped at core count (blocked threads
+/// park for free); it never shrinks.
+static WORKERS: AtomicUsize = AtomicUsize::new(0);
+const MAX_WORKERS: usize = 256;
 
 /// Worker stack size — mirror the CLI's large execution stack.
 const STACK_SIZE: usize = 256 << 20; // 256 MB
@@ -175,9 +188,44 @@ fn run_task(vm: &mut VM, func: &str, args: Vec<Sendable>) -> Result<Sendable, St
     detach(&result)
 }
 
-/// Lazily start the worker pool on first spawn.
-fn ensure_pool() -> &'static mpsc::Sender<Task> {
-    TASK_TX.get_or_init(|| {
+/// Spawn one worker thread: build its VM from the program's declarations, then
+/// pull and run tasks until the queue closes.
+fn spawn_worker(rx: Arc<Mutex<mpsc::Receiver<Task>>>, src: String) {
+    let id = WORKERS.fetch_add(1, Ordering::SeqCst);
+    let res = std::thread::Builder::new()
+        .name(format!("oxi-worker-{}", id))
+        .stack_size(STACK_SIZE)
+        .spawn(move || {
+            IS_WORKER.with(|w| w.set(true));
+            let mut vm = match build_worker_vm(&src) {
+                Ok(vm) => vm,
+                Err(_) => {
+                    WORKERS.fetch_sub(1, Ordering::SeqCst);
+                    return;
+                }
+            };
+            loop {
+                let task = {
+                    let guard = rx.lock().unwrap();
+                    guard.recv()
+                };
+                let task = match task {
+                    Ok(t) => t,
+                    Err(_) => break, // channel closed
+                };
+                let result = run_task(&mut vm, &task.func, task.args);
+                let _ = task.reply.send(result);
+                OUTSTANDING.fetch_sub(1, Ordering::SeqCst);
+            }
+        });
+    if res.is_err() {
+        WORKERS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Lazily start the worker pool on first spawn, seeded with one worker per core.
+fn ensure_pool() -> &'static Pool {
+    POOL.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<Task>();
         let rx = Arc::new(Mutex::new(rx));
         let src = SRC.get().cloned().unwrap_or_default();
@@ -185,36 +233,10 @@ fn ensure_pool() -> &'static mpsc::Sender<Task> {
         let n = std::thread::available_parallelism()
             .map(|v| v.get())
             .unwrap_or(4);
-
-        for i in 0..n {
-            let rx = Arc::clone(&rx);
-            let src = src.clone();
-            std::thread::Builder::new()
-                .name(format!("oxi-worker-{}", i))
-                .stack_size(STACK_SIZE)
-                .spawn(move || {
-                    IS_WORKER.with(|w| w.set(true));
-                    let mut vm = match build_worker_vm(&src) {
-                        Ok(vm) => vm,
-                        Err(_) => return,
-                    };
-                    loop {
-                        let task = {
-                            let guard = rx.lock().unwrap();
-                            guard.recv()
-                        };
-                        let task = match task {
-                            Ok(t) => t,
-                            Err(_) => break, // channel closed
-                        };
-                        let result = run_task(&mut vm, &task.func, task.args);
-                        let _ = task.reply.send(result);
-                        OUTSTANDING.fetch_sub(1, Ordering::SeqCst);
-                    }
-                })
-                .expect("failed to spawn worker thread");
+        for _ in 0..n {
+            spawn_worker(Arc::clone(&rx), src.clone());
         }
-        tx
+        Pool { tx, rx, src }
     })
 }
 
@@ -265,14 +287,20 @@ pub fn builtin_spawn(args: &[Value]) -> Value {
         };
         let _ = reply_tx.send(result);
     } else {
-        let tx = ensure_pool();
+        let pool = ensure_pool();
         let task = Task {
             func: func_name,
             args: sendable_args,
             reply: reply_tx,
         };
-        OUTSTANDING.fetch_add(1, Ordering::SeqCst);
-        if tx.send(task).is_err() {
+        let pending = OUTSTANDING.fetch_add(1, Ordering::SeqCst) + 1;
+        // Grow the pool when every worker is busy so I/O-bound fan-out isn't
+        // capped at core count. Blocked threads park for free.
+        let workers = WORKERS.load(Ordering::SeqCst);
+        if pending > workers && workers < MAX_WORKERS {
+            spawn_worker(Arc::clone(&pool.rx), pool.src.clone());
+        }
+        if pool.tx.send(task).is_err() {
             OUTSTANDING.fetch_sub(1, Ordering::SeqCst);
             return Value::Error(Rc::new("spawn(): worker pool unavailable".to_string()));
         }
