@@ -95,6 +95,8 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
             let mut parser = Parser::new(lexer, &contents);
             let program = parser.parse_program();
 
+            oxigen_core::concurrent::set_src(contents.clone());
+
             let errors = parser.errors();
             if !errors.is_empty() {
                 eprintln!("{}", parser.format_errors());

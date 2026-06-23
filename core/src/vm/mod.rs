@@ -359,6 +359,30 @@ impl VM {
         Ok(self.pop())
     }
 
+    /// Look up a global value by name (used by the concurrency worker pool to
+    /// resolve a spawned function by name). Returns a clone if present.
+    pub fn get_global(&self, name: &str) -> Option<Value> {
+        self.globals.get(name).cloned()
+    }
+
+    /// Call a callee `Value` (closure or builtin) with positional `args` from
+    /// external Rust code, driving the VM to completion and returning the
+    /// result. Used by the concurrency worker pool.
+    pub fn call_with_args(&mut self, callee: Value, args: Vec<Value>) -> Result<Value, VMError> {
+        let depth = self.frames.len();
+        let arg_count = args.len();
+        self.push(callee);
+        for a in args {
+            self.push(a);
+        }
+        self.call_value(arg_count, &[])?;
+        // If the call pushed a frame (closure), drive it to completion.
+        if self.frames.len() > depth {
+            self.execute_until(depth)?;
+        }
+        Ok(self.pop())
+    }
+
     // ── Opcode handlers (shared between interpreter and JIT runtime) ──
 
     /// Read the name string at constant index `name_idx`. The compiler

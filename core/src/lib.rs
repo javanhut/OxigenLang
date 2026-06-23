@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod compiler;
+pub mod concurrent;
 pub mod evaluator;
 pub mod formatter;
 pub mod jit;
