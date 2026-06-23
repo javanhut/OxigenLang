@@ -3556,22 +3556,64 @@ impl Evaluator {
                 self.reject_escaped_loop_control(ret, call_span)
             }
             Object::StructDef { name, fields, .. } => {
-                // Positional instantiation: Person("Alice", 30)
-                if args.len() != fields.len() {
+                // Instantiation by position and/or name:
+                //   Person("Alice", 30)  /  Person(name="Alice", age=30)
+                let total_provided = args.len() + named_args.len();
+                if total_provided != fields.len() {
                     return self.runtime_error(
                         call_span,
                         &format!(
                             "struct {} has {} fields, got {} arguments",
                             name,
                             fields.len(),
-                            args.len()
+                            total_provided
                         ),
                         None,
                     );
                 }
 
+                // Reject named args that don't name a field or collide with a
+                // value already supplied positionally.
+                for (arg_name, _) in &named_args {
+                    match fields.iter().position(|(f, _, _)| f == arg_name) {
+                        Some(pos) if pos < args.len() => {
+                            return self.runtime_error(
+                                call_span,
+                                &format!(
+                                    "field '{}' was given both positionally and by name",
+                                    arg_name
+                                ),
+                                None,
+                            );
+                        }
+                        Some(_) => {}
+                        None => {
+                            return self.runtime_error(
+                                call_span,
+                                &format!("unknown field name: '{}'", arg_name),
+                                None,
+                            );
+                        }
+                    }
+                }
+
                 let mut instance_fields = HashMap::new();
-                for ((field_name, expected_type, _), arg) in fields.iter().zip(args.iter()) {
+                for (i, (field_name, expected_type, _)) in fields.iter().enumerate() {
+                    let arg = if i < args.len() {
+                        Rc::clone(&args[i])
+                    } else if let Some((_, v)) =
+                        named_args.iter().find(|(n, _)| n == field_name)
+                    {
+                        Rc::clone(v)
+                    } else {
+                        // Reachable only when a named arg is duplicated, leaving
+                        // this field uncovered despite the count matching.
+                        return self.runtime_error(
+                            call_span,
+                            &format!("missing field: '{}'", field_name),
+                            None,
+                        );
+                    };
                     let actual_type = arg.effective_type_name();
                     if !type_matches(expected_type, &actual_type) {
                         return self.runtime_error(
@@ -3586,7 +3628,7 @@ impl Evaluator {
                             )),
                         );
                     }
-                    instance_fields.insert(field_name.clone(), Rc::clone(arg));
+                    instance_fields.insert(field_name.clone(), arg);
                 }
 
                 Rc::new(Object::StructInstance {
