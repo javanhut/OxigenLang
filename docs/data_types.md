@@ -40,6 +40,50 @@ name := 'world'
 
 Type keyword: `str`. Zero value: `""` (empty string).
 
+Single- and double-quoted strings are **single-line**: a raw newline before the closing quote is an error (write newlines with the `\n` escape instead).
+
+#### Multi-line Strings
+
+Wrap text in triple quotes — `"""..."""` or `'''...'''` — to write a string that spans multiple lines. Raw newlines inside the string are kept verbatim, so you don't need `\n`:
+
+```oxi
+poem := """
+Roses are red,
+Violets are blue.
+"""
+println(poem)
+```
+
+The content is taken **literally**, including the leading newline right after the opening `"""` and the trailing newline before the closing `"""`. Put the text on the same line as the fences to avoid them:
+
+```oxi
+banner := """+----------+
+|  Oxigen  |
++----------+"""
+```
+
+Triple-quoted strings support the **same interpolation** and escape sequences as single-line strings, and an interpolation expression may itself span multiple lines:
+
+```oxi
+name := "world"
+x := 10
+y := 20
+
+msg := """
+Hello, {name}!
+{x} + {y} = {x + y}
+"""
+println(msg)
+
+// Interpolation expressions can span lines too:
+total := """sum = {
+    x +
+    y
+}"""
+```
+
+Both `"""` and `'''` behave identically; choose whichever lets you embed the other quote style without escaping. A triple-quoted string is only "unterminated" if end-of-file is reached before its closing fence.
+
 #### String Operations
 
 - **Concatenation**: Use `+` to join strings:

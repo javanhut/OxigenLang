@@ -84,3 +84,77 @@ fn test_import_test_roundtrip() {
     assert_reparseable(&source, "import_test");
     assert_idempotent(&source, "import_test");
 }
+
+#[test]
+fn test_multiline_strings_roundtrip() {
+    let source = example_source("multiline_strings.oxi");
+    assert_reparseable(&source, "multiline_strings");
+    assert_idempotent(&source, "multiline_strings");
+}
+
+#[test]
+fn test_multiline_string_keeps_triple_quotes_and_raw_newlines() {
+    // A triple-quoted string must format back to triple quotes with its raw
+    // newlines intact — not collapse to a single-line `"...\n..."`.
+    let source = "x := \"\"\"\nline one\nline two\n\"\"\"\n";
+    let formatted = format_source(source);
+
+    assert!(
+        formatted.contains("\"\"\""),
+        "triple quotes not preserved:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains("line one\nline two"),
+        "raw newlines not preserved:\n{}",
+        formatted
+    );
+    assert!(
+        !formatted.contains("\\n"),
+        "newlines inside a triple-quoted string must stay raw:\n{}",
+        formatted
+    );
+    assert_reparseable(source, "multiline_decl");
+    assert_idempotent(source, "multiline_decl");
+}
+
+#[test]
+fn test_single_line_string_is_not_promoted_to_triple() {
+    // Regression guard: a single-line string written with `\n` escapes must
+    // stay single-line and escaped — only triple-quoted sources format as
+    // multi-line strings.
+    let source = "x := \"a\\nb\"\n";
+    let formatted = format_source(source);
+
+    assert!(
+        !formatted.contains("\"\"\""),
+        "single-line string must not become triple-quoted:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains("\"a\\nb\""),
+        "escaped single-line form not preserved:\n{}",
+        formatted
+    );
+}
+
+#[test]
+fn test_multiline_string_with_interpolation_roundtrip() {
+    // Interpolation inside a triple-quoted string round-trips, keeping the
+    // triple quotes and the literal newlines around the `{...}` expression.
+    let source = "msg := \"\"\"\nHello, {name}!\nBye.\n\"\"\"\n";
+    let formatted = format_source(source);
+
+    assert!(
+        formatted.contains("\"\"\""),
+        "triple quotes not preserved for interpolated string:\n{}",
+        formatted
+    );
+    assert!(
+        formatted.contains("{name}"),
+        "interpolation not preserved:\n{}",
+        formatted
+    );
+    assert_reparseable(source, "multiline_interp");
+    assert_idempotent(source, "multiline_interp");
+}

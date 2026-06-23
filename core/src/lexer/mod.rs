@@ -322,8 +322,14 @@ impl Lexer {
                 _ => self.single_with_span(TokenType::FSlash, span),
             },
             '\\' => self.single_with_span(TokenType::BSlash, span),
-            '"' => self.read_string('"', span),
-            '\'' => self.read_string('\'', span),
+            '"' => {
+                let triple = self.at_triple_quote('"');
+                self.read_string('"', triple, span)
+            }
+            '\'' => {
+                let triple = self.at_triple_quote('\'');
+                self.read_string('\'', triple, span)
+            }
             '`' => self.read_char_literal(span),
             c if c.is_ascii_digit() => return self.read_number(span),
             c if is_ident_start(c) => return self.read_ident(span),
@@ -453,20 +459,60 @@ impl Lexer {
         }
     }
 
-    fn read_string(&mut self, delimiter: char, span: Span) -> Token {
-        self.read_char(); // opening quote
+    /// True when the scanner sits at a run of three `delimiter` chars — the
+    /// opening or closing fence of a triple-quoted string (`"""` or `'''`).
+    fn at_triple_quote(&self, delimiter: char) -> bool {
+        self.ch == delimiter
+            && self.peek_char() == delimiter
+            && self.input.get(self.position + 2).copied() == Some(delimiter)
+    }
+
+    /// True when the scanner is positioned at the delimiter run that closes a
+    /// string of this kind: one quote for a single-line string, three for a
+    /// triple-quoted one.
+    fn at_closing_delimiter(&self, delimiter: char, triple: bool) -> bool {
+        if triple {
+            self.at_triple_quote(delimiter)
+        } else {
+            self.ch == delimiter
+        }
+    }
+
+    /// True when scanning of the string body should stop: at the closing
+    /// delimiter, at EOF, or — for single-line strings only — at a raw newline
+    /// (which makes the string unterminated). Triple-quoted strings span
+    /// newlines and only end at their closing fence or EOF.
+    fn at_string_body_end(&self, delimiter: char, triple: bool) -> bool {
+        self.ch == '\0'
+            || self.at_closing_delimiter(delimiter, triple)
+            || (!triple && self.ch == '\n')
+    }
+
+    /// Consume the run of delimiter chars that opens or closes a string: one
+    /// quote normally, three for a triple-quoted string.
+    fn consume_quote_fence(&mut self, triple: bool) {
+        self.read_char();
+        if triple {
+            self.read_char();
+            self.read_char();
+        }
+    }
+
+    fn read_string(&mut self, delimiter: char, triple: bool, span: Span) -> Token {
+        self.consume_quote_fence(triple); // opening quote(s)
 
         // Check if this string contains interpolation
-        let has_interp = self.string_has_interpolation(delimiter);
+        let has_interp = self.string_has_interpolation(delimiter, triple);
 
         if !has_interp {
             // Simple string, no interpolation — process escape sequences.
-            // Stop at the closing delimiter, EOF ('\0'), or a raw newline.
-            // Oxigen strings are single-line (newlines are written with the
-            // `\n` escape), so reaching a raw newline or EOF before the
-            // closing quote means the string is unterminated.
+            // A single-line string stops at the closing delimiter, EOF, or a
+            // raw newline (newlines are written with the `\n` escape, so a raw
+            // newline before the closing quote means the string is
+            // unterminated). A triple-quoted string spans raw newlines and
+            // only ends at its closing fence or EOF.
             let mut literal = std::string::String::new();
-            while self.ch != delimiter && self.ch != '\0' && self.ch != '\n' {
+            while !self.at_string_body_end(delimiter, triple) {
                 if self.ch == '\\' {
                     self.push_escape_sequence(&mut literal, delimiter);
                 } else {
@@ -474,15 +520,19 @@ impl Lexer {
                     self.read_char();
                 }
             }
-            if self.ch != delimiter {
+            if !self.at_closing_delimiter(delimiter, triple) {
                 // Unterminated: do NOT consume the newline/EOF sentinel so the
                 // lexer keeps making forward progress and the rest of the line
                 // is still tokenized (avoiding a misleading cascade).
                 return self.unterminated_string_token(span);
             }
-            self.read_char(); // closing quote
+            self.consume_quote_fence(triple); // closing quote(s)
             return Token {
-                token_type: TokenType::String,
+                token_type: if triple {
+                    TokenType::MultilineString
+                } else {
+                    TokenType::String
+                },
                 literal,
                 span,
             };
@@ -495,9 +545,9 @@ impl Lexer {
         let pending_mark = self.pending_tokens.len();
         let mut literal_buf = std::string::String::new();
 
-        // Stop at the closing delimiter, EOF, or a raw newline (strings are
-        // single-line; see the non-interpolation branch above).
-        while self.ch != delimiter && self.ch != '\0' && self.ch != '\n' {
+        // Stop at the closing fence, EOF, or — for single-line strings — a raw
+        // newline (see the non-interpolation branch above).
+        while !self.at_string_body_end(delimiter, triple) {
             if self.ch == '{' {
                 // Emit any accumulated literal as a String token
                 if !literal_buf.is_empty() {
@@ -531,8 +581,18 @@ impl Lexer {
                         }
                     }
 
-                    // Skip whitespace inside interpolation
-                    self.skip_whitespace_except_newline();
+                    // Skip whitespace inside the interpolation expression.
+                    // Newlines are only valid here inside a triple-quoted
+                    // string, where `{ ... }` may span lines; single-line
+                    // strings keep their existing behavior.
+                    loop {
+                        self.skip_whitespace_except_newline();
+                        if triple && self.ch == '\n' {
+                            self.read_char();
+                            continue;
+                        }
+                        break;
+                    }
                     if self.ch == '}' {
                         continue;
                     }
@@ -542,8 +602,14 @@ impl Lexer {
                     let inner_tok = match self.ch {
                         c if c.is_ascii_digit() => self.read_number(inner_span),
                         c if is_ident_start(c) => self.read_ident(inner_span),
-                        '"' => self.read_string('"', inner_span),
-                        '\'' => self.read_string('\'', inner_span),
+                        '"' => {
+                            let inner_triple = self.at_triple_quote('"');
+                            self.read_string('"', inner_triple, inner_span)
+                        }
+                        '\'' => {
+                            let inner_triple = self.at_triple_quote('\'');
+                            self.read_string('\'', inner_triple, inner_span)
+                        }
                         '(' => self.single_with_span(TokenType::LParen, inner_span),
                         ')' => self.single_with_span(TokenType::RParen, inner_span),
                         ',' => self.single_with_span(TokenType::Comma, inner_span),
@@ -584,7 +650,7 @@ impl Lexer {
             }
         }
 
-        if self.ch != delimiter {
+        if !self.at_closing_delimiter(delimiter, triple) {
             // Unterminated interpolated string: discard the partial part tokens
             // we queued and report a single error anchored at the opening quote.
             // Leave the newline/EOF sentinel unconsumed for forward progress.
@@ -608,11 +674,16 @@ impl Lexer {
             span: self.span(),
         });
 
-        self.read_char(); // closing quote
+        self.consume_quote_fence(triple); // closing quote(s)
 
-        // Return InterpStart as the first token
+        // Return InterpStart as the first token (a multi-line variant when the
+        // string was triple-quoted, so the formatter can round-trip it).
         Token {
-            token_type: TokenType::InterpStart,
+            token_type: if triple {
+                TokenType::MultilineInterpStart
+            } else {
+                TokenType::InterpStart
+            },
             literal: "".into(),
             span,
         }
@@ -620,9 +691,11 @@ impl Lexer {
 
     /// Build the diagnostic token for a string literal that was never closed.
     ///
-    /// Oxigen has no multi-line string literals (newlines are written with the
-    /// `\n` escape), so a string that reaches end-of-line or end-of-input
-    /// before its closing delimiter is a missing-quote typo. We surface this as
+    /// A single-line Oxigen string is closed by a matching quote on the same
+    /// line (newlines are written with the `\n` escape), so reaching
+    /// end-of-line or end-of-input first is a missing-quote typo. A
+    /// triple-quoted string (`"""`/`'''`) may span lines, so only end-of-input
+    /// before its closing fence is unterminated. Either way we surface this as
     /// a `TokenType::Illegal` token whose `literal` is the human-readable
     /// message and whose `span` points at the OPENING quote — the actual
     /// location of the mistake — instead of letting the lexer swallow the rest
@@ -690,15 +763,29 @@ impl Lexer {
         Some(((high << 4) | low) as u8)
     }
 
-    /// Look ahead to check if a string contains `{` before its closing delimiter
-    fn string_has_interpolation(&self, delimiter: char) -> bool {
+    /// Look ahead to check if a string contains `{` before its closing fence.
+    ///
+    /// For a single-line string the scan stops at the delimiter, EOF, or a raw
+    /// newline (which makes the string unterminated). For a triple-quoted
+    /// string the scan spans newlines and stops only at the closing `"""`/`'''`
+    /// fence or EOF. In both cases a non-interpolated result routes the string
+    /// to the simpler escape-only branch of `read_string`.
+    fn string_has_interpolation(&self, delimiter: char, triple: bool) -> bool {
         let mut pos = self.position;
         while pos < self.input.len() {
             let c = self.input[pos];
-            // A raw newline ends the line before any closing delimiter: the
-            // string is unterminated, so route it to the non-interpolation
-            // branch which reports the error (single-line strings only).
-            if c == delimiter || c == '\0' || c == '\n' {
+            if c == '\0' {
+                return false;
+            }
+            if triple {
+                // Closing fence: three delimiter chars in a row.
+                if c == delimiter
+                    && self.input.get(pos + 1).copied() == Some(delimiter)
+                    && self.input.get(pos + 2).copied() == Some(delimiter)
+                {
+                    return false;
+                }
+            } else if c == delimiter || c == '\n' {
                 return false;
             }
             if c == '\\' {

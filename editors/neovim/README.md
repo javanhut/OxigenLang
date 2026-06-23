@@ -120,7 +120,7 @@ The included `syntax/oxigen.lua` provides basic syntax highlighting for:
 
 - Keywords and control flow
 - Builtin functions
-- String literals and interpolation
+- String literals (single-line and triple-quoted multi-line) and interpolation
 - Numbers and floats
 - Comments (`//`)
 - Executable headers and directives (`#!`, `#[indent]`, `#[location=...]`)

@@ -4,8 +4,9 @@
 // characters until the next quote or EOF, producing a misleading cascade of
 // parser errors far from the real mistake (e.g. `{"stream: False}` reported
 // "expected Colon, got Ident(\"body\")" three lines later). The lexer now
-// detects an unterminated string (raw newline or EOF before the closing
-// delimiter — Oxigen strings are single-line) and reports a clear error
+// detects an unterminated string (for single-line strings: a raw newline or
+// EOF before the closing delimiter; triple-quoted strings may span lines, so
+// only EOF before the closing fence is unterminated) and reports a clear error
 // anchored at the OPENING quote.
 
 use oxigen_core::{lexer::Lexer, parser::Parser};

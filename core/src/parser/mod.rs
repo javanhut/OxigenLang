@@ -154,6 +154,7 @@ impl Parser {
         p.register_prefix(TokenType::Integer, Parser::parse_integer);
         p.register_prefix(TokenType::Float, Parser::parse_float);
         p.register_prefix(TokenType::String, Parser::parse_string);
+        p.register_prefix(TokenType::MultilineString, Parser::parse_string);
         p.register_prefix(TokenType::Char, Parser::parse_char);
         p.register_prefix(TokenType::LParen, Parser::parse_grouped_expression);
         p.register_prefix(TokenType::True, Parser::parse_boolean);
@@ -171,6 +172,7 @@ impl Parser {
         p.register_prefix(TokenType::OptionKw, Parser::parse_option_expression);
         p.register_prefix(TokenType::SelfKw, Parser::parse_self_expression);
         p.register_prefix(TokenType::InterpStart, Parser::parse_string_interp);
+        p.register_prefix(TokenType::MultilineInterpStart, Parser::parse_string_interp);
 
         // Infix Parse Functions
         for tt in [TokenType::Plus, TokenType::Minus] {

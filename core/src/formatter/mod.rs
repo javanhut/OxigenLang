@@ -507,10 +507,16 @@ impl Formatter {
                     self.push(".0");
                 }
             }
-            Expression::Str { value, .. } => {
-                self.push("\"");
-                self.push(&escape_string(value));
-                self.push("\"");
+            Expression::Str { value, token } => {
+                if token.token_type == TokenType::MultilineString {
+                    self.push("\"\"\"");
+                    self.push(&escape_string_triple(value));
+                    self.push("\"\"\"");
+                } else {
+                    self.push("\"");
+                    self.push(&escape_string(value));
+                    self.push("\"");
+                }
             }
             Expression::Char { value, .. } => {
                 self.push("'");
@@ -852,12 +858,18 @@ impl Formatter {
                 self.push(" then ");
                 self.format_expression(alternative);
             }
-            Expression::StringInterp { parts, .. } => {
-                self.push("\"");
+            Expression::StringInterp { parts, token } => {
+                let multiline = token.token_type == TokenType::MultilineInterpStart;
+                let fence = if multiline { "\"\"\"" } else { "\"" };
+                self.push(fence);
                 for part in parts {
                     match part {
                         StringInterpPart::Literal(s) => {
-                            self.push(&escape_string(s));
+                            if multiline {
+                                self.push(&escape_string_triple(s));
+                            } else {
+                                self.push(&escape_string(s));
+                            }
                         }
                         StringInterpPart::Expr(e) => {
                             self.push("{");
@@ -866,7 +878,7 @@ impl Formatter {
                         }
                     }
                 }
-                self.push("\"");
+                self.push(fence);
             }
         }
     }
@@ -1062,6 +1074,51 @@ fn escape_string(s: &str) -> String {
             '\t' => result.push_str("\\t"),
             '\r' => result.push_str("\\r"),
             _ => result.push(c),
+        }
+    }
+    result
+}
+
+/// Escape the body of a triple-quoted string. Raw newlines are kept verbatim
+/// (that's the point of a multi-line literal); backslashes, tabs and carriage
+/// returns are escaped as usual. A `"` is escaped only when it would otherwise
+/// collide with the closing `"""` fence — when it's the third in a run, or the
+/// final character of this chunk (which would butt up against the fence). This
+/// keeps stray quotes (e.g. `She said "hi"`) unescaped in the common case.
+fn escape_string_triple(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut result = String::new();
+    let mut quote_run = 0; // consecutive unescaped `"` already emitted
+    for (i, &c) in chars.iter().enumerate() {
+        match c {
+            '\\' => {
+                result.push_str("\\\\");
+                quote_run = 0;
+            }
+            '\n' => {
+                result.push('\n');
+                quote_run = 0;
+            }
+            '\t' => {
+                result.push_str("\\t");
+                quote_run = 0;
+            }
+            '\r' => {
+                result.push_str("\\r");
+                quote_run = 0;
+            }
+            '"' if quote_run == 2 || i + 1 == chars.len() => {
+                result.push_str("\\\"");
+                quote_run = 0;
+            }
+            '"' => {
+                result.push('"');
+                quote_run += 1;
+            }
+            _ => {
+                result.push(c);
+                quote_run = 0;
+            }
         }
     }
     result

@@ -1,0 +1,42 @@
+// Multi-line strings in Oxigen.
+//
+// Triple quotes — `"""..."""` or `'''...'''` — let a string span several lines.
+// Raw newlines are kept verbatim, so you don't need `\n`. They support the same
+// `{}` interpolation and escape sequences as single-line strings.
+//
+// Run it with:  oxigen example/multiline_strings.oxi
+
+name := "Raven"
+version := 1
+
+// Basic multi-line string with interpolation. The content is literal, so the
+// newline right after the opening `"""` and before the closing `"""` are kept.
+message := """
+Welcome, {name}!
+You are running Oxigen v{version}.
+"""
+println(message)
+
+// Put text on the fence lines to avoid the leading/trailing newlines.
+banner := """+--------------------+
+|  Oxigen multiline  |
++--------------------+"""
+println(banner)
+
+// `'''` behaves identically — handy when the text contains double quotes.
+quote := '''She said "multi-line strings are great" and meant it.'''
+println(quote)
+
+// Interpolation expressions may themselves span multiple lines.
+x := 10
+y := 20
+sum := """{
+    x +
+    y
+}"""
+println("sum = {sum}")
+
+// Escapes still work inside triple-quoted strings.
+escaped := """tab\there
+and a literal quote: \" done"""
+println(escaped)
