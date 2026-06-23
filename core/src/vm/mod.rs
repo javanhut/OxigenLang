@@ -2829,7 +2829,8 @@ impl VM {
                 Ok(())
             }
             ValueRepr::StructDef(def) => {
-                // Struct constructor call (positional args)
+                // Struct constructor call. Positional args fill fields in order;
+                // named args (name=value) bind to the matching field by name.
                 let start = self.stack.len() - arg_count;
                 let args: Vec<Value> = self.stack_drain_from(start);
                 self.pop(); // pop the struct def
@@ -2838,10 +2839,15 @@ impl VM {
                 let layout = self.resolve_field_layout(&def_name)?;
                 let mut field_vec: Vec<Value> = Vec::with_capacity(layout.slots.len());
                 for (i, slot) in layout.slots.iter().enumerate() {
-                    let val = args
-                        .get(i)
-                        .cloned()
-                        .unwrap_or_else(|| Self::zero_value_for_type(&slot.1));
+                    let val = if i < args.len() {
+                        args[i].clone()
+                    } else if let Some((_, v)) =
+                        named_args.iter().find(|(n, _)| *n == slot.0)
+                    {
+                        v.clone()
+                    } else {
+                        Self::zero_value_for_type(&slot.1)
+                    };
                     field_vec.push(val);
                 }
 

@@ -1,0 +1,110 @@
+//! Regression: struct constructors must bind NAMED (field=value) arguments,
+//! not silently discard them.
+//!
+//! Before the fix, `S(x="hello")` accepted the syntax but dropped the value —
+//! the field kept its zero value with no error. Positional args bound fine and
+//! named args worked for ordinary function calls; only struct constructors
+//! ignored them, on both the VM and the tree-walker. The bar is
+//! VM(interp) == VM(JIT) == tree-walker == expected.
+
+#![cfg(feature = "jit")]
+
+use oxigen_core::compiler::Compiler;
+use oxigen_core::evaluator::Evaluator;
+use oxigen_core::lexer::Lexer;
+use oxigen_core::object::environment::Environment;
+use oxigen_core::parser::Parser;
+use oxigen_core::vm::VM;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+fn run_vm(source: &str, jit_threshold: Option<u32>) -> Result<String, String> {
+    let lexer = Lexer::new(source);
+    let mut parser = Parser::new(lexer, source);
+    let program = parser.parse_program();
+    assert!(
+        parser.errors().is_empty(),
+        "parser errors:\n{}",
+        parser.format_errors()
+    );
+    let function = Compiler::new()
+        .compile(&program)
+        .map_err(|errs| format!("{:?}", errs))?;
+    let mut vm = VM::new();
+    if let Some(t) = jit_threshold {
+        vm.jit.set_threshold(t);
+    }
+    vm.run(function)
+        .map(|v| format!("{}", v))
+        .map_err(|e| e.message)
+}
+
+fn run_tree(source: &str) -> String {
+    let lexer = Lexer::new(source);
+    let mut parser = Parser::new(lexer, source);
+    let program = parser.parse_program();
+    assert!(
+        parser.errors().is_empty(),
+        "parser errors:\n{}",
+        parser.format_errors()
+    );
+    let env = Rc::new(RefCell::new(Environment::new()));
+    let mut evaluator = Evaluator::new();
+    format!("{}", evaluator.eval_program(&program, env))
+}
+
+/// Assert VM (interp) == VM (JIT) == tree-walker, and all equal to `expected`.
+fn assert_parity(source: &str, expected: &str) {
+    let interp = run_vm(source, None).expect("VM interp should succeed");
+    let jit = run_vm(source, Some(1)).expect("VM JIT should succeed");
+    let tree = run_tree(source);
+    assert_eq!(interp, expected, "VM interp mismatch");
+    assert_eq!(jit, expected, "VM JIT mismatch");
+    assert_eq!(tree, expected, "tree-walker mismatch");
+    assert_eq!(interp, jit, "VM interp != VM JIT");
+    assert_eq!(interp, tree, "VM interp != tree-walker");
+}
+
+#[test]
+fn named_ctor_arg_binds_value() {
+    // The minimal repro: a single named argument must reach the field.
+    let src = r#"
+struct S { x <str> }
+s := S(x="hello")
+s.x
+"#;
+    assert_parity(src, "hello");
+}
+
+#[test]
+fn all_named_ctor_args_bind() {
+    // Every field supplied by name, in declaration order.
+    let src = r#"
+struct ChatMessage { model <str>  messages <array> }
+m := ChatMessage(model="gemma4:latest", messages=[])
+m.model
+"#;
+    assert_parity(src, "gemma4:latest");
+}
+
+#[test]
+fn named_ctor_args_bind_out_of_order() {
+    // Named args bind by name regardless of the order they appear in the call.
+    let src = r#"
+struct ChatMessage { model <str>  messages <array> }
+m := ChatMessage(messages=[], model="gemma4:latest")
+m.model
+"#;
+    assert_parity(src, "gemma4:latest");
+}
+
+#[test]
+fn mixed_positional_then_named_ctor_args() {
+    // Positional args fill leading fields; a named arg fills the rest.
+    let src = r#"
+struct ChatMessage { model <str>  messages <array> }
+m := ChatMessage("gemma4:latest", messages=[])
+m.model
+"#;
+    assert_parity(src, "gemma4:latest");
+}
