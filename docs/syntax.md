@@ -19,7 +19,7 @@ a, b := [1, 2]             // array/tuple unpacking
 |---------|----------------------------|--------------|
 | Integer | `42`, `-7`                 | `int`        |
 | Float   | `3.14`, `-0.5`             | `float`      |
-| String  | `"hello"`, `'world'`, `"line\n"` | `str`  |
+| String  | `"hello"`, `'world'`, `"line\n"`, `"""multi\nline"""` | `str`  |
 | Char    | `` `a` ``, `` `Z` ``      | `char`       |
 | Boolean | `True`, `False`            | `bool`       |
 | Array   | `[1, 2, 3]`               | `array`      |
@@ -141,6 +141,19 @@ main { ... }                                      // entry point (skipped when i
 
 ```oxi
 "\n"   "\t"   "\r"   "\\"   "\""   "\'"   "\0"
+```
+
+## Multi-line Strings
+
+Triple quotes (`"""..."""` or `'''...'''`) span multiple lines and keep raw
+newlines verbatim. They support the same `{}` interpolation and escapes as
+single-line strings. See [data_types.md](data_types.md#multi-line-strings).
+
+```oxi
+banner := """
+Welcome, {name}!
+Lines are kept as written.
+"""
 ```
 
 ## Comments

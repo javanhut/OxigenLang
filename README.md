@@ -11,7 +11,7 @@ OxigenLang is a modern, lightweight, interpreted programming language implemente
 - **Pattern Matching**: Define reusable patterns with the `pattern` keyword and match against them with `choose`.
 - **Enums**: Rust-style enumerations with unit, tuple, and struct variants, explicit or auto-assigned discriminants, and field access by name or index.
 - **Rich Type System**: Dynamic typing by default with optional type annotations for locking types and controlling mutability. Four declaration forms give precise control over value and type mutability, and parameter type annotations are enforced on the default bytecode backend.
-- **Data Types**: Integers, Floats, Strings (with escape sequences and interpolation), Characters, Booleans, Arrays, Bytes, Uints, Tuples, Maps, Sets, and `None`.
+- **Data Types**: Integers, Floats, Strings (with escape sequences, interpolation, and triple-quoted multi-line literals), Characters, Booleans, Arrays, Bytes, Uints, Tuples, Maps, Sets, and `None`.
 - **Structs**: Composite data types with typed fields, single-inheritance, methods via `includes` blocks, `self` access, hidden fields, and dot-chaining.
 - **First-Class Functions**: Named and anonymous functions, closures, typed parameters, default values, optional parameters, and implicit/explicit returns.
 - **Unpacking**: Destructure arrays and tuples into multiple variables with `a, b := [1, 2]`.

@@ -183,8 +183,15 @@ syn match oxigenTypedVarDecl /\<\w\+\>\ze\s\+<[^>]\+>/
 syn match oxigenUntypedVarDecl /\<\w\+\>\ze\s*:=/
 
 " Strings
-syn region oxigenString start=/"/ skip=/\\"/ end=/"/ contains=oxigenInterp
-syn region oxigenChar start=/'/ skip=/\\'/ end=/'/
+" Single-line strings and char literals end at the closing quote on the same
+" line (`oneline` stops an unterminated one from bleeding onto later lines).
+syn region oxigenString start=/"/ skip=/\\"/ end=/"/ oneline contains=oxigenInterp
+syn region oxigenChar start=/'/ skip=/\\'/ end=/'/ oneline
+" Triple-quoted multi-line strings (`"""..."""` and `'''...'''`). Defined AFTER
+" the single-quote forms so they take priority at the same start position (Vim
+" prefers the longer / later-defined match), and they may span newlines.
+syn region oxigenString start=/"""/ skip=/\\"/ end=/"""/ keepend contains=oxigenInterp
+syn region oxigenString start=/'''/ skip=/\\'/ end=/'''/ keepend contains=oxigenInterp
 syn match oxigenInterp /{\([^}]*\)}/ contained
 
 " Numbers

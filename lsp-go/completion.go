@@ -160,6 +160,100 @@ func detectCompletionContext(source string, pos Position, stdlibPath string) (co
 	return contextGeneral, ""
 }
 
+// positionToOffset converts an LSP (line, character) position to a byte offset
+// into source. Columns are treated as byte offsets within the line, matching
+// the rest of this server's simple line/column handling.
+func positionToOffset(source string, pos Position) int {
+	line := int(pos.Line)
+	char := int(pos.Character)
+	n := len(source)
+
+	i := 0
+	for curLine := 0; i < n && curLine < line; i++ {
+		if source[i] == '\n' {
+			curLine++
+		}
+	}
+	// i now sits at the first byte of the target line (or at EOF).
+	for col := 0; i < n && col < char && source[i] != '\n'; col, i = col+1, i+1 {
+	}
+	return i
+}
+
+// inStringLiteralText reports whether pos sits inside the text of a string
+// literal, including triple-quoted multi-line strings (with either quote
+// style), but NOT inside a {...} interpolation expression, where code
+// completions are still wanted. It scans the document from the start tracking
+// the active string delimiter and interpolation-brace depth. This is a
+// completion heuristic; the compiler remains the source of truth for parsing.
+func inStringLiteralText(source string, pos Position) bool {
+	offset := positionToOffset(source, pos)
+	n := len(source)
+	if offset > n {
+		offset = n
+	}
+
+	var delim byte // 0 when outside a string, otherwise '"' or '\''
+	triple := false
+	interpDepth := 0 // >0 while inside `{...}` within a string
+
+	for i := 0; i < offset; {
+		c := source[i]
+
+		// Outside any string: only a quote can open one.
+		if delim == 0 {
+			if c == '"' || c == '\'' {
+				delim = c
+				triple = i+2 < n && source[i+1] == c && source[i+2] == c
+				if triple {
+					i += 3
+				} else {
+					i++
+				}
+				continue
+			}
+			i++
+			continue
+		}
+
+		// Inside a string's interpolation expression: track nested braces.
+		if interpDepth > 0 {
+			switch c {
+			case '{':
+				interpDepth++
+			case '}':
+				interpDepth--
+			}
+			i++
+			continue
+		}
+
+		// Inside string literal text.
+		switch {
+		case c == '\\':
+			i += 2 // skip the escaped character
+		case c == '{':
+			interpDepth = 1
+			i++
+		case triple && c == delim && i+2 < n && source[i+1] == delim && source[i+2] == delim:
+			delim = 0
+			i += 3
+		case !triple && c == delim:
+			delim = 0
+			i++
+		case !triple && c == '\n':
+			// Single-line strings cannot span newlines; an unterminated one
+			// ends here so later lines aren't treated as string text.
+			delim = 0
+			i++
+		default:
+			i++
+		}
+	}
+
+	return delim != 0 && interpDepth == 0
+}
+
 func extractLastWord(s string) string {
 	s = strings.TrimSpace(s)
 	for i := len(s) - 1; i >= 0; i-- {
@@ -175,6 +269,14 @@ func isIdentChar(c byte) bool {
 }
 
 func getCompletions(source string, pos Position, stdlibPath string) []CompletionItem {
+	// Don't pop up keyword/builtin completions while the cursor is inside the
+	// text of a string literal — including triple-quoted multi-line strings.
+	// Interpolation expressions (`{...}`) are still real code, so completions
+	// remain available there.
+	if inStringLiteralText(source, pos) {
+		return []CompletionItem{}
+	}
+
 	ctx, moduleName := detectCompletionContext(source, pos, stdlibPath)
 
 	switch ctx {
