@@ -10,6 +10,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -77,6 +78,10 @@ struct Task {
 static TASK_TX: OnceLock<mpsc::Sender<Task>> = OnceLock::new();
 static SRC: OnceLock<String> = OnceLock::new();
 
+/// Count of tasks handed to the pool but not yet finished by a worker. Drained
+/// at program exit so fire-and-forget spawns aren't killed when the process ends.
+static OUTSTANDING: AtomicUsize = AtomicUsize::new(0);
+
 /// Worker stack size — mirror the CLI's large execution stack.
 const STACK_SIZE: usize = 256 << 20; // 256 MB
 
@@ -101,6 +106,16 @@ pub fn set_src(s: String) {
 /// Returns true if the current thread is a spawn worker.
 pub fn is_worker() -> bool {
     IS_WORKER.with(|w| w.get())
+}
+
+/// Block until every task handed to the worker pool has finished. Call once at
+/// program exit so never-joined ("fire-and-forget") spawns run to completion
+/// instead of dying with the process. A task that never returns will block
+/// exit — cancellation/timeouts are out of scope (P3).
+pub fn drain() {
+    while OUTSTANDING.load(Ordering::SeqCst) > 0 {
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
 }
 
 /// A top-level statement a worker needs in order to resolve spawned functions:
@@ -194,6 +209,7 @@ fn ensure_pool() -> &'static mpsc::Sender<Task> {
                         };
                         let result = run_task(&mut vm, &task.func, task.args);
                         let _ = task.reply.send(result);
+                        OUTSTANDING.fetch_sub(1, Ordering::SeqCst);
                     }
                 })
                 .expect("failed to spawn worker thread");
@@ -255,7 +271,9 @@ pub fn builtin_spawn(args: &[Value]) -> Value {
             args: sendable_args,
             reply: reply_tx,
         };
+        OUTSTANDING.fetch_add(1, Ordering::SeqCst);
         if tx.send(task).is_err() {
+            OUTSTANDING.fetch_sub(1, Ordering::SeqCst);
             return Value::Error(Rc::new("spawn(): worker pool unavailable".to_string()));
         }
     }

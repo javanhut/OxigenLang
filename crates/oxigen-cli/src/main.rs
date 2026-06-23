@@ -141,6 +141,9 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
                     std::process::exit(1);
                 }
             }
+
+            // Let any fire-and-forget spawned tasks finish before exit.
+            oxigen_core::concurrent::drain();
         }
     };
     std::thread::Builder::new()
