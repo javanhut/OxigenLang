@@ -332,6 +332,17 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
         "__http_request".to_string(),
         Rc::new(Object::Builtin(builtin__http_request)),
     );
+    builtins.insert("__net_download".to_string(), Rc::new(Object::Builtin(builtin_net_download)));
+    builtins.insert("__net_upload".to_string(), Rc::new(Object::Builtin(builtin_net_upload)));
+    builtins.insert("__net_tcp_connect".to_string(), Rc::new(Object::Builtin(builtin_net_tcp_connect)));
+    builtins.insert("__net_tcp_listen".to_string(), Rc::new(Object::Builtin(builtin_net_tcp_listen)));
+    builtins.insert("__net_tcp_accept".to_string(), Rc::new(Object::Builtin(builtin_net_tcp_accept)));
+    builtins.insert("__net_send".to_string(), Rc::new(Object::Builtin(builtin_net_send)));
+    builtins.insert("__net_receive".to_string(), Rc::new(Object::Builtin(builtin_net_receive)));
+    builtins.insert("__net_close".to_string(), Rc::new(Object::Builtin(builtin_net_close)));
+    builtins.insert("__net_udp_bind".to_string(), Rc::new(Object::Builtin(builtin_net_udp_bind)));
+    builtins.insert("__net_udp_send".to_string(), Rc::new(Object::Builtin(builtin_net_udp_send)));
+    builtins.insert("__net_udp_receive".to_string(), Rc::new(Object::Builtin(builtin_net_udp_receive)));
 
     builtins
 }
@@ -2785,5 +2796,199 @@ fn builtin__http_request(args: Vec<Rc<Object>>) -> Rc<Object> {
             "__http_request: unsupported method '{}'",
             method
         ))),
+    }
+}
+
+// ── Streaming / socket networking ───────────────────────────────────────
+
+fn net_str(arg: &Rc<Object>, name: &str) -> Result<String, Rc<Object>> {
+    match arg.as_ref() {
+        Object::String(s) => Ok(s.clone()),
+        _ => Err(Rc::new(Object::Error(format!(
+            "{}: expected STRING, got {}",
+            name,
+            arg.type_name()
+        )))),
+    }
+}
+
+fn net_int(arg: &Rc<Object>, name: &str) -> Result<i64, Rc<Object>> {
+    match arg.as_ref() {
+        Object::Integer(n) => Ok(*n),
+        _ => Err(Rc::new(Object::Error(format!(
+            "{}: expected INTEGER, got {}",
+            name,
+            arg.type_name()
+        )))),
+    }
+}
+
+fn net_headers(arg: Option<&Rc<Object>>) -> Vec<(String, String)> {
+    match arg.map(|a| a.as_ref()) {
+        Some(Object::Map(pairs)) => pairs
+            .iter()
+            .filter_map(|(k, v)| match (k.as_ref(), v.as_ref()) {
+                (Object::String(key), Object::String(val)) => Some((key.clone(), val.clone())),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+macro_rules! net_try {
+    ($e:expr) => {
+        match $e {
+            Ok(v) => v,
+            Err(err) => return err,
+        }
+    };
+}
+
+fn builtin_net_download(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 2 {
+        return Rc::new(Object::Error("download: expected (url, path)".to_string()));
+    }
+    let url = net_try!(net_str(&args[0], "download url"));
+    let path = net_try!(net_str(&args[1], "download path"));
+    match crate::netres::http_download(&url, &path) {
+        Ok(status) => Rc::new(Object::Integer(status)),
+        Err(e) => Rc::new(Object::Error(e)),
+    }
+}
+
+fn builtin_net_upload(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() < 3 || args.len() > 4 {
+        return Rc::new(Object::Error(
+            "upload: expected (method, url, file_path, headers?)".to_string(),
+        ));
+    }
+    let method = net_try!(net_str(&args[0], "upload method"));
+    let url = net_try!(net_str(&args[1], "upload url"));
+    let file_path = net_try!(net_str(&args[2], "upload file_path"));
+    let headers = net_headers(args.get(3));
+    match crate::netres::http_upload(&method, &url, &file_path, headers) {
+        Ok((status, body)) => Rc::new(Object::Map(vec![
+            (
+                Rc::new(Object::String("status".to_string())),
+                Rc::new(Object::Integer(status)),
+            ),
+            (
+                Rc::new(Object::String("body".to_string())),
+                Rc::new(Object::String(body)),
+            ),
+        ])),
+        Err(e) => Rc::new(Object::Error(e)),
+    }
+}
+
+fn builtin_net_tcp_connect(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 2 {
+        return Rc::new(Object::Error("connect: expected (host, port)".to_string()));
+    }
+    let host = net_try!(net_str(&args[0], "connect host"));
+    let port = net_try!(net_int(&args[1], "connect port"));
+    match crate::netres::tcp_connect(&host, port) {
+        Ok(id) => Rc::new(Object::Integer(id as i64)),
+        Err(e) => Rc::new(Object::Error(e)),
+    }
+}
+
+fn builtin_net_tcp_listen(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 2 {
+        return Rc::new(Object::Error("listen: expected (host, port)".to_string()));
+    }
+    let host = net_try!(net_str(&args[0], "listen host"));
+    let port = net_try!(net_int(&args[1], "listen port"));
+    match crate::netres::tcp_listen(&host, port) {
+        Ok(id) => Rc::new(Object::Integer(id as i64)),
+        Err(e) => Rc::new(Object::Error(e)),
+    }
+}
+
+fn builtin_net_tcp_accept(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error("accept: expected (server)".to_string()));
+    }
+    let id = net_try!(net_int(&args[0], "accept server"));
+    match crate::netres::tcp_accept(id as u64) {
+        Ok(conn) => Rc::new(Object::Integer(conn as i64)),
+        Err(e) => Rc::new(Object::Error(e)),
+    }
+}
+
+fn builtin_net_send(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 2 {
+        return Rc::new(Object::Error("send: expected (conn, data)".to_string()));
+    }
+    let id = net_try!(net_int(&args[0], "send conn"));
+    let data = net_try!(net_str(&args[1], "send data"));
+    match crate::netres::tcp_send(id as u64, &data) {
+        Ok(n) => Rc::new(Object::Integer(n)),
+        Err(e) => Rc::new(Object::Error(e)),
+    }
+}
+
+fn builtin_net_receive(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 2 {
+        return Rc::new(Object::Error("receive: expected (conn, max)".to_string()));
+    }
+    let id = net_try!(net_int(&args[0], "receive conn"));
+    let max = net_try!(net_int(&args[1], "receive max"));
+    match crate::netres::tcp_receive(id as u64, max) {
+        Ok(s) => Rc::new(Object::String(s)),
+        Err(e) => Rc::new(Object::Error(e)),
+    }
+}
+
+fn builtin_net_close(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error("close: expected (handle)".to_string()));
+    }
+    let id = net_try!(net_int(&args[0], "close handle"));
+    crate::netres::close(id as u64);
+    Rc::new(Object::None)
+}
+
+fn builtin_net_udp_bind(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 2 {
+        return Rc::new(Object::Error("udp_bind: expected (host, port)".to_string()));
+    }
+    let host = net_try!(net_str(&args[0], "udp_bind host"));
+    let port = net_try!(net_int(&args[1], "udp_bind port"));
+    match crate::netres::udp_bind(&host, port) {
+        Ok(id) => Rc::new(Object::Integer(id as i64)),
+        Err(e) => Rc::new(Object::Error(e)),
+    }
+}
+
+fn builtin_net_udp_send(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 4 {
+        return Rc::new(Object::Error(
+            "udp_send: expected (sock, data, host, port)".to_string(),
+        ));
+    }
+    let id = net_try!(net_int(&args[0], "udp_send sock"));
+    let data = net_try!(net_str(&args[1], "udp_send data"));
+    let host = net_try!(net_str(&args[2], "udp_send host"));
+    let port = net_try!(net_int(&args[3], "udp_send port"));
+    match crate::netres::udp_send(id as u64, &data, &host, port) {
+        Ok(n) => Rc::new(Object::Integer(n)),
+        Err(e) => Rc::new(Object::Error(e)),
+    }
+}
+
+fn builtin_net_udp_receive(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 2 {
+        return Rc::new(Object::Error("udp_receive: expected (sock, max)".to_string()));
+    }
+    let id = net_try!(net_int(&args[0], "udp_receive sock"));
+    let max = net_try!(net_int(&args[1], "udp_receive max"));
+    match crate::netres::udp_receive(id as u64, max) {
+        Ok((data, addr)) => Rc::new(Object::Tuple(vec![
+            Rc::new(Object::String(data)),
+            Rc::new(Object::String(addr)),
+        ])),
+        Err(e) => Rc::new(Object::Error(e)),
     }
 }

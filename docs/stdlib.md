@@ -435,8 +435,44 @@ introduce net
 | `delete` | `delete(url)` | HTTP DELETE request |
 | `head` | `head(url)` | HTTP HEAD request |
 | `request` | `request(method, url, headers, body)` | Full control HTTP request |
+| `download` | `download(url, path)` | Stream a GET body to a file; returns the status code |
+| `upload` | `upload(method, url, file_path, headers = {})` | Stream a file as the request body; returns `{status, body}` |
+| `connect` | `connect(host, port)` | Open a TCP connection; returns a connection handle |
+| `listen` | `listen(host, port)` | Bind a TCP server; returns a server handle |
+| `accept` | `accept(server)` | Block until a client connects; returns a connection handle |
+| `send` | `send(conn, data)` | Send text on a connection; returns bytes written |
+| `receive` | `receive(conn, max = 4096)` | Read up to `max` bytes; returns `""` on a clean close |
+| `close` | `close(handle)` | Close a socket handle (connection or server); idempotent |
+| `udp_bind` | `udp_bind(host, port)` | Bind a UDP socket; returns a socket handle |
+| `udp_send` | `udp_send(sock, data, host, port)` | Send a datagram; returns bytes sent |
+| `udp_receive` | `udp_receive(sock, max = 4096)` | Receive a datagram; returns `(data, sender_address)` |
 
-All functions return a map with `"status"` (integer) and `"body"` (string).
+The HTTP request functions return a map with `"status"` (integer) and `"body"` (string).
+
+`download`/`upload` stream their payloads so large transfers never buffer the
+whole body in memory.
+
+Socket I/O works on UTF-8 text — the common case (HTTP, line protocols, JSON
+over TCP). A **handle** is an opaque ticket number for an open socket; always
+`close` it when done, or it leaks one connection until the program exits — like
+a file you never close.
+
+**Errors.** On failure (connection refused, host not found, file missing, bad
+status), every `net` function returns a terminal `Error` that halts execution —
+the same model as the HTTP request functions. Normalize a call into a value you
+can inspect with `<map<Error || Value>>(...)` and the `result` module:
+
+```oxi
+res := <type<Error || Value>>(net.connect("127.0.0.1", 9999))
+print("connect failed\n") when result.is_err(res)
+```
+
+**Blocking.** All socket calls are synchronous and block the (single-threaded)
+interpreter until the OS operation completes: `connect` waits for the handshake,
+`accept` waits for a client, `receive`/`udp_receive` wait for data. There is no
+timeout — a `connect` to an unreachable host blocks until the OS gives up. One
+slow peer stalls the whole program; non-blocking/timeout support is not yet
+available.
 
 ```oxi
 introduce net
@@ -453,6 +489,22 @@ resp := net.post("https://api.example.com/items", body)
 
 // Custom request with headers
 resp := net.request("GET", "https://api.example.com/secure", {"Authorization": "Bearer token123"}, None)
+
+// Stream a large file to disk without buffering it
+status := net.download("https://example.com/big.iso", "big.iso")
+
+// TCP echo server
+srv := net.listen("127.0.0.1", 8080)
+conn := net.accept(srv)
+msg := net.receive(conn)
+net.send(conn, "echo: " + msg)
+net.close(conn)
+net.close(srv)
+
+// UDP
+sock := net.udp_bind("127.0.0.1", 9000)
+data, sender := net.udp_receive(sock)
+net.close(sock)
 ```
 
 Supports HTTP and HTTPS.

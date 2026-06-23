@@ -5,7 +5,7 @@ OxigenLang is a modern, lightweight, interpreted programming language implemente
 ## Features
 
 - **Module System**: Import standard library modules or local files with `introduce`/`intro`. Namespace imports, selective imports, and module caching.
-- **Standard Library**: 18 modules — math, strings, array, io, os, path, time, datetime, random, json, toml, encoding, hash, regex, net (HTTP/HTTPS client), ansi (terminal colors), parse_args (CLI flag parsing), and result (Error/Value helpers).
+- **Standard Library**: 18 modules — math, strings, array, io, os, path, time, datetime, random, json, toml, encoding, hash, regex, net (HTTP/HTTPS client with streaming download/upload, plus TCP and UDP sockets), ansi (terminal colors), parse_args (CLI flag parsing), and result (Error/Value helpers).
 - **Flexible Block Styles**: Choose between traditional brace-based blocks or Python-style indentation blocks with the `#[indent]` directive.
 - **Conditional Expressions**: Multi-arm `option` blocks, ternary shorthand, `unless` inverse conditionals, `unless ... then ...` fallback expressions, `when`/`unless` postfix guards, and short-circuit `and`/`or` logical operators.
 - **Pattern Matching**: Define reusable patterns with the `pattern` keyword and match against them with `choose`.

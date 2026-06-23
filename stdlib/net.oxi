@@ -36,3 +36,52 @@ fun head(url <str>) { __http_request("HEAD", url) }
 fun request(method <HttpMethod>, url <str>, headers <generic>, body <generic>) {
     __http_request(method.value, url, headers, body)
 }
+
+// ── Streaming HTTP ────────────────────────────────────────────────────────
+
+// Stream a GET response body to a file without buffering it in memory.
+// Returns the HTTP status code.
+fun download(url <str>, path <str>) { __net_download(url, path) }
+
+// Stream a file as the request body without buffering it in memory.
+// Returns a map with "status" and "body".
+fun upload(method <str>, url <str>, file_path <str>, headers <map> = {}) {
+    __net_upload(method, url, file_path, headers)
+}
+
+// ── TCP sockets ───────────────────────────────────────────────────────────
+//
+// A handle is an opaque ticket number for an open socket. Pass it to
+// send/receive/close. Always close a handle when done — a forgotten handle
+// leaks one connection until the program exits, like a file you never close.
+
+// Open a TCP connection. Returns a connection handle.
+fun connect(host <str>, port <int>) { __net_tcp_connect(host, port) }
+
+// Bind a TCP server socket. Returns a server handle; call accept to take connections.
+fun listen(host <str>, port <int>) { __net_tcp_listen(host, port) }
+
+// Block until a client connects to a server handle. Returns a connection handle.
+fun accept(server <int>) { __net_tcp_accept(server) }
+
+// Send text on a connection. Returns the number of bytes written.
+fun send(conn <int>, data <str>) { __net_send(conn, data) }
+
+// Receive up to `max` bytes from a connection. Returns "" on a clean close.
+fun receive(conn <int>, max <int> = 4096) { __net_receive(conn, max) }
+
+// Close a socket handle (connection or server). Idempotent.
+fun close(handle <int>) { __net_close(handle) }
+
+// ── UDP sockets ───────────────────────────────────────────────────────────
+
+// Bind a UDP socket. Returns a socket handle.
+fun udp_bind(host <str>, port <int>) { __net_udp_bind(host, port) }
+
+// Send a UDP datagram to host:port. Returns the number of bytes sent.
+fun udp_send(sock <int>, data <str>, host <str>, port <int>) {
+    __net_udp_send(sock, data, host, port)
+}
+
+// Receive a datagram (up to `max` bytes). Returns a (data, sender_address) tuple.
+fun udp_receive(sock <int>, max <int> = 4096) { __net_udp_receive(sock, max) }
