@@ -18,6 +18,7 @@ use crate::ast::{Expression, Statement};
 use crate::compiler::Compiler;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
+use crate::vm::collections::{OxMap, OxSet};
 use crate::vm::value::{Value, ValueRepr};
 use crate::vm::VM;
 use std::cell::RefCell as StdRefCell;
@@ -31,6 +32,9 @@ pub enum Sendable {
     Bool(bool),
     Str(String),
     Arr(Vec<Sendable>),
+    Tuple(Vec<Sendable>),
+    Map(Vec<(Sendable, Sendable)>),
+    Set(Vec<Sendable>),
 }
 
 /// Convert a VM `Value` into a `Sendable`. Errors on anything unsupported.
@@ -49,6 +53,18 @@ fn detach(v: &Value) -> Result<Sendable, String> {
             }
             Ok(Sendable::Arr(out))
         }
+        ValueRepr::Tuple(t) => Ok(Sendable::Tuple(
+            t.iter().map(detach).collect::<Result<_, _>>()?,
+        )),
+        ValueRepr::Map(m) => Ok(Sendable::Map(
+            m.borrow()
+                .iter()
+                .map(|(k, v)| Ok((detach(k)?, detach(v)?)))
+                .collect::<Result<_, String>>()?,
+        )),
+        ValueRepr::Set(s) => Ok(Sendable::Set(
+            s.borrow().iter().map(detach).collect::<Result<_, _>>()?,
+        )),
         _ => Err(format!("cannot send value of type {} across threads", v.type_name())),
     }
 }
@@ -64,6 +80,19 @@ fn attach(s: Sendable) -> Value {
         Sendable::Arr(items) => {
             let vals: Vec<Value> = items.into_iter().map(attach).collect();
             Value::Array(Rc::new(StdRefCell::new(vals)))
+        }
+        Sendable::Tuple(items) => {
+            let vals: Vec<Value> = items.into_iter().map(attach).collect();
+            Value::Tuple(Rc::new(vals))
+        }
+        Sendable::Map(pairs) => {
+            let ps: Vec<(Value, Value)> =
+                pairs.into_iter().map(|(k, v)| (attach(k), attach(v))).collect();
+            Value::Map(Rc::new(StdRefCell::new(OxMap::from_pairs(ps))))
+        }
+        Sendable::Set(items) => {
+            let vs = items.into_iter().map(attach);
+            Value::Set(Rc::new(StdRefCell::new(OxSet::from_iter_dedup(vs))))
         }
     }
 }
