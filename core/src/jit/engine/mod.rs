@@ -2100,12 +2100,14 @@ impl JitInner {
                             let off = read_u16(code, ip + 1) as usize;
                             let target_ip = ip + 3 + off;
                             let target = blocks[&target_ip];
-                            // Materialize staged operands before leaving the
-                            // block so a merge reads them from memory, not the
-                            // shared compile-time virt_stack (see block-boundary
-                            // comment above). No-op when virt_stack is empty.
-                            virt_stack.flush_to_memory(&mut builder, vm_val);
-                            builder.ins().jump(target, &[]);
+                            // A `Jump` right after a `Return` (the dead tail of
+                            // `give X when cond`) sits in an already-terminated
+                            // block — only emit the edge if the block is still
+                            // open, else this is unreachable dead code.
+                            if !terminated {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
+                                builder.ins().jump(target, &[]);
+                            }
                             terminated = true;
                             ip += 3;
                         }
