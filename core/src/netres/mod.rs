@@ -6,18 +6,19 @@
 //!
 //! A *handle* is an opaque `u64` "ticket number" handed to Oxigen code; the
 //! real OS resource lives here. `close` returns the ticket and is idempotent.
-//! The registry is thread-local — Oxigen runs a program on a single thread, so
-//! a handle is only ever used from the thread that created it.
+//! The registry is a global lock-protected table, so a handle works from any
+//! worker thread (lets an accepted socket be handed to a `spawn`ed task).
 //!
 //! Socket reads/writes operate on UTF-8 text (lossy on read). This covers the
 //! common case (HTTP, line protocols, JSON over TCP); binary-safe byte I/O is
 //! intentionally deferred until a concrete need exists.
 
-use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 
 enum Resource {
     Tcp(TcpStream),
@@ -25,35 +26,34 @@ enum Resource {
     Udp(UdpSocket),
 }
 
-thread_local! {
-    static REGISTRY: RefCell<HashMap<u64, Resource>> = RefCell::new(HashMap::new());
-    static NEXT_ID: Cell<u64> = const { Cell::new(1) };
-}
+// ponytail: one global lock on the socket table so ids cross threads (enables
+// spawn handle(conn)). I/O runs on a cloned fd *outside* the lock, so a blocking
+// recv never stalls other sockets. Shard the map only if the lock ever contends.
+static REGISTRY: LazyLock<Mutex<HashMap<u64, Resource>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 fn insert(res: Resource) -> u64 {
-    let id = NEXT_ID.with(|n| {
-        let id = n.get();
-        n.set(id + 1);
-        id
-    });
-    REGISTRY.with(|r| r.borrow_mut().insert(id, res));
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    REGISTRY.lock().unwrap().insert(id, res);
     id
 }
 
 fn with_tcp<T>(id: u64, f: impl FnOnce(&mut TcpStream) -> Result<T, String>) -> Result<T, String> {
-    REGISTRY.with(|r| match r.borrow_mut().get_mut(&id) {
-        Some(Resource::Tcp(s)) => f(s),
-        Some(_) => Err(format!("handle {} is not a TCP connection", id)),
-        None => Err(format!("invalid or closed handle {}", id)),
-    })
+    let mut s = match REGISTRY.lock().unwrap().get(&id) {
+        Some(Resource::Tcp(s)) => s.try_clone().map_err(|e| e.to_string())?,
+        Some(_) => return Err(format!("handle {} is not a TCP connection", id)),
+        None => return Err(format!("invalid or closed handle {}", id)),
+    };
+    f(&mut s)
 }
 
 fn with_udp<T>(id: u64, f: impl FnOnce(&UdpSocket) -> Result<T, String>) -> Result<T, String> {
-    REGISTRY.with(|r| match r.borrow().get(&id) {
-        Some(Resource::Udp(s)) => f(s),
-        Some(_) => Err(format!("handle {} is not a UDP socket", id)),
-        None => Err(format!("invalid or closed handle {}", id)),
-    })
+    let s = match REGISTRY.lock().unwrap().get(&id) {
+        Some(Resource::Udp(s)) => s.try_clone().map_err(|e| e.to_string())?,
+        Some(_) => return Err(format!("handle {} is not a UDP socket", id)),
+        None => return Err(format!("invalid or closed handle {}", id)),
+    };
+    f(&s)
 }
 
 // ── TCP ─────────────────────────────────────────────────────────────────
@@ -71,11 +71,11 @@ pub fn tcp_listen(host: &str, port: i64) -> Result<u64, String> {
 pub fn tcp_accept(id: u64) -> Result<u64, String> {
     // Clone the listener so the registry borrow is released before the
     // (potentially long) blocking accept.
-    let listener = REGISTRY.with(|r| match r.borrow().get(&id) {
-        Some(Resource::Listener(l)) => l.try_clone().map_err(|e| e.to_string()),
-        Some(_) => Err(format!("handle {} is not a TCP server", id)),
-        None => Err(format!("invalid or closed handle {}", id)),
-    })?;
+    let listener = match REGISTRY.lock().unwrap().get(&id) {
+        Some(Resource::Listener(l)) => l.try_clone().map_err(|e| e.to_string())?,
+        Some(_) => return Err(format!("handle {} is not a TCP server", id)),
+        None => return Err(format!("invalid or closed handle {}", id)),
+    };
     let (stream, _) = listener.accept().map_err(|e| e.to_string())?;
     Ok(insert(Resource::Tcp(stream)))
 }
@@ -134,7 +134,7 @@ pub fn udp_receive(id: u64, max: i64) -> Result<(String, String), String> {
 /// Closes a handle and frees its slot. Idempotent — closing an unknown or
 /// already-closed handle is a no-op.
 pub fn close(id: u64) {
-    REGISTRY.with(|r| r.borrow_mut().remove(&id));
+    REGISTRY.lock().unwrap().remove(&id);
 }
 
 // ── Streaming HTTP ────────────────────────────────────────────────────────

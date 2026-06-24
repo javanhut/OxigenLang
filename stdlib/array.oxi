@@ -282,3 +282,7 @@ fun sort_by(arr <array>, key_fn <generic>) {
 fun pmap(arr <array>, f <generic>) {
     map(map(arr, fun(x <generic>) { spawn(f, x) }), fun(h <generic>) { join(h) })
 }
+
+// Wait for many already-spawned tasks; results in input order. The 80% of
+// structured concurrency — no scope/cancel, just join-all.
+fun all(hs <array>) { map(hs, fun(h <generic>) { join(h) }) }

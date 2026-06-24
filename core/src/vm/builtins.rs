@@ -11,6 +11,7 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("println".to_string(), Value::Builtin(builtin_println));
     globals.insert("spawn".to_string(), Value::Builtin(crate::concurrent::builtin_spawn));
     globals.insert("join".to_string(), Value::Builtin(crate::concurrent::builtin_join));
+    globals.insert("cancel".to_string(), Value::Builtin(crate::concurrent::builtin_cancel));
     globals.insert("len".to_string(), Value::Builtin(builtin_len));
     globals.insert("push".to_string(), Value::Builtin(builtin_push));
     globals.insert("first".to_string(), Value::Builtin(builtin_first));

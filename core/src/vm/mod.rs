@@ -2877,11 +2877,17 @@ impl VM {
                 ) {
                     self.snapshot_spawn_closure(start);
                 }
-                // Pass args as a borrowed slice of the stack — no per-call
-                // Vec allocation (LuaJIT fast-function style). `func` is a
-                // copied fn pointer and never touches `self`, so the
-                // immutable borrow ends before we mutate the stack.
-                let result = func(&self.stack[start..]);
+                // `join` is routed to a VM-aware path so it can rebuild
+                // struct/enum results; every other builtin never touches `self`,
+                // so its borrow ends before we mutate the stack.
+                let result = if std::ptr::fn_addr_eq(
+                    func,
+                    crate::concurrent::builtin_join as fn(&[Value]) -> Value,
+                ) {
+                    crate::concurrent::join_with_vm(self, &self.stack[start..])
+                } else {
+                    func(&self.stack[start..])
+                };
                 // Drop the args AND the builtin itself (at start - 1).
                 self.stack_truncate(start - 1);
                 if let Value::Error(ref msg) = result {
@@ -3298,6 +3304,10 @@ impl VM {
         named_args: &[(String, Value)],
         module_globals: Option<Rc<HashMap<String, Value>>>,
     ) -> Result<(), VMError> {
+        // ponytail: 1 TLS read/call; gate behind a global AtomicBool if a recursion bench regresses.
+        if crate::concurrent::cancelled() {
+            return Err(self.runtime_error("task cancelled"));
+        }
         let expected = closure.function.arity as usize;
         let state = closure.jit_state.get();
 

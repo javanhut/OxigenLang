@@ -2115,8 +2115,10 @@ impl JitInner {
                             let off = read_u16(code, ip + 1) as usize;
                             let target_ip = (ip + 3) - off;
                             let target = blocks[&target_ip];
-                            virt_stack.flush_to_memory(&mut builder, vm_val);
-                            builder.ins().jump(target, &[]);
+                            if !terminated {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
+                                builder.ins().jump(target, &[]);
+                            }
                             terminated = true;
                             ip += 3;
                         }
@@ -4059,6 +4061,12 @@ impl JitInner {
                         }
 
                         OpCode::Return => {
+                            // Dead trailing return (the compiler's None;Return epilogue after an
+                            // explicit give/return) — block already terminated, skip emitting.
+                            if terminated {
+                                ip += 1;
+                                continue;
+                            }
                             match kind {
                                 EntryKind::Generic => {
                                     // Inline frame-teardown when safe — eliminates

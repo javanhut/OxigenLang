@@ -10,7 +10,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -19,7 +19,10 @@ use crate::compiler::Compiler;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::vm::collections::{OxMap, OxSet};
-use crate::vm::value::{Function, ObjClosure, Upvalue, Value, ValueRepr};
+use crate::vm::value::{
+    Function, ObjClosure, ObjEnumInstance, ObjStructInstance, Upvalue, Value, ValueRepr,
+    VmEnumPayload,
+};
 use crate::vm::VM;
 use std::cell::RefCell as StdRefCell;
 use std::rc::Rc;
@@ -35,6 +38,15 @@ pub enum Sendable {
     Tuple(Vec<Sendable>),
     Map(Vec<(Sendable, Sendable)>),
     Set(Vec<Sendable>),
+    Struct { name: String, fields: Vec<Sendable> },
+    Enum { ename: String, variant: String, payload: SendPayload },
+}
+
+/// Transfer form of `VmEnumPayload`.
+pub enum SendPayload {
+    Unit(Option<Box<Sendable>>),
+    Tuple(Vec<Sendable>),
+    Fields(Vec<(String, Sendable)>),
 }
 
 /// Convert a VM `Value` into a `Sendable`. Errors on anything unsupported.
@@ -65,34 +77,76 @@ fn detach(v: &Value) -> Result<Sendable, String> {
         ValueRepr::Set(s) => Ok(Sendable::Set(
             s.borrow().iter().map(detach).collect::<Result<_, _>>()?,
         )),
+        ValueRepr::StructInstance(s) => Ok(Sendable::Struct {
+            name: s.struct_name.clone(),
+            fields: s.field_slice().iter().map(detach).collect::<Result<_, _>>()?,
+        }),
+        ValueRepr::EnumInstance(e) => Ok(Sendable::Enum {
+            ename: e.enum_name.clone(),
+            variant: e.variant_name.clone(),
+            payload: detach_payload(&e.payload)?,
+        }),
         _ => Err(format!("cannot send value of type {} across threads", v.type_name())),
     }
 }
 
-/// Rebuild a VM `Value` from a `Sendable`. No VM required.
-fn attach(s: Sendable) -> Value {
+fn detach_payload(p: &VmEnumPayload) -> Result<SendPayload, String> {
+    Ok(match p {
+        VmEnumPayload::Unit(v) => SendPayload::Unit(match v {
+            Some(v) => Some(Box::new(detach(v)?)),
+            None => None,
+        }),
+        VmEnumPayload::Tuple(t) => SendPayload::Tuple(t.iter().map(detach).collect::<Result<_, _>>()?),
+        VmEnumPayload::Struct(f) => SendPayload::Fields(
+            f.iter().map(|(n, v)| Ok((n.clone(), detach(v)?))).collect::<Result<_, String>>()?,
+        ),
+    })
+}
+
+/// Rebuild a VM `Value` from a `Sendable`. Needs the VM only to look up a
+/// struct's definition/layout when rebuilding a `StructInstance`.
+fn attach(s: Sendable, vm: &VM) -> Value {
     match s {
         Sendable::Unit => Value::None,
         Sendable::Int(n) => Value::Integer(n),
         Sendable::Float(f) => Value::Float(f),
         Sendable::Bool(b) => Value::Boolean(b),
         Sendable::Str(s) => Value::String(Rc::new(s)),
-        Sendable::Arr(items) => {
-            let vals: Vec<Value> = items.into_iter().map(attach).collect();
-            Value::Array(Rc::new(StdRefCell::new(vals)))
-        }
+        Sendable::Arr(items) => Value::Array(Rc::new(StdRefCell::new(
+            items.into_iter().map(|x| attach(x, vm)).collect(),
+        ))),
         Sendable::Tuple(items) => {
-            let vals: Vec<Value> = items.into_iter().map(attach).collect();
-            Value::Tuple(Rc::new(vals))
+            Value::Tuple(Rc::new(items.into_iter().map(|x| attach(x, vm)).collect()))
         }
-        Sendable::Map(pairs) => {
-            let ps: Vec<(Value, Value)> =
-                pairs.into_iter().map(|(k, v)| (attach(k), attach(v))).collect();
-            Value::Map(Rc::new(StdRefCell::new(OxMap::from_pairs(ps))))
+        Sendable::Map(pairs) => Value::Map(Rc::new(StdRefCell::new(OxMap::from_pairs(
+            pairs.into_iter().map(|(k, v)| (attach(k, vm), attach(v, vm))).collect(),
+        )))),
+        Sendable::Set(items) => Value::Set(Rc::new(StdRefCell::new(OxSet::from_iter_dedup(
+            items.into_iter().map(|x| attach(x, vm)),
+        )))),
+        Sendable::Struct { name, fields } => {
+            let vals: Vec<Value> = fields.into_iter().map(|f| attach(f, vm)).collect();
+            match (vm.get_struct_def(&name), vm.resolve_field_layout(&name)) {
+                (Some(def), Ok(layout)) => {
+                    Value::StructInstance(Rc::new(ObjStructInstance::new(name, vals, layout, def)))
+                }
+                _ => Value::Error(Rc::new(format!("struct '{}' not defined on this thread", name))),
+            }
         }
-        Sendable::Set(items) => {
-            let vs = items.into_iter().map(attach);
-            Value::Set(Rc::new(StdRefCell::new(OxSet::from_iter_dedup(vs))))
+        Sendable::Enum { ename, variant, payload } => Value::EnumInstance(Rc::new(ObjEnumInstance {
+            enum_name: ename,
+            variant_name: variant,
+            payload: attach_payload(payload, vm),
+        })),
+    }
+}
+
+fn attach_payload(p: SendPayload, vm: &VM) -> VmEnumPayload {
+    match p {
+        SendPayload::Unit(v) => VmEnumPayload::Unit(v.map(|b| attach(*b, vm))),
+        SendPayload::Tuple(t) => VmEnumPayload::Tuple(t.into_iter().map(|x| attach(x, vm)).collect()),
+        SendPayload::Fields(f) => {
+            VmEnumPayload::Struct(f.into_iter().map(|(n, v)| (n, attach(v, vm))).collect())
         }
     }
 }
@@ -111,6 +165,7 @@ struct Task {
     callee: Callee,
     args: Vec<Sendable>,
     reply: mpsc::Sender<Result<Sendable, String>>,
+    cancel: Arc<AtomicBool>,
 }
 
 /// The worker pool: the task sender plus what's needed to grow it on demand.
@@ -150,6 +205,10 @@ thread_local! {
     /// Worker-only: compile-order id -> function code, for rebuilding spawned
     /// closures (lambdas/captures) that the name path can't resolve.
     static WORKER_FNS: RefCell<HashMap<u32, Rc<Function>>> = RefCell::new(HashMap::new());
+
+    /// Main: handle id -> cancel flag. Worker: the running task's flag.
+    static CANCELS: RefCell<HashMap<u64, Arc<AtomicBool>>> = RefCell::new(HashMap::new());
+    static CUR_CANCEL: RefCell<Option<Arc<AtomicBool>>> = RefCell::new(None);
 }
 
 /// Register the program source so workers can rebuild a VM. Call once before
@@ -161,6 +220,27 @@ pub fn set_src(s: String) {
 /// Returns true if the current thread is a spawn worker.
 pub fn is_worker() -> bool {
     IS_WORKER.with(|w| w.get())
+}
+
+/// True if the running task was cancelled. Checked at every `call_closure`, so a
+/// tight callless loop or a parked recv won't see it until the next call.
+pub fn cancelled() -> bool {
+    CUR_CANCEL.with(|c| c.borrow().as_ref().is_some_and(|f| f.load(Ordering::Relaxed)))
+}
+
+/// `cancel(handle)` — cooperatively stop a spawned task at its next call.
+pub fn builtin_cancel(args: &[Value]) -> Value {
+    let id = match args.first().map(|v| v.repr()) {
+        Some(ValueRepr::Uint(u)) => u,
+        Some(ValueRepr::Integer(n)) if n >= 0 => n as u64,
+        _ => return Value::None,
+    };
+    CANCELS.with(|c| {
+        if let Some(f) = c.borrow().get(&id) {
+            f.store(true, Ordering::Relaxed);
+        }
+    });
+    Value::None
 }
 
 /// Block until every task handed to the worker pool has finished. Call once at
@@ -251,11 +331,11 @@ fn run_task(vm: &mut VM, callee: Callee, args: Vec<Sendable>) -> Result<Sendable
             let f = WORKER_FNS
                 .with(|t| t.borrow().get(&id).cloned())
                 .ok_or_else(|| format!("spawn: function #{} not found", id))?;
-            let ups: Vec<Value> = upvalues.into_iter().map(attach).collect();
+            let ups: Vec<Value> = upvalues.into_iter().map(|u| attach(u, vm)).collect();
             Value::Closure(Rc::new(ObjClosure::closed(f, ups)))
         }
     };
-    let val_args: Vec<Value> = args.into_iter().map(attach).collect();
+    let val_args: Vec<Value> = args.into_iter().map(|a| attach(a, vm)).collect();
     let result = vm
         .call_with_args(callee, val_args)
         .map_err(|e| format!("{}", e))?;
@@ -287,6 +367,7 @@ fn spawn_worker(rx: Arc<Mutex<mpsc::Receiver<Task>>>, src: String) {
                     Ok(t) => t,
                     Err(_) => break, // channel closed
                 };
+                CUR_CANCEL.with(|c| *c.borrow_mut() = Some(task.cancel.clone()));
                 let result = run_task(&mut vm, task.callee, task.args);
                 let _ = task.reply.send(result);
                 OUTSTANDING.fetch_sub(1, Ordering::SeqCst);
@@ -369,6 +450,8 @@ pub fn builtin_spawn(args: &[Value]) -> Value {
     }
 
     let (reply_tx, reply_rx) = mpsc::channel::<Result<Sendable, String>>();
+    let id = next_id();
+    let cancel = Arc::new(AtomicBool::new(false));
 
     // Inside a worker: run inline so workers can't enqueue more tasks.
     if is_worker() {
@@ -383,10 +466,12 @@ pub fn builtin_spawn(args: &[Value]) -> Value {
         let _ = reply_tx.send(result);
     } else {
         let pool = ensure_pool();
+        CANCELS.with(|c| c.borrow_mut().insert(id, cancel.clone()));
         let task = Task {
             callee,
             args: sendable_args,
             reply: reply_tx,
+            cancel,
         };
         let pending = OUTSTANDING.fetch_add(1, Ordering::SeqCst) + 1;
         // Grow the pool when every worker is busy so I/O-bound fan-out isn't
@@ -401,15 +486,25 @@ pub fn builtin_spawn(args: &[Value]) -> Value {
         }
     }
 
-    let id = next_id();
     HANDLES.with(|h| h.borrow_mut().insert(id, reply_rx));
     Value::Uint(id)
 }
 
 /// `join(handle)` -> the spawned call's result (blocks).
-pub fn builtin_join(args: &[Value]) -> Value {
-    if args.len() != 1 {
-        return Value::Error(Rc::new("join() takes exactly one argument".to_string()));
+/// `join(handle, ms)` -> result, or an error if it doesn't finish within `ms`.
+/// Stub: `join` is routed through `join_with_vm` at the builtin dispatch site
+/// (it needs VM access to rebuild struct/enum results). Never reached normally.
+pub fn builtin_join(_args: &[Value]) -> Value {
+    Value::Error(Rc::new("join(): internal dispatch error".to_string()))
+}
+
+/// `join(handle[, ms])` — blocks for a spawned call's result, with VM access so
+/// struct/enum results can be rebuilt on this thread.
+pub fn join_with_vm(vm: &VM, args: &[Value]) -> Value {
+    if args.is_empty() || args.len() > 2 {
+        return Value::Error(Rc::new(
+            "join() takes a handle and an optional timeout (ms)".to_string(),
+        ));
     }
     let id = match args[0].repr() {
         ValueRepr::Uint(u) => u,
@@ -423,9 +518,17 @@ pub fn builtin_join(args: &[Value]) -> Value {
         None => return Value::Error(Rc::new(format!("join(): invalid or used handle {}", id))),
     };
 
-    match rx.recv() {
-        Ok(Ok(s)) => attach(s),
+    let recvd = match args.get(1).and_then(|v| v.as_integer()) {
+        Some(ms) => rx.recv_timeout(std::time::Duration::from_millis(ms.max(0) as u64)),
+        None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+    };
+    match recvd {
+        Ok(Ok(s)) => attach(s, vm),
         Ok(Err(e)) => Value::Error(Rc::new(e)),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            HANDLES.with(|h| h.borrow_mut().insert(id, rx));
+            Value::Error(Rc::new("join(): timed out".to_string()))
+        }
         Err(_) => Value::Error(Rc::new("join(): worker dropped without replying".to_string())),
     }
 }
