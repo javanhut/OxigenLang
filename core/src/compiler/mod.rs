@@ -271,6 +271,11 @@ pub struct Compiler {
     /// matching the tree-walker, where `each` introduces a fresh per-iteration
     /// environment that `set_typed` writes the shadow into.
     typed_globals: std::collections::HashSet<String>,
+    /// Monotonic id stamped onto each `Function` at finalization, in compile
+    /// order. Deterministic for a given source, so a worker compiling the same
+    /// source assigns identical ids (closure transfer across threads relies on
+    /// this to identify a lambda's code).
+    fn_counter: u32,
 }
 
 impl Compiler {
@@ -287,6 +292,7 @@ impl Compiler {
             method_field_stack: Vec::new(),
             declared_globals: std::collections::HashSet::new(),
             typed_globals: std::collections::HashSet::new(),
+            fn_counter: 0,
         };
         // Push the top-level script frame.
         compiler.frames.push(CompilerFrame::new(None, 0));
@@ -345,7 +351,10 @@ impl Compiler {
         }
 
         let frame = self.frames.pop().unwrap();
-        Ok(frame.function)
+        let mut function = frame.function;
+        function.id = self.fn_counter;
+        self.fn_counter += 1;
+        Ok(function)
     }
 
     // ── Helpers ────────────────────────────────────────────────────────
@@ -2813,7 +2822,9 @@ impl Compiler {
 
         // Pop this frame and get the function + upvalues
         let frame = self.frames.pop().unwrap();
-        let function = frame.function;
+        let mut function = frame.function;
+        function.id = self.fn_counter;
+        self.fn_counter += 1;
         let upvalues = frame.upvalues;
 
         // Add the function as a constant in the enclosing scope

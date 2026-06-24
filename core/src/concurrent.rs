@@ -19,7 +19,7 @@ use crate::compiler::Compiler;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::vm::collections::{OxMap, OxSet};
-use crate::vm::value::{Value, ValueRepr};
+use crate::vm::value::{Function, ObjClosure, Upvalue, Value, ValueRepr};
 use crate::vm::VM;
 use std::cell::RefCell as StdRefCell;
 use std::rc::Rc;
@@ -97,9 +97,18 @@ fn attach(s: Sendable) -> Value {
     }
 }
 
+/// How a worker resolves the function to run: a named top-level function
+/// (resolved in the worker's globals, preserving module context) or — for
+/// lambdas and capturing closures — a compile-order function id plus a snapshot
+/// of its captured upvalues.
+enum Callee {
+    Named(String),
+    Fn { id: u32, upvalues: Vec<Sendable> },
+}
+
 /// A unit of work for a worker thread.
 struct Task {
-    func: String,
+    callee: Callee,
     args: Vec<Sendable>,
     reply: mpsc::Sender<Result<Sendable, String>>,
 }
@@ -137,6 +146,10 @@ thread_local! {
     static HANDLES: RefCell<HashMap<u64, mpsc::Receiver<Result<Sendable, String>>>> =
         RefCell::new(HashMap::new());
     static NEXT: Cell<u64> = const { Cell::new(1) };
+
+    /// Worker-only: compile-order id -> function code, for rebuilding spawned
+    /// closures (lambdas/captures) that the name path can't resolve.
+    static WORKER_FNS: RefCell<HashMap<u32, Rc<Function>>> = RefCell::new(HashMap::new());
 }
 
 /// Register the program source so workers can rebuild a VM. Call once before
@@ -181,6 +194,18 @@ fn is_declaration(stmt: &Statement) -> bool {
     }
 }
 
+/// Walk a compiled program's function tree, mapping each function's stable id
+/// to its code, so a worker can rebuild a spawned closure (lambda/captures)
+/// that lives in `main` and so isn't among the declarations-only globals.
+fn collect_fns(f: &Rc<Function>, table: &mut HashMap<u32, Rc<Function>>) {
+    table.insert(f.id, Rc::clone(f));
+    for c in f.chunk.constants.iter() {
+        if let Value::Closure(inner) = c {
+            collect_fns(&inner.function, table);
+        }
+    }
+}
+
 /// Build a VM with the program's top-level declarations (functions, types,
 /// patterns, imports) registered but no executable top-level code run.
 fn build_worker_vm(src: &str) -> Result<VM, String> {
@@ -190,11 +215,22 @@ fn build_worker_vm(src: &str) -> Result<VM, String> {
     if !parser.errors().is_empty() {
         return Err(format!("worker parse error: {}", parser.format_errors()));
     }
+    // Compile the FULL program (not run) to harvest the id->function table —
+    // lambdas live in `main`, which the declarations filter below drops. Same
+    // source + compiler as the main thread, so the ids match.
+    let full = Rc::new(
+        Compiler::new()
+            .compile(&program)
+            .map_err(|errs| format!("worker compile error: {:?}", errs))?,
+    );
+    let mut table = HashMap::new();
+    collect_fns(&full, &mut table);
+    WORKER_FNS.with(|t| *t.borrow_mut() = table);
+
     // Workers load declarations only — drop all executable top-level statements
     // so no top-level `spawn`/`join`/side effect ever runs at worker init.
     program.statements.retain(is_declaration);
-    let compiler = Compiler::new();
-    let function = compiler
+    let function = Compiler::new()
         .compile(&program)
         .map_err(|errs| format!("worker compile error: {:?}", errs))?;
 
@@ -206,10 +242,19 @@ fn build_worker_vm(src: &str) -> Result<VM, String> {
 }
 
 /// Run a task synchronously on the given VM and produce a Sendable result.
-fn run_task(vm: &mut VM, func: &str, args: Vec<Sendable>) -> Result<Sendable, String> {
-    let callee = vm
-        .get_global(func)
-        .ok_or_else(|| format!("spawn: function '{}' not found", func))?;
+fn run_task(vm: &mut VM, callee: Callee, args: Vec<Sendable>) -> Result<Sendable, String> {
+    let callee = match callee {
+        Callee::Named(name) => vm
+            .get_global(&name)
+            .ok_or_else(|| format!("spawn: function '{}' not found", name))?,
+        Callee::Fn { id, upvalues } => {
+            let f = WORKER_FNS
+                .with(|t| t.borrow().get(&id).cloned())
+                .ok_or_else(|| format!("spawn: function #{} not found", id))?;
+            let ups: Vec<Value> = upvalues.into_iter().map(attach).collect();
+            Value::Closure(Rc::new(ObjClosure::closed(f, ups)))
+        }
+    };
     let val_args: Vec<Value> = args.into_iter().map(attach).collect();
     let result = vm
         .call_with_args(callee, val_args)
@@ -242,7 +287,7 @@ fn spawn_worker(rx: Arc<Mutex<mpsc::Receiver<Task>>>, src: String) {
                     Ok(t) => t,
                     Err(_) => break, // channel closed
                 };
-                let result = run_task(&mut vm, &task.func, task.args);
+                let result = run_task(&mut vm, task.callee, task.args);
                 let _ = task.reply.send(result);
                 OUTSTANDING.fetch_sub(1, Ordering::SeqCst);
             }
@@ -282,15 +327,36 @@ pub fn builtin_spawn(args: &[Value]) -> Value {
     if args.is_empty() {
         return Value::Error(Rc::new("spawn() requires a function argument".to_string()));
     }
-    let func_name = match args[0].repr() {
-        ValueRepr::Closure(c) => match c.function.name.as_deref() {
-            Some(name) => name.to_string(),
-            None => {
-                return Value::Error(Rc::new(
-                    "spawn() cannot spawn an anonymous function".to_string(),
-                ))
+    let callee = match args[0].repr() {
+        ValueRepr::Closure(c) => {
+            // Named top-level function with no captures: resolve by name on the
+            // worker (preserves module context). Otherwise ship the function id
+            // plus a snapshot of its (already-closed) upvalues.
+            if c.upvalues.is_empty() && c.function.name.is_some() {
+                Callee::Named(c.function.name.clone().unwrap())
+            } else {
+                let mut ups = Vec::with_capacity(c.upvalues.len());
+                for uv in &c.upvalues {
+                    match &*uv.borrow() {
+                        Upvalue::Closed(v) => match detach(v) {
+                            Ok(s) => ups.push(s),
+                            Err(e) => {
+                                return Value::Error(Rc::new(format!("spawn(): capture {}", e)))
+                            }
+                        },
+                        Upvalue::Open(_) => {
+                            return Value::Error(Rc::new(
+                                "spawn(): internal error — open upvalue".to_string(),
+                            ))
+                        }
+                    }
+                }
+                Callee::Fn {
+                    id: c.function.id,
+                    upvalues: ups,
+                }
             }
-        },
+        }
         _ => return Value::Error(Rc::new("spawn() first argument must be a function".to_string())),
     };
 
@@ -311,14 +377,14 @@ pub fn builtin_spawn(args: &[Value]) -> Value {
         // simple — correctness over speed.
         let src = SRC.get().cloned().unwrap_or_default();
         let result = match build_worker_vm(&src) {
-            Ok(mut vm) => run_task(&mut vm, &func_name, sendable_args),
+            Ok(mut vm) => run_task(&mut vm, callee, sendable_args),
             Err(e) => Err(e),
         };
         let _ = reply_tx.send(result);
     } else {
         let pool = ensure_pool();
         let task = Task {
-            func: func_name,
+            callee,
             args: sendable_args,
             reply: reply_tx,
         };

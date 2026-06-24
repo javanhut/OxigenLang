@@ -992,6 +992,39 @@ impl VM {
         Ok(())
     }
 
+    /// Closure transfer: if `self.stack[start]` is a closure with live (open)
+    /// captures, replace it with a snapshot whose upvalues are `Closed` over the
+    /// current stack values, so a no-stack builtin (`spawn`) can read them.
+    /// `#[cold]`/`#[inline(never)]` keeps these locals out of `call_value`'s
+    /// frame, which is on the stack for every call including deep recursion.
+    #[cold]
+    #[inline(never)]
+    fn snapshot_spawn_closure(&mut self, start: usize) {
+        let c = match &self.stack[start] {
+            Value::Closure(c) => Rc::clone(c),
+            _ => return,
+        };
+        if !c
+            .upvalues
+            .iter()
+            .any(|uv| matches!(&*uv.borrow(), Upvalue::Open(_)))
+        {
+            return;
+        }
+        let vals: Vec<Value> = c
+            .upvalues
+            .iter()
+            .map(|uv| match &*uv.borrow() {
+                Upvalue::Open(slot) => self.stack[*slot].clone(),
+                Upvalue::Closed(v) => v.clone(),
+            })
+            .collect();
+        self.stack[start] = Value::Closure(Rc::new(crate::vm::value::ObjClosure::closed(
+            Rc::clone(&c.function),
+            vals,
+        )));
+    }
+
     // ── Stack Operations ───────────────────────────────────────────────
 
     #[inline(always)]
@@ -2835,6 +2868,15 @@ impl VM {
                 }
 
                 let start = self.stack.len() - arg_count;
+                // Closure transfer: snapshot a spawned capturing closure so the
+                // builtin (no stack access) can read its upvalues. Kept out of
+                // line so its locals don't bloat this hot, deeply-recursed frame.
+                if std::ptr::fn_addr_eq(
+                    func,
+                    crate::concurrent::builtin_spawn as fn(&[Value]) -> Value,
+                ) {
+                    self.snapshot_spawn_closure(start);
+                }
                 // Pass args as a borrowed slice of the stack — no per-call
                 // Vec allocation (LuaJIT fast-function style). `func` is a
                 // copied fn pointer and never touches `self`, so the

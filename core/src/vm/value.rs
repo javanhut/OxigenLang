@@ -451,6 +451,10 @@ pub struct Function {
     /// this function. Used by smart JIT tiering to compile loop-heavy
     /// single-call functions at entry instead of after they finish.
     pub has_loop: bool,
+    /// Stable, compile-order id. The concurrency layer uses it to identify a
+    /// closure's code across threads — a worker rebuilds the same id→Function
+    /// table by compiling the same source (ids are deterministic per source).
+    pub id: u32,
 }
 
 impl Function {
@@ -463,6 +467,7 @@ impl Function {
             params: Vec::new(),
             locals: Vec::new(),
             has_loop: false,
+            id: 0,
         }
     }
 }
@@ -557,6 +562,33 @@ pub fn make_upvalue_int_caches(n: usize) -> (Box<[Cell<u8>]>, Box<[Cell<i64>]>) 
         .collect::<Vec<_>>()
         .into_boxed_slice();
     (kinds, values)
+}
+
+impl ObjClosure {
+    /// Build a closure whose upvalues are all `Closed` over `upvalue_values`,
+    /// with cold JIT state and no module globals. Used to snapshot a closure
+    /// for cross-thread transfer and to rebuild it on a worker.
+    pub fn closed(function: Rc<Function>, upvalue_values: Vec<Value>) -> ObjClosure {
+        let upvalues: Vec<Rc<RefCell<Upvalue>>> = upvalue_values
+            .into_iter()
+            .map(|v| Rc::new(RefCell::new(Upvalue::Closed(v))))
+            .collect();
+        let (upvalue_int_kinds, upvalue_int_values) = make_upvalue_int_caches(upvalues.len());
+        ObjClosure {
+            function,
+            upvalues,
+            module_globals: RefCell::new(None),
+            call_count: Cell::new(0),
+            loop_count: Cell::new(0),
+            jit_state: Cell::new(0),
+            jit_thunk: Cell::new(None),
+            specialized_thunk: Cell::new(None),
+            specialized_arity: Cell::new(0),
+            specialized_kind: Cell::new(0),
+            upvalue_int_kinds,
+            upvalue_int_values,
+        }
+    }
 }
 
 /// u8 encoding of `engine::SpecializedEntryKind` stored in
