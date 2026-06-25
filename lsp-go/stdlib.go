@@ -99,23 +99,7 @@ func discoverStdlib(stdlibPath string) []moduleInfo {
 
 		moduleName := strings.TrimSuffix(entry.Name(), ".oxi")
 		path := filepath.Join(stdlibPath, entry.Name())
-
-		source, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-
-		var functions []functionInfo
-		for _, line := range strings.Split(string(source), "\n") {
-			if matches := funDeclRe.FindStringSubmatch(line); matches != nil {
-				name := matches[1]
-				params := matches[2]
-				sig := name + "(" + params + ")"
-				functions = append(functions, functionInfo{name: name, signature: sig})
-			}
-		}
-
-		modules = append(modules, moduleInfo{name: moduleName, functions: functions})
+		modules = append(modules, moduleInfo{name: moduleName, functions: parseModuleFuncs(path)})
 	}
 
 	sort.Slice(modules, func(i, j int) bool {

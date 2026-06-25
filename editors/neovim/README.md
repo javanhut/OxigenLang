@@ -109,8 +109,8 @@ The LSP server also supports `textDocument/formatting`, so if you prefer LSP-bas
 The LSP server provides:
 
 - **Diagnostics** -- Real-time parse error reporting with hints
-- **Completion** -- Keywords, builtin functions, type names, and stdlib modules
-- **Hover** -- Documentation for keywords, builtins, types, shebangs, and file directives
+- **Completion** -- Keywords, builtin functions, type names, and stdlib modules, plus your own document symbols: structs, functions, enums, patterns, and variables show up as you write them. `instance.` and `self.` complete a struct's fields and methods (including inherited ones), and `localmod.` completes the functions of a locally-imported `.oxi` module. Type annotations (`<…>`) offer your own structs/enums. Completions carry rich Markdown documentation.
+- **Hover** -- Documentation for keywords (including `diverge`/`converge`/`within`), builtins, types, shebangs, and file directives
 - **Document Symbols** -- Outline of functions, structs, patterns, and variables
 - **Formatting** -- Format documents via LSP or `oxigen fmt`
 

@@ -113,6 +113,12 @@ func keywordHover(word string) string {
 		return "**each** — Iterate over a collection\n\n```oxigen\neach item in collection {\n    body\n}\n```"
 	case "repeat":
 		return "**repeat** — Loop while condition is true\n\n```oxigen\nrepeat condition {\n    body\n}\n```"
+	case "diverge":
+		return "**diverge** — Run work on a worker thread (real OS thread, share-nothing).\n\n`diverge { ... }` returns a task immediately; `diverge each x in xs { ... }` fans out over a collection in parallel and gathers results in order.\n\n```oxigen\nwork := diverge { expensive() }\nsquares := diverge each n in nums { n * n }\n```"
+	case "converge":
+		return "**converge** — Wait for a task and return its value (idempotent). Accepts a single task or a list of tasks (joined in order). Add `within <ms>` to bound the wait.\n\n```oxigen\nresult := converge work\nall := converge [a, b]\nr := converge work within 500\n```"
+	case "within":
+		return "**within** — Bound a `converge` wait to a number of milliseconds. On timeout it returns an error value (test with `is_error`); the task keeps running.\n\n```oxigen\nresult := converge work within 500\n```"
 	case "option":
 		return "**option** — Multi-arm conditional expression\n\n```oxigen\noption {\n    condition -> result\n    else -> default\n}\n```"
 	case "unless":
@@ -226,6 +232,8 @@ func builtinHover(word string) string {
 		return "**is_value**(obj) -> bool\n\nCheck if an object is a Value wrapper."
 	case "is_error":
 		return "**is_error**(obj) -> bool\n\nCheck if an object is an error value."
+	case "cancel":
+		return "**cancel**(task)\n\nAsk a task to stop. Cancellation is cooperative — the task stops at its next function call. Joining a cancelled task returns an error value (test with `is_error`)."
 	default:
 		return ""
 	}

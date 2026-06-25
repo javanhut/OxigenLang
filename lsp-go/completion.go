@@ -18,6 +18,9 @@ var keywords = []keywordInfo{
 	{"from", "Selective import from a module"},
 	{"each", "Iterate over a collection"},
 	{"repeat", "Loop while condition is true"},
+	{"diverge", "Run a block on a worker thread, returning a task"},
+	{"converge", "Wait for a task (or list of tasks) and return its value"},
+	{"within", "Bound a converge wait: converge t within <ms>"},
 	{"option", "Multi-arm conditional expression"},
 	{"unless", "Inverse conditional expression"},
 	{"choose", "Pattern matching expression"},
@@ -80,6 +83,7 @@ var builtins = []keywordInfo{
 	{"error", "error(message) — Create an error value"},
 	{"is_value", "is_value(obj) — Check if obj is a Value wrapper"},
 	{"is_error", "is_error(obj) — Check if obj is an error"},
+	{"cancel", "cancel(task) — Ask a task to stop (cooperative)"},
 }
 
 var typeNames = []keywordInfo{
@@ -104,12 +108,14 @@ const (
 	contextGeneral completionContext = iota
 	contextAfterIntroduce
 	contextAfterModuleDot
+	contextAfterLocalModuleDot
+	contextAfterInstanceDot
 	contextTypeAnnotation
 	contextHeaderDirective
 	contextShebang
 )
 
-func detectCompletionContext(source string, pos Position, stdlibPath string) (completionContext, string) {
+func detectCompletionContext(source string, pos Position, idx *docIndex, stdlibPath string) (completionContext, string) {
 	lines := strings.Split(source, "\n")
 	lineIdx := int(pos.Line)
 	if lineIdx >= len(lines) {
@@ -139,14 +145,24 @@ func detectCompletionContext(source string, pos Position, stdlibPath string) (co
 		return contextAfterIntroduce, ""
 	}
 
-	// Check for module.member access
+	// Check for `receiver.member` access. The receiver may be a stdlib module, a
+	// local imported module, or a variable/`self` bound to a struct instance.
 	if dotIdx := strings.LastIndex(trimmed, "."); dotIdx >= 0 {
-		beforeDot := trimmed[:dotIdx]
-		moduleName := extractLastWord(beforeDot)
-		if moduleName != "" {
-			funcMap := getStdlibFuncMap(stdlibPath)
-			if _, ok := funcMap[moduleName]; ok {
-				return contextAfterModuleDot, moduleName
+		word := extractLastWord(trimmed[:dotIdx])
+		if word != "" {
+			if _, ok := getStdlibFuncMap(stdlibPath)[word]; ok {
+				return contextAfterModuleDot, word
+			}
+			if t, ok := idx.varTypes[word]; ok {
+				return contextAfterInstanceDot, t
+			}
+			if word == "self" {
+				if es := idx.enclosingStruct(lineIdx); es != "" {
+					return contextAfterInstanceDot, es
+				}
+			}
+			if _, ok := idx.localMods[word]; ok {
+				return contextAfterLocalModuleDot, word
 			}
 		}
 	}
@@ -268,7 +284,7 @@ func isIdentChar(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
 
-func getCompletions(source string, pos Position, stdlibPath string) []CompletionItem {
+func getCompletions(source string, pos Position, uri, stdlibPath string) []CompletionItem {
 	// Don't pop up keyword/builtin completions while the cursor is inside the
 	// text of a string literal — including triple-quoted multi-line strings.
 	// Interpolation expressions (`{...}`) are still real code, so completions
@@ -277,7 +293,8 @@ func getCompletions(source string, pos Position, stdlibPath string) []Completion
 		return []CompletionItem{}
 	}
 
-	ctx, moduleName := detectCompletionContext(source, pos, stdlibPath)
+	idx := indexDocument(source, uri)
+	ctx, payload := detectCompletionContext(source, pos, idx, stdlibPath)
 
 	switch ctx {
 	case contextHeaderDirective:
@@ -287,11 +304,15 @@ func getCompletions(source string, pos Position, stdlibPath string) []Completion
 	case contextAfterIntroduce:
 		return moduleCompletions(stdlibPath)
 	case contextAfterModuleDot:
-		return moduleFunctionCompletions(moduleName, stdlibPath)
+		return moduleFunctionCompletions(payload, stdlibPath)
+	case contextAfterLocalModuleDot:
+		return localModuleFunctionCompletions(idx, payload)
+	case contextAfterInstanceDot:
+		return structMemberCompletions(idx, payload)
 	case contextTypeAnnotation:
-		return typeCompletions()
+		return typeCompletions(idx)
 	default:
-		return generalCompletions()
+		return generalCompletions(idx, int(pos.Line))
 	}
 }
 
@@ -322,39 +343,54 @@ func shebangCompletions() []CompletionItem {
 	}
 }
 
-func generalCompletions() []CompletionItem {
+func generalCompletions(idx *docIndex, lineIdx int) []CompletionItem {
 	items := make([]CompletionItem, 0, len(keywords)+len(builtins))
 
 	kwKind := CompletionKindKeyword
 	for _, kw := range keywords {
 		items = append(items, CompletionItem{
-			Label:  kw.name,
-			Kind:   &kwKind,
-			Detail: kw.detail,
+			Label:         kw.name,
+			Kind:          &kwKind,
+			Detail:        kw.detail,
+			Documentation: docMarkup(keywordHover(kw.name)),
 		})
 	}
 
 	fnKind := CompletionKindFunction
 	for _, b := range builtins {
 		items = append(items, CompletionItem{
-			Label:  b.name,
-			Kind:   &fnKind,
-			Detail: b.detail,
+			Label:         b.name,
+			Kind:          &fnKind,
+			Detail:        b.detail,
+			Documentation: docMarkup(builtinHover(b.name)),
 		})
+	}
+
+	// Symbols declared in this document — new structs, functions, enums,
+	// patterns, and top-level variables show up as you write them.
+	items = append(items, idx.symbolCompletions()...)
+
+	// Inside a method body, the enclosing struct's fields and methods are in
+	// scope via implicit self, so offer them bare.
+	if es := idx.enclosingStruct(lineIdx); es != "" {
+		items = append(items, structMemberCompletions(idx, es)...)
 	}
 
 	return items
 }
 
-func typeCompletions() []CompletionItem {
+func typeCompletions(idx *docIndex) []CompletionItem {
 	tpKind := CompletionKindTypeParameter
 	kwKind := CompletionKindKeyword
+	stKind := CompletionKindStruct
+	enKind := CompletionKindEnum
 	items := make([]CompletionItem, 0, len(typeNames)+len(angleConstructs))
 	for _, t := range typeNames {
 		items = append(items, CompletionItem{
-			Label:  t.name,
-			Kind:   &tpKind,
-			Detail: t.detail,
+			Label:         t.name,
+			Kind:          &tpKind,
+			Detail:        t.detail,
+			Documentation: docMarkup(typeHover(t.name)),
 		})
 	}
 	// `<` also begins the error/value model wrappers and a `<test>` block, not
@@ -366,7 +402,85 @@ func typeCompletions() []CompletionItem {
 			Detail: c.detail,
 		})
 	}
+	// User-defined structs and enums are usable as type annotations too.
+	for _, st := range idx.structList {
+		items = append(items, CompletionItem{Label: st.name, Kind: &stKind, Detail: structDetail(st)})
+	}
+	for _, e := range idx.enums {
+		items = append(items, CompletionItem{Label: e.name, Kind: &enKind, Detail: e.detail})
+	}
 	return items
+}
+
+// symbolCompletions turns the document's declared symbols into completion items.
+func (idx *docIndex) symbolCompletions() []CompletionItem {
+	items := make([]CompletionItem, 0, len(idx.structList)+len(idx.funcs)+len(idx.enums)+len(idx.patterns)+len(idx.topVars))
+	stKind := CompletionKindStruct
+	enKind := CompletionKindEnum
+	fnKind := CompletionKindFunction
+	varKind := CompletionKindVariable
+	for _, st := range idx.structList {
+		items = append(items, CompletionItem{Label: st.name, Kind: &stKind, Detail: structDetail(st)})
+	}
+	for _, e := range idx.enums {
+		items = append(items, CompletionItem{Label: e.name, Kind: &enKind, Detail: e.detail})
+	}
+	for _, f := range idx.funcs {
+		items = append(items, CompletionItem{Label: f.name, Kind: &fnKind, Detail: f.detail})
+	}
+	for _, p := range idx.patterns {
+		items = append(items, CompletionItem{Label: p.name, Kind: &fnKind, Detail: p.detail})
+	}
+	for _, v := range idx.topVars {
+		items = append(items, CompletionItem{Label: v.name, Kind: &varKind, Detail: v.detail})
+	}
+	return items
+}
+
+// structMemberCompletions offers the fields and methods of a struct (including
+// inherited ones) — what shows after `instance.` or `self.`.
+func structMemberCompletions(idx *docIndex, structName string) []CompletionItem {
+	fields, methods := idx.structMembers(structName)
+	items := make([]CompletionItem, 0, len(fields)+len(methods))
+	methodKind := CompletionKindMethod
+	fieldKind := CompletionKindField
+	for _, m := range methods {
+		items = append(items, CompletionItem{Label: m.name, Kind: &methodKind, Detail: structName + "." + m.detail})
+	}
+	for _, f := range fields {
+		items = append(items, CompletionItem{Label: f.name, Kind: &fieldKind, Detail: f.detail})
+	}
+	return items
+}
+
+// localModuleFunctionCompletions offers the functions of a locally-imported
+// `.oxi` module — what shows after `localmod.`.
+func localModuleFunctionCompletions(idx *docIndex, moduleName string) []CompletionItem {
+	funcs := idx.localMods[moduleName]
+	fnKind := CompletionKindFunction
+	items := make([]CompletionItem, 0, len(funcs))
+	for _, f := range funcs {
+		items = append(items, CompletionItem{Label: f.name, Kind: &fnKind, Detail: f.signature})
+	}
+	return items
+}
+
+func structDetail(st *docStruct) string {
+	if len(st.fields) == 0 {
+		return "struct " + st.name
+	}
+	names := make([]string, 0, len(st.fields))
+	for _, f := range st.fields {
+		names = append(names, f.name)
+	}
+	return "struct " + st.name + "(" + strings.Join(names, ", ") + ")"
+}
+
+func docMarkup(value string) *MarkupContent {
+	if value == "" {
+		return nil
+	}
+	return &MarkupContent{Kind: "markdown", Value: value}
 }
 
 func moduleCompletions(stdlibPath string) []CompletionItem {

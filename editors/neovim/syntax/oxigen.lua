@@ -131,6 +131,7 @@ syn keyword oxigenKeyword struct enum nextgroup=oxigenStructName skipwhite
 syn keyword oxigenKeyword includes hidden
 syn keyword oxigenKeyword main
 syn keyword oxigenKeyword each repeat if option unless choose pattern when
+syn keyword oxigenKeyword diverge converge within
 syn keyword oxigenKeyword guard fail give skip stop
 syn keyword oxigenKeyword in not and or then as hide self
 
@@ -153,7 +154,7 @@ syn match oxigenStructRef /\<\w\+\>\ze\s\+includes\>/
 syn keyword oxigenBuiltin print println len push first last rest
 syn keyword oxigenBuiltin type ord chr str int float range chars
 syn keyword oxigenBuiltin byte uint set keys values insert remove has
-syn keyword oxigenBuiltin tuple error is_value is_error
+syn keyword oxigenBuiltin tuple error is_value is_error cancel
 
 " Angle form directives: <log>, <log<tag>>, <fail>, <guard>, <guard<...>>
 syn match oxigenDirective /<log\(<[^>]*>\)\?>/

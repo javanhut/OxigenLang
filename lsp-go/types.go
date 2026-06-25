@@ -99,7 +99,7 @@ type DidOpenTextDocumentParams struct {
 }
 
 type DidChangeTextDocumentParams struct {
-	TextDocument   VersionedTextDocumentIdentifier `json:"textDocument"`
+	TextDocument   VersionedTextDocumentIdentifier  `json:"textDocument"`
 	ContentChanges []TextDocumentContentChangeEvent `json:"contentChanges"`
 }
 
@@ -134,9 +134,10 @@ type CompletionParams struct {
 }
 
 type CompletionItem struct {
-	Label  string `json:"label"`
-	Kind   *int   `json:"kind,omitempty"`
-	Detail string `json:"detail,omitempty"`
+	Label         string         `json:"label"`
+	Kind          *int           `json:"kind,omitempty"`
+	Detail        string         `json:"detail,omitempty"`
+	Documentation *MarkupContent `json:"documentation,omitempty"`
 }
 
 // ── Hover ──
@@ -186,9 +187,14 @@ const (
 )
 
 const (
+	CompletionKindMethod        = 2
 	CompletionKindFunction      = 3
+	CompletionKindField         = 5
+	CompletionKindVariable      = 6
 	CompletionKindModule        = 9
+	CompletionKindEnum          = 13
 	CompletionKindKeyword       = 14
+	CompletionKindStruct        = 22
 	CompletionKindTypeParameter = 25
 )
 

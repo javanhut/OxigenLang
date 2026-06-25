@@ -166,7 +166,7 @@ func (s *Server) handleInitialize(msg Request) {
 		},
 		ServerInfo: &ServerInfo{
 			Name:    "oxigen-lsp",
-			Version: "0.2.0",
+			Version: "0.3.0",
 		},
 	}
 	s.respond(msg.ID, result)
@@ -259,7 +259,7 @@ func (s *Server) handleCompletion(msg Request) {
 		return
 	}
 
-	items := getCompletions(content, params.Position, s.stdlibPath)
+	items := getCompletions(content, params.Position, params.TextDocument.URI, s.stdlibPath)
 	s.respond(msg.ID, items)
 }
 
