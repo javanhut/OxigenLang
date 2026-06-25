@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --locked
+      - run: cargo test --workspace
 
   # Suite 2 — Oxigen: the <test> blocks in tests/*_test.oxi, run by the
   # language's own test runner. stdlib resolves from the repo-root ./stdlib,
@@ -34,6 +34,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p oxigen --locked
+      - run: cargo build -p oxigen
       - name: Run Oxigen test suite
         run: ./target/debug/oxigen test tests/
