@@ -284,7 +284,3 @@ fun sort_by(arr <array>, key_fn <generic>) {
 fun pmap(arr <array>, f <generic>) {
     map(map(arr, fun(x <generic>) { __spawn(f, x) }), fun(h <generic>) { __join_task(h) })
 }
-
-// Wait for many already-spawned tasks; results in input order. Prefer
-// `converge [list]`.
-fun all(hs <array>) { map(hs, fun(h <generic>) { __join_task(h) }) }
