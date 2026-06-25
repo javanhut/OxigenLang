@@ -139,6 +139,34 @@ fn test_single_line_string_is_not_promoted_to_triple() {
 }
 
 #[test]
+fn test_diverge_converge_keep_high_level_syntax() {
+    // Regression guard: the formatter must round-trip `diverge`/`converge`
+    // surface syntax, NOT lower it to the `__spawn`/`__join_task` builtins.
+    let source = "main {\n    \
+        sq := diverge each n in nums {\n        n * n\n    }\n    \
+        work := diverge {\n        slow()\n    }\n    \
+        r := converge work within 500\n    \
+        all := converge [work]\n}\n";
+    let formatted = format_source(source);
+
+    for kw in ["diverge each ", "diverge {", "converge work", "within 500"] {
+        assert!(
+            formatted.contains(kw),
+            "high-level concurrency syntax `{}` not preserved:\n{}",
+            kw,
+            formatted
+        );
+    }
+    assert!(
+        !formatted.contains("__spawn") && !formatted.contains("__join_task"),
+        "formatter leaked the lowered builtins:\n{}",
+        formatted
+    );
+    assert_reparseable(source, "diverge_converge");
+    assert_idempotent(source, "diverge_converge");
+}
+
+#[test]
 fn test_multiline_string_with_interpolation_roundtrip() {
     // Interpolation inside a triple-quoted string round-trips, keeping the
     // triple quotes and the literal newlines around the `{...}` expression.

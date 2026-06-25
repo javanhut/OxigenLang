@@ -120,11 +120,11 @@ func keywordHover(word string) string {
 	case "within":
 		return "**within** — Bound a `converge` wait to a number of milliseconds. On timeout it returns an error value (test with `is_error`); the task keeps running.\n\n```oxigen\nresult := converge work within 500\n```"
 	case "option":
-		return "**option** — Multi-arm conditional expression\n\n```oxigen\noption {\n    condition -> result\n    else -> default\n}\n```"
+		return "**option** — Multi-arm conditional expression. Arms are comma-separated `condition -> result`; a trailing bare `{ ... }` block (no `->`) is the default.\n\n```oxigen\noption {\n    n < 0 -> \"negative\",\n    n == 0 -> \"zero\",\n    { \"positive\" }\n}\n```"
 	case "unless":
 		return "**unless** — Inverse conditional\n\n```oxigen\nvalue unless condition then alternative\n```"
 	case "choose":
-		return "**choose** — Pattern matching\n\n```oxigen\nchoose value {\n    pattern_name -> result\n    else -> default\n}\n```"
+		return "**choose** — Pattern matching\n\n```oxigen\nchoose value {\n    is_red -> println(\"stop\")\n    is_green -> println(\"go\")\n}\n```"
 	case "pattern":
 		return "**pattern** — Define a named pattern for use with choose\n\n```oxigen\npattern name(x) = condition\n```"
 	case "guard":

@@ -212,6 +212,8 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     );
     globals.insert("__net_download".to_string(), Value::Builtin(builtin_net_download));
     globals.insert("__net_upload".to_string(), Value::Builtin(builtin_net_upload));
+    globals.insert("__net_http_open".to_string(), Value::Builtin(builtin_net_http_open));
+    globals.insert("__net_http_read".to_string(), Value::Builtin(builtin_net_http_read));
     globals.insert("__net_tcp_connect".to_string(), Value::Builtin(builtin_net_tcp_connect));
     globals.insert("__net_tcp_listen".to_string(), Value::Builtin(builtin_net_tcp_listen));
     globals.insert("__net_tcp_accept".to_string(), Value::Builtin(builtin_net_tcp_accept));
@@ -226,8 +228,13 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
 // ── Core builtins ──────────────────────────────────────────────────────
 
 fn builtin_print(args: &[Value]) -> Value {
+    use std::io::Write;
     let parts: Vec<String> = args.iter().map(|a| format!("{}", a)).collect();
-    print!("{}", parts.join(" "));
+    // Flush so `print` (no trailing newline) shows immediately — needed for
+    // token-by-token streaming output, where nothing else triggers a flush.
+    let mut out = std::io::stdout().lock();
+    let _ = write!(out, "{}", parts.join(" "));
+    let _ = out.flush();
     Value::None
 }
 
@@ -2277,6 +2284,33 @@ fn builtin_net_upload(args: &[Value]) -> Value {
                 crate::vm::collections::OxMap::from_pairs(entries),
             )))
         }
+        Err(e) => Value::Error(rc_str(e)),
+    }
+}
+
+fn builtin_net_http_open(args: &[Value]) -> Value {
+    if args.len() != 1 {
+        return Value::Error(rc_str("open_stream: expected (url)"));
+    }
+    let url = net_try!(net_str(&args[0], "open_stream url"));
+    match crate::netres::http_open(&url) {
+        Ok(id) => Value::Integer(id as i64),
+        Err(e) => Value::Error(rc_str(e)),
+    }
+}
+
+fn builtin_net_http_read(args: &[Value]) -> Value {
+    if args.len() != 3 {
+        return Value::Error(rc_str("read_chunk: expected (stream, max, timeout_ms)"));
+    }
+    let id = net_try!(net_int(&args[0], "read_chunk stream"));
+    let max = net_try!(net_int(&args[1], "read_chunk max"));
+    let timeout = net_try!(net_int(&args[2], "read_chunk timeout_ms"));
+    match crate::netres::http_read(id as u64, max, timeout) {
+        // None = timed out with no data yet (only when timeout_ms > 0); the
+        // caller distinguishes this from "" (EOF) and an error value.
+        Ok(Some(s)) => Value::String(rc_str(s)),
+        Ok(None) => Value::None,
         Err(e) => Value::Error(rc_str(e)),
     }
 }

@@ -18,12 +18,30 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
 
 enum Resource {
     Tcp(TcpStream),
     Listener(TcpListener),
     Udp(UdpSocket),
+    // A streaming HTTP response body, drained on a background thread into a
+    // channel so reads can be polled with a timeout (a live spinner) instead of
+    // blocking the interpreter. Behind its own Arc<Mutex<…>> so the registry
+    // lock is released before the (possibly slow) channel wait.
+    HttpBody(Arc<Mutex<HttpStream>>),
+}
+
+/// The receiving end of a streaming HTTP body. A background thread owns the
+/// reader and pushes raw byte chunks into `rx`; `carry` holds bytes not yet
+/// returned, including the trailing bytes of a multi-byte UTF-8 char that
+/// landed on a chunk boundary (so `http_read` only ever returns whole
+/// codepoints — critical for token streams with emoji/accents/CJK).
+struct HttpStream {
+    rx: Receiver<Vec<u8>>,
+    carry: Vec<u8>,
+    done: bool,
 }
 
 // ponytail: one global lock on the socket table so ids cross threads (enables
@@ -151,6 +169,113 @@ pub fn http_download(url: &str, path: &str) -> Result<i64, String> {
     let mut file = File::create(path).map_err(|e| e.to_string())?;
     std::io::copy(&mut reader, &mut file).map_err(|e| e.to_string())?;
     Ok(status as i64)
+}
+
+/// Opens a streaming GET and stashes the response body reader behind a handle.
+/// Read it incrementally with `http_read`; `close` frees it. The body is never
+/// buffered whole in memory — this is the read side of `download`.
+pub fn http_open(url: &str) -> Result<u64, String> {
+    let resp = ureq::get(url)
+        .call()
+        .map_err(|e| format!("http error: {}", e))?;
+    let (_, body) = resp.into_parts();
+    let mut reader = body.into_reader();
+
+    // Drain the body on a dedicated thread so the interpreter can poll reads
+    // with a timeout (the channel) instead of blocking on the socket. The
+    // thread ends at EOF, on error, or when the consumer drops the stream
+    // (`close`), at which point `tx.send` fails. ponytail: a thread blocked in
+    // `read` at close lingers until the next byte/EOF — fine for request/stream
+    // bodies, which terminate; revisit if long idle streams pile up.
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    Ok(insert(Resource::HttpBody(Arc::new(Mutex::new(HttpStream {
+        rx,
+        carry: Vec::new(),
+        done: false,
+    })))))
+}
+
+/// Reads up to `max` bytes of valid UTF-8 from an HTTP stream handle.
+///
+/// `timeout_ms == 0` blocks until data or EOF. `timeout_ms > 0` waits at most
+/// that long and returns `Ok(None)` if nothing arrived yet (so a caller can
+/// animate a spinner and retry). Returns:
+///   - `Ok(Some(text))` — `text` is "" only at end of stream
+///   - `Ok(None)`       — timed out with no data yet
+///
+/// A multi-byte codepoint can straddle a chunk boundary; we hold the incomplete
+/// trailing bytes in `carry` and only ever return whole characters.
+pub fn http_read(id: u64, max: i64, timeout_ms: i64) -> Result<Option<String>, String> {
+    if max <= 0 {
+        return Err("read_chunk: max bytes must be positive".to_string());
+    }
+    let stream = match REGISTRY.lock().unwrap().get(&id) {
+        Some(Resource::HttpBody(s)) => Arc::clone(s),
+        Some(_) => return Err(format!("handle {} is not an HTTP stream", id)),
+        None => return Err(format!("invalid or closed handle {}", id)),
+    };
+    let mut st = stream.lock().unwrap();
+
+    // Pull from the channel until we hold at least one whole char, or hit EOF.
+    while !has_whole_char(&st.carry) && !st.done {
+        let next = if timeout_ms > 0 {
+            match st.rx.recv_timeout(Duration::from_millis(timeout_ms as u64)) {
+                Ok(c) => Some(c),
+                Err(RecvTimeoutError::Timeout) => return Ok(None),
+                Err(RecvTimeoutError::Disconnected) => None,
+            }
+        } else {
+            st.rx.recv().ok()
+        };
+        match next {
+            Some(chunk) => st.carry.extend_from_slice(&chunk),
+            None => st.done = true,
+        }
+    }
+
+    if st.carry.is_empty() {
+        return Ok(Some(String::new())); // EOF, nothing buffered
+    }
+
+    // Return up to `max` bytes without splitting a multi-byte char.
+    let cap = (max as usize).min(st.carry.len());
+    let end = match std::str::from_utf8(&st.carry[..cap]) {
+        Ok(_) => cap,
+        Err(e) => e.valid_up_to(),
+    };
+    if end == 0 {
+        // The next char is wider than `max`, or only a truncated tail remains at
+        // EOF. Emit it (lossily for the truncated case) so we always progress.
+        let out = String::from_utf8_lossy(&st.carry).into_owned();
+        st.carry.clear();
+        return Ok(Some(out));
+    }
+    let out = String::from_utf8_lossy(&st.carry[..end]).into_owned();
+    st.carry.drain(..end);
+    Ok(Some(out))
+}
+
+/// Whether `buf` holds at least one complete UTF-8 char ready to return.
+fn has_whole_char(buf: &[u8]) -> bool {
+    match std::str::from_utf8(buf) {
+        Ok(s) => !s.is_empty(),
+        Err(e) => e.valid_up_to() > 0,
+    }
 }
 
 /// Streams the file at `file_path` as the request body without buffering it.

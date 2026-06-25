@@ -1562,36 +1562,10 @@ impl Parser {
     }
 
     // ── diverge / converge ──────────────────────────────────────────────
-    // Surface syntax for fork-join. `diverge` splits work off the current
-    // flow; `converge` rejoins it. Pure parse-time desugar to the `spawn`/
-    // `join` builtins — the compiler and VM never see a new node.
-    //   diverge { B }            -> spawn(fun() { B })
-    //   diverge each X in XS { B}-> (fun(){ spawn each, then join each })()
-    //   converge T               -> join(T)
-
-    fn syn_ident(&self, tok: &Token, name: &str) -> Expression {
-        Expression::Ident(Identifier {
-            token: tok.clone(),
-            value: name.to_string(),
-        })
-    }
-
-    fn syn_call(&self, tok: &Token, name: &str, args: Vec<Expression>) -> Expression {
-        Expression::Call {
-            token: tok.clone(),
-            function: Box::new(self.syn_ident(tok, name)),
-            args,
-            named_args: Vec::new(),
-        }
-    }
-
-    fn syn_thunk(&self, tok: &Token, body: Vec<Statement>) -> Expression {
-        Expression::FunctionLiteral {
-            token: tok.clone(),
-            parameters: Vec::new(),
-            body,
-        }
-    }
+    // Surface syntax for fork-join. `diverge` splits work off the current flow;
+    // `converge` rejoins it. These parse into first-class AST nodes so the
+    // formatter can round-trip them; the compiler and evaluator lower them to
+    // the `__spawn`/`__join_task` builtins via `ast::desugar_*`.
 
     fn parse_diverge_expression(&mut self) -> Option<Expression> {
         let tok = self.curr_token.clone(); // 'diverge'
@@ -1601,8 +1575,7 @@ impl Parser {
         }
         self.expect_peek(TokenType::LBrace)?; // '{'
         let body = self.parse_block()?;
-        let thunk = self.syn_thunk(&tok, body);
-        Some(self.syn_call(&tok, "__spawn", vec![thunk]))
+        Some(Expression::Diverge { token: tok, body })
     }
 
     fn parse_diverge_each(&mut self, tok: Token) -> Option<Expression> {
@@ -1616,61 +1589,11 @@ impl Parser {
         let iterable = self.parse_expression(Precedence::Lowest)?;
         self.expect_peek(TokenType::LBrace)?;
         let body = self.parse_block()?;
-
-        let empty_arr = || Expression::Array {
-            token: tok.clone(),
-            elements: Vec::new(),
-        };
-        let id = |n: &str| Identifier {
-            token: tok.clone(),
-            value: n.to_string(),
-        };
-
-        // each X in XS { push(__dv_hs, spawn(fun(){ B })) }
-        let spawn_call = self.syn_call(&tok, "__spawn", vec![self.syn_thunk(&tok, body)]);
-        let spawn_loop = Statement::Each {
-            token: tok.clone(),
+        Some(Expression::DivergeEach {
+            token: tok,
             variable: var,
-            iterable,
-            body: vec![Statement::Expr(self.syn_call(
-                &tok,
-                "push",
-                vec![self.syn_ident(&tok, "__dv_hs"), spawn_call],
-            ))],
-        };
-
-        // each __dv_h in __dv_hs { push(__dv_rs, join(__dv_h)) }
-        let join_call = self.syn_call(&tok, "__join_task", vec![self.syn_ident(&tok, "__dv_h")]);
-        let join_loop = Statement::Each {
-            token: tok.clone(),
-            variable: id("__dv_h"),
-            iterable: self.syn_ident(&tok, "__dv_hs"),
-            body: vec![Statement::Expr(self.syn_call(
-                &tok,
-                "push",
-                vec![self.syn_ident(&tok, "__dv_rs"), join_call],
-            ))],
-        };
-
-        // (fun() { spawn all, then join all in order; return results })()
-        let body = vec![
-            Statement::Let {
-                name: id("__dv_hs"),
-                value: empty_arr(),
-            },
-            spawn_loop,
-            Statement::Let {
-                name: id("__dv_rs"),
-                value: empty_arr(),
-            },
-            join_loop,
-            Statement::Expr(self.syn_ident(&tok, "__dv_rs")),
-        ];
-        Some(Expression::Call {
-            token: tok.clone(),
-            function: Box::new(self.syn_thunk(&tok, body)),
-            args: Vec::new(),
-            named_args: Vec::new(),
+            iterable: Box::new(iterable),
+            body,
         })
     }
 
@@ -1686,14 +1609,18 @@ impl Parser {
         }
         self.next_token(); // move onto the task expression
         let task = self.parse_expression(Precedence::Prefix)?;
-        // Optional timeout: `converge T within <ms>` -> __join_task(T, ms).
-        let mut args = vec![task];
+        // Optional timeout: `converge T within <ms>`.
+        let mut timeout = None;
         if self.peek_token.token_type == TokenType::Within {
             self.next_token(); // 'within'
             self.next_token(); // move onto the ms expression
-            args.push(self.parse_expression(Precedence::Prefix)?);
+            timeout = Some(Box::new(self.parse_expression(Precedence::Prefix)?));
         }
-        Some(self.syn_call(&tok, "__join_task", args))
+        Some(Expression::Converge {
+            token: tok,
+            task: Box::new(task),
+            timeout,
+        })
     }
 
     fn parse_function_parameters(&mut self) -> Option<Vec<TypedParam>> {

@@ -334,6 +334,8 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
     );
     builtins.insert("__net_download".to_string(), Rc::new(Object::Builtin(builtin_net_download)));
     builtins.insert("__net_upload".to_string(), Rc::new(Object::Builtin(builtin_net_upload)));
+    builtins.insert("__net_http_open".to_string(), Rc::new(Object::Builtin(builtin_net_http_open)));
+    builtins.insert("__net_http_read".to_string(), Rc::new(Object::Builtin(builtin_net_http_read)));
     builtins.insert("__net_tcp_connect".to_string(), Rc::new(Object::Builtin(builtin_net_tcp_connect)));
     builtins.insert("__net_tcp_listen".to_string(), Rc::new(Object::Builtin(builtin_net_tcp_listen)));
     builtins.insert("__net_tcp_accept".to_string(), Rc::new(Object::Builtin(builtin_net_tcp_accept)));
@@ -348,10 +350,13 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
 }
 
 fn builtin_print(args: Vec<Rc<Object>>) -> Rc<Object> {
+    use std::io::Write;
     let output: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-    // `print` does NOT append a newline (that's `println`); match the VM/JIT
-    // (vm/builtins.rs `builtin_print` uses `print!`) so file output is identical.
-    print!("{}", output.join(" "));
+    // `print` does NOT append a newline (that's `println`); flush so it shows
+    // immediately, matching the VM and supporting token-by-token streaming.
+    let mut out = std::io::stdout().lock();
+    let _ = write!(out, "{}", output.join(" "));
+    let _ = out.flush();
     Rc::new(Object::None)
 }
 
@@ -2878,6 +2883,34 @@ fn builtin_net_upload(args: Vec<Rc<Object>>) -> Rc<Object> {
                 Rc::new(Object::String(body)),
             ),
         ])),
+        Err(e) => Rc::new(Object::Error(e)),
+    }
+}
+
+fn builtin_net_http_open(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 1 {
+        return Rc::new(Object::Error("open_stream: expected (url)".to_string()));
+    }
+    let url = net_try!(net_str(&args[0], "open_stream url"));
+    match crate::netres::http_open(&url) {
+        Ok(id) => Rc::new(Object::Integer(id as i64)),
+        Err(e) => Rc::new(Object::Error(e)),
+    }
+}
+
+fn builtin_net_http_read(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 3 {
+        return Rc::new(Object::Error(
+            "read_chunk: expected (stream, max, timeout_ms)".to_string(),
+        ));
+    }
+    let id = net_try!(net_int(&args[0], "read_chunk stream"));
+    let max = net_try!(net_int(&args[1], "read_chunk max"));
+    let timeout = net_try!(net_int(&args[2], "read_chunk timeout_ms"));
+    match crate::netres::http_read(id as u64, max, timeout) {
+        // None = timed out with no data yet; distinct from "" (EOF) and error.
+        Ok(Some(s)) => Rc::new(Object::String(s)),
+        Ok(None) => Rc::new(Object::None),
         Err(e) => Rc::new(Object::Error(e)),
     }
 }

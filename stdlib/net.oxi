@@ -49,6 +49,21 @@ fun upload(method <str>, url <str>, file_path <str>, headers <map> = {}) {
     __net_upload(method, url, file_path, headers)
 }
 
+// Open a streaming GET. Returns a stream handle; read it incrementally with
+// read_chunk and free it with close. The body is never buffered in memory, so
+// this suits long-lived responses (SSE, chunked, large downloads). Pairs with
+// `diverge` to consume a stream on a worker thread.
+fun open_stream(url <str>) { __net_http_open(url) }
+
+// Read up to `max` bytes from a stream handle.
+//   timeout_ms = 0  -> block until data or end of stream
+//   timeout_ms > 0  -> wait at most that long; returns None if nothing arrived
+//                      yet (animate a spinner and retry)
+// Returns "" at end of stream, a string of bytes otherwise, or None on timeout.
+fun read_chunk(stream <int>, max <int> = 4096, timeout_ms <int> = 0) {
+    __net_http_read(stream, max, timeout_ms)
+}
+
 // ── TCP sockets ───────────────────────────────────────────────────────────
 //
 // A handle is an opaque ticket number for an open socket. Pass it to

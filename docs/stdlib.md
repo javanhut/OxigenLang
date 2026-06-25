@@ -437,6 +437,8 @@ introduce net
 | `request` | `request(method, url, headers, body)` | Full control HTTP request |
 | `download` | `download(url, path)` | Stream a GET body to a file; returns the status code |
 | `upload` | `upload(method, url, file_path, headers = {})` | Stream a file as the request body; returns `{status, body}` |
+| `open_stream` | `open_stream(url)` | Open a streaming GET; returns a stream handle (body not buffered) |
+| `read_chunk` | `read_chunk(stream, max = 4096, timeout_ms = 0)` | Read up to `max` bytes; `""` at end of stream. With `timeout_ms > 0`, returns `None` if nothing arrived yet (poll + animate a spinner) |
 | `connect` | `connect(host, port)` | Open a TCP connection; returns a connection handle |
 | `listen` | `listen(host, port)` | Bind a TCP server; returns a server handle |
 | `accept` | `accept(server)` | Block until a client connects; returns a connection handle |
@@ -450,7 +452,23 @@ introduce net
 The HTTP request functions return a map with `"status"` (integer) and `"body"` (string).
 
 `download`/`upload` stream their payloads so large transfers never buffer the
-whole body in memory.
+whole body in memory. `open_stream`/`read_chunk` expose a response body
+incrementally instead (SSE, chunked, long-poll, large downloads): `open_stream`
+returns a handle, `read_chunk` pulls the next bytes until it returns `""`, and
+`close` frees it. `read_chunk` always returns whole UTF-8 characters, so
+multi-byte tokens (emoji, accents, CJK) never split across reads. Pass a
+`timeout_ms` to poll without blocking — it returns `None` when no data has
+arrived yet, which is how you animate a spinner while waiting for the first
+token:
+
+```oxi
+chunk := net.read_chunk(s, 4096, 80)   // wait up to 80ms
+option {
+    chunk == None    -> { /* still waiting — draw a spinner frame */ },
+    chunk == ""      -> { /* end of stream */ },
+    { /* got bytes — split on "\n", parse, print */ }
+}
+```
 
 Socket I/O works on UTF-8 text — the common case (HTTP, line protocols, JSON
 over TCP). A **handle** is an opaque ticket number for an open socket; always

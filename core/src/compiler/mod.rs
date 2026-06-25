@@ -731,6 +731,9 @@ impl Compiler {
             | Expression::Fail { token, .. }
             | Expression::Unless { token, .. }
             | Expression::StringInterp { token, .. }
+            | Expression::Diverge { token, .. }
+            | Expression::DivergeEach { token, .. }
+            | Expression::Converge { token, .. }
             | Expression::EnumVariantConstruct { token, .. } => token.span.line as u32,
             Expression::Ident(ident) => ident.token.span.line as u32,
             Expression::Grouped(inner) => Self::expr_line(inner),
@@ -797,6 +800,9 @@ impl Compiler {
             | Expression::Fail { token, .. }
             | Expression::Unless { token, .. }
             | Expression::StringInterp { token, .. }
+            | Expression::Diverge { token, .. }
+            | Expression::DivergeEach { token, .. }
+            | Expression::Converge { token, .. }
             | Expression::EnumVariantConstruct { token, .. } => token.span.column as u32,
             Expression::Ident(ident) => ident.token.span.column as u32,
             Expression::Grouped(inner) => Self::expr_column(inner),
@@ -1824,6 +1830,37 @@ impl Compiler {
                 // discarded `(option{... -> {stop}})` stays legitimate.
                 self.value_consumed = consumed;
                 self.compile_expression(inner);
+            }
+
+            // diverge/converge lower to __spawn/__join_task. The lowered call's
+            // value IS this node's value, so forward the captured context the
+            // same way Grouped does.
+            Expression::Diverge { token, body } => {
+                self.value_consumed = consumed;
+                self.compile_expression(&crate::ast::desugar_diverge(token, body));
+            }
+            Expression::DivergeEach {
+                token,
+                variable,
+                iterable,
+                body,
+            } => {
+                self.value_consumed = consumed;
+                self.compile_expression(&crate::ast::desugar_diverge_each(
+                    token, variable, iterable, body,
+                ));
+            }
+            Expression::Converge {
+                token,
+                task,
+                timeout,
+            } => {
+                self.value_consumed = consumed;
+                self.compile_expression(&crate::ast::desugar_converge(
+                    token,
+                    task,
+                    timeout.as_deref(),
+                ));
             }
 
             Expression::Prefix {

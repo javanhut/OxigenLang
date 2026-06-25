@@ -37,4 +37,19 @@ fun add_modifier(string <str>, modifer <ModCodes>){
   new_str
 }
 
+// ── Cursor & line control ───────────────────────────────────────────────
+// These return escape strings to `print(...)`. Use clear_line to overwrite an
+// in-place status line (a spinner, a progress bar) on each redraw.
+
+// Move to column 0 and erase the line.
+fun clear_line() { "\r\x1b[K" }
+
+// Move the cursor to the start of the current line (without erasing).
+fun line_start() { "\r" }
+
+// Hide / show the terminal cursor — wrap a spinner loop so the caret
+// doesn't flicker, and always restore it when done.
+fun hide_cursor() { "\x1b[?25l" }
+fun show_cursor() { "\x1b[?25h" }
+
 

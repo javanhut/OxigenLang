@@ -2102,6 +2102,28 @@ impl Evaluator {
                 }
             }
 
+            // diverge/converge lower to the __spawn/__join_task builtins.
+            Expression::Diverge { token, body } => {
+                self.eval_expression(&crate::ast::desugar_diverge(token, body), env)
+            }
+            Expression::DivergeEach {
+                token,
+                variable,
+                iterable,
+                body,
+            } => self.eval_expression(
+                &crate::ast::desugar_diverge_each(token, variable, iterable, body),
+                env,
+            ),
+            Expression::Converge {
+                token,
+                task,
+                timeout,
+            } => self.eval_expression(
+                &crate::ast::desugar_converge(token, task, timeout.as_deref()),
+                env,
+            ),
+
             Expression::DotAccess {
                 token: dot_token,
                 left,

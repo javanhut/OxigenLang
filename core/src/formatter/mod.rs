@@ -846,6 +846,41 @@ impl Formatter {
                 self.format_expression(value);
                 self.push(")");
             }
+            Expression::Diverge { body, .. } => {
+                self.push("diverge {");
+                self.newline();
+                self.indent += 1;
+                self.format_block(body);
+                self.indent -= 1;
+                self.push_indent();
+                self.push("}");
+            }
+            Expression::DivergeEach {
+                variable,
+                iterable,
+                body,
+                ..
+            } => {
+                self.push("diverge each ");
+                self.push(&variable.value);
+                self.push(" in ");
+                self.format_expression(iterable);
+                self.push(" {");
+                self.newline();
+                self.indent += 1;
+                self.format_block(body);
+                self.indent -= 1;
+                self.push_indent();
+                self.push("}");
+            }
+            Expression::Converge { task, timeout, .. } => {
+                self.push("converge ");
+                self.format_expression(task);
+                if let Some(ms) = timeout {
+                    self.push(" within ");
+                    self.format_expression(ms);
+                }
+            }
             Expression::Unless {
                 consequence,
                 condition,

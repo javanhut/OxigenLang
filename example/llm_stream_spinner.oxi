@@ -1,0 +1,74 @@
+// Streaming an LLM response with a live "thinking" spinner.
+//
+// Same NDJSON token streaming as llm_stream.oxi, but with an animated ANSI
+// spinner while waiting for the first token, then live token output — the
+// ChatGPT-style CLI experience.
+//
+// The trick is the timeout form of read_chunk:
+//   net.read_chunk(stream, max, timeout_ms)
+// With timeout_ms > 0 it returns None if no data arrived within that window
+// (vs "" for end-of-stream and an error value for failure), so a single thread
+// can poll and animate a spinner between reads — no concurrency needed.
+//
+// `open_stream` issues a GET (real LLM APIs stream over POST, not yet
+// supported). To try it locally, start the chunked NDJSON server from the
+// header of example/llm_stream.oxi, then run:  oxigen example/llm_stream_spinner.oxi
+
+introduce net
+introduce json
+introduce strings
+introduce ansi
+
+main {
+    s := net.open_stream("http://127.0.0.1:8080/api/generate")
+    frames := ["|", "/", "-", "\\"]
+    buf <str> := ""
+    text <str> := ""
+    fidx := 0
+    done := False
+    streaming := False
+
+    print(ansi.hide_cursor())
+    repeat unless done {
+        chunk := net.read_chunk(s, 4096, 80)   // wait up to 80ms for data
+        option {
+            // None = nothing yet -> animate the spinner (only before tokens flow,
+            // so a mid-stream pause never erases text already printed).
+            chunk == None -> {
+                option { streaming == False -> {
+                    frame := frames[fidx % len(frames)]
+                    print(ansi.clear_line() + ansi.add_color(frame, ansi.ForeGroundColors.Cyan) + " thinking...")
+                    fidx = fidx + 1
+                }}
+            },
+            is_error(chunk) -> { done = True },
+            {
+                // chunk is a string here: data, or "" at end of stream.
+                option { streaming == False -> {
+                    print(ansi.clear_line())
+                    streaming = True
+                }}
+                buf = buf + chunk
+                parts := strings.split(buf, "\n")
+                last := len(parts) - 1
+                i := 0
+                repeat when i < last {
+                    line := strings.trim(parts[i])
+                    option { len(line) > 0 -> {
+                        obj := json.parse(line)
+                        tok := obj["response"]
+                        text = text + tok
+                        print(tok)
+                        option { obj["done"] -> { done = True } }
+                    }}
+                    i = i + 1
+                }
+                buf = parts[last]
+                option { chunk == "" -> { done = True } }   // end of stream
+            }
+        }
+    }
+    print(ansi.show_cursor())
+    println("")
+    println(ansi.add_color("captured {len(text)} chars", ansi.ForeGroundColors.Gray))
+}
