@@ -336,6 +336,7 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
     builtins.insert("__net_upload".to_string(), Rc::new(Object::Builtin(builtin_net_upload)));
     builtins.insert("__net_http_open".to_string(), Rc::new(Object::Builtin(builtin_net_http_open)));
     builtins.insert("__net_http_read".to_string(), Rc::new(Object::Builtin(builtin_net_http_read)));
+    builtins.insert("__net_http_read_line".to_string(), Rc::new(Object::Builtin(builtin_net_http_read_line)));
     builtins.insert("__net_tcp_connect".to_string(), Rc::new(Object::Builtin(builtin_net_tcp_connect)));
     builtins.insert("__net_tcp_listen".to_string(), Rc::new(Object::Builtin(builtin_net_tcp_listen)));
     builtins.insert("__net_tcp_accept".to_string(), Rc::new(Object::Builtin(builtin_net_tcp_accept)));
@@ -2888,12 +2889,33 @@ fn builtin_net_upload(args: Vec<Rc<Object>>) -> Rc<Object> {
 }
 
 fn builtin_net_http_open(args: Vec<Rc<Object>>) -> Rc<Object> {
-    if args.len() != 1 {
-        return Rc::new(Object::Error("open_stream: expected (url)".to_string()));
+    if args.len() != 4 {
+        return Rc::new(Object::Error(
+            "open_stream: expected (method, url, headers, body)".to_string(),
+        ));
     }
-    let url = net_try!(net_str(&args[0], "open_stream url"));
-    match crate::netres::http_open(&url) {
+    let method = net_try!(net_str(&args[0], "open_stream method"));
+    let url = net_try!(net_str(&args[1], "open_stream url"));
+    let headers = net_headers(Some(&args[2]));
+    let body = net_try!(net_str(&args[3], "open_stream body"));
+    let body = if body.is_empty() { None } else { Some(body.as_str()) };
+    match crate::netres::http_open(&method, &url, &headers, body) {
         Ok(id) => Rc::new(Object::Integer(id as i64)),
+        Err(e) => Rc::new(Object::Error(e)),
+    }
+}
+
+fn builtin_net_http_read_line(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if args.len() != 2 {
+        return Rc::new(Object::Error(
+            "read_line: expected (stream, timeout_ms)".to_string(),
+        ));
+    }
+    let id = net_try!(net_int(&args[0], "read_line stream"));
+    let timeout = net_try!(net_int(&args[1], "read_line timeout_ms"));
+    match crate::netres::http_read_line(id as u64, timeout) {
+        Ok(Some(s)) => Rc::new(Object::String(s)),
+        Ok(None) => Rc::new(Object::None),
         Err(e) => Rc::new(Object::Error(e)),
     }
 }

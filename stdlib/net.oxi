@@ -49,17 +49,51 @@ fun upload(method <str>, url <str>, file_path <str>, headers <map> = {}) {
     __net_upload(method, url, file_path, headers)
 }
 
-// Open a streaming GET. Returns a stream handle; read it incrementally with
-// read_chunk and free it with close. The body is never buffered in memory, so
-// this suits long-lived responses (SSE, chunked, large downloads). Pairs with
-// `diverge` to consume a stream on a worker thread.
-fun open_stream(url <str>) { __net_http_open(url) }
+// Open a streaming HTTP request. Returns a stream handle; read it with
+// read_line (or read_chunk) and free it with close. The body is never buffered
+// in memory, so this suits token streams and long responses (LLM APIs, SSE,
+// chunked, large downloads).
+//
+//   net.open_stream(url)                                  // GET
+//   net.open_stream(url, "POST", headers, body)           // e.g. an LLM API
+fun open_stream(url <str>, method <str> = "GET", headers <map> = {}, body <str> = "") {
+    __net_http_open(method, url, headers, body)
+}
 
-// Read up to `max` bytes from a stream handle.
-//   timeout_ms = 0  -> block until data or end of stream
-//   timeout_ms > 0  -> wait at most that long; returns None if nothing arrived
-//                      yet (animate a spinner and retry)
-// Returns "" at end of stream, a string of bytes otherwise, or None on timeout.
+// Method shorthands mirroring get/post/put/patch — the common streaming calls.
+fun stream_get(url <str>, headers <map> = {}) { open_stream(url, "GET", headers, "") }
+
+fun stream_post(url <str>, body <str>, headers <map> = {"Content-Type": "application/json"}) {
+    open_stream(url, "POST", headers, body)
+}
+
+fun stream_put(url <str>, body <str>, headers <map> = {"Content-Type": "application/json"}) {
+    open_stream(url, "PUT", headers, body)
+}
+
+fun stream_patch(url <str>, body <str>, headers <map> = {"Content-Type": "application/json"}) {
+    open_stream(url, "PATCH", headers, body)
+}
+
+// Read the next line from a stream (newline-delimited), WITHOUT the newline.
+// This is the easy way to consume NDJSON / SSE token streams — each call returns
+// one complete line, so you just json.parse it:
+//
+//   repeat unless done {
+//       line := net.read_line(s)
+//       option { line == "" -> { done = True }, { handle(json.parse(line)) } }
+//   }
+//
+//   timeout_ms = 0  -> block until a line or end of stream
+//   timeout_ms > 0  -> returns None if no full line arrived yet (spin and retry)
+// Returns "" at end of stream.
+fun read_line(stream <int>, timeout_ms <int> = 0) {
+    __net_http_read_line(stream, timeout_ms)
+}
+
+// Lower-level: read up to `max` raw bytes (for binary or non-line protocols).
+//   timeout_ms = 0 blocks; > 0 returns None if nothing arrived yet.
+// Returns "" at end of stream. Prefer read_line for text/NDJSON streams.
 fun read_chunk(stream <int>, max <int> = 4096, timeout_ms <int> = 0) {
     __net_http_read(stream, max, timeout_ms)
 }

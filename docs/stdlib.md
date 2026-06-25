@@ -437,8 +437,12 @@ introduce net
 | `request` | `request(method, url, headers, body)` | Full control HTTP request |
 | `download` | `download(url, path)` | Stream a GET body to a file; returns the status code |
 | `upload` | `upload(method, url, file_path, headers = {})` | Stream a file as the request body; returns `{status, body}` |
-| `open_stream` | `open_stream(url)` | Open a streaming GET; returns a stream handle (body not buffered) |
-| `read_chunk` | `read_chunk(stream, max = 4096, timeout_ms = 0)` | Read up to `max` bytes; `""` at end of stream. With `timeout_ms > 0`, returns `None` if nothing arrived yet (poll + animate a spinner) |
+| `open_stream` | `open_stream(url, method = "GET", headers = {}, body = "")` | Open a streaming request (GET/POST/PUT/PATCH); returns a stream handle (body not buffered) |
+| `stream_get` | `stream_get(url, headers = {})` | Streaming GET (shorthand for `open_stream`) |
+| `stream_post` | `stream_post(url, body, headers = {...})` | Streaming POST; defaults to JSON Content-Type — the usual LLM call |
+| `stream_put` / `stream_patch` | `stream_put(url, body, headers = {...})` | Streaming PUT / PATCH |
+| `read_line` | `read_line(stream, timeout_ms = 0)` | Read the next line (no newline); `""` at end of stream. With `timeout_ms > 0`, returns `None` if no full line arrived yet. The easy way to read NDJSON/SSE |
+| `read_chunk` | `read_chunk(stream, max = 4096, timeout_ms = 0)` | Lower-level: read up to `max` raw bytes (binary/non-line protocols); `""` at end of stream, `None` on timeout |
 | `connect` | `connect(host, port)` | Open a TCP connection; returns a connection handle |
 | `listen` | `listen(host, port)` | Bind a TCP server; returns a server handle |
 | `accept` | `accept(server)` | Block until a client connects; returns a connection handle |
@@ -452,23 +456,36 @@ introduce net
 The HTTP request functions return a map with `"status"` (integer) and `"body"` (string).
 
 `download`/`upload` stream their payloads so large transfers never buffer the
-whole body in memory. `open_stream`/`read_chunk` expose a response body
-incrementally instead (SSE, chunked, long-poll, large downloads): `open_stream`
-returns a handle, `read_chunk` pulls the next bytes until it returns `""`, and
-`close` frees it. `read_chunk` always returns whole UTF-8 characters, so
-multi-byte tokens (emoji, accents, CJK) never split across reads. Pass a
-`timeout_ms` to poll without blocking — it returns `None` when no data has
-arrived yet, which is how you animate a spinner while waiting for the first
-token:
+whole body in memory. `open_stream` exposes a response body incrementally
+instead (LLM token streams, SSE, chunked, long-poll). It takes a method, so you
+can POST a prompt and read the tokens back; `close` frees the handle.
+
+`read_line` is the easy way to consume the stream: each call returns one
+complete line, so you just parse it. It returns whole UTF-8 characters (emoji,
+accents, CJK never split), and with a `timeout_ms` it returns `None` when no
+full line has arrived yet — how you animate a spinner while the model thinks.
 
 ```oxi
-chunk := net.read_chunk(s, 4096, 80)   // wait up to 80ms
-option {
-    chunk == None    -> { /* still waiting — draw a spinner frame */ },
-    chunk == ""      -> { /* end of stream */ },
-    { /* got bytes — split on "\n", parse, print */ }
+headers := {"Content-Type": "application/json"}
+body := json.stringify({"model": "llama3", "prompt": "Say hi"})
+s := net.open_stream("http://localhost:11434/api/generate", "POST", headers, body)
+
+done := False
+repeat unless done {
+    line := net.read_line(s)               // one NDJSON object, or "" at EOF
+    option {
+        line == "" -> { done = True },
+        {
+            obj := json.parse(line)
+            print(obj["response"])         // token, live
+            done = obj["done"]
+        }
+    }
 }
+net.close(s)
 ```
+
+`read_chunk` is the lower-level byte reader for binary or non-line protocols.
 
 Socket I/O works on UTF-8 text — the common case (HTTP, line protocols, JSON
 over TCP). A **handle** is an opaque ticket number for an open socket; always

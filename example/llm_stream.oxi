@@ -1,72 +1,36 @@
-// Streaming an LLM response token by token.
+// Stream an LLM response token by token.
 //
-// Reads a newline-delimited JSON (NDJSON) stream — the shape Ollama's
-// /api/generate returns — accumulating the full answer while printing each
-// token live as it arrives. Every line looks like
-//   {"response": "tok", "done": false}
-// and the final line has "done": true.
+// POSTs a prompt to a streaming model endpoint and reads the newline-delimited
+// JSON (NDJSON) reply one line at a time with net.read_line. Each line is
+// {"response": "tok", "done": false}; the last has "done": true.
 //
-// `read_chunk` returns raw BYTES, not whole JSON objects, so we buffer and split
-// on "\n": all but the last split element are complete objects; the last is a
-// partial line carried to the next read. (read_chunk already guarantees whole
-// UTF-8 characters, so multi-byte tokens never split.)
+// Targets a local Ollama (https://ollama.com — `ollama run llama3` first).
+// Change the url / model / body for any other NDJSON streaming API.
 //
-// `open_stream` issues a GET. Real LLM APIs (Ollama, OpenAI) stream over POST,
-// which open_stream doesn't do yet — but any GET NDJSON/SSE endpoint works. To
-// try this locally, start a tiny chunked NDJSON server:
-//
-//   python3 - <<'PY'
-//   import http.server, json, time
-//   class H(http.server.BaseHTTPRequestHandler):
-//       protocol_version = "HTTP/1.1"      # needed for chunked transfer-encoding
-//       def do_GET(self):
-//           self.send_response(200)
-//           self.send_header("Transfer-Encoding", "chunked"); self.end_headers()
-//           time.sleep(0.6)                # "thinking" pause (shows the spinner)
-//           for t in ["Hello", " there", "! ", "Streaming", " works", "."]:
-//               line = (json.dumps({"response": t, "done": False}) + "\n").encode()
-//               self.wfile.write(b"%x\r\n%s\r\n" % (len(line), line)); self.wfile.flush(); time.sleep(0.12)
-//           last = (json.dumps({"response": "", "done": True}) + "\n").encode()
-//           self.wfile.write(b"%x\r\n%s\r\n0\r\n\r\n" % (len(last), last))
-//       def log_message(self, *a): pass
-//   http.server.HTTPServer(("127.0.0.1", 8080), H).serve_forever()
-//   PY
-//
-// Then run:  oxigen example/llm_stream.oxi
+// Run:  oxigen example/llm_stream.oxi
 
 introduce net
 introduce json
 introduce strings
 
 main {
-    s := net.open_stream("http://127.0.0.1:8080/api/generate")
-    buf <str> := ""
+    payload := json.stringify({"model": "llama3", "prompt": "Say hello in five words."})
+    s := net.stream_post("http://localhost:11434/api/generate", payload)
+
     text <str> := ""
     done := False
-
     repeat unless done {
-        chunk := net.read_chunk(s, 4096)   // blocking read; "" at end of stream
-
-        buf = buf + chunk
-        parts := strings.split(buf, "\n")
-        last := len(parts) - 1
-        i := 0
-        repeat when i < last {
-            line := strings.trim(parts[i])
-            option { len(line) > 0 -> {
+        line := strings.trim(net.read_line(s))   // one whole JSON object, or "" at EOF
+        option {
+            line == "" -> { done = True },
+            {
                 obj := json.parse(line)
-                tok := obj["response"]
-                text = text + tok          // build the full answer
-                print(tok)                 // ...and show it live, no newline
-                option { obj["done"] -> { done = True } }
-            }}
-            i = i + 1
+                text = text + obj["response"]
+                print(obj["response"])           // live, no newline
+                done = obj["done"]
+            }
         }
-        buf = parts[last]                   // keep the trailing partial line
-
-        option { chunk == "" -> { done = True } }   // stop at end of stream
     }
-
     net.close(s)
     println("")
     println("--- captured {len(text)} chars ---")

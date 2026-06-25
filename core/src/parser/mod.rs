@@ -1947,7 +1947,12 @@ impl Parser {
         let mut named_args: Vec<(String, Expression)> = Vec::new();
         let mut in_named = false;
 
-        // Handle empty args: f()
+        // Skip newlines after '(' so a call can span multiple lines.
+        while self.peek_token.token_type == TokenType::Newline {
+            self.next_token();
+        }
+
+        // Handle empty args: f() or f(\n)
         if self.peek_token.token_type == TokenType::RParen {
             self.next_token();
             return Some((args, named_args));
@@ -1979,10 +1984,23 @@ impl Parser {
                 args.push(expr);
             }
 
+            // Skip newlines between an argument and the following comma or ')'.
+            while self.peek_token.token_type == TokenType::Newline {
+                self.next_token();
+            }
+
             if self.peek_token.token_type != TokenType::Comma {
                 break;
             }
             self.next_token(); // consume comma
+
+            // Skip newlines after the comma (and allow a trailing comma).
+            while self.peek_token.token_type == TokenType::Newline {
+                self.next_token();
+            }
+            if self.peek_token.token_type == TokenType::RParen {
+                break;
+            }
         }
 
         self.expect_peek(TokenType::RParen)?;

@@ -15,6 +15,16 @@ fn parse_ok(input: &str) -> Program {
     program
 }
 
+#[test]
+fn test_call_args_span_multiple_lines_with_trailing_comma() {
+    // A call's arguments may span newlines, with an optional trailing comma.
+    let program = parse_ok("f(\n    1,\n    2,\n    3,\n)");
+    match &program.statements[0] {
+        Statement::Expr(Expression::Call { args, .. }) => assert_eq!(args.len(), 3),
+        other => panic!("expected a call expression, got {:?}", other),
+    }
+}
+
 // ==================== LITERAL PARSING TESTS ====================
 
 #[test]

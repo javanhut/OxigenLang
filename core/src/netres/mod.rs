@@ -171,22 +171,55 @@ pub fn http_download(url: &str, path: &str) -> Result<i64, String> {
     Ok(status as i64)
 }
 
-/// Opens a streaming GET and stashes the response body reader behind a handle.
-/// Read it incrementally with `http_read`; `close` frees it. The body is never
-/// buffered whole in memory — this is the read side of `download`.
-pub fn http_open(url: &str) -> Result<u64, String> {
-    let resp = ureq::get(url)
-        .call()
-        .map_err(|e| format!("http error: {}", e))?;
-    let (_, body) = resp.into_parts();
-    let mut reader = body.into_reader();
+/// Opens a streaming HTTP request and stashes the response body behind a handle.
+/// Read it line by line with `http_read_line` (the easy path) or byte-wise with
+/// `http_read`; `close` frees it. The body is never buffered whole in memory.
+///
+/// `method` is GET/POST/PUT/PATCH; `body` is sent for the body methods and
+/// ignored for GET. This is what lets you stream a real LLM API — POST the
+/// model+prompt and read the tokens back.
+pub fn http_open(
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: Option<&str>,
+) -> Result<u64, String> {
+    let resp = match method.to_uppercase().as_str() {
+        "GET" => {
+            let mut req = ureq::get(url);
+            for (k, v) in headers {
+                req = req.header(k.as_str(), v.as_str());
+            }
+            req.call()
+        }
+        m @ ("POST" | "PUT" | "PATCH") => {
+            let mut req = match m {
+                "POST" => ureq::post(url),
+                "PUT" => ureq::put(url),
+                _ => ureq::patch(url),
+            };
+            for (k, v) in headers {
+                req = req.header(k.as_str(), v.as_str());
+            }
+            match body {
+                Some(b) => req.send(b.as_bytes()),
+                None => req.send_empty(),
+            }
+        }
+        m => return Err(format!("open_stream: unsupported method '{}'", m)),
+    }
+    .map_err(|e| format!("http error: {}", e))?;
 
-    // Drain the body on a dedicated thread so the interpreter can poll reads
-    // with a timeout (the channel) instead of blocking on the socket. The
-    // thread ends at EOF, on error, or when the consumer drops the stream
-    // (`close`), at which point `tx.send` fails. ponytail: a thread blocked in
-    // `read` at close lingers until the next byte/EOF — fine for request/stream
-    // bodies, which terminate; revisit if long idle streams pile up.
+    let (_, resp_body) = resp.into_parts();
+    Ok(spawn_body_reader(Box::new(resp_body.into_reader())))
+}
+
+/// Drains a response body on a background thread into a channel so reads can be
+/// polled with a timeout instead of blocking the interpreter. The thread ends at
+/// EOF, on error, or when the consumer drops the stream (`close`). ponytail: a
+/// thread blocked in `read` at close lingers until the next byte/EOF — fine for
+/// bodies that terminate; revisit if long idle streams pile up.
+fn spawn_body_reader(mut reader: Box<dyn Read + Send>) -> u64 {
     let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
@@ -202,12 +235,55 @@ pub fn http_open(url: &str) -> Result<u64, String> {
             }
         }
     });
-
-    Ok(insert(Resource::HttpBody(Arc::new(Mutex::new(HttpStream {
+    insert(Resource::HttpBody(Arc::new(Mutex::new(HttpStream {
         rx,
         carry: Vec::new(),
         done: false,
-    })))))
+    }))))
+}
+
+/// Reads the next newline-delimited line from a stream, without the trailing
+/// newline — the easy way to consume NDJSON/SSE token streams (each call returns
+/// one complete line, so the caller just parses it).
+///
+/// `timeout_ms == 0` blocks until a line or EOF; `> 0` returns `Ok(None)` if no
+/// full line arrived in time. Returns `Ok(Some(""))` at end of stream (NDJSON
+/// has no blank lines, so "" reliably means EOF there). A line never splits a
+/// codepoint — `\n` is one byte — so it is always returned as valid UTF-8.
+pub fn http_read_line(id: u64, timeout_ms: i64) -> Result<Option<String>, String> {
+    let stream = match REGISTRY.lock().unwrap().get(&id) {
+        Some(Resource::HttpBody(s)) => Arc::clone(s),
+        Some(_) => return Err(format!("handle {} is not an HTTP stream", id)),
+        None => return Err(format!("invalid or closed handle {}", id)),
+    };
+    let mut st = stream.lock().unwrap();
+
+    loop {
+        if let Some(pos) = st.carry.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = st.carry.drain(..=pos).collect();
+            let text = String::from_utf8_lossy(&line[..line.len() - 1]);
+            return Ok(Some(text.trim_end_matches('\r').to_string())); // tolerate CRLF
+        }
+        if st.done {
+            // No newline left: flush any remaining bytes as the last line, "" = EOF.
+            let out = String::from_utf8_lossy(&st.carry).into_owned();
+            st.carry.clear();
+            return Ok(Some(out));
+        }
+        let next = if timeout_ms > 0 {
+            match st.rx.recv_timeout(Duration::from_millis(timeout_ms as u64)) {
+                Ok(c) => Some(c),
+                Err(RecvTimeoutError::Timeout) => return Ok(None),
+                Err(RecvTimeoutError::Disconnected) => None,
+            }
+        } else {
+            st.rx.recv().ok()
+        };
+        match next {
+            Some(chunk) => st.carry.extend_from_slice(&chunk),
+            None => st.done = true,
+        }
+    }
 }
 
 /// Reads up to `max` bytes of valid UTF-8 from an HTTP stream handle.

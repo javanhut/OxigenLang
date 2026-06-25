@@ -214,6 +214,10 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("__net_upload".to_string(), Value::Builtin(builtin_net_upload));
     globals.insert("__net_http_open".to_string(), Value::Builtin(builtin_net_http_open));
     globals.insert("__net_http_read".to_string(), Value::Builtin(builtin_net_http_read));
+    globals.insert(
+        "__net_http_read_line".to_string(),
+        Value::Builtin(builtin_net_http_read_line),
+    );
     globals.insert("__net_tcp_connect".to_string(), Value::Builtin(builtin_net_tcp_connect));
     globals.insert("__net_tcp_listen".to_string(), Value::Builtin(builtin_net_tcp_listen));
     globals.insert("__net_tcp_accept".to_string(), Value::Builtin(builtin_net_tcp_accept));
@@ -2289,12 +2293,29 @@ fn builtin_net_upload(args: &[Value]) -> Value {
 }
 
 fn builtin_net_http_open(args: &[Value]) -> Value {
-    if args.len() != 1 {
-        return Value::Error(rc_str("open_stream: expected (url)"));
+    if args.len() != 4 {
+        return Value::Error(rc_str("open_stream: expected (method, url, headers, body)"));
     }
-    let url = net_try!(net_str(&args[0], "open_stream url"));
-    match crate::netres::http_open(&url) {
+    let method = net_try!(net_str(&args[0], "open_stream method"));
+    let url = net_try!(net_str(&args[1], "open_stream url"));
+    let headers = net_headers(Some(&args[2]));
+    let body = net_try!(net_str(&args[3], "open_stream body"));
+    let body = if body.is_empty() { None } else { Some(body.as_str()) };
+    match crate::netres::http_open(&method, &url, &headers, body) {
         Ok(id) => Value::Integer(id as i64),
+        Err(e) => Value::Error(rc_str(e)),
+    }
+}
+
+fn builtin_net_http_read_line(args: &[Value]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(rc_str("read_line: expected (stream, timeout_ms)"));
+    }
+    let id = net_try!(net_int(&args[0], "read_line stream"));
+    let timeout = net_try!(net_int(&args[1], "read_line timeout_ms"));
+    match crate::netres::http_read_line(id as u64, timeout) {
+        Ok(Some(s)) => Value::String(rc_str(s)),
+        Ok(None) => Value::None,
         Err(e) => Value::Error(rc_str(e)),
     }
 }
