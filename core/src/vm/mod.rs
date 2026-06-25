@@ -1261,7 +1261,11 @@ impl VM {
                 return frame.line;
             }
         }
-        let frame = self.frames.last().unwrap();
+        // No frame yet (e.g. a cancel check that fires at call entry before the
+        // frame is pushed): there's no line to report — diagnostics, never panic.
+        let Some(frame) = self.frames.last() else {
+            return 0;
+        };
         let ip = if frame.ip > 0 { frame.ip - 1 } else { 0 };
         if ip < frame.closure.function.chunk.lines.len() {
             frame.closure.function.chunk.lines[ip]
@@ -1282,7 +1286,9 @@ impl VM {
                 return frame.column;
             }
         }
-        let frame = self.frames.last().unwrap();
+        let Some(frame) = self.frames.last() else {
+            return 0;
+        };
         let ip = if frame.ip > 0 { frame.ip - 1 } else { 0 };
         frame
             .closure

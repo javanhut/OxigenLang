@@ -20,8 +20,8 @@ use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::vm::collections::{OxMap, OxSet};
 use crate::vm::value::{
-    Function, ObjClosure, ObjEnumInstance, ObjStructInstance, Upvalue, Value, ValueRepr,
-    VmEnumPayload,
+    ErrorValueData, Function, ObjClosure, ObjEnumInstance, ObjStructInstance, Upvalue, Value,
+    ValueRepr, VmEnumPayload,
 };
 use crate::vm::VM;
 use std::cell::RefCell as StdRefCell;
@@ -213,6 +213,17 @@ pub struct TaskHandle {
     cancel: Arc<AtomicBool>,
 }
 
+/// A task outcome that the program can recover from: produced as a *catchable*
+/// `ErrorValue` (testable with `is_error`), not the raising `Value::Error` kind
+/// that halts execution. Timeouts, cancellation, and failed tasks use this so
+/// `join`/`converge` always return a value you can branch on.
+fn task_error(msg: impl Into<String>, tag: &str) -> Value {
+    Value::ErrorValue(Rc::new(ErrorValueData {
+        msg: Rc::new(msg.into()),
+        tag: Some(Rc::new(tag.to_string())),
+    }))
+}
+
 impl TaskHandle {
     pub fn join(&self, vm: &VM) -> Value {
         if let Some(v) = &*self.memo.borrow() {
@@ -220,8 +231,8 @@ impl TaskHandle {
         }
         let v = match self.rx.recv() {
             Ok(Ok(s)) => attach(s, vm),
-            Ok(Err(e)) => Value::Error(Rc::new(e)),
-            Err(_) => Value::Error(Rc::new("join(): worker dropped without replying".to_string())),
+            Ok(Err(e)) => task_error(e, "task"),
+            Err(_) => task_error("join(): worker dropped without replying", "task"),
         };
         *self.memo.borrow_mut() = Some(v.clone());
         v
@@ -239,9 +250,9 @@ impl TaskHandle {
                 *self.memo.borrow_mut() = Some(v.clone());
                 v
             }
-            Ok(Err(e)) => Value::Error(Rc::new(e)),
-            Err(mpsc::RecvTimeoutError::Timeout) => Value::Error(Rc::new("join(): timed out".to_string())),
-            Err(_) => Value::Error(Rc::new("join(): worker dropped without replying".to_string())),
+            Ok(Err(e)) => task_error(e, "task"),
+            Err(mpsc::RecvTimeoutError::Timeout) => task_error("join(): timed out", "timeout"),
+            Err(_) => task_error("join(): worker dropped without replying", "task"),
         }
     }
 
@@ -531,6 +542,19 @@ pub fn join_with_vm(vm: &VM, args: &[Value]) -> Value {
             Some(ms) => h.join_timeout(vm, ms.max(0) as u64),
             None => h.join(vm),
         },
+        // join a list of tasks in order — so `converge [t1, t2]` works and no
+        // `array` import is needed for batch joins. Non-task elements pass through.
+        Some(Value::Array(arr)) => {
+            let joined: Vec<Value> = arr
+                .borrow()
+                .iter()
+                .map(|v| match v {
+                    Value::Task(h) => h.join(vm),
+                    other => other.clone(),
+                })
+                .collect();
+            Value::Array(Rc::new(RefCell::new(joined)))
+        }
         _ => Value::Error(Rc::new("join() requires a task handle".to_string())),
     }
 }
