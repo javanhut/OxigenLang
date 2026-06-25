@@ -37,3 +37,8 @@ jobs:
       - run: cargo build -p oxigen
       - name: Run Oxigen test suite
         run: ./target/debug/oxigen test tests/
+      # Concurrency can't live in a <test> block (diverge ships thunks by
+      # compile-order id against one process-global source), so run the
+      # self-asserting program directly; it exits non-zero on any mismatch.
+      - name: Run concurrency smoke test
+        run: ./target/debug/oxigen tests/concurrency.oxi
