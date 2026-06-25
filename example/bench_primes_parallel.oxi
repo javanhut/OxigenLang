@@ -1,0 +1,32 @@
+// Parallel version of `bench_primes_serial`: same total work, dispatched
+// across the worker pool via `array.pmap`. The default-tiered JIT runs on each
+// worker, so per-chunk compute matches the serial baseline — the report's
+// `default` column should show ~Ncore speedup over `bench_primes_serial`.
+introduce array
+
+fun count_primes(limit <int>) {
+    count <int> := 0
+    n <int> := 2
+    repeat when n < limit {
+        is_p <int> := 1
+        d <int> := 2
+        repeat when d * d <= n {
+            option {
+                n % d == 0 -> { is_p = 0 },
+                {}
+            }
+            d = d + 1
+        }
+        option {
+            is_p == 1 -> { count = count + 1 },
+            {}
+        }
+        n = n + 1
+    }
+    count
+}
+
+chunks := [40000, 40000, 40000, 40000, 40000, 40000, 40000, 40000,
+           40000, 40000, 40000, 40000, 40000, 40000, 40000, 40000]
+
+array.pmap(chunks, count_primes)

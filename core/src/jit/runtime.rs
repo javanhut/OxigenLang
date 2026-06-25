@@ -716,7 +716,8 @@ pub unsafe extern "C" fn jit_op_eq(vm: *mut VM) {
     vm.sync_stack_from_view();
     let b = vm.pop();
     let a = vm.pop();
-    vm.push(Value::Boolean(VM::values_equal(&a, &b)));
+    let eq = vm.values_equal_forced(a, b);
+    vm.push(Value::Boolean(eq));
 }
 
 pub unsafe extern "C" fn jit_op_ne(vm: *mut VM) {
@@ -725,7 +726,8 @@ pub unsafe extern "C" fn jit_op_ne(vm: *mut VM) {
     vm.sync_stack_from_view();
     let b = vm.pop();
     let a = vm.pop();
-    vm.push(Value::Boolean(!VM::values_equal(&a, &b)));
+    let eq = vm.values_equal_forced(a, b);
+    vm.push(Value::Boolean(!eq));
 }
 
 // ── Logical / unary ────────────────────────────────────────────────────
@@ -735,6 +737,7 @@ pub unsafe extern "C" fn jit_op_not(vm: *mut VM) {
     vm.jit.bump_helper(HelperCounter::Not);
     vm.sync_stack_from_view();
     let v = vm.pop();
+    let v = vm.force(v);
     vm.push(Value::Boolean(!v.is_truthy()));
 }
 
@@ -743,6 +746,7 @@ pub unsafe extern "C" fn jit_op_negate(vm: *mut VM) -> u32 {
     vm.jit.bump_helper(HelperCounter::Negate);
     vm.sync_stack_from_view();
     let v = vm.pop();
+    let v = vm.force(v);
     match v.repr() {
         ValueRepr::Integer(n) => {
             vm.push(Value::Integer(-n));

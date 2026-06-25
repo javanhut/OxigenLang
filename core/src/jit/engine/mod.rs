@@ -951,6 +951,19 @@ impl JitInner {
                         }
                     }
 
+                    // Dead code after a terminator, before the next block
+                    // boundary: the loop back-edge + `None;Return` epilogue the
+                    // compiler emits past an explicit `give` inside `repeat`/
+                    // `each`. Cranelift forbids emitting into a filled block, so
+                    // skip every byte until `ip` reaches a real block start
+                    // (the switch above resets `terminated`). Stepping by 1 lands
+                    // harmlessly on operand bytes — they're skipped too.
+                    // ponytail: byte-step, not a length table — dead tails are tiny.
+                    if terminated {
+                        ip += 1;
+                        continue;
+                    }
+
                     let op = OpCode::from_byte(code[ip]).ok_or(())?;
                     let line = chunk.lines.get(ip).copied().unwrap_or(0);
                     let col = chunk.columns.get(ip).copied().unwrap_or(0);
@@ -2100,10 +2113,6 @@ impl JitInner {
                             let off = read_u16(code, ip + 1) as usize;
                             let target_ip = ip + 3 + off;
                             let target = blocks[&target_ip];
-                            // Materialize staged operands before leaving the
-                            // block so a merge reads them from memory, not the
-                            // shared compile-time virt_stack (see block-boundary
-                            // comment above). No-op when virt_stack is empty.
                             virt_stack.flush_to_memory(&mut builder, vm_val);
                             builder.ins().jump(target, &[]);
                             terminated = true;

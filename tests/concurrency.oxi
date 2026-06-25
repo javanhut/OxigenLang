@@ -1,0 +1,40 @@
+// Concurrency smoke test for `diverge` / `converge` / auto-join.
+//
+// NOT a `<test>`-block file: the `oxigen test` runner compiles each test block
+// as its own sub-program, but `diverge` ships a thunk by compile-order function
+// id and the worker pool resolves it against a single, process-global source —
+// so a thunk's id only lines up when the whole file is compiled as one program.
+// Run it via `oxigen run` (which sets that source to the full file). It
+// self-asserts with `expect`; any mismatch raises and exits non-zero, failing
+// CI. See .github/workflows/ci.yml (oxigen-tests job).
+
+introduce {expect} from test
+
+fun sq(x) { x * x }
+
+// Capturing closure crossing the spawn boundary. Capture happens in a function
+// scope (the supported path — capturing a `main`-scope local isn't wired yet).
+fun scaled_by(factor) {
+    diverge each x in [1, 2, 3] { x * factor }
+}
+
+main {
+    // diverge + converge: one task off to the side, then wait for it.
+    t := diverge { sq(6) }
+    expect(converge t).eq(36)
+
+    // auto-join via a non-`+` operator (guards the all-consume-sites force()).
+    u := diverge { sq(6) }
+    expect(u * 2).eq(72)
+
+    // diverge each: fan out over a collection, gather in input order.
+    expect(diverge each n in [1, 2, 3, 4] { sq(n) }).eq([1, 4, 9, 16])
+
+    // converge a list of independent tasks, in order.
+    expect(converge [diverge { sq(3) }, diverge { sq(4) }]).eq([9, 16])
+
+    // captured upvalue survives the spawn boundary.
+    expect(scaled_by(10)).eq([10, 20, 30])
+
+    println("concurrency ok")
+}

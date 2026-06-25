@@ -1,0 +1,44 @@
+name: CI
+
+on: [push, pull_request]
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Suite 1 — Rust: workspace unit + integration tests. JIT is the default
+  # feature, so this exercises the Cranelift backend.
+  rust-tests:
+    name: Rust suite (cargo test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  # Suite 2 — Oxigen: the <test> blocks in tests/*_test.oxi, run by the
+  # language's own test runner. stdlib resolves from the repo-root ./stdlib,
+  # so the step runs from the checkout root. The runner exits non-zero on any
+  # failing block, which fails the job.
+  oxigen-tests:
+    name: Oxigen suite (oxigen test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p oxigen
+      - name: Run Oxigen test suite
+        run: ./target/debug/oxigen test tests/
+      # Concurrency can't live in a <test> block (diverge ships thunks by
+      # compile-order id against one process-global source), so run the
+      # self-asserting program directly; it exits non-zero on any mismatch.
+      - name: Run concurrency smoke test
+        run: ./target/debug/oxigen tests/concurrency.oxi

@@ -359,6 +359,30 @@ impl VM {
         Ok(self.pop())
     }
 
+    /// Look up a global value by name (used by the concurrency worker pool to
+    /// resolve a spawned function by name). Returns a clone if present.
+    pub fn get_global(&self, name: &str) -> Option<Value> {
+        self.globals.get(name).cloned()
+    }
+
+    /// Call a callee `Value` (closure or builtin) with positional `args` from
+    /// external Rust code, driving the VM to completion and returning the
+    /// result. Used by the concurrency worker pool.
+    pub fn call_with_args(&mut self, callee: Value, args: Vec<Value>) -> Result<Value, VMError> {
+        let depth = self.frames.len();
+        let arg_count = args.len();
+        self.push(callee);
+        for a in args {
+            self.push(a);
+        }
+        self.call_value(arg_count, &[])?;
+        // If the call pushed a frame (closure), drive it to completion.
+        if self.frames.len() > depth {
+            self.execute_until(depth)?;
+        }
+        Ok(self.pop())
+    }
+
     // ── Opcode handlers (shared between interpreter and JIT runtime) ──
 
     /// Read the name string at constant index `name_idx`. The compiler
@@ -968,6 +992,39 @@ impl VM {
         Ok(())
     }
 
+    /// Closure transfer: if `self.stack[start]` is a closure with live (open)
+    /// captures, replace it with a snapshot whose upvalues are `Closed` over the
+    /// current stack values, so a no-stack builtin (`spawn`) can read them.
+    /// `#[cold]`/`#[inline(never)]` keeps these locals out of `call_value`'s
+    /// frame, which is on the stack for every call including deep recursion.
+    #[cold]
+    #[inline(never)]
+    fn snapshot_spawn_closure(&mut self, start: usize) {
+        let c = match &self.stack[start] {
+            Value::Closure(c) => Rc::clone(c),
+            _ => return,
+        };
+        if !c
+            .upvalues
+            .iter()
+            .any(|uv| matches!(&*uv.borrow(), Upvalue::Open(_)))
+        {
+            return;
+        }
+        let vals: Vec<Value> = c
+            .upvalues
+            .iter()
+            .map(|uv| match &*uv.borrow() {
+                Upvalue::Open(slot) => self.stack[*slot].clone(),
+                Upvalue::Closed(v) => v.clone(),
+            })
+            .collect();
+        self.stack[start] = Value::Closure(Rc::new(crate::vm::value::ObjClosure::closed(
+            Rc::clone(&c.function),
+            vals,
+        )));
+    }
+
     // ── Stack Operations ───────────────────────────────────────────────
 
     #[inline(always)]
@@ -1204,7 +1261,11 @@ impl VM {
                 return frame.line;
             }
         }
-        let frame = self.frames.last().unwrap();
+        // No frame yet (e.g. a cancel check that fires at call entry before the
+        // frame is pushed): there's no line to report — diagnostics, never panic.
+        let Some(frame) = self.frames.last() else {
+            return 0;
+        };
         let ip = if frame.ip > 0 { frame.ip - 1 } else { 0 };
         if ip < frame.closure.function.chunk.lines.len() {
             frame.closure.function.chunk.lines[ip]
@@ -1225,7 +1286,9 @@ impl VM {
                 return frame.column;
             }
         }
-        let frame = self.frames.last().unwrap();
+        let Some(frame) = self.frames.last() else {
+            return 0;
+        };
         let ip = if frame.ip > 0 { frame.ip - 1 } else { 0 };
         frame
             .closure
@@ -1540,12 +1603,14 @@ impl VM {
                 OpCode::Equal => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(Value::Boolean(Self::values_equal(&a, &b)));
+                    let eq = self.values_equal_forced(a, b);
+                    self.push(Value::Boolean(eq));
                 }
                 OpCode::NotEqual => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(Value::Boolean(!Self::values_equal(&a, &b)));
+                    let eq = self.values_equal_forced(a, b);
+                    self.push(Value::Boolean(!eq));
                 }
                 OpCode::Less => {
                     let b = self.pop();
@@ -1575,6 +1640,7 @@ impl VM {
                 // ── Logical ─────────────────────────────────────────
                 OpCode::Not => {
                     let val = self.pop();
+                    let val = self.force(val);
                     self.push(Value::Boolean(!val.is_truthy()));
                 }
 
@@ -1618,6 +1684,7 @@ impl VM {
                 // ── Unary ───────────────────────────────────────────
                 OpCode::Negate => {
                     let val = self.pop();
+                    let val = self.force(val);
                     match val.repr() {
                         ValueRepr::Integer(n) => self.push(Value::Integer(-n)),
                         ValueRepr::Float(f) => self.push(Value::Float(-f)),
@@ -2472,7 +2539,22 @@ impl VM {
 
     // ── Arithmetic Helpers ──────────────────────────────────────────────
 
+    /// Auto-join: a spawned task handle resolves to its result when consumed.
+    /// Called at every value-consuming site — arithmetic/bitwise/shift,
+    /// comparison, equality, unary, and indexing — so a `Task` resolves the
+    /// moment its underlying value is actually needed. Shared by the VM and the
+    /// JIT, which route through the same `binary_*`/`eval_index`/`unary_bnot`
+    /// helpers. Builtins (`converge`, `cancel`) deliberately do NOT force —
+    /// they need the raw handle.
+    pub(crate) fn force(&self, v: Value) -> Value {
+        match v {
+            Value::Task(h) => h.join(self),
+            v => v,
+        }
+    }
+
     pub(crate) fn binary_add(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l + r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l + r)),
@@ -2528,6 +2610,7 @@ impl VM {
     }
 
     pub(crate) fn binary_sub(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l - r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l - r)),
@@ -2553,6 +2636,7 @@ impl VM {
     }
 
     pub(crate) fn binary_mul(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l * r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l * r)),
@@ -2568,6 +2652,7 @@ impl VM {
     }
 
     pub(crate) fn binary_div(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 if *r == 0 {
@@ -2602,6 +2687,7 @@ impl VM {
     }
 
     pub(crate) fn binary_mod(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 if *r == 0 {
@@ -2643,6 +2729,7 @@ impl VM {
     // agree on `1 << 64`, `1 << -1`, etc.
 
     pub(crate) fn binary_band(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l & r)),
             _ => Err(self.runtime_error("bitwise & requires integers")),
@@ -2650,6 +2737,7 @@ impl VM {
     }
 
     pub(crate) fn binary_bor(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l | r)),
             _ => Err(self.runtime_error("bitwise | requires integers")),
@@ -2657,6 +2745,7 @@ impl VM {
     }
 
     pub(crate) fn binary_bxor(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l ^ r)),
             _ => Err(self.runtime_error("bitwise ^ requires integers")),
@@ -2664,6 +2753,7 @@ impl VM {
     }
 
     pub(crate) fn unary_bnot(&self, a: Value) -> Result<Value, VMError> {
+        let a = self.force(a);
         match a.repr() {
             ValueRepr::Integer(n) => Ok(Value::Integer(!n)),
             _ => Err(self.runtime_error("bitwise ~ requires an integer")),
@@ -2671,6 +2761,7 @@ impl VM {
     }
 
     pub(crate) fn binary_shl(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 Ok(Value::Integer(l.wrapping_shl(*r as u32)))
@@ -2680,6 +2771,7 @@ impl VM {
     }
 
     pub(crate) fn binary_shr(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 Ok(Value::Integer(l.wrapping_shr(*r as u32)))
@@ -2726,7 +2818,15 @@ impl VM {
         }
     }
 
+    /// `==`/`!=` with auto-join. `values_equal` is static (it backs nothing
+    /// that owns a `&VM`), so the force lives here rather than inside it.
+    pub(crate) fn values_equal_forced(&self, a: Value, b: Value) -> bool {
+        let (a, b) = (self.force(a), self.force(b));
+        Self::values_equal(&a, &b)
+    }
+
     pub(crate) fn compare_less(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l < r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l < r)),
@@ -2744,6 +2844,7 @@ impl VM {
     }
 
     pub(crate) fn compare_less_equal(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l <= r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l <= r)),
@@ -2759,6 +2860,7 @@ impl VM {
     }
 
     pub(crate) fn compare_greater(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l > r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l > r)),
@@ -2774,6 +2876,7 @@ impl VM {
     }
 
     pub(crate) fn compare_greater_equal(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l >= r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l >= r)),
@@ -2811,11 +2914,26 @@ impl VM {
                 }
 
                 let start = self.stack.len() - arg_count;
-                // Pass args as a borrowed slice of the stack — no per-call
-                // Vec allocation (LuaJIT fast-function style). `func` is a
-                // copied fn pointer and never touches `self`, so the
-                // immutable borrow ends before we mutate the stack.
-                let result = func(&self.stack[start..]);
+                // Closure transfer: snapshot a spawned capturing closure so the
+                // builtin (no stack access) can read its upvalues. Kept out of
+                // line so its locals don't bloat this hot, deeply-recursed frame.
+                if std::ptr::fn_addr_eq(
+                    func,
+                    crate::concurrent::builtin_spawn as fn(&[Value]) -> Value,
+                ) {
+                    self.snapshot_spawn_closure(start);
+                }
+                // `join` is routed to a VM-aware path so it can rebuild
+                // struct/enum results; every other builtin never touches `self`,
+                // so its borrow ends before we mutate the stack.
+                let result = if std::ptr::fn_addr_eq(
+                    func,
+                    crate::concurrent::builtin_join as fn(&[Value]) -> Value,
+                ) {
+                    crate::concurrent::join_with_vm(self, &self.stack[start..])
+                } else {
+                    func(&self.stack[start..])
+                };
                 // Drop the args AND the builtin itself (at start - 1).
                 self.stack_truncate(start - 1);
                 if let Value::Error(ref msg) = result {
@@ -3232,6 +3350,10 @@ impl VM {
         named_args: &[(String, Value)],
         module_globals: Option<Rc<HashMap<String, Value>>>,
     ) -> Result<(), VMError> {
+        // ponytail: 1 TLS read/call; gate behind a global AtomicBool if a recursion bench regresses.
+        if crate::concurrent::cancelled() {
+            return Err(self.runtime_error("task cancelled"));
+        }
         let expected = closure.function.arity as usize;
         let state = closure.jit_state.get();
 
@@ -3509,6 +3631,7 @@ impl VM {
     // ── Index Operations ────────────────────────────────────────────────
 
     pub(crate) fn eval_index(&self, collection: Value, index: Value) -> Result<Value, VMError> {
+        let (collection, index) = (self.force(collection), self.force(index));
         match (&collection, &index) {
             (Value::Array(arr), Value::Integer(i)) => {
                 let borrowed = arr.borrow();

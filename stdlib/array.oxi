@@ -272,3 +272,15 @@ fun sort_by(arr <array>, key_fn <generic>) {
     }
     result
 }
+
+// ── Parallel ──
+
+// Parallel map: spawn `f` on every element, then join the results in order.
+// Spawns ALL tasks before joining any, so the work overlaps on the worker
+// pool. `f` must be a named top-level function — lambdas can't cross the
+// spawn boundary yet (closure transfer is a later step).
+// Prefer the `diverge each` keyword form — these stay as thin wrappers over the
+// internal spawn/join primitives for back-compat.
+fun pmap(arr <array>, f <generic>) {
+    map(map(arr, fun(x <generic>) { __spawn(f, x) }), fun(h <generic>) { __join_task(h) })
+}

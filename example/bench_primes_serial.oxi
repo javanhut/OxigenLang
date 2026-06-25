@@ -1,0 +1,32 @@
+// Serial baseline for the concurrency benchmark: count primes below each
+// chunk limit sequentially via `array.map`. Pairs with `bench_primes_parallel`
+// (same workload, `array.pmap`) so the report's two rows show the parallel
+// speedup directly. CPU-bound; the inner loop JIT-compiles per chunk.
+introduce array
+
+fun count_primes(limit <int>) {
+    count <int> := 0
+    n <int> := 2
+    repeat when n < limit {
+        is_p <int> := 1
+        d <int> := 2
+        repeat when d * d <= n {
+            option {
+                n % d == 0 -> { is_p = 0 },
+                {}
+            }
+            d = d + 1
+        }
+        option {
+            is_p == 1 -> { count = count + 1 },
+            {}
+        }
+        n = n + 1
+    }
+    count
+}
+
+chunks := [40000, 40000, 40000, 40000, 40000, 40000, 40000, 40000,
+           40000, 40000, 40000, 40000, 40000, 40000, 40000, 40000]
+
+array.map(chunks, count_primes)
