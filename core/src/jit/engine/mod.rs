@@ -951,6 +951,19 @@ impl JitInner {
                         }
                     }
 
+                    // Dead code after a terminator, before the next block
+                    // boundary: the loop back-edge + `None;Return` epilogue the
+                    // compiler emits past an explicit `give` inside `repeat`/
+                    // `each`. Cranelift forbids emitting into a filled block, so
+                    // skip every byte until `ip` reaches a real block start
+                    // (the switch above resets `terminated`). Stepping by 1 lands
+                    // harmlessly on operand bytes — they're skipped too.
+                    // ponytail: byte-step, not a length table — dead tails are tiny.
+                    if terminated {
+                        ip += 1;
+                        continue;
+                    }
+
                     let op = OpCode::from_byte(code[ip]).ok_or(())?;
                     let line = chunk.lines.get(ip).copied().unwrap_or(0);
                     let col = chunk.columns.get(ip).copied().unwrap_or(0);
@@ -2100,14 +2113,8 @@ impl JitInner {
                             let off = read_u16(code, ip + 1) as usize;
                             let target_ip = ip + 3 + off;
                             let target = blocks[&target_ip];
-                            // A `Jump` right after a `Return` (the dead tail of
-                            // `give X when cond`) sits in an already-terminated
-                            // block — only emit the edge if the block is still
-                            // open, else this is unreachable dead code.
-                            if !terminated {
-                                virt_stack.flush_to_memory(&mut builder, vm_val);
-                                builder.ins().jump(target, &[]);
-                            }
+                            virt_stack.flush_to_memory(&mut builder, vm_val);
+                            builder.ins().jump(target, &[]);
                             terminated = true;
                             ip += 3;
                         }
@@ -2115,10 +2122,8 @@ impl JitInner {
                             let off = read_u16(code, ip + 1) as usize;
                             let target_ip = (ip + 3) - off;
                             let target = blocks[&target_ip];
-                            if !terminated {
-                                virt_stack.flush_to_memory(&mut builder, vm_val);
-                                builder.ins().jump(target, &[]);
-                            }
+                            virt_stack.flush_to_memory(&mut builder, vm_val);
+                            builder.ins().jump(target, &[]);
                             terminated = true;
                             ip += 3;
                         }
@@ -4061,12 +4066,6 @@ impl JitInner {
                         }
 
                         OpCode::Return => {
-                            // Dead trailing return (the compiler's None;Return epilogue after an
-                            // explicit give/return) — block already terminated, skip emitting.
-                            if terminated {
-                                ip += 1;
-                                continue;
-                            }
                             match kind {
                                 EntryKind::Generic => {
                                     // Inline frame-teardown when safe — eliminates
