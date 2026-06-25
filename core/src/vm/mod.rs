@@ -1603,12 +1603,14 @@ impl VM {
                 OpCode::Equal => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(Value::Boolean(Self::values_equal(&a, &b)));
+                    let eq = self.values_equal_forced(a, b);
+                    self.push(Value::Boolean(eq));
                 }
                 OpCode::NotEqual => {
                     let b = self.pop();
                     let a = self.pop();
-                    self.push(Value::Boolean(!Self::values_equal(&a, &b)));
+                    let eq = self.values_equal_forced(a, b);
+                    self.push(Value::Boolean(!eq));
                 }
                 OpCode::Less => {
                     let b = self.pop();
@@ -1638,6 +1640,7 @@ impl VM {
                 // ── Logical ─────────────────────────────────────────
                 OpCode::Not => {
                     let val = self.pop();
+                    let val = self.force(val);
                     self.push(Value::Boolean(!val.is_truthy()));
                 }
 
@@ -1681,6 +1684,7 @@ impl VM {
                 // ── Unary ───────────────────────────────────────────
                 OpCode::Negate => {
                     let val = self.pop();
+                    let val = self.force(val);
                     match val.repr() {
                         ValueRepr::Integer(n) => self.push(Value::Integer(-n)),
                         ValueRepr::Float(f) => self.push(Value::Float(-f)),
@@ -2536,8 +2540,12 @@ impl VM {
     // ── Arithmetic Helpers ──────────────────────────────────────────────
 
     /// Auto-join: a spawned task handle resolves to its result when consumed.
-    /// ponytail: applied at binary ops; extend to other consume sites (index,
-    /// field access) with the same one-liner when a Task actually reaches one.
+    /// Called at every value-consuming site — arithmetic/bitwise/shift,
+    /// comparison, equality, unary, and indexing — so a `Task` resolves the
+    /// moment its underlying value is actually needed. Shared by the VM and the
+    /// JIT, which route through the same `binary_*`/`eval_index`/`unary_bnot`
+    /// helpers. Builtins (`converge`, `cancel`) deliberately do NOT force —
+    /// they need the raw handle.
     pub(crate) fn force(&self, v: Value) -> Value {
         match v {
             Value::Task(h) => h.join(self),
@@ -2602,6 +2610,7 @@ impl VM {
     }
 
     pub(crate) fn binary_sub(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l - r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l - r)),
@@ -2627,6 +2636,7 @@ impl VM {
     }
 
     pub(crate) fn binary_mul(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l * r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l * r)),
@@ -2642,6 +2652,7 @@ impl VM {
     }
 
     pub(crate) fn binary_div(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 if *r == 0 {
@@ -2676,6 +2687,7 @@ impl VM {
     }
 
     pub(crate) fn binary_mod(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 if *r == 0 {
@@ -2717,6 +2729,7 @@ impl VM {
     // agree on `1 << 64`, `1 << -1`, etc.
 
     pub(crate) fn binary_band(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l & r)),
             _ => Err(self.runtime_error("bitwise & requires integers")),
@@ -2724,6 +2737,7 @@ impl VM {
     }
 
     pub(crate) fn binary_bor(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l | r)),
             _ => Err(self.runtime_error("bitwise | requires integers")),
@@ -2731,6 +2745,7 @@ impl VM {
     }
 
     pub(crate) fn binary_bxor(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l ^ r)),
             _ => Err(self.runtime_error("bitwise ^ requires integers")),
@@ -2738,6 +2753,7 @@ impl VM {
     }
 
     pub(crate) fn unary_bnot(&self, a: Value) -> Result<Value, VMError> {
+        let a = self.force(a);
         match a.repr() {
             ValueRepr::Integer(n) => Ok(Value::Integer(!n)),
             _ => Err(self.runtime_error("bitwise ~ requires an integer")),
@@ -2745,6 +2761,7 @@ impl VM {
     }
 
     pub(crate) fn binary_shl(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 Ok(Value::Integer(l.wrapping_shl(*r as u32)))
@@ -2754,6 +2771,7 @@ impl VM {
     }
 
     pub(crate) fn binary_shr(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 Ok(Value::Integer(l.wrapping_shr(*r as u32)))
@@ -2800,7 +2818,15 @@ impl VM {
         }
     }
 
+    /// `==`/`!=` with auto-join. `values_equal` is static (it backs nothing
+    /// that owns a `&VM`), so the force lives here rather than inside it.
+    pub(crate) fn values_equal_forced(&self, a: Value, b: Value) -> bool {
+        let (a, b) = (self.force(a), self.force(b));
+        Self::values_equal(&a, &b)
+    }
+
     pub(crate) fn compare_less(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l < r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l < r)),
@@ -2818,6 +2844,7 @@ impl VM {
     }
 
     pub(crate) fn compare_less_equal(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l <= r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l <= r)),
@@ -2833,6 +2860,7 @@ impl VM {
     }
 
     pub(crate) fn compare_greater(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l > r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l > r)),
@@ -2848,6 +2876,7 @@ impl VM {
     }
 
     pub(crate) fn compare_greater_equal(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l >= r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l >= r)),
@@ -3602,6 +3631,7 @@ impl VM {
     // ── Index Operations ────────────────────────────────────────────────
 
     pub(crate) fn eval_index(&self, collection: Value, index: Value) -> Result<Value, VMError> {
+        let (collection, index) = (self.force(collection), self.force(index));
         match (&collection, &index) {
             (Value::Array(arr), Value::Integer(i)) => {
                 let borrowed = arr.borrow();
