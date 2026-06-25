@@ -363,6 +363,9 @@ pub enum Value {
     // Module
     Module(Rc<ObjModule>),
 
+    // Concurrency: a spawned task's handle. Auto-joins when consumed.
+    Task(Rc<crate::concurrent::TaskHandle>),
+
     // Error handling
     /// Boxed to keep `Value` down to 24 bytes. The inline form would
     /// carry two `Rc<str>` fat pointers (32 B) which dominated the enum
@@ -420,6 +423,7 @@ pub enum ValueRepr<'a> {
     ErrorValue(&'a Rc<ErrorValueData>),
     Wrapped(&'a Rc<Value>),
     Error(&'a Rc<String>),
+    Task(&'a Rc<crate::concurrent::TaskHandle>),
 }
 
 /// Boxed payload of `Value::ErrorValue`. Kept off the enum so `Value`
@@ -893,6 +897,7 @@ impl Value {
             Value::ErrorValue(d) => ValueRepr::ErrorValue(d),
             Value::Wrapped(v) => ValueRepr::Wrapped(v),
             Value::Error(s) => ValueRepr::Error(s),
+            Value::Task(h) => ValueRepr::Task(h),
         }
     }
 
@@ -994,6 +999,7 @@ impl Value {
             Value::Error(_) => "ERROR",
             Value::EnumDef(_) => "ENUM_DEF",
             Value::EnumInstance(_) => "ENUM",
+            Value::Task(_) => "TASK",
         }
     }
 
@@ -1094,6 +1100,7 @@ impl fmt::Display for Value {
                     )
                 }
             },
+            Value::Task(_) => write!(f, "<task>"),
         }
     }
 }
@@ -1138,6 +1145,7 @@ impl fmt::Debug for Value {
                     i.enum_name, i.variant_name, i.payload
                 )
             }
+            Value::Task(_) => write!(f, "Task"),
         }
     }
 }

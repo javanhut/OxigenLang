@@ -2529,7 +2529,18 @@ impl VM {
 
     // ── Arithmetic Helpers ──────────────────────────────────────────────
 
+    /// Auto-join: a spawned task handle resolves to its result when consumed.
+    /// ponytail: applied at binary ops; extend to other consume sites (index,
+    /// field access) with the same one-liner when a Task actually reaches one.
+    pub(crate) fn force(&self, v: Value) -> Value {
+        match v {
+            Value::Task(h) => h.join(self),
+            v => v,
+        }
+    }
+
     pub(crate) fn binary_add(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l + r)),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l + r)),

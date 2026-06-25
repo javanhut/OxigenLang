@@ -197,18 +197,57 @@ thread_local! {
     /// and to skip the `main` body when building the worker VM.
     static IS_WORKER: Cell<bool> = const { Cell::new(false) };
 
-    /// Per-thread handle table mapping a ticket id to the reply receiver.
-    static HANDLES: RefCell<HashMap<u64, mpsc::Receiver<Result<Sendable, String>>>> =
-        RefCell::new(HashMap::new());
-    static NEXT: Cell<u64> = const { Cell::new(1) };
-
     /// Worker-only: compile-order id -> function code, for rebuilding spawned
     /// closures (lambdas/captures) that the name path can't resolve.
     static WORKER_FNS: RefCell<HashMap<u32, Rc<Function>>> = RefCell::new(HashMap::new());
 
-    /// Main: handle id -> cancel flag. Worker: the running task's flag.
-    static CANCELS: RefCell<HashMap<u64, Arc<AtomicBool>>> = RefCell::new(HashMap::new());
+    /// Worker: the running task's cancel flag (set by cancel() via the handle).
     static CUR_CANCEL: RefCell<Option<Arc<AtomicBool>>> = RefCell::new(None);
+}
+
+/// A spawned task's handle: its result channel, a memoized result, and the
+/// cancel flag shared with the worker. Lives inside `Value::Task`.
+pub struct TaskHandle {
+    rx: mpsc::Receiver<Result<Sendable, String>>,
+    memo: RefCell<Option<Value>>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl TaskHandle {
+    pub fn join(&self, vm: &VM) -> Value {
+        if let Some(v) = &*self.memo.borrow() {
+            return v.clone();
+        }
+        let v = match self.rx.recv() {
+            Ok(Ok(s)) => attach(s, vm),
+            Ok(Err(e)) => Value::Error(Rc::new(e)),
+            Err(_) => Value::Error(Rc::new("join(): worker dropped without replying".to_string())),
+        };
+        *self.memo.borrow_mut() = Some(v.clone());
+        v
+    }
+
+    /// ponytail: timeout stops *waiting*, not the task; don't memoize, so a
+    /// later join can still collect.
+    pub fn join_timeout(&self, vm: &VM, ms: u64) -> Value {
+        if let Some(v) = &*self.memo.borrow() {
+            return v.clone();
+        }
+        match self.rx.recv_timeout(std::time::Duration::from_millis(ms)) {
+            Ok(Ok(s)) => {
+                let v = attach(s, vm);
+                *self.memo.borrow_mut() = Some(v.clone());
+                v
+            }
+            Ok(Err(e)) => Value::Error(Rc::new(e)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Value::Error(Rc::new("join(): timed out".to_string())),
+            Err(_) => Value::Error(Rc::new("join(): worker dropped without replying".to_string())),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Register the program source so workers can rebuild a VM. Call once before
@@ -230,16 +269,9 @@ pub fn cancelled() -> bool {
 
 /// `cancel(handle)` — cooperatively stop a spawned task at its next call.
 pub fn builtin_cancel(args: &[Value]) -> Value {
-    let id = match args.first().map(|v| v.repr()) {
-        Some(ValueRepr::Uint(u)) => u,
-        Some(ValueRepr::Integer(n)) if n >= 0 => n as u64,
-        _ => return Value::None,
-    };
-    CANCELS.with(|c| {
-        if let Some(f) = c.borrow().get(&id) {
-            f.store(true, Ordering::Relaxed);
-        }
-    });
+    if let Some(Value::Task(h)) = args.first() {
+        h.cancel();
+    }
     Value::None
 }
 
@@ -395,14 +427,6 @@ fn ensure_pool() -> &'static Pool {
     })
 }
 
-fn next_id() -> u64 {
-    NEXT.with(|n| {
-        let id = n.get();
-        n.set(id + 1);
-        id
-    })
-}
-
 /// `spawn(func, args...)` -> task handle (`Value::Uint`).
 pub fn builtin_spawn(args: &[Value]) -> Value {
     if args.is_empty() {
@@ -450,7 +474,6 @@ pub fn builtin_spawn(args: &[Value]) -> Value {
     }
 
     let (reply_tx, reply_rx) = mpsc::channel::<Result<Sendable, String>>();
-    let id = next_id();
     let cancel = Arc::new(AtomicBool::new(false));
 
     // Inside a worker: run inline so workers can't enqueue more tasks.
@@ -466,12 +489,11 @@ pub fn builtin_spawn(args: &[Value]) -> Value {
         let _ = reply_tx.send(result);
     } else {
         let pool = ensure_pool();
-        CANCELS.with(|c| c.borrow_mut().insert(id, cancel.clone()));
         let task = Task {
             callee,
             args: sendable_args,
             reply: reply_tx,
-            cancel,
+            cancel: cancel.clone(),
         };
         let pending = OUTSTANDING.fetch_add(1, Ordering::SeqCst) + 1;
         // Grow the pool when every worker is busy so I/O-bound fan-out isn't
@@ -486,8 +508,11 @@ pub fn builtin_spawn(args: &[Value]) -> Value {
         }
     }
 
-    HANDLES.with(|h| h.borrow_mut().insert(id, reply_rx));
-    Value::Uint(id)
+    Value::Task(Rc::new(TaskHandle {
+        rx: reply_rx,
+        memo: RefCell::new(None),
+        cancel,
+    }))
 }
 
 /// `join(handle)` -> the spawned call's result (blocks).
@@ -501,34 +526,11 @@ pub fn builtin_join(_args: &[Value]) -> Value {
 /// `join(handle[, ms])` — blocks for a spawned call's result, with VM access so
 /// struct/enum results can be rebuilt on this thread.
 pub fn join_with_vm(vm: &VM, args: &[Value]) -> Value {
-    if args.is_empty() || args.len() > 2 {
-        return Value::Error(Rc::new(
-            "join() takes a handle and an optional timeout (ms)".to_string(),
-        ));
-    }
-    let id = match args[0].repr() {
-        ValueRepr::Uint(u) => u,
-        ValueRepr::Integer(n) if n >= 0 => n as u64,
-        _ => return Value::Error(Rc::new("join() requires a task handle".to_string())),
-    };
-
-    let rx = HANDLES.with(|h| h.borrow_mut().remove(&id));
-    let rx = match rx {
-        Some(rx) => rx,
-        None => return Value::Error(Rc::new(format!("join(): invalid or used handle {}", id))),
-    };
-
-    let recvd = match args.get(1).and_then(|v| v.as_integer()) {
-        Some(ms) => rx.recv_timeout(std::time::Duration::from_millis(ms.max(0) as u64)),
-        None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-    };
-    match recvd {
-        Ok(Ok(s)) => attach(s, vm),
-        Ok(Err(e)) => Value::Error(Rc::new(e)),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            HANDLES.with(|h| h.borrow_mut().insert(id, rx));
-            Value::Error(Rc::new("join(): timed out".to_string()))
-        }
-        Err(_) => Value::Error(Rc::new("join(): worker dropped without replying".to_string())),
+    match args.first() {
+        Some(Value::Task(h)) => match args.get(1).and_then(|v| v.as_integer()) {
+            Some(ms) => h.join_timeout(vm, ms.max(0) as u64),
+            None => h.join(vm),
+        },
+        _ => Value::Error(Rc::new("join() requires a task handle".to_string())),
     }
 }
