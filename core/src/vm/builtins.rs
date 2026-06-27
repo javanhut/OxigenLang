@@ -112,6 +112,7 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     // I/O builtins
     globals.insert("__input".to_string(), Value::Builtin(builtin_input));
     globals.insert("__read_line".to_string(), Value::Builtin(builtin_read_line));
+    globals.insert("__read_key".to_string(), Value::Builtin(builtin_read_key));
 
     // File I/O
     globals.insert("__read_file".to_string(), Value::Builtin(builtin_read_file));
@@ -1171,6 +1172,14 @@ fn builtin_read_line(_args: &[Value]) -> Value {
     match std::io::stdin().read_line(&mut line) {
         Ok(_) => Value::String(rc_str(line.trim_end_matches('\n').trim_end_matches('\r'))),
         Err(e) => Value::Error(rc_str(format!("read_line error: {}", e))),
+    }
+}
+
+// Read a single key (arrow keys included) in raw mode; see crate::keyinput.
+fn builtin_read_key(_args: &[Value]) -> Value {
+    match crate::keyinput::read_key() {
+        Ok(k) => Value::String(rc_str(k)),
+        Err(e) => Value::Error(rc_str(format!("read_key error: {}", e))),
     }
 }
 

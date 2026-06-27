@@ -182,6 +182,10 @@ pub fn get_builtins() -> HashMap<String, Rc<Object>> {
         "__read_line".to_string(),
         Rc::new(Object::Builtin(builtin__read_line)),
     );
+    builtins.insert(
+        "__read_key".to_string(),
+        Rc::new(Object::Builtin(builtin__read_key)),
+    );
 
     // OS builtins
     builtins.insert(
@@ -1631,6 +1635,20 @@ fn builtin__read_line(args: Vec<Rc<Object>>) -> Rc<Object> {
             Rc::new(Object::String(line))
         }
         Err(e) => Rc::new(Object::Error(format!("__read_line: {}", e))),
+    }
+}
+
+// Read a single key (arrow keys included) in raw mode; see crate::keyinput.
+fn builtin__read_key(args: Vec<Rc<Object>>) -> Rc<Object> {
+    if !args.is_empty() {
+        return Rc::new(Object::Error(format!(
+            "__read_key: expected 0 arguments, got {}",
+            args.len()
+        )));
+    }
+    match crate::keyinput::read_key() {
+        Ok(k) => Rc::new(Object::String(k)),
+        Err(e) => Rc::new(Object::Error(format!("__read_key: {}", e))),
     }
 }
 

@@ -322,8 +322,7 @@ fn run_test_file(path: &std::path::Path, color: bool) -> FileResult {
     // `oxigen test` runs each `<test>` block on the bytecode VM (not the
     // tree-walker), so tests observe the same semantics as `oxigen file.oxi`
     // — notably in-place `push`/`insert`. The REPL stays on the tree-walker.
-    let outcomes =
-        oxigen_core::test_runner::run_vm_tests(&program, &contents, Some(file_path_buf));
+    let outcomes = oxigen_core::test_runner::run_vm_tests(&program, &contents, Some(file_path_buf));
 
     if outcomes.is_empty() {
         return FileResult {
@@ -339,10 +338,20 @@ fn run_test_file(path: &std::path::Path, color: bool) -> FileResult {
     for outcome in &outcomes {
         if outcome.passed {
             passed += 1;
-            let _ = write!(output, "\n  {} {}", status_marker(true, color), outcome.name);
+            let _ = write!(
+                output,
+                "\n  {} {}",
+                status_marker(true, color),
+                outcome.name
+            );
         } else {
             failed += 1;
-            let _ = write!(output, "\n  {} {}", status_marker(false, color), outcome.name);
+            let _ = write!(
+                output,
+                "\n  {} {}",
+                status_marker(false, color),
+                outcome.name
+            );
             if let Some(msg) = &outcome.message {
                 let _ = write!(output, "\n       {}", paint(msg, C_RED, color));
             }
@@ -452,11 +461,6 @@ fn check_file(file_path: &str) {
 }
 
 fn fmt_files(paths: &[String]) {
-    if paths.is_empty() {
-        eprintln!("Usage: oxigen fmt <file.oxi> [file2.oxi ...]");
-        std::process::exit(1);
-    }
-
     for path in paths {
         if !path.ends_with(".oxi") {
             eprintln!("Skipping non-.oxi file: {}", path);

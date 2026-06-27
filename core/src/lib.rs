@@ -4,6 +4,7 @@ pub mod concurrent;
 pub mod evaluator;
 pub mod formatter;
 pub mod jit;
+pub mod keyinput;
 pub mod lexer;
 pub mod netres;
 pub mod object;
