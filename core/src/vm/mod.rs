@@ -365,6 +365,19 @@ impl VM {
         self.globals.get(name).cloned()
     }
 
+    /// Iterate all globals (used by the concurrency worker pool to snapshot the
+    /// main thread's user globals for a spawned closure that references a
+    /// top-level `main` binding — those are GLOBALS, not upvalues).
+    pub fn globals_iter(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.globals.iter()
+    }
+
+    /// Install a global (used by a worker to seed a spawned task with the main
+    /// thread's user globals before running it).
+    pub fn define_global(&mut self, name: String, val: Value) {
+        self.globals.insert(name, val);
+    }
+
     /// Call a callee `Value` (closure or builtin) with positional `args` from
     /// external Rust code, driving the VM to completion and returning the
     /// result. Used by the concurrency worker pool.
@@ -2914,19 +2927,24 @@ impl VM {
                 }
 
                 let start = self.stack.len() - arg_count;
+                let is_spawn = std::ptr::fn_addr_eq(
+                    func,
+                    crate::concurrent::builtin_spawn as fn(&[Value]) -> Value,
+                );
                 // Closure transfer: snapshot a spawned capturing closure so the
                 // builtin (no stack access) can read its upvalues. Kept out of
                 // line so its locals don't bloat this hot, deeply-recursed frame.
-                if std::ptr::fn_addr_eq(
-                    func,
-                    crate::concurrent::builtin_spawn as fn(&[Value]) -> Value,
-                ) {
+                if is_spawn {
                     self.snapshot_spawn_closure(start);
                 }
-                // `join` is routed to a VM-aware path so it can rebuild
-                // struct/enum results; every other builtin never touches `self`,
-                // so its borrow ends before we mutate the stack.
-                let result = if std::ptr::fn_addr_eq(
+                // `join`/`spawn` are routed to VM-aware paths: `join` rebuilds
+                // struct/enum results; `spawn` snapshots the main thread's user
+                // globals so a spawned closure can resolve top-level `main`
+                // bindings on the worker. Every other builtin never touches
+                // `self`, so its borrow ends before we mutate the stack.
+                let result = if is_spawn {
+                    crate::concurrent::spawn_with_vm(self, &self.stack[start..])
+                } else if std::ptr::fn_addr_eq(
                     func,
                     crate::concurrent::builtin_join as fn(&[Value]) -> Value,
                 ) {

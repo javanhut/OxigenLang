@@ -96,6 +96,7 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
             let program = parser.parse_program();
 
             oxigen_core::concurrent::set_src(contents.clone());
+            oxigen_core::concurrent::set_main_file(file_path_buf.clone());
 
             let errors = parser.errors();
             if !errors.is_empty() {

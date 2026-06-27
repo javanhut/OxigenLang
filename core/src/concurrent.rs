@@ -164,6 +164,9 @@ enum Callee {
 struct Task {
     callee: Callee,
     args: Vec<Sendable>,
+    /// Snapshot of the main thread's user globals, so a spawned closure can
+    /// resolve top-level `main` bindings (which are GLOBALS, not upvalues).
+    globals: Vec<(String, Sendable)>,
     reply: mpsc::Sender<Result<Sendable, String>>,
     cancel: Arc<AtomicBool>,
 }
@@ -177,6 +180,10 @@ struct Pool {
 
 static POOL: OnceLock<Pool> = OnceLock::new();
 static SRC: OnceLock<String> = OnceLock::new();
+/// The program's file path, so a worker VM can resolve LOCAL module imports
+/// (`introduce .mod`) — relative resolution needs `current_file`. Without it,
+/// worker init fails on the import and the worker dies, orphaning tasks.
+static MAIN_FILE: OnceLock<std::path::PathBuf> = OnceLock::new();
 
 /// Count of tasks handed to the pool but not yet finished by a worker. Drained
 /// at program exit so fire-and-forget spawns aren't killed when the process ends.
@@ -265,6 +272,11 @@ impl TaskHandle {
 /// running the program.
 pub fn set_src(s: String) {
     let _ = SRC.set(s);
+}
+
+/// Register the program's file path so workers can resolve local module imports.
+pub fn set_main_file(path: std::path::PathBuf) {
+    let _ = MAIN_FILE.set(path);
 }
 
 /// Returns true if the current thread is a spawn worker.
@@ -359,13 +371,28 @@ fn build_worker_vm(src: &str) -> Result<VM, String> {
 
     let mut vm = VM::new();
     vm.set_source(src);
+    if let Some(path) = MAIN_FILE.get() {
+        vm.set_file(path.clone()); // so local `introduce .mod` imports resolve
+    }
     vm.is_main_context = false; // register fun defs, skip main body
     vm.run(function).map_err(|e| format!("worker init error: {}", e))?;
     Ok(vm)
 }
 
 /// Run a task synchronously on the given VM and produce a Sendable result.
-fn run_task(vm: &mut VM, callee: Callee, args: Vec<Sendable>) -> Result<Sendable, String> {
+fn run_task(
+    vm: &mut VM,
+    callee: Callee,
+    args: Vec<Sendable>,
+    globals: Vec<(String, Sendable)>,
+) -> Result<Sendable, String> {
+    // Seed the worker with the main thread's user globals so a spawned closure
+    // that reads a top-level `main` binding (a GLOBAL, not an upvalue) resolves
+    // it here. Last-writer-wins per task; each spawn ships the full snapshot.
+    for (name, s) in globals {
+        let v = attach(s, vm);
+        vm.define_global(name, v);
+    }
     let callee = match callee {
         Callee::Named(name) => vm
             .get_global(&name)
@@ -394,13 +421,10 @@ fn spawn_worker(rx: Arc<Mutex<mpsc::Receiver<Task>>>, src: String) {
         .stack_size(STACK_SIZE)
         .spawn(move || {
             IS_WORKER.with(|w| w.set(true));
-            let mut vm = match build_worker_vm(&src) {
-                Ok(vm) => vm,
-                Err(_) => {
-                    WORKERS.fetch_sub(1, Ordering::SeqCst);
-                    return;
-                }
-            };
+            // Build can fail (e.g. a module that errors at init). Keep the
+            // result and reply with the error per task rather than dying — a
+            // dead worker orphans queued tasks, deadlocking their join().
+            let mut built = build_worker_vm(&src);
             loop {
                 let task = {
                     let guard = rx.lock().unwrap();
@@ -411,10 +435,14 @@ fn spawn_worker(rx: Arc<Mutex<mpsc::Receiver<Task>>>, src: String) {
                     Err(_) => break, // channel closed
                 };
                 CUR_CANCEL.with(|c| *c.borrow_mut() = Some(task.cancel.clone()));
-                let result = run_task(&mut vm, task.callee, task.args);
+                let result = match &mut built {
+                    Ok(vm) => run_task(vm, task.callee, task.args, task.globals),
+                    Err(e) => Err(e.clone()),
+                };
                 let _ = task.reply.send(result);
                 OUTSTANDING.fetch_sub(1, Ordering::SeqCst);
             }
+            WORKERS.fetch_sub(1, Ordering::SeqCst);
         });
     if res.is_err() {
         WORKERS.fetch_sub(1, Ordering::SeqCst);
@@ -438,8 +466,28 @@ fn ensure_pool() -> &'static Pool {
     })
 }
 
-/// `spawn(func, args...)` -> task handle (`Value::Uint`).
+/// `spawn(func, args...)` -> task handle. Address sentinel for the VM's
+/// dispatch (see `call_value`) and the rare direct-call path; the VM routes
+/// real spawns through `spawn_with_vm` so they carry the main thread's globals.
 pub fn builtin_spawn(args: &[Value]) -> Value {
+    spawn_inner(args, Vec::new())
+}
+
+/// `spawn` with VM access: snapshot the main thread's user globals so a spawned
+/// closure can resolve top-level `main` bindings (GLOBALS, not upvalues) on the
+/// worker, which otherwise loads only declarations. Builtins/closures/tasks
+/// aren't Sendable -> skipped (the worker already has declarations).
+/// ponytail: ships the full user-global snapshot per spawn — O(globals) detach.
+/// Cheap for typical programs; narrow to GetGlobal-referenced names if it bites.
+pub fn spawn_with_vm(vm: &VM, args: &[Value]) -> Value {
+    let globals: Vec<(String, Sendable)> = vm
+        .globals_iter()
+        .filter_map(|(k, v)| detach(v).ok().map(|s| (k.clone(), s)))
+        .collect();
+    spawn_inner(args, globals)
+}
+
+fn spawn_inner(args: &[Value], globals: Vec<(String, Sendable)>) -> Value {
     if args.is_empty() {
         return Value::Error(Rc::new("spawn() requires a function argument".to_string()));
     }
@@ -494,7 +542,7 @@ pub fn builtin_spawn(args: &[Value]) -> Value {
         // simple — correctness over speed.
         let src = SRC.get().cloned().unwrap_or_default();
         let result = match build_worker_vm(&src) {
-            Ok(mut vm) => run_task(&mut vm, callee, sendable_args),
+            Ok(mut vm) => run_task(&mut vm, callee, sendable_args, globals),
             Err(e) => Err(e),
         };
         let _ = reply_tx.send(result);
@@ -503,6 +551,7 @@ pub fn builtin_spawn(args: &[Value]) -> Value {
         let task = Task {
             callee,
             args: sendable_args,
+            globals,
             reply: reply_tx,
             cancel: cancel.clone(),
         };
