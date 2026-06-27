@@ -103,35 +103,25 @@ binary stays pure interpreter. Full architecture, supported opcodes,
 safety invariants, and benchmark methodology are in
 [docs/JIT_ARCHITECTURE.md](docs/JIT_ARCHITECTURE.md).
 
-### Benchmark Against Python
+### Benchmarking
 
-Run the benchmark harness from the repo root:
+Build the release binary, then run the benchmark harness from the repo root:
 
 ```bash
-python3 scripts/bench.py
+cargo build --release --features jit -p oxigen
+scripts/bench.sh
 ```
 
-That uses `target/release/oxigen` if it already exists, otherwise it
-builds it, then runs every paired `example/bench_*.oxi` /
-`example/bench_*.py` benchmark and writes both JSON and Markdown reports
-to `benchmark_reports/`. The report stores raw samples, median/mean/
-stdev/min/max per benchmark, and suite-level geometric-mean speedups vs
-Python so you can track JIT performance over time. To run a single
-benchmark:
+It runs every paired `example/bench_*.oxi` / `example/bench_*.py`
+benchmark with a thermal-fair, interleaved A/B harness against CPython
+(plus Bun and Node when installed) and writes per-benchmark JSON and a
+consolidated Markdown report to `benchmark_reports/`. To run specific
+benchmarks, tune sampling, or A/B two oxigen builds:
 
 ```bash
-python3 scripts/bench.py bench_loop
-python3 scripts/bench.py example/bench_fib.oxi
-```
-
-Useful flags:
-
-```bash
-python3 scripts/bench.py --rebuild
-python3 scripts/bench.py --oxigen-only
-python3 scripts/bench.py --plain-build
-python3 scripts/bench.py --runs 10 --warmups 3
-python3 scripts/bench.py --report-name nightly --report-dir reports/benchmarks
+scripts/bench.sh bench_loop bench_fib
+scripts/bench.sh --warmup=8 --runs=15
+OXIGEN_BIN_B=/path/to/baseline/oxigen scripts/bench.sh
 ```
 
 ## Editor Support

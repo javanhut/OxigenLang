@@ -113,7 +113,7 @@ if [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]]; then
     rm -rf "$_tmp_dir"
 fi
 
-# Optional CPU pinning (mirrors scripts/bench.py's OXIGEN_BENCH_CPU).
+# Optional CPU pinning via OXIGEN_BENCH_CPU.
 # taskset is Linux-only; on macOS there's no taskset, so pinning is simply
 # skipped (the `command -v` guard fails) — the harness still runs.
 TASKSET_PREFIX=()
