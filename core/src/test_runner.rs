@@ -1,29 +1,38 @@
 //! VM-backed runner for `oxigen test`.
 //!
-//! Runs each `<test>("name") { ... }` block on the bytecode VM (not the
-//! tree-walker), so test execution uses the SAME semantics as `oxigen file.oxi`
-//! — in particular **in-place `push`/`insert`** mutation, cross-type numeric
-//! coercion, etc. The interactive REPL stays on the tree-walker.
+//! Runs each `<test>("name") { ... }` block on the bytecode VM, so test
+//! execution uses the SAME semantics as `oxigen file.oxi` — in particular
+//! **in-place `push`/`insert`** mutation, cross-type numeric coercion, etc.
 //!
 //! Each test is compiled and run INDEPENDENTLY: the program for a single test is
 //! `[auto-import expect] + [top-level setup] + [test body]`, where "setup" is the
 //! file's top-level statements other than `<test>` blocks and a `main { }` block
-//! (which is suppressed under `oxigen test`, matching the tree-walker). Running
-//! each test on a fresh VM means a failure or mutation in one test cannot affect
-//! another. Test setup is normally just `fun` definitions (idempotent, no
-//! output), so re-running it per test is invisible.
+//! (which is suppressed under `oxigen test`). Running each test on a fresh VM
+//! means a failure or mutation in one test cannot affect another. Test setup is
+//! normally just `fun` definitions (idempotent, no output), so re-running it per
+//! test is invisible.
 //!
 //! A test PASSES iff its body runs without raising an error. Assertions
 //! (`expect(x).eq(y)`) fail by raising an error via `<fail>`, which short-
-//! circuits the body — exactly the contract the tree-walker enforced.
+//! circuits the body.
 
 use crate::ast::{Expression, Program, Statement};
 use crate::compiler::Compiler;
-use crate::evaluator::TestOutcome;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::vm::VM;
 use std::path::PathBuf;
+
+/// Result of executing a single `<test>("name") { ... }` block.
+#[derive(Debug, Clone)]
+pub struct TestOutcome {
+    /// The test's name (the string passed to `<test>(...)`).
+    pub name: String,
+    /// Whether the test passed (its body produced no error).
+    pub passed: bool,
+    /// On failure, the assertion/error message that caused it.
+    pub message: Option<String>,
+}
 
 /// Parse a snippet into its statements, discarding it on any parse error
 /// (the caller's program already parsed cleanly; this is only the fixed

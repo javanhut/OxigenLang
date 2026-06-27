@@ -10,7 +10,7 @@
 
 #![cfg(feature = "jit")]
 
-use oxigen_core::evaluator::TestOutcome;
+use oxigen_core::test_runner::TestOutcome;
 use oxigen_core::lexer::Lexer;
 use oxigen_core::parser::Parser;
 use oxigen_core::test_runner::run_vm_tests;

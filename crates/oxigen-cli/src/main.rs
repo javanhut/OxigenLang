@@ -1,18 +1,13 @@
-use std::cell::RefCell;
 use std::env;
 use std::fs;
 use std::io::IsTerminal;
 use std::path::PathBuf;
-use std::rc::Rc;
 
 mod repl;
 
 use oxigen_core::compiler::Compiler;
-use oxigen_core::evaluator::Evaluator;
 use oxigen_core::formatter::Formatter;
 use oxigen_core::lexer::Lexer;
-use oxigen_core::object;
-use oxigen_core::object::environment::Environment;
 use oxigen_core::parser::Parser;
 use oxigen_core::vm::VM;
 
@@ -96,6 +91,7 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
             let program = parser.parse_program();
 
             oxigen_core::concurrent::set_src(contents.clone());
+            oxigen_core::concurrent::set_main_file(file_path_buf.clone());
 
             let errors = parser.errors();
             if !errors.is_empty() {
@@ -144,56 +140,6 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
 
             // Let any fire-and-forget spawned tasks finish before exit.
             oxigen_core::concurrent::drain();
-        }
-    };
-    std::thread::Builder::new()
-        .stack_size(STACK_SIZE)
-        .spawn(run)
-        .expect("failed to spawn execution thread")
-        .join()
-        .expect("execution thread panicked");
-}
-
-fn run_file(file_path: &str, script_args: &[String]) {
-    let contents = read_source(file_path);
-    let file_path_buf = PathBuf::from(file_path)
-        .canonicalize()
-        .expect("Could not resolve file path");
-
-    // Run parse/eval on a large-stack thread so the tree-walker's RECURSION_LIMIT
-    // depth guard fires gracefully (rc=1) instead of the default 8MB CLI main
-    // thread overflowing first (rc=134). Mirrors run_file_vm. Rc-backed
-    // Evaluator/Environment/Program are created INSIDE the closure so only Send
-    // values (contents/file_path_buf/script_args) cross the thread boundary.
-    const STACK_SIZE: usize = 256 << 20; // 256 MB
-    let run = {
-        let script_args: Vec<String> = script_args.to_vec();
-        move || {
-            let lexer = Lexer::new(&contents);
-            let mut parser = Parser::new(lexer, &contents);
-            let program = parser.parse_program();
-
-            let errors = parser.errors();
-            if !errors.is_empty() {
-                eprintln!("{}", parser.format_errors());
-                std::process::exit(1);
-            }
-
-            let env = Rc::new(RefCell::new(Environment::new()));
-            let mut evaluator = Evaluator::new_with_path(file_path_buf);
-            evaluator.set_source(&contents);
-            evaluator.set_script_args(&script_args);
-            let result = evaluator.eval_program(&program, env);
-
-            match result.as_ref() {
-                object::Object::None => {}
-                object::Object::Error(msg) => {
-                    eprintln!("{}", msg);
-                    std::process::exit(1);
-                }
-                object::Object::ErrorValue { .. } => println!("{}", result),
-                _ => println!("{}", result),
-            }
         }
     };
     std::thread::Builder::new()
@@ -318,11 +264,10 @@ fn run_test_file(path: &std::path::Path, color: bool) -> FileResult {
         }
     };
 
-    // `oxigen test` runs each `<test>` block on the bytecode VM (not the
-    // tree-walker), so tests observe the same semantics as `oxigen file.oxi`
-    // — notably in-place `push`/`insert`. The REPL stays on the tree-walker.
-    let outcomes =
-        oxigen_core::test_runner::run_vm_tests(&program, &contents, Some(file_path_buf));
+    // `oxigen test` runs each `<test>` block on the bytecode VM, so tests
+    // observe the same semantics as `oxigen file.oxi` — notably in-place
+    // `push`/`insert`.
+    let outcomes = oxigen_core::test_runner::run_vm_tests(&program, &contents, Some(file_path_buf));
 
     if outcomes.is_empty() {
         return FileResult {
@@ -338,10 +283,20 @@ fn run_test_file(path: &std::path::Path, color: bool) -> FileResult {
     for outcome in &outcomes {
         if outcome.passed {
             passed += 1;
-            let _ = write!(output, "\n  {} {}", status_marker(true, color), outcome.name);
+            let _ = write!(
+                output,
+                "\n  {} {}",
+                status_marker(true, color),
+                outcome.name
+            );
         } else {
             failed += 1;
-            let _ = write!(output, "\n  {} {}", status_marker(false, color), outcome.name);
+            let _ = write!(
+                output,
+                "\n  {} {}",
+                status_marker(false, color),
+                outcome.name
+            );
             if let Some(msg) = &outcome.message {
                 let _ = write!(output, "\n       {}", paint(msg, C_RED, color));
             }
@@ -451,11 +406,6 @@ fn check_file(file_path: &str) {
 }
 
 fn fmt_files(paths: &[String]) {
-    if paths.is_empty() {
-        eprintln!("Usage: oxigen fmt <file.oxi> [file2.oxi ...]");
-        std::process::exit(1);
-    }
-
     for path in paths {
         if !path.ends_with(".oxi") {
             eprintln!("Skipping non-.oxi file: {}", path);
@@ -496,8 +446,8 @@ fn fmt_files(paths: &[String]) {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // VM is the default. --tree-walk falls back to the tree-walking interpreter.
-    let use_tree_walk = args.iter().any(|a| a == "--tree-walk");
+    // The bytecode VM is the only backend. `--jit` compiles eagerly (threshold
+    // 1), `--no-jit` disables compilation; default is lazy tiering.
     let no_jit = args.iter().any(|a| a == "--no-jit");
     let eager_jit = !no_jit
         && (args.iter().any(|a| a == "--jit")
@@ -513,7 +463,7 @@ fn main() {
         .iter()
         .filter(|a| {
             let s = a.as_str();
-            s != "--tree-walk" && s != "--vm" && s != "--jit" && s != "--no-jit"
+            s != "--jit" && s != "--no-jit"
         })
         .cloned()
         .collect();
@@ -533,11 +483,7 @@ fn main() {
         Some("fmt") => fmt_files(&filtered_args[2..]),
         Some("test") => run_tests_command(&filtered_args[2..]),
         Some(path) if path.ends_with(".oxi") => {
-            if use_tree_walk {
-                run_file(path, &filtered_args[2..]);
-            } else {
-                run_file_vm(path, &filtered_args[2..], jit_mode);
-            }
+            run_file_vm(path, &filtered_args[2..], jit_mode);
         }
         _ => repl::run_repl(),
     }

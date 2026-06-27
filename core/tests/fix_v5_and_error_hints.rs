@@ -8,23 +8,19 @@
 //! instead of `1, 1, 1`. The fix materializes a FRESH collection per
 //! initialization (`Value::fresh_clone` at the `Constant` opcode and in
 //! `current_constant`, which the JIT's `jit_push_constant` helper routes
-//! through). The tree-walker (the maturity oracle) prints `1, 1, 1`, so
-//! VM(interp) == VM(JIT) == tree-walker is the bar.
+//! through). The correct output is `1, 1, 1`, so VM(interp) == VM(JIT) is the
+//! bar.
 //!
 //! Error-hint parity: the VM used to drop the `  = hint:` line on
-//! divide-by-zero / modulo-by-zero runtime errors. It must now carry the same
-//! hint text the tree-walker produces so file-vs-REPL output agrees.
+//! divide-by-zero / modulo-by-zero runtime errors. It must now carry the
+//! expected hint text so file-vs-REPL output agrees.
 
 #![cfg(feature = "jit")]
 
 use oxigen_core::compiler::Compiler;
-use oxigen_core::evaluator::Evaluator;
 use oxigen_core::lexer::Lexer;
-use oxigen_core::object::environment::Environment;
 use oxigen_core::parser::Parser;
 use oxigen_core::vm::VM;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// Run a program on the bytecode VM. `jit_threshold == Some(1)` forces the
 /// JIT path; `None` keeps it on the interpreter.
@@ -49,53 +45,13 @@ fn run_vm(source: &str, jit_threshold: Option<u32>) -> Result<String, String> {
         .map_err(|e| e.message)
 }
 
-/// Run a program on the tree-walking interpreter (the reference oracle),
-/// returning the final value as a string.
-fn run_tree(source: &str) -> String {
-    let lexer = Lexer::new(source);
-    let mut parser = Parser::new(lexer, source);
-    let program = parser.parse_program();
-    assert!(
-        parser.errors().is_empty(),
-        "parser errors:\n{}",
-        parser.format_errors()
-    );
-    let env = Rc::new(RefCell::new(Environment::new()));
-    let mut evaluator = Evaluator::new();
-    format!("{}", evaluator.eval_program(&program, env))
-}
-
-/// Run a program on the tree-walker and return its error string (the program
-/// is expected to fail at runtime). Panics if it unexpectedly succeeds.
-fn run_tree_err(source: &str) -> String {
-    use oxigen_core::object::Object;
-    let lexer = Lexer::new(source);
-    let mut parser = Parser::new(lexer, source);
-    let program = parser.parse_program();
-    assert!(
-        parser.errors().is_empty(),
-        "parser errors:\n{}",
-        parser.format_errors()
-    );
-    let env = Rc::new(RefCell::new(Environment::new()));
-    let mut evaluator = Evaluator::new();
-    let result = evaluator.eval_program(&program, env);
-    match result.as_ref() {
-        Object::Error(msg) => msg.clone(),
-        other => panic!("expected a tree-walker runtime error, got {:?}", other),
-    }
-}
-
-/// Assert VM(interp) == VM(JIT) == tree-walker, all equal to `expected`.
+/// Assert VM(interp) == VM(JIT), both equal to `expected`.
 fn assert_parity(source: &str, expected: &str) {
     let interp = run_vm(source, None).expect("VM interp should succeed");
     let jit = run_vm(source, Some(1)).expect("VM JIT should succeed");
-    let tree = run_tree(source);
     assert_eq!(interp, expected, "VM interp mismatch");
     assert_eq!(jit, expected, "VM JIT mismatch");
-    assert_eq!(tree, expected, "tree-walker mismatch");
     assert_eq!(interp, jit, "VM interp != VM JIT");
-    assert_eq!(interp, tree, "VM interp != tree-walker");
 }
 
 // ── V5: typed zero-init heap defaults are fresh per initialization ──────────
@@ -117,8 +73,7 @@ fn typed_array_default_is_fresh_per_call() {
     // mutated. Each call must start from an EMPTY array. Returning
     // `b() + b() + b()` is `1 + 1 + 1 = 3` when fresh, `1 + 2 + 3 = 6` when
     // the heap default is aliased across calls. `assert_parity` runs this on
-    // the interpreter, on a forced-JIT threshold, and on the tree-walker
-    // oracle.
+    // the interpreter and on a forced-JIT threshold.
     let src = r#"
 fun b(){
   arr <array>
@@ -182,10 +137,8 @@ b() + b() + b() + b() + b()
 "#;
     let interp = run_vm(src, None).expect("VM interp should succeed");
     let jit = run_vm(src, Some(1)).expect("VM JIT should succeed");
-    let tree = run_tree(src);
     assert_eq!(interp, "5", "VM interp: array default aliased across calls");
     assert_eq!(jit, "5", "VM JIT: array default aliased across calls");
-    assert_eq!(tree, "5", "tree-walker (oracle) should also give 5");
     assert_eq!(interp, jit, "VM interp != VM JIT");
 }
 
@@ -196,19 +149,8 @@ fn divide_by_zero_hint_matches_tree_walker() {
     let src = "1 / 0\n";
     let vm_err = run_vm(src, None).expect_err("1/0 must error on the VM");
     let jit_err = run_vm(src, Some(1)).expect_err("1/0 must error under JIT");
-    let tree_err = run_tree_err(src);
 
-    // The tree-walker's canonical message + hint for divide-by-zero.
-    assert!(
-        tree_err.contains("division by zero"),
-        "tree-walker message changed: {tree_err:?}"
-    );
-    assert!(
-        tree_err.contains("ensure the divisor is not zero before dividing"),
-        "tree-walker hint changed: {tree_err:?}"
-    );
-
-    // The VM (interp + JIT) must now carry the SAME message and hint text.
+    // The VM (interp + JIT) must carry the canonical message and hint text.
     for (label, msg) in [("interp", &vm_err), ("jit", &jit_err)] {
         assert!(
             msg.contains("division by zero"),
@@ -226,16 +168,6 @@ fn modulo_by_zero_hint_matches_tree_walker() {
     let src = "5 % 0\n";
     let vm_err = run_vm(src, None).expect_err("5%0 must error on the VM");
     let jit_err = run_vm(src, Some(1)).expect_err("5%0 must error under JIT");
-    let tree_err = run_tree_err(src);
-
-    assert!(
-        tree_err.contains("modulo by zero"),
-        "tree-walker message changed: {tree_err:?}"
-    );
-    assert!(
-        tree_err.contains("ensure the divisor is not zero before using %"),
-        "tree-walker hint changed: {tree_err:?}"
-    );
 
     for (label, msg) in [("interp", &vm_err), ("jit", &jit_err)] {
         assert!(
@@ -255,14 +187,9 @@ fn operator_type_mismatch_hint_matches_tree_walker() {
     // must agree so file vs REPL output is consistent.
     let src = "5 + \"x\"\n";
     let vm_err = run_vm(src, None).expect_err("5 + string must error on the VM");
-    let tree_err = run_tree_err(src);
 
     assert!(
-        tree_err.contains("operands must be the same type for this operator"),
-        "tree-walker hint changed: {tree_err:?}"
-    );
-    assert!(
         vm_err.contains("operands must be the same type for this operator"),
-        "VM operator-mismatch hint does not match tree-walker: {vm_err:?}"
+        "VM operator-mismatch hint missing: {vm_err:?}"
     );
 }

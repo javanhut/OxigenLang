@@ -15,6 +15,62 @@ use std::rc::Rc;
 pub(crate) const STACK_MAX: usize = 262144; // 256K stack slots
 pub(crate) const FRAMES_MAX: usize = 16384; // 16K call frames — supports deep recursion
 
+/// Checks if `actual` satisfies the type constraint `expected`.
+/// Handles GENERIC (accepts anything) and union types like "INTEGER || STRING".
+pub(crate) fn type_matches(expected: &str, actual: &str) -> bool {
+    if expected == "GENERIC" {
+        return true;
+    }
+    if expected == "ERROR" && actual.starts_with("ERROR") {
+        return true;
+    }
+    if expected.contains(" || ") {
+        expected.split(" || ").any(|t| t == "GENERIC" || t == actual)
+    } else {
+        expected == actual
+    }
+}
+
+/// Locate the stdlib directory: next to the executable (dev or system install),
+/// then the cwd, then a user install under `~/.oxigen`.
+pub(crate) fn find_stdlib_path() -> PathBuf {
+    // 1. Relative to executable (dev: target/debug/oxigen + stdlib/)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let candidate = exe_dir.join("stdlib");
+            if candidate.is_dir() {
+                return candidate;
+            }
+            // 2. System install: <prefix>/bin/../lib/oxigen/stdlib
+            if let Some(prefix) = exe_dir.parent() {
+                let candidate = prefix.join("lib").join("oxigen").join("stdlib");
+                if candidate.is_dir() {
+                    return candidate;
+                }
+            }
+        }
+    }
+    // 3. Current working directory (preferred for local development)
+    let candidate = PathBuf::from("stdlib");
+    if candidate.is_dir() {
+        return candidate;
+    }
+    // 4. Parent of current working directory (useful when tests run from a crate dir)
+    let candidate = PathBuf::from("..").join("stdlib");
+    if candidate.is_dir() {
+        return candidate;
+    }
+    // 5. User install: ~/.oxigen/lib/stdlib
+    if let Ok(home) = std::env::var("HOME") {
+        let candidate = PathBuf::from(home).join(".oxigen").join("lib").join("stdlib");
+        if candidate.is_dir() {
+            return candidate;
+        }
+    }
+    // Fallback
+    PathBuf::from("stdlib")
+}
+
 /// A call frame: one per active function invocation.
 #[derive(Debug)]
 struct CallFrame {
@@ -225,7 +281,7 @@ impl VM {
             globals,
             open_upvalues: Vec::new(),
             current_file: None,
-            stdlib_path: crate::evaluator::find_stdlib_path(),
+            stdlib_path: find_stdlib_path(),
             module_cache: HashMap::new(),
             import_stack: Vec::new(),
             is_main_context: true,
@@ -359,10 +415,40 @@ impl VM {
         Ok(self.pop())
     }
 
+    /// Clear transient execution state (stack, call frames, open upvalues,
+    /// error handlers) while preserving globals and the module cache. The REPL
+    /// calls this after a runtime error so a failed line leaves the stack
+    /// balanced for the next `run`, without losing prior `var`/`fun`/`struct`
+    /// definitions (which live in globals).
+    pub fn reset_exec_state(&mut self) {
+        self.stack.clear();
+        self.stack_view.len = 0;
+        self.jit_frames.clear();
+        self.jit_frame_view.len = 0;
+        self.frames.clear();
+        self.open_upvalues.clear();
+        self.error_handlers.clear();
+        self.import_stack.clear();
+        self.jit_executing.set(false);
+    }
+
     /// Look up a global value by name (used by the concurrency worker pool to
     /// resolve a spawned function by name). Returns a clone if present.
     pub fn get_global(&self, name: &str) -> Option<Value> {
         self.globals.get(name).cloned()
+    }
+
+    /// Iterate all globals (used by the concurrency worker pool to snapshot the
+    /// main thread's user globals for a spawned closure that references a
+    /// top-level `main` binding — those are GLOBALS, not upvalues).
+    pub fn globals_iter(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.globals.iter()
+    }
+
+    /// Install a global (used by a worker to seed a spawned task with the main
+    /// thread's user globals before running it).
+    pub fn define_global(&mut self, name: String, val: Value) {
+        self.globals.insert(name, val);
     }
 
     /// Call a callee `Value` (closure or builtin) with positional `args` from
@@ -436,7 +522,7 @@ impl VM {
             .and_then(|c| c.clone());
         if let Some(expected) = constraint {
             let actual = self.peek(0).effective_type_name();
-            if !crate::evaluator::type_matches(&expected, &actual) {
+            if !type_matches(&expected, &actual) {
                 return Err(self.runtime_error_hint(
                     &format!("type mismatch: expected {}, got {}", expected, actual),
                     &format!("'{}' is locked to type {}", name, expected),
@@ -461,7 +547,7 @@ impl VM {
             .and_then(|c| c.clone());
         if let Some(expected) = constraint {
             let actual = self.peek(0).effective_type_name();
-            if !crate::evaluator::type_matches(&expected, &actual) {
+            if !type_matches(&expected, &actual) {
                 return Err(self.runtime_error_hint(
                     &format!(
                         "type mismatch: '{}' is locked to {}, got {}",
@@ -1726,7 +1812,7 @@ impl VM {
                         .and_then(|li| li.type_constraint.clone());
                     if let Some(expected) = constraint {
                         let actual = self.peek(0).effective_type_name();
-                        if !crate::evaluator::type_matches(&expected, &actual) {
+                        if !type_matches(&expected, &actual) {
                             return Err(self.runtime_error_hint(
                                 &format!("type mismatch: expected {}, got {}", expected, actual),
                                 &format!("variable is locked to type {}", expected),
@@ -2914,19 +3000,24 @@ impl VM {
                 }
 
                 let start = self.stack.len() - arg_count;
+                let is_spawn = std::ptr::fn_addr_eq(
+                    func,
+                    crate::concurrent::builtin_spawn as fn(&[Value]) -> Value,
+                );
                 // Closure transfer: snapshot a spawned capturing closure so the
                 // builtin (no stack access) can read its upvalues. Kept out of
                 // line so its locals don't bloat this hot, deeply-recursed frame.
-                if std::ptr::fn_addr_eq(
-                    func,
-                    crate::concurrent::builtin_spawn as fn(&[Value]) -> Value,
-                ) {
+                if is_spawn {
                     self.snapshot_spawn_closure(start);
                 }
-                // `join` is routed to a VM-aware path so it can rebuild
-                // struct/enum results; every other builtin never touches `self`,
-                // so its borrow ends before we mutate the stack.
-                let result = if std::ptr::fn_addr_eq(
+                // `join`/`spawn` are routed to VM-aware paths: `join` rebuilds
+                // struct/enum results; `spawn` snapshots the main thread's user
+                // globals so a spawned closure can resolve top-level `main`
+                // bindings on the worker. Every other builtin never touches
+                // `self`, so its borrow ends before we mutate the stack.
+                let result = if is_spawn {
+                    crate::concurrent::spawn_with_vm(self, &self.stack[start..])
+                } else if std::ptr::fn_addr_eq(
                     func,
                     crate::concurrent::builtin_join as fn(&[Value]) -> Value,
                 ) {
@@ -3423,8 +3514,8 @@ impl VM {
                 let actual = val.effective_type_name();
                 // Match the specific type or the generic category (ENUM/STRUCT),
                 // mirroring the evaluator so `<Enum>` accepts any enum value.
-                if !crate::evaluator::type_matches(expected_ty, &actual)
-                    && !crate::evaluator::type_matches(expected_ty, val.type_name())
+                if !type_matches(expected_ty, &actual)
+                    && !type_matches(expected_ty, val.type_name())
                 {
                     return Err(self.runtime_error_hint(
                         &format!(

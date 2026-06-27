@@ -492,8 +492,7 @@ Reproduce with:
 
 ```bash
 cargo build --release --features jit -p oxigen
-OXIGEN_JIT=1 python3 scripts/bench.py --skip-build --oxigen-bin ./target/release/oxigen \
-    --runs 10 --warmups 3 \
+scripts/bench.sh --warmup=3 --runs=10 \
     bench_fib bench_arith bench_loop bench_nested_loop \
     bench_collatz bench_closure bench_struct_method
 ```
@@ -598,5 +597,5 @@ stderr).
 - `core/tests/jit_fallback.rs` — regression tests that run every
   supported opcode through both interpreter and JIT and assert
   matching output.
-- `scripts/bench.py` — benchmark harness (supports `--python` flag
-  for side-by-side CPython comparison).
+- `scripts/bench.sh` — thermal-fair benchmark harness (oxigen vs
+  CPython/Bun/Node; writes reports to `benchmark_reports/`).

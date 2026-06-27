@@ -586,7 +586,7 @@ pub unsafe extern "C" fn jit_set_local_checked(vm: *mut VM, slot: u32) -> u32 {
         .and_then(|li| li.type_constraint.clone());
     if let Some(expected) = constraint {
         let actual = vm.peek(0).effective_type_name();
-        if !crate::evaluator::type_matches(&expected, &actual) {
+        if !crate::vm::type_matches(&expected, &actual) {
             let e = vm.runtime_error_hint(
                 &format!("type mismatch: expected {}, got {}", expected, actual),
                 &format!("variable is locked to type {}", expected),

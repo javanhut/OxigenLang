@@ -14,9 +14,8 @@
 //!
 //! The fix adds `end_scope_keeping_value` (compiler/mod.rs): it stashes the
 //! result into the floor slot with `SetLocal`, drops the duplicate, then
-//! closes/pops the remaining body locals top-down. This makes VM == JIT ==
-//! tree-walker for value-producing blocks with locals, including captured
-//! NON-floor locals.
+//! closes/pops the remaining body locals top-down. This makes VM == JIT for
+//! value-producing blocks with locals, including captured NON-floor locals.
 //!
 //! The remaining case — when the block's FLOOR local is itself captured by a
 //! surviving closure — is now closed too. The value-preserving stash would
@@ -34,13 +33,9 @@
 #![cfg(feature = "jit")]
 
 use oxigen_core::compiler::Compiler;
-use oxigen_core::evaluator::Evaluator;
 use oxigen_core::lexer::Lexer;
-use oxigen_core::object::environment::Environment;
 use oxigen_core::parser::Parser;
 use oxigen_core::vm::VM;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// Run a program on the bytecode VM. `jit_threshold == Some(1)` forces the JIT
 /// path; `None` keeps it on the interpreter.
@@ -65,27 +60,10 @@ fn run_vm(source: &str, jit_threshold: Option<u32>) -> Result<String, String> {
         .map_err(|e| e.message)
 }
 
-/// Run a program on the tree-walking interpreter (the reference oracle).
-fn run_tree(source: &str) -> String {
-    let lexer = Lexer::new(source);
-    let mut parser = Parser::new(lexer, source);
-    let program = parser.parse_program();
-    assert!(
-        parser.errors().is_empty(),
-        "parser errors:\n{}",
-        parser.format_errors()
-    );
-    let env = Rc::new(RefCell::new(Environment::new()));
-    let mut evaluator = Evaluator::new();
-    format!("{}", evaluator.eval_program(&program, env))
-}
-
-/// Assert VM (interp) == VM (JIT) == tree-walker, and equal to `expected`.
+/// Assert VM (interp) == VM (JIT), and both equal to `expected`.
 fn assert_parity(source: &str, expected: &str) {
     let interp = run_vm(source, None).expect("VM interp should succeed");
     let jit = run_vm(source, Some(1)).expect("VM JIT should succeed");
-    let tree = run_tree(source);
-    assert_eq!(tree, expected, "tree-walker mismatch (oracle)");
     assert_eq!(interp, expected, "VM interp mismatch");
     assert_eq!(jit, expected, "VM JIT mismatch");
     assert_eq!(interp, jit, "VM interp != VM JIT");
@@ -199,8 +177,8 @@ out";
 //
 // These encode the original BUG A and its no-skip variant. The complete fix is
 // the slot-indexed `CloseUpvalueAt` opcode emitted by `end_scope_keeping_value`
-// and implemented in both the VM interpreter and the JIT. The asserted strings
-// are the tree-walker oracle outputs; all three backends now agree.
+// and implemented in both the VM interpreter and the JIT; both backends now
+// agree on the asserted values.
 
 #[test]
 fn floor_captured_local_skip_bug_a() {
