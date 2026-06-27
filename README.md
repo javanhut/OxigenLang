@@ -1,6 +1,6 @@
 # OxigenLang
 
-OxigenLang is a modern, lightweight, interpreted programming language implemented in Rust. It features a clean, expressive syntax, pattern matching, enums, a two-tier error model, a built-in test runner, a module system with a standard library, and an optional indentation-based block syntax.
+OxigenLang is a modern, lightweight programming language implemented in Rust. It runs on a bytecode virtual machine with a baseline Cranelift JIT, and features a clean, expressive syntax, pattern matching, enums, a two-tier error model, a built-in test runner, a module system with a standard library, and an optional indentation-based block syntax.
 
 ## Features
 
@@ -10,7 +10,7 @@ OxigenLang is a modern, lightweight, interpreted programming language implemente
 - **Conditional Expressions**: Multi-arm `option` blocks, ternary shorthand, `unless` inverse conditionals, `unless ... then ...` fallback expressions, `when`/`unless` postfix guards, and short-circuit `and`/`or` logical operators.
 - **Pattern Matching**: Define reusable patterns with the `pattern` keyword and match against them with `choose`.
 - **Enums**: Rust-style enumerations with unit, tuple, and struct variants, explicit or auto-assigned discriminants, and field access by name or index.
-- **Rich Type System**: Dynamic typing by default with optional type annotations for locking types and controlling mutability. Four declaration forms give precise control over value and type mutability, and parameter type annotations are enforced on the default bytecode backend.
+- **Rich Type System**: Dynamic typing by default with optional type annotations for locking types and controlling mutability. Four declaration forms give precise control over value and type mutability, and parameter type annotations are enforced by the bytecode VM.
 - **Data Types**: Integers, Floats, Strings (with escape sequences, interpolation, and triple-quoted multi-line literals), Characters, Booleans, Arrays, Bytes, Uints, Tuples, Maps, Sets, and `None`.
 - **Structs**: Composite data types with typed fields, single-inheritance, methods via `includes` blocks, `self` access, hidden fields, and dot-chaining.
 - **First-Class Functions**: Named and anonymous functions, closures, typed parameters, default values, optional parameters, and implicit/explicit returns.
@@ -58,10 +58,9 @@ Removes the oxigen binary and stdlib from `/usr/local/`.
 ### Makefile
 
 ```bash
-sudo make install                # installs to /usr/local/
-sudo make install-with-jit       # installs a JIT-enabled build to /usr/local/
+sudo make install                # JIT-enabled build to /usr/local/ (default)
 sudo make install PREFIX=/opt    # custom prefix
-sudo make install-with-jit PREFIX=/opt
+sudo make install-no-jit         # interpreter-only build (no Cranelift)
 sudo make uninstall              # removes it
 ```
 
@@ -80,35 +79,38 @@ cargo run -p oxigen -- check file.oxi # parse and report errors as JSON
 cargo run -p oxigen -- test         # discover and run every *_test.oxi file
 ```
 
-### Optional JIT (experimental)
+### JIT (experimental)
 
-OxigenLang ships with a baseline Cranelift-backed JIT that's compiled
-out by default. It's competitive with or faster than CPython 3.14
-across the benchmark suite, with the largest wins on tight loops and
-arithmetic (see `benchmark_reports/` for the latest numbers on your
-machine). It's kept experimental pending broader real-world hardening.
-Build it in with the `jit` feature and opt in at run time with `--jit`:
+OxigenLang ships with a baseline Cranelift-backed JIT that's **compiled
+in and enabled by default** — a default build tiers hot functions up to
+native code automatically (after ~50 calls). It's competitive with or
+faster than CPython 3.14 across the benchmark suite, with the largest
+wins on tight loops and arithmetic (see `benchmark_reports/` for the
+latest numbers on your machine). It's still marked experimental pending
+broader real-world hardening, so runtime flags let you control it:
 
 ```bash
-cargo build --release --features jit -p oxigen
-make build-with-jit
-sudo make install-with-jit
-./target/release/oxigen --jit path/to/script.oxi   # eager (threshold=1)
-./target/release/oxigen       path/to/script.oxi   # default tiering
-./target/release/oxigen --no-jit path/to/script.oxi # interpreter only
+./target/release/oxigen --jit path/to/script.oxi    # eager: compile on first call
+./target/release/oxigen       path/to/script.oxi    # default: lazy tiering
+./target/release/oxigen --no-jit path/to/script.oxi # disable: pure interpreter
 ```
 
-Without `--features jit` the `--jit` flag is silently ignored and the
-binary stays pure interpreter. Full architecture, supported opcodes,
-safety invariants, and benchmark methodology are in
-[docs/JIT_ARCHITECTURE.md](docs/JIT_ARCHITECTURE.md).
+To build a smaller binary without the JIT (and without the Cranelift
+dependency tree), drop the default feature:
+
+```bash
+cargo build --release --no-default-features -p oxigen   # or: make build-no-jit
+```
+
+Full architecture, supported opcodes, safety invariants, and benchmark
+methodology are in [docs/JIT_ARCHITECTURE.md](docs/JIT_ARCHITECTURE.md).
 
 ### Benchmarking
 
 Build the release binary, then run the benchmark harness from the repo root:
 
 ```bash
-cargo build --release --features jit -p oxigen
+cargo build --release -p oxigen
 scripts/bench.sh
 ```
 
@@ -303,8 +305,4 @@ For detailed information, see the [docs](docs/) directory:
 | [Built-in Functions](docs/builtins.md) | Complete reference for all built-ins |
 | [Standard Library](docs/stdlib.md) | Full reference for the stdlib modules |
 | [Testing](docs/testing.md) | The built-in test runner, `expect` matchers, `oxigen test` |
-| [JIT Architecture](docs/JIT_ARCHITECTURE.md) | **Experimental** — baseline Cranelift JIT: how to build it in, runtime flags, supported opcodes, safety invariants, benchmark status vs CPython |
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
+| [JIT Architecture](docs/JIT_ARCHITECTURE.md) | **Experimental** — baseline Cranelift JIT: runtime flags, build options, supported opcodes, safety invariants, benchmark status vs CPython |
