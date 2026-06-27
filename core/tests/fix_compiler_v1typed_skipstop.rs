@@ -2,9 +2,8 @@
 //!
 //! (A) skip/stop as a VALUE: using `skip`/`stop` in a value-consumed position
 //!     (e.g. the body of an option/choose arm, or the last expression of a
-//!     block used as a value) must be a COMPILE error, matching the tree-walker
-//!     which produces an `Object::Skip`/`Object::Stop` sentinel that errors the
-//!     moment it is consumed (`INTEGER + SKIP`). Legitimate control-flow
+//!     block used as a value) must be a COMPILE error rather than the VM
+//!     silently producing a value (`INTEGER + SKIP`). Legitimate control-flow
 //!     `skip when ...` / `stop when ...` inside a loop body must still compile
 //!     and run.
 //!
@@ -16,13 +15,9 @@
 #![cfg(feature = "jit")]
 
 use oxigen_core::compiler::Compiler;
-use oxigen_core::evaluator::Evaluator;
 use oxigen_core::lexer::Lexer;
-use oxigen_core::object::environment::Environment;
 use oxigen_core::parser::Parser;
 use oxigen_core::vm::VM;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 fn parse(source: &str) -> oxigen_core::ast::Program {
     let lexer = Lexer::new(source);
@@ -52,13 +47,6 @@ fn run_vm(source: &str, jit_threshold: Option<u32>) -> Result<String, String> {
     vm.run(function)
         .map(|v| format!("{}", v))
         .map_err(|e| e.message)
-}
-
-fn run_tree(source: &str) -> String {
-    let program = parse(source);
-    let env = Rc::new(RefCell::new(Environment::new()));
-    let mut evaluator = Evaluator::new();
-    format!("{}", evaluator.eval_program(&program, env))
 }
 
 // --- (A) skip/stop as a value ---------------------------------------------
@@ -102,7 +90,6 @@ sum"#;
     // 1 + 3 + 4 = 8 (2 skipped)
     assert_eq!(run_vm(src, None).unwrap(), "8");
     assert_eq!(run_vm(src, Some(1)).unwrap(), "8");
-    assert_eq!(run_tree(src), "8");
 }
 
 #[test]
@@ -117,7 +104,6 @@ sum"#;
     // 1 + 2 = 3 (loop stops at i == 3)
     assert_eq!(run_vm(src, None).unwrap(), "3");
     assert_eq!(run_vm(src, Some(1)).unwrap(), "3");
-    assert_eq!(run_tree(src), "3");
 }
 
 // --- (B) V1-typed update-vs-shadow ----------------------------------------
@@ -131,13 +117,10 @@ repeat when x <= 5 {
   x <int> := x + 1
 }
 x"#;
-    let tree = run_tree(src);
     let interp = run_vm(src, None).expect("VM interp should terminate");
     let jit = run_vm(src, Some(1)).expect("VM JIT should terminate");
-    assert_eq!(tree, "6", "tree-walker should reach 6");
     assert_eq!(interp, "6", "VM interp should reach 6");
     assert_eq!(jit, "6", "VM JIT should reach 6");
-    assert_eq!(interp, tree, "VM interp != tree-walker");
     assert_eq!(interp, jit, "VM interp != VM JIT");
 }
 
@@ -159,12 +142,9 @@ each i in [1] {
 }
 x"#;
     assert!(compiles(src), "shadowing program must compile");
-    let tree = run_tree(final_src);
     let interp = run_vm(final_src, None).unwrap();
     let jit = run_vm(final_src, Some(1)).unwrap();
-    assert_eq!(tree, "10", "outer x must remain 10 (shadow, not update)");
     assert_eq!(interp, "10", "VM interp: outer x must remain 10");
     assert_eq!(jit, "10", "VM JIT: outer x must remain 10");
-    assert_eq!(interp, tree, "VM interp != tree-walker");
     assert_eq!(interp, jit, "VM interp != VM JIT");
 }

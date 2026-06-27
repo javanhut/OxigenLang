@@ -1,7 +1,7 @@
 // Regression tests for the parser lane (P1 struct inheritance, P2 hidden fields).
 //
 // These assert PARSING + AST shape only. Full runtime inheritance / access-control
-// semantics live in the compiler + vm + evaluator and are intentionally deferred;
+// semantics live in the compiler + vm and are intentionally deferred;
 // see docs/VM_PARITY_FIXES.md for the cross-file spec.
 
 use oxigen_core::ast::{Program, Statement};

@@ -1,13 +1,11 @@
 pub mod ast;
 pub mod compiler;
 pub mod concurrent;
-pub mod evaluator;
 pub mod formatter;
 pub mod jit;
 pub mod keyinput;
 pub mod lexer;
 pub mod netres;
-pub mod object;
 pub mod parser;
 pub mod test_runner;
 pub mod token;

@@ -1,28 +1,14 @@
 //! Bug B regression: an explicit `self.<field> = ...` mutation inside an `each`
 //! loop in a struct method must persist as seen by the caller.
 //!
-//! The tree-walker was the BUGGY backend here (VM/JIT were already correct).
-//! The BoundMethod machinery binds each instance field as a method-env
-//! variable and, after the body runs, writes each field's method-env value
-//! back onto the instance. An `each` loop runs its body in a fresh
-//! per-iteration env, so an explicit `self.field = ...` that previously did
-//! `env.set(field, ..)` wrote into that throwaway env, leaving the method-env
-//! binding stale; the write-back then clobbered the instance's mutated value.
-//!
-//! After the fix, `self.field = ...` updates the field's actual binding in the
-//! method env (via scope-chain `update`), so the write-back is consistent.
-//! The bar is tree-walker == VM(interp) == VM(JIT) == expected.
+//! The bar is VM(interp) == VM(JIT) == expected.
 
 #![cfg(feature = "jit")]
 
 use oxigen_core::compiler::Compiler;
-use oxigen_core::evaluator::Evaluator;
 use oxigen_core::lexer::Lexer;
-use oxigen_core::object::environment::Environment;
 use oxigen_core::parser::Parser;
 use oxigen_core::vm::VM;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// Run a program on the bytecode VM. `jit_threshold == Some(1)` forces the
 /// JIT path; `None` keeps it on the interpreter.
@@ -47,37 +33,19 @@ fn run_vm(source: &str, jit_threshold: Option<u32>) -> Result<String, String> {
         .map_err(|e| e.message)
 }
 
-/// Run a program on the tree-walking interpreter.
-fn run_tree(source: &str) -> String {
-    let lexer = Lexer::new(source);
-    let mut parser = Parser::new(lexer, source);
-    let program = parser.parse_program();
-    assert!(
-        parser.errors().is_empty(),
-        "parser errors:\n{}",
-        parser.format_errors()
-    );
-    let env = Rc::new(RefCell::new(Environment::new()));
-    let mut evaluator = Evaluator::new();
-    format!("{}", evaluator.eval_program(&program, env))
-}
-
-/// Assert tree-walker == VM (interp) == VM (JIT) == `expected`.
+/// Assert VM (interp) == VM (JIT) == `expected`.
 fn assert_parity(source: &str, expected: &str) {
     let interp = run_vm(source, None).expect("VM interp should succeed");
     let jit = run_vm(source, Some(1)).expect("VM JIT should succeed");
-    let tree = run_tree(source);
-    assert_eq!(tree, expected, "tree-walker mismatch");
     assert_eq!(interp, expected, "VM interp mismatch");
     assert_eq!(jit, expected, "VM JIT mismatch");
-    assert_eq!(tree, interp, "tree-walker != VM interp");
     assert_eq!(interp, jit, "VM interp != VM JIT");
 }
 
 #[test]
 fn self_field_assign_in_each_persists() {
     // The canonical repro: `self.n = self.n + i` inside an `each` loop must
-    // persist. Expected 5 (0 + 5); the tree-walker used to drop the mutation.
+    // persist. Expected 5 (0 + 5).
     let src = r#"
 struct W { n <int> }
 W includes { fun tick(){ each i in [5] { self.n = self.n + i } } }

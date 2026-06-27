@@ -1,25 +1,17 @@
-//! Tree-walker-vs-VM parity regressions for the lane-`eval` items where the
-//! tree-walker was BEHIND the VM (the VM is the correct/oracle behavior here):
+//! VM regression tests for lane-`eval` items (the VM is the reference impl):
 //!
 //!   TW1 — `=` reassignment of an UNTYPED binding (`s := 0; s = s + 1`) must
-//!         succeed and mutate it, matching the VM (handle_set_global). Type-lock
-//!         and immutability violations must STILL error.
-//!   TW2 — negative index READ (`arr[-1]`, `"s"[-1]`) must index from the end,
-//!         matching the VM's eval_index. Out-of-range still yields None.
-//!   TW4 — String `<` lexicographic comparison must return a bool, matching the
-//!         VM's compare_less. (The VM only implements `<` for strings.)
-//!
-//! Each case asserts run_tree == run_vm(interp) == expected, mirroring the
-//! helper pattern from fix_nested_named_fn.rs.
+//!         succeed and mutate it (handle_set_global). Type-lock and
+//!         immutability violations must STILL error.
+//!   TW2 — negative index READ (`arr[-1]`, `"s"[-1]`) must index from the end
+//!         (eval_index). Out-of-range still yields None.
+//!   TW4 — String `<` lexicographic comparison must return a bool
+//!         (compare_less). (The VM only implements `<` for strings.)
 
 use oxigen_core::compiler::Compiler;
-use oxigen_core::evaluator::Evaluator;
 use oxigen_core::lexer::Lexer;
-use oxigen_core::object::environment::Environment;
 use oxigen_core::parser::Parser;
 use oxigen_core::vm::VM;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// Run a program on the bytecode VM (interpreter path). Returns the formatted
 /// final value, or the error message string on failure.
@@ -41,44 +33,19 @@ fn run_vm(source: &str) -> Result<String, String> {
         .map_err(|e| e.message)
 }
 
-/// Run a program on the tree-walking interpreter.
-fn run_tree(source: &str) -> String {
-    let lexer = Lexer::new(source);
-    let mut parser = Parser::new(lexer, source);
-    let program = parser.parse_program();
-    assert!(
-        parser.errors().is_empty(),
-        "parser errors:\n{}",
-        parser.format_errors()
-    );
-    let env = Rc::new(RefCell::new(Environment::new()));
-    let mut evaluator = Evaluator::new();
-    format!("{}", evaluator.eval_program(&program, env))
-}
-
-/// Assert tree-walker == VM(interp) == `expected` for a program that succeeds.
+/// Assert VM(interp) == `expected` for a program that succeeds.
 fn assert_parity(source: &str, expected: &str) {
     let interp = run_vm(source).expect("VM interp should succeed");
-    let tree = run_tree(source);
     assert_eq!(interp, expected, "VM interp mismatch for:\n{}", source);
-    assert_eq!(tree, expected, "tree-walker mismatch for:\n{}", source);
-    assert_eq!(interp, tree, "VM interp != tree-walker for:\n{}", source);
 }
 
-/// Assert BOTH the tree-walker and the VM reject `source` (parity on errors).
+/// Assert the VM rejects `source`.
 fn assert_both_error(source: &str) {
     let interp = run_vm(source);
-    let tree = run_tree(source);
     assert!(
         interp.is_err(),
         "VM should have errored but returned {:?} for:\n{}",
         interp,
-        source
-    );
-    assert!(
-        tree.contains("error") || tree.to_lowercase().contains("mismatch") || tree.contains("immutable"),
-        "tree-walker should have errored but returned {:?} for:\n{}",
-        tree,
         source
     );
 }

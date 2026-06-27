@@ -117,8 +117,7 @@ The REPL maintains state across lines — variables, functions, structs, and pat
 
 | Command / Flag | Description |
 |----------------|-------------|
-| `oxigen file.oxi [args...]` | Execute a script (uses the bytecode VM by default) |
-| `oxigen file.oxi --tree-walk` | Execute using the tree-walking interpreter (fallback) |
+| `oxigen file.oxi [args...]` | Execute a script (bytecode VM) |
 | `oxigen file.oxi --jit` | Experimental: tier up to the baseline JIT on first call. Only available in builds produced with `--features jit`; ignored otherwise. `OXIGEN_JIT=1` is an equivalent env toggle. |
 | `oxigen file.oxi --no-jit` | Force the pure interpreter even in a JIT-enabled build. |
 | `oxigen` | Start the interactive REPL |

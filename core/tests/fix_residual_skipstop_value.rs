@@ -1,9 +1,7 @@
 //! R3b: a `skip`/`stop` whose value is CONSUMED by an enclosing expression
 //! (operator operand, assignment/Let RHS, call argument, give/return value)
-//! must be a COMPILE error, matching the tree-walker, which treats `skip`/
-//! `stop` as `Object::Skip`/`Object::Stop` sentinels that error the moment
-//! they are consumed (e.g. `1 + skip` => `type mismatch: INTEGER + SKIP`).
-//! Previously the VM/JIT silently produced a value here.
+//! must be a COMPILE error rather than the VM/JIT silently producing a value
+//! (e.g. `1 + skip` => `type mismatch: INTEGER + SKIP`).
 //!
 //! The rejection must fire ONLY in value-CONSUMED position. A `skip`/`stop`
 //! in an `option`/`choose` arm whose RESULT IS DISCARDED (the construct is a
@@ -13,13 +11,9 @@
 #![cfg(feature = "jit")]
 
 use oxigen_core::compiler::Compiler;
-use oxigen_core::evaluator::Evaluator;
 use oxigen_core::lexer::Lexer;
-use oxigen_core::object::environment::Environment;
 use oxigen_core::parser::Parser;
 use oxigen_core::vm::VM;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 fn parse(source: &str) -> oxigen_core::ast::Program {
     let lexer = Lexer::new(source);
@@ -52,13 +46,6 @@ fn run_vm(source: &str, jit_threshold: Option<u32>) -> Result<String, String> {
         .map_err(|e| e.message)
 }
 
-/// Run on the tree-walking interpreter (the reference oracle).
-fn run_tree(source: &str) -> String {
-    let env = Rc::new(RefCell::new(Environment::new()));
-    let mut evaluator = Evaluator::new();
-    format!("{}", evaluator.eval_program(&parse(source), env))
-}
-
 // ── CONSUMED skip/stop => COMPILE error (the R3b repro) ─────────────────────
 
 #[test]
@@ -74,12 +61,11 @@ each i in [1] { x := 1 + option { boom() -> 5, <Error> -> { skip } }
         !compiles(src),
         "skip consumed by `1 + option{{...}}` must be a COMPILE error"
     );
-    // And the tree-walker (oracle) rejects the same program at runtime.
+    // And the VM rejects the same program (at compile time).
     assert!(
-        run_tree(src).to_lowercase().contains("mismatch")
-            || run_tree(src).to_lowercase().contains("skip"),
-        "tree-walker should reject consumed skip; got {:?}",
-        run_tree(src)
+        run_vm(src, None).is_err(),
+        "VM should reject consumed skip; got {:?}",
+        run_vm(src, None)
     );
 }
 
@@ -129,7 +115,6 @@ f()"#;
     assert!(compiles(src), "discarded-stop option must still compile");
     assert_eq!(run_vm(src, None).unwrap(), "done", "VM interp");
     assert_eq!(run_vm(src, Some(1)).unwrap(), "done", "VM JIT");
-    assert_eq!(run_tree(src), "done", "tree-walker");
 }
 
 #[test]
@@ -145,8 +130,11 @@ f()"#;
     assert!(compiles(src), "discarded-skip option must still compile");
     // The option value is discarded; the trailing `s = s + 1` runs every
     // iteration regardless of the <Error> arm's `skip`.
-    assert_eq!(run_vm(src, None).unwrap(), run_tree(src), "VM interp == tree");
-    assert_eq!(run_vm(src, Some(1)).unwrap(), run_tree(src), "VM JIT == tree");
+    assert_eq!(
+        run_vm(src, None).unwrap(),
+        run_vm(src, Some(1)).unwrap(),
+        "VM interp == JIT"
+    );
 }
 
 // ── Plain `skip when`/`stop when` control flow stays unaffected ─────────────
@@ -161,7 +149,6 @@ s"#;
     // 0 + 1 + 3 + 4 = 8 (i == 2 skipped)
     assert_eq!(run_vm(src, None).unwrap(), "8");
     assert_eq!(run_vm(src, Some(1)).unwrap(), "8");
-    assert_eq!(run_tree(src), "8");
 }
 
 #[test]
@@ -174,7 +161,6 @@ s"#;
     // 0 + 1 + 2 = 3 (stop at i == 3)
     assert_eq!(run_vm(src, None).unwrap(), "3");
     assert_eq!(run_vm(src, Some(1)).unwrap(), "3");
-    assert_eq!(run_tree(src), "3");
 }
 
 #[test]

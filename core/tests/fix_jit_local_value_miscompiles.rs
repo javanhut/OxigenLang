@@ -1,5 +1,5 @@
 //! Regression tests for two JIT miscompiles where a hot/compiled function
-//! silently returned the WRONG value (the cold VM and tree-walker were correct):
+//! silently returned the WRONG value (the cold VM interpreter was correct):
 //!
 //! 1. **struct-field-add in a loop** — `self.f = self.f + x` directly inside a
 //!    loop body matched the inline struct-field-add peephole, whose load was
@@ -18,18 +18,14 @@
 //!    unaffected). This also covered the "recursion with a local" reports, which
 //!    were the same bug (the local was read from a conditional `option` arm).
 //!
-//! All assertions check tree-walk == VM(interp) == VM(JIT, threshold 1).
+//! All assertions check VM(interp) == VM(JIT, threshold 1).
 
 #![cfg(feature = "jit")]
 
 use oxigen_core::compiler::Compiler;
-use oxigen_core::evaluator::Evaluator;
 use oxigen_core::lexer::Lexer;
-use oxigen_core::object::environment::Environment;
 use oxigen_core::parser::Parser;
 use oxigen_core::vm::VM;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 fn run_vm(source: &str, jit_threshold: Option<u32>) -> String {
     let lexer = Lexer::new(source);
@@ -44,22 +40,10 @@ fn run_vm(source: &str, jit_threshold: Option<u32>) -> String {
     format!("{}", vm.run(function).expect("run"))
 }
 
-fn run_tree(source: &str) -> String {
-    let lexer = Lexer::new(source);
-    let mut parser = Parser::new(lexer, source);
-    let program = parser.parse_program();
-    assert!(parser.errors().is_empty(), "parser errors:\n{}", parser.format_errors());
-    let env = Rc::new(RefCell::new(Environment::new()));
-    let mut ev = Evaluator::new();
-    format!("{}", ev.eval_program(&program, env))
-}
-
-/// tree == VM(interp) == VM(JIT), all equal to `expected`.
+/// VM(interp) == VM(JIT), both equal to `expected`.
 fn assert_parity(src: &str, expected: &str) {
-    let tree = run_tree(src);
     let interp = run_vm(src, None);
     let jit = run_vm(src, Some(1));
-    assert_eq!(tree, expected, "tree-walker (oracle) mismatch");
     assert_eq!(interp, expected, "VM interp mismatch");
     assert_eq!(jit, expected, "VM JIT mismatch (the miscompile)");
 }

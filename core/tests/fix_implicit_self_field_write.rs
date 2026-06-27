@@ -1,23 +1,17 @@
 //! B12-write regression: a bare-name ASSIGNMENT inside a method whose name is
 //! a field of the enclosing method's struct must resolve to `self.field = ...`
-//! (implicit self), mirroring the tree-walker (the reference oracle).
+//! (implicit self).
 //!
 //! Before the fix, the implicit-self READ resolved (B12) but a bare-name WRITE
 //! fell through to a global SetGlobal, so a mutating method left the struct
-//! field untouched. The differential flagged `struct_method_mutate` as
-//! VM_NE_TREE *and* JIT_NE_VM, and `struct_method_loop` (`fun inc(){ v = v+1 }`)
-//! as VM_NE_TREE. The bar is VM(interp) == VM(JIT) == tree-walker == expected.
+//! field untouched. The bar is VM(interp) == VM(JIT) == expected.
 
 #![cfg(feature = "jit")]
 
 use oxigen_core::compiler::Compiler;
-use oxigen_core::evaluator::Evaluator;
 use oxigen_core::lexer::Lexer;
-use oxigen_core::object::environment::Environment;
 use oxigen_core::parser::Parser;
 use oxigen_core::vm::VM;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// Run a program on the bytecode VM. `jit_threshold == Some(1)` forces the JIT
 /// path; `None` keeps it on the interpreter.
@@ -42,31 +36,13 @@ fn run_vm(source: &str, jit_threshold: Option<u32>) -> Result<String, String> {
         .map_err(|e| e.message)
 }
 
-/// Run a program on the tree-walking interpreter (the reference oracle).
-fn run_tree(source: &str) -> String {
-    let lexer = Lexer::new(source);
-    let mut parser = Parser::new(lexer, source);
-    let program = parser.parse_program();
-    assert!(
-        parser.errors().is_empty(),
-        "parser errors:\n{}",
-        parser.format_errors()
-    );
-    let env = Rc::new(RefCell::new(Environment::new()));
-    let mut evaluator = Evaluator::new();
-    format!("{}", evaluator.eval_program(&program, env))
-}
-
-/// Assert VM (interp) == VM (JIT) == tree-walker, and all equal to `expected`.
+/// Assert VM (interp) == VM (JIT), and both equal to `expected`.
 fn assert_parity(source: &str, expected: &str) {
     let interp = run_vm(source, None).expect("VM interp should succeed");
     let jit = run_vm(source, Some(1)).expect("VM JIT should succeed");
-    let tree = run_tree(source);
     assert_eq!(interp, expected, "VM interp mismatch");
     assert_eq!(jit, expected, "VM JIT mismatch");
-    assert_eq!(tree, expected, "tree-walker mismatch");
     assert_eq!(interp, jit, "VM interp != VM JIT");
-    assert_eq!(interp, tree, "VM interp != tree-walker");
 }
 
 #[test]
@@ -132,17 +108,6 @@ fn implicit_self_write_param_shadows_field() {
     // param (SetLocal), NOT the field (no implicit-self SetField). This is the
     // load-bearing B12-write property: a param wins over a field for the write,
     // exactly as it wins for the read (compile_identifier_inner).
-    //
-    // NOTE: we assert VM(interp) == VM(JIT) only here, NOT full tri-parity.
-    // The tree-walker has a SEPARATE, pre-existing write-back artifact in
-    // `apply_function` for BoundMethod (evaluator/mod.rs ~3404): after a method
-    // returns it copies each field name's value OUT OF the method env back into
-    // the instance. Because the shadowing param lives in a CHILD scope of the
-    // field binding, that write-back reads the param's final value and clobbers
-    // the field — so the tree-walker reports the param value (101), an artifact
-    // unrelated to (and not fixable from) the compiler's bare-name resolution.
-    // The compiler fix correctly makes the param win on the WRITE; forcing the
-    // tree-walker's write-back quirk into the VM would be wrong.
     let src = r#"
 struct P { radius <int> }
 P includes {

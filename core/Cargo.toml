@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 # JIT on by default: the Cranelift-backed compiler is the standard backend and
-# carries the VM correctness/perf work (and is at full tree-walker parity).
+# carries the VM correctness/perf work.
 # Build with `--no-default-features` for a VM-interpreter-only binary that omits
 # the cranelift dep tree.
 default = ["jit"]
