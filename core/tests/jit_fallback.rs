@@ -1777,3 +1777,76 @@ fn guard_in_loop_no_leak() {
     assert_eq!(run_result(src, None).unwrap(), "4950"); // sum 0..99
     assert_eq!(run_result(src, Some(1)).unwrap(), "4950");
 }
+
+/// `each x in <collection>` JIT-compiles (IterLen/IterGet supported) instead
+/// of bailing the whole function to the interpreter. Must match the
+/// interpreter across every iterable kind and actually compile. Includes the
+/// `stop`-over-array case that regressed once (BuildArray element ordering vs
+/// the loop-var slot): `stop` cleans the loop var, so its position matters.
+#[test]
+fn jit_each_over_collections_matches_and_compiles() {
+    let cases: &[(&str, &str)] = &[
+        // array
+        ("fun f(a){ t := 0\neach x in a { t = t + x }\nt }\nf([10,20,30])", "60"),
+        // string
+        ("fun f(s){ n := 0\neach c in s { n = n + 1 }\nn }\nf(\"abcde\")", "5"),
+        // tuple
+        ("fun f(p){ t := 0\neach x in p { t = t + x }\nt }\nf((1,2,3,4))", "10"),
+        // stop must fire at the right element (regression: array was built
+        // [1,3,2,4], so `stop when x==3` fired early). Expect 1+2 = 3.
+        ("fun f(a){ s := 0\neach x in a { stop when x == 3\ns = s + x }\ns }\nf([1,2,3,4])", "3"),
+        // skip over array
+        ("fun f(a){ s := 0\neach x in a { skip when x == 2\ns = s + x }\ns }\nf([1,2,3,4])", "8"),
+    ];
+    for (src, expected) in cases {
+        assert_eq!(run_disabled(src).0, *expected, "interp: {src}");
+        let (out, ok, failed) = run_with_thresholds(src, None, Some(1));
+        assert_eq!(out, *expected, "jit: {src}");
+        assert!(ok >= 1, "expected each-loop to JIT-compile: {src} (ok={ok})");
+        assert_eq!(failed, 0, "compile failure for: {src} (failed={failed})");
+    }
+}
+
+/// `each i in range(a, b)` with the *builtin* range lowers to a counting
+/// loop (no array materialized; body is JIT-eligible). The counting loop
+/// must match the interpreter and actually JIT-compile. A *user-shadowed*
+/// `range` must fall back to ordinary iteration (correctness only).
+#[test]
+fn jit_each_in_range_counting_loop_matches_and_compiles() {
+    let cases: &[(&str, &str)] = &[
+        ("fun f(n){ t := 0\neach i in range(n) { t = t + i }\nt }\nf(100)", "4950"),
+        ("fun f(){ t := 0\neach i in range(2, 7) { t = t + i }\nt }\nf()", "20"),
+    ];
+    for (src, expected) in cases {
+        assert_eq!(run_disabled(src).0, *expected, "interp: {src}");
+        let (out, ok, failed) = run_with_thresholds(src, None, Some(1));
+        assert_eq!(out, *expected, "jit: {src}");
+        assert!(ok >= 1, "expected counting-loop to JIT-compile: {src} (ok={ok})");
+        assert_eq!(failed, 0, "compile failure for: {src} (failed={failed})");
+    }
+
+    // A user-shadowed `range` must NOT be lowered to a counting loop — it
+    // iterates the returned array instead. Correctness only (each-over-array
+    // is not JIT-compiled, so no compile-count assertion here).
+    let shadow =
+        "fun range(n){ give [9, 9] }\nfun f(){ t := 0\neach x in range(3) { t = t + x }\nt }\nf()";
+    assert_eq!(run_disabled(shadow).0, "18");
+}
+
+/// Compile-time constant folding now runs in every expression position,
+/// not just `:=` initializers. Folded literals must produce identical
+/// results to runtime evaluation.
+#[test]
+fn constant_folding_all_positions() {
+    let cases: &[(&str, &str)] = &[
+        ("60 * 60 * 24", "86400"),
+        ("(1 + 2) * (3 + 4)", "21"),
+        ("2 < 3", "True"),
+        ("-5 + 10", "5"),
+        ("println(7 * 6)\n0", "0"), // folds inside a call argument
+    ];
+    for (src, expected) in cases {
+        assert_eq!(run_result(src, None).unwrap(), *expected, "interp: {src}");
+        assert_eq!(run_result(src, Some(1)).unwrap(), *expected, "jit: {src}");
+    }
+}

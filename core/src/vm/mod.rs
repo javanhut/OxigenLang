@@ -2280,22 +2280,8 @@ impl VM {
                 // ── Iteration Support ───────────────────────────────
                 OpCode::IterLen => {
                     // Stack: [iterable] -> [length]
-                    // The iterable is accessed via GetLocal, so we just compute length
-                    // from what's on top of stack and replace it.
                     let iterable = self.pop();
-                    let len = match iterable.repr() {
-                        ValueRepr::Array(a) => a.borrow().len() as i64,
-                        ValueRepr::String(s) => s.chars().count() as i64,
-                        ValueRepr::Tuple(t) => t.len() as i64,
-                        ValueRepr::Set(s) => s.borrow().len() as i64,
-                        ValueRepr::Map(m) => m.borrow().len() as i64,
-                        _ => {
-                            return Err(self.runtime_error_hint(
-                                &format!("cannot iterate over {}", iterable.type_name()),
-                                "each loops work with arrays, tuples, strings, sets, and maps",
-                            ));
-                        }
-                    };
+                    let len = self.iter_len(&iterable)?;
                     self.push(Value::Integer(len));
                 }
 
@@ -2315,32 +2301,7 @@ impl VM {
                 OpCode::IterGet => {
                     let index = self.pop();
                     let iterable = self.pop();
-                    let idx = match index.repr() {
-                        ValueRepr::Integer(i) => i as usize,
-                        _ => return Err(self.runtime_error("index must be integer")),
-                    };
-                    let val = match iterable.repr() {
-                        ValueRepr::Array(a) => a.borrow().get(idx).cloned().unwrap_or(Value::None),
-                        ValueRepr::String(s) => s
-                            .chars()
-                            .nth(idx)
-                            .map(|c| Value::String(rc_str(c.to_string())))
-                            .unwrap_or(Value::None),
-                        ValueRepr::Tuple(t) => t.get(idx).cloned().unwrap_or(Value::None),
-                        ValueRepr::Set(s) => {
-                            s.borrow().items().get(idx).cloned().unwrap_or(Value::None)
-                        }
-                        ValueRepr::Map(m) => {
-                            let borrowed = m.borrow();
-                            if let Some((k, v)) = borrowed.entries().get(idx) {
-                                // For maps, yield (key, value) tuple
-                                Value::Tuple(Rc::new(vec![k.clone(), v.clone()]))
-                            } else {
-                                Value::None
-                            }
-                        }
-                        _ => return Err(self.runtime_error("cannot iterate")),
-                    };
+                    let val = self.iter_get(&iterable, &index)?;
                     self.push(val);
                 }
 
@@ -3717,6 +3678,53 @@ impl VM {
                 i += 1;
             }
         }
+    }
+
+    // ── Iteration (each) ────────────────────────────────────────────────
+    // Shared by the `IterLen`/`IterGet` interpreter arms and the JIT helpers
+    // (`jit_op_iter_len`/`jit_op_iter_get`) so both stay byte-faithful.
+
+    /// Length of an iterable for an `each` loop. `[it] -> len`.
+    pub(crate) fn iter_len(&self, iterable: &Value) -> Result<i64, VMError> {
+        match iterable.repr() {
+            ValueRepr::Array(a) => Ok(a.borrow().len() as i64),
+            ValueRepr::String(s) => Ok(s.chars().count() as i64),
+            ValueRepr::Tuple(t) => Ok(t.len() as i64),
+            ValueRepr::Set(s) => Ok(s.borrow().len() as i64),
+            ValueRepr::Map(m) => Ok(m.borrow().len() as i64),
+            _ => Err(self.runtime_error_hint(
+                &format!("cannot iterate over {}", iterable.type_name()),
+                "each loops work with arrays, tuples, strings, sets, and maps",
+            )),
+        }
+    }
+
+    /// Element `iterable[index]` for an `each` loop. `[it, idx] -> elem`.
+    pub(crate) fn iter_get(&self, iterable: &Value, index: &Value) -> Result<Value, VMError> {
+        let idx = match index.repr() {
+            ValueRepr::Integer(i) => i as usize,
+            _ => return Err(self.runtime_error("index must be integer")),
+        };
+        Ok(match iterable.repr() {
+            ValueRepr::Array(a) => a.borrow().get(idx).cloned().unwrap_or(Value::None),
+            ValueRepr::String(s) => s
+                .chars()
+                .nth(idx)
+                .map(|c| Value::String(rc_str(c.to_string())))
+                .unwrap_or(Value::None),
+            ValueRepr::Tuple(t) => t.get(idx).cloned().unwrap_or(Value::None),
+            ValueRepr::Set(s) => s.borrow().items().get(idx).cloned().unwrap_or(Value::None),
+            ValueRepr::Map(m) => {
+                let borrowed = m.borrow();
+                if let Some((k, v)) = borrowed.entries().get(idx) {
+                    // For maps, yield (key, value) tuple
+                    Value::Tuple(Rc::new(vec![k.clone(), v.clone()]))
+                } else {
+                    Value::None
+                }
+            }
+            _ => return Err(self.runtime_error("cannot iterate")),
+        })
     }
 
     // ── Index Operations ────────────────────────────────────────────────

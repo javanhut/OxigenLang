@@ -1147,6 +1147,23 @@ impl JitInner {
                             emit_early_exit_on_err(&mut builder, exit_block, status);
                             ip += 1;
                         }
+                        OpCode::IterLen | OpCode::IterGet => {
+                            // The helpers read operands from `vm.stack` via
+                            // pop(), so flush any staged virt temps (e.g. the
+                            // virtualized `__index__`) to memory first.
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
+                            }
+                            let func = if op == OpCode::IterLen {
+                                refs.iter_len
+                            } else {
+                                refs.iter_get
+                            };
+                            let call = builder.ins().call(func, &[vm_val]);
+                            let status = builder.inst_results(call)[0];
+                            emit_early_exit_on_err(&mut builder, exit_block, status);
+                            ip += 1;
+                        }
                         OpCode::TypeWrap => {
                             // Fast path: slot_types proved this TypeWrap is
                             // identity (target is "INTEGER", input slot type
@@ -4454,6 +4471,8 @@ fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usiz
             | OpCode::ShiftLeft
             | OpCode::ShiftRight
             | OpCode::Index
+            | OpCode::IterLen
+            | OpCode::IterGet
             | OpCode::CloseUpvalue
             | OpCode::Return => 1,
             // u8 operand

@@ -286,6 +286,43 @@ pub unsafe extern "C" fn jit_op_index_fast_array_int(vm: *mut VM) -> u32 {
     }
 }
 
+/// `each`-loop length: pops the iterable, pushes its length. `[it] -> len`.
+/// Mirrors the `IterLen` interpreter arm via the shared `VM::iter_len`.
+pub unsafe extern "C" fn jit_op_iter_len(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.sync_stack_from_view();
+    let iterable = vm.pop();
+    match vm.iter_len(&iterable) {
+        Ok(len) => {
+            vm.push(Value::Integer(len));
+            0
+        }
+        Err(err) => {
+            vm.jit.stash_error(err);
+            1
+        }
+    }
+}
+
+/// `each`-loop element: pops index+iterable, pushes `iterable[index]`.
+/// `[it, idx] -> elem`. Mirrors `IterGet` via the shared `VM::iter_get`.
+pub unsafe extern "C" fn jit_op_iter_get(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.sync_stack_from_view();
+    let index = vm.pop();
+    let iterable = vm.pop();
+    match vm.iter_get(&iterable, &index) {
+        Ok(val) => {
+            vm.push(val);
+            0
+        }
+        Err(err) => {
+            vm.jit.stash_error(err);
+            1
+        }
+    }
+}
+
 pub unsafe extern "C" fn jit_type_wrap(vm: *mut VM, type_idx: u32) -> u32 {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::TypeWrap);

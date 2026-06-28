@@ -444,6 +444,33 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
             // simply not be virtualized — safe and consistent with
             // the v1 eligibility rule.
             let depth_after = next_state.stack.len();
+
+            // A collection-build consumes its literal-element transients off
+            // the stack. Any `first_init_ip` recorded for a vacated element
+            // position is stale: an element Constant's stack slot can coincide
+            // with a later local slot (e.g. `each i in [1,2,3,4]` puts element
+            // `3` at the loop-var slot), and the real value there arrives from
+            // a non-Constant op (BuildArray's result, IterGet, a later store).
+            // Leaving the stale entry makes the JIT materialize that element
+            // into its slot out of literal order, reordering `[1,2,3,4]` →
+            // `[1,3,2,4]`. Drop them; a genuine Constant init at the position
+            // re-records itself below if it lands later in the walk. Scoped to
+            // Build* (not plain Pop) so loop scope-teardown doesn't clobber a
+            // real local's init record.
+            if matches!(
+                op,
+                OpCode::BuildArray
+                    | OpCode::BuildTuple
+                    | OpCode::BuildSet
+                    | OpCode::BuildMap
+                    | OpCode::StructLiteral
+            ) && depth_after < depth_before
+            {
+                for pos in depth_after..depth_before {
+                    first_init_ip.remove(&(pos as u16));
+                }
+            }
+
             if matches!(op, OpCode::Constant) && depth_after == depth_before + 1 {
                 let new_pos = depth_after - 1;
                 if new_pos < num_slots {
@@ -1671,16 +1698,17 @@ fn transfer(
             targets.push(ip + 3 + off);
         }
         OpCode::IterLen | OpCode::IterGet => {
-            // IterLen: [it] → [it, len]. len is int-in-range but we don't
-            // know if it'll be used as Int; be conservative → Value.
+            // Must match the VM dispatch arms' stack effect exactly, or the
+            // JIT virtualizes the wrong slots (silent infinite loops).
+            // IterLen: [it] → [len]  (VM pops the iterable, pushes the length).
             // IterGet: [it, idx] → [elem].
-            if matches!(op, OpCode::IterLen) {
-                next.stack.push(SlotType::Value);
-            } else {
+            // The result is left conservative (Value): len is int-in-range but
+            // we don't know if it'll be consumed as Int.
+            next.stack.pop();
+            if matches!(op, OpCode::IterGet) {
                 next.stack.pop();
-                next.stack.pop();
-                next.stack.push(SlotType::Value);
             }
+            next.stack.push(SlotType::Value);
         }
         OpCode::TypeWrap => {
             // For `<int>` annotations ("INTEGER" target), TypeWrap is

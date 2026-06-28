@@ -655,6 +655,17 @@ impl Compiler {
         None
     }
 
+    /// True if `name` is bound by the user as a local (current or any
+    /// enclosing frame → would resolve as local/upvalue) or a declared
+    /// global. Read-only — unlike `resolve_upvalue` it registers no capture.
+    /// Used to confirm a bare `range` actually means the builtin.
+    fn name_is_user_bound(&self, name: &str) -> bool {
+        self.frames
+            .iter()
+            .any(|f| f.locals.iter().any(|l| l.name == name))
+            || self.declared_globals.contains(name)
+    }
+
     /// Resolve an upvalue (captured variable from enclosing scope).
     fn resolve_upvalue(&mut self, frame_idx: usize, name: &str) -> Option<u16> {
         if frame_idx == 0 {
@@ -1257,38 +1268,84 @@ impl Compiler {
                 body,
                 ..
             } => {
-                // Compile iterable, store it in a local
-                self.compile_expression(iterable);
+                // `each i in range(a)` / `range(a, b)` with the *builtin* range
+                // (not user-shadowed): lower to a counting loop. No array is
+                // materialised, and with IterLen/IterGet gone the body is
+                // JIT-eligible. `range` is always ascending, step 1, `a..b`.
+                let range_args: Option<&[Expression]> = match iterable {
+                    Expression::Call {
+                        function,
+                        args,
+                        named_args,
+                        ..
+                    } if named_args.is_empty()
+                        && (args.len() == 1 || args.len() == 2)
+                        && matches!(&**function, Expression::Ident(id) if id.value == "range")
+                        && !self.name_is_user_bound("range") =>
+                    {
+                        Some(args.as_slice())
+                    }
+                    _ => None,
+                };
+
                 self.begin_scope();
 
-                // Local for the iterable itself
-                self.add_local("__iterable__", false, None);
-
-                // Local for the index counter
-                self.emit_constant(Value::Integer(0), line);
-                self.add_local("__index__", true, None);
-
-                // Get iterable length
-                let iterable_slot = self.resolve_local("__iterable__").unwrap();
-                let index_slot = self.resolve_local("__index__").unwrap();
+                // `iter_slot` holds the iterable (array path); unused for range.
+                // `index_slot` is the counter; `end_slot` the exclusive bound.
+                let (index_slot, iter_slot, end_slot) = if let Some(args) = range_args {
+                    // counter = start (0 for 1-arg form), evaluated once
+                    if args.len() == 1 {
+                        self.emit_constant(Value::Integer(0), line);
+                    } else {
+                        self.compile_expression(&args[0]);
+                    }
+                    self.add_local("__index__", true, None);
+                    // end = last arg, evaluated once
+                    self.compile_expression(&args[args.len() - 1]);
+                    self.add_local("__range_end__", false, None);
+                    let i = self.resolve_local("__index__").unwrap();
+                    let e = self.resolve_local("__range_end__").unwrap();
+                    (i, 0, e)
+                } else {
+                    self.compile_expression(iterable);
+                    self.add_local("__iterable__", false, None);
+                    self.emit_constant(Value::Integer(0), line);
+                    self.add_local("__index__", true, None);
+                    let it = self.resolve_local("__iterable__").unwrap();
+                    let i = self.resolve_local("__index__").unwrap();
+                    (i, it, 0)
+                };
+                let is_range = range_args.is_some();
 
                 let loop_start = self.current_chunk().len();
                 self.current_frame_mut().loop_starts.push(loop_start);
                 self.current_frame_mut().loop_exits.push(Vec::new());
                 self.current_frame_mut().loop_continues.push(Vec::new());
 
-                // Check index < len: push iterable, push IterLen, push index, compare
-                self.emit_op_u16(OpCode::GetLocal, iterable_slot, line);
-                self.emit_op(OpCode::IterLen, line);
-                self.emit_op_u16(OpCode::GetLocal, index_slot, line);
-                self.emit_op(OpCode::Greater, line); // len > index
+                // Loop condition (leaves a bool both branches Pop).
+                if is_range {
+                    // index < end
+                    self.emit_op_u16(OpCode::GetLocal, index_slot, line);
+                    self.emit_op_u16(OpCode::GetLocal, end_slot, line);
+                    self.emit_op(OpCode::Less, line);
+                } else {
+                    // len(iterable) > index
+                    self.emit_op_u16(OpCode::GetLocal, iter_slot, line);
+                    self.emit_op(OpCode::IterLen, line);
+                    self.emit_op_u16(OpCode::GetLocal, index_slot, line);
+                    self.emit_op(OpCode::Greater, line);
+                }
                 let exit_jump = self.emit_jump(OpCode::JumpIfFalse, line);
                 self.emit_op(OpCode::Pop, line);
 
-                // Get element: iterable[index]
-                self.emit_op_u16(OpCode::GetLocal, iterable_slot, line);
-                self.emit_op_u16(OpCode::GetLocal, index_slot, line);
-                self.emit_op(OpCode::IterGet, line);
+                // Push the loop value: the counter (range) or iterable[index].
+                if is_range {
+                    self.emit_op_u16(OpCode::GetLocal, index_slot, line);
+                } else {
+                    self.emit_op_u16(OpCode::GetLocal, iter_slot, line);
+                    self.emit_op_u16(OpCode::GetLocal, index_slot, line);
+                    self.emit_op(OpCode::IterGet, line);
+                }
 
                 // `stop` exits to the loop's outer scope, which does NOT include
                 // the loop variable (the exit path never bound it that
@@ -1804,6 +1861,17 @@ impl Compiler {
         // captured context; everything else descends as consumed.
         let consumed = self.value_consumed;
         self.value_consumed = true;
+
+        // Fold pure-literal arithmetic/comparison/bitwise subtrees to a single
+        // constant (e.g. `60*60*24`, `2 < 3`). Leaves keep their existing fast
+        // paths (True/False/None opcodes), so only fold compound nodes.
+        if matches!(expr, Expression::Prefix { .. } | Expression::Infix { .. }) {
+            if let Some(folded) = fold_constant_expression(expr) {
+                self.emit_constant(folded, line);
+                return;
+            }
+        }
+
         match expr {
             Expression::Int { value, .. } => {
                 self.emit_constant(Value::Integer(*value), line);
