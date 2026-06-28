@@ -1440,11 +1440,83 @@ impl JitInner {
                                     .get(slot as usize)
                                     .map(|li| li.type_constraint.is_some())
                                     .unwrap_or(false);
-                                if constrained {
-                                    // Type-locked slot: enforce the lock via the
+                                let int_constraint = func
+                                    .locals
+                                    .get(slot as usize)
+                                    .and_then(|li| li.type_constraint.as_deref())
+                                    == Some("INTEGER");
+                                if constrained && int_constraint {
+                                    // Inline the int type-lock check. The hot
+                                    // case — storing an Integer into an <int>
+                                    // slot whose value came off a call result
+                                    // (on memory, not virt-staged) — is a tag
+                                    // compare + 16-byte copy, no FFI. Only a
+                                    // real violation crosses into the checked
+                                    // helper to raise the exact lock error and
+                                    // bail. Removes the per-iteration FFI on
+                                    // typed-int accumulators fed by calls
+                                    // (bench_closure `total <int> = total +
+                                    // add5(i)`: 500k crossings; collatz: 50k).
+                                    // The lock is still enforced: anything but
+                                    // tag INTEGER takes the error path.
+                                    use cranelift_codegen::ir::MemFlags;
+                                    use cranelift_codegen::ir::condcodes::IntCC;
+                                    let flags = MemFlags::trusted();
+                                    let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
+                                    let stack_len = emit_load_stack_len(&mut builder, vm_val);
+                                    let value_size =
+                                        builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+                                    let one = builder.ins().iconst(types::I64, 1);
+                                    let top_idx = builder.ins().isub(stack_len, one);
+                                    let top_off = builder.ins().imul(top_idx, value_size);
+                                    let addr_top = builder.ins().iadd(stack_ptr, top_off);
+                                    let top_tag = builder.ins().load(types::I8, flags, addr_top, 0);
+                                    let int_tag =
+                                        builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
+                                    let is_int = builder.ins().icmp(IntCC::Equal, top_tag, int_tag);
+                                    let ok_block = builder.create_block();
+                                    let err_block = builder.create_block();
+                                    builder.ins().brif(is_int, ok_block, &[], err_block, &[]);
+
+                                    // Rare violation: the helper raises the
+                                    // exact lock error and returns 1; bail.
+                                    builder.switch_to_block(err_block);
+                                    maybe_emit_current_line(
+                                        &mut builder,
+                                        vm_val,
+                                        line,
+                                        col,
+                                        &mut last_emitted_loc,
+                                    );
+                                    let slot_arg = builder.ins().iconst(types::I32, slot as i64);
+                                    let call = builder
+                                        .ins()
+                                        .call(refs.set_local_checked, &[vm_val, slot_arg]);
+                                    let status = builder.inst_results(call)[0];
+                                    let zero64 = builder.ins().iconst(types::I64, 0);
+                                    builder
+                                        .ins()
+                                        .jump(exit_block, &[status.into(), zero64.into()]);
+
+                                    // OK: inline 16-byte copy top -> slot. Both
+                                    // sides are primitive (top is INTEGER; an
+                                    // <int> slot only ever holds int/None), so
+                                    // no Rc/Drop interaction.
+                                    builder.switch_to_block(ok_block);
+                                    let slot_const = builder.ins().iconst(types::I64, slot as i64);
+                                    let abs_slot = builder.ins().iadd(slot_offset_val, slot_const);
+                                    let slot_off = builder.ins().imul(abs_slot, value_size);
+                                    let addr_slot = builder.ins().iadd(stack_ptr, slot_off);
+                                    let words = VALUE_SIZE.div_ceil(8);
+                                    for i in 0..words {
+                                        let off = (i * 8) as i32;
+                                        let v = builder.ins().load(types::I64, flags, addr_top, off);
+                                        builder.ins().store(flags, v, addr_slot, off);
+                                    }
+                                } else if constrained {
+                                    // Non-int type lock: enforce via the
                                     // fallible checked helper and bail on a
-                                    // mismatch, so a set type is never ignored
-                                    // even once the function is JIT-compiled.
+                                    // mismatch.
                                     maybe_emit_current_line(
                                         &mut builder,
                                         vm_val,
