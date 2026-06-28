@@ -2695,10 +2695,10 @@ impl JitInner {
                                 // graceful "stack overflow" error and we
                                 // early-exit the thunk with status 1, so the
                                 // JIT rejects what the VM rejects.
-                                emit_fallible(
+                                emit_inline_recursion_guard(
                                     &mut builder,
                                     exit_block,
-                                    refs.check_recursion_depth,
+                                    &refs,
                                     vm_val,
                                 );
 
@@ -3109,10 +3109,10 @@ impl JitInner {
                                 // 16384 JitFrames fit on the native stack and
                                 // THIS FRAMES_MAX guard becomes the graceful
                                 // limit (no native-stack SIGABRT below 16384).
-                                emit_fallible(
+                                emit_inline_recursion_guard(
                                     &mut builder,
                                     exit_block,
-                                    refs.check_recursion_depth,
+                                    &refs,
                                     vm_val,
                                 );
 
@@ -3325,10 +3325,10 @@ impl JitInner {
                             // 256 MB-stack thread, so all 16384 JitFrames fit
                             // and this FRAMES_MAX guard fires gracefully before
                             // the native stack is exhausted (no SIGABRT).
-                            emit_fallible(
+                            emit_inline_recursion_guard(
                                 &mut builder,
                                 exit_block,
-                                refs.check_recursion_depth,
+                                &refs,
                                 vm_val,
                             );
 
@@ -3875,10 +3875,10 @@ impl JitInner {
                                 // thread so all 16384 JitFrames fit and this
                                 // FRAMES_MAX guard fires gracefully before the
                                 // native stack overflows (no SIGABRT).
-                                emit_fallible(
+                                emit_inline_recursion_guard(
                                     &mut builder,
                                     exit_block,
-                                    refs.check_recursion_depth,
+                                    &refs,
                                     vm_val,
                                 );
                                 let closure_raw_box = builder.ins().load(
@@ -4407,6 +4407,62 @@ fn emit_early_exit_on_err(
     let ok_block = builder.create_block();
     builder.ins().brif(status, err_block, &[], ok_block, &[]);
     builder.switch_to_block(err_block);
+    let zero64 = builder.ins().iconst(types::I64, 0);
+    builder
+        .ins()
+        .jump(exit_block, &[status.into(), zero64.into()]);
+    builder.switch_to_block(ok_block);
+}
+
+/// Inline replacement for the per-call `check_recursion_depth` FFI guard.
+/// The inline JIT call paths push a `JitFrame` + operands directly into the
+/// pre-allocated `jit_frames` (cap `FRAMES_MAX`) and value-stack (cap
+/// `STACK_MAX`) buffers, so each recursive call must bounds-check before the
+/// push or it overruns the buffer and SIGSEGVs (the V7 guard). The old code
+/// crossed into an FFI helper for that check on EVERY call — millions of
+/// crossings on a recursive workload (fib(30) ≈ 2.7M). Here the common path
+/// is two loads + two compares + a branch; only the rare overflow crosses
+/// into the helper to stash the exact graceful "stack overflow" error and
+/// exit. The inline bound omits the (constant, ≥0) interpreter-frame count
+/// the helper adds, so it triggers no earlier than the buffers fill — it
+/// still can't overrun (no SIGSEGV) and still raises `Err` on unbounded
+/// recursion, matching the guard's contract. (`fix_jit_recursion_guard`.)
+fn emit_inline_recursion_guard(
+    builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
+    refs: &HelperRefs,
+    vm_val: cranelift_codegen::ir::Value,
+) {
+    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::condcodes::IntCC;
+    let flags = MemFlags::trusted();
+    let jfl = builder
+        .ins()
+        .load(types::I64, flags, vm_val, vm_jit_frame_view_len_offset());
+    let sl = builder
+        .ins()
+        .load(types::I64, flags, vm_val, vm_stack_view_len_offset());
+    let frame_max = builder
+        .ins()
+        .iconst(types::I64, crate::vm::FRAMES_MAX as i64);
+    let stack_lim = builder
+        .ins()
+        .iconst(types::I64, (crate::vm::STACK_MAX - 8192) as i64);
+    let frame_of = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, jfl, frame_max);
+    let stack_of = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, sl, stack_lim);
+    let overflow = builder.ins().bor(frame_of, stack_of);
+    let ovf_block = builder.create_block();
+    let ok_block = builder.create_block();
+    builder.ins().brif(overflow, ovf_block, &[], ok_block, &[]);
+    // Rare overflow: the helper re-checks (stricter bound, always true here)
+    // and stashes the graceful error; exit with its status.
+    builder.switch_to_block(ovf_block);
+    let call = builder.ins().call(refs.check_recursion_depth, &[vm_val]);
+    let status = builder.inst_results(call)[0];
     let zero64 = builder.ins().iconst(types::I64, 0);
     builder
         .ins()
