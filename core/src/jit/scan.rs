@@ -62,6 +62,7 @@ fn is_supported(op: OpCode) -> bool {
             | OpCode::Dup
             | OpCode::BuildArray
             | OpCode::Index
+            | OpCode::IndexAssign
             | OpCode::IterLen
             | OpCode::IterGet
             | OpCode::TypeWrap
@@ -153,6 +154,7 @@ fn instr_fixed_len(op: OpCode) -> usize {
         | OpCode::ShiftLeft
         | OpCode::ShiftRight
         | OpCode::Index
+        | OpCode::IndexAssign
         | OpCode::IterLen
         | OpCode::IterGet
         | OpCode::CloseUpvalue

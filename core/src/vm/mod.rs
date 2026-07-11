@@ -3768,7 +3768,7 @@ impl VM {
         }
     }
 
-    fn eval_index_assign(
+    pub(crate) fn eval_index_assign(
         &self,
         collection: Value,
         index: Value,

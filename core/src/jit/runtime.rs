@@ -304,6 +304,24 @@ pub unsafe extern "C" fn jit_op_iter_len(vm: *mut VM) -> u32 {
     }
 }
 
+/// `arr[i] = v` / `map[k] = v`: pops value+index+collection, assigns in
+/// place, pushes nothing. `[coll, idx, val] -> []`. Mirrors the
+/// `IndexAssign` interpreter arm via the shared `VM::eval_index_assign`.
+pub unsafe extern "C" fn jit_op_index_assign(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.sync_stack_from_view();
+    let value = vm.pop();
+    let index = vm.pop();
+    let collection = vm.pop();
+    match vm.eval_index_assign(collection, index, value) {
+        Ok(()) => 0,
+        Err(err) => {
+            vm.jit.stash_error(err);
+            1
+        }
+    }
+}
+
 /// `each`-loop element: pops index+iterable, pushes `iterable[index]`.
 /// `[it, idx] -> elem`. Mirrors `IterGet` via the shared `VM::iter_get`.
 pub unsafe extern "C" fn jit_op_iter_get(vm: *mut VM) -> u32 {

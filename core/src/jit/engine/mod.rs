@@ -1147,6 +1147,19 @@ impl JitInner {
                             emit_early_exit_on_err(&mut builder, exit_block, status);
                             ip += 1;
                         }
+                        OpCode::IndexAssign => {
+                            // The helper reads value+index+collection from
+                            // `vm.stack` via pop(), so flush staged virt
+                            // temps (e.g. a virtualized int rhs) to memory
+                            // first — same contract as IterGet/TypeWrap.
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
+                            }
+                            let call = builder.ins().call(refs.index_assign, &[vm_val]);
+                            let status = builder.inst_results(call)[0];
+                            emit_early_exit_on_err(&mut builder, exit_block, status);
+                            ip += 1;
+                        }
                         OpCode::IterLen | OpCode::IterGet => {
                             // The helpers read operands from `vm.stack` via
                             // pop(), so flush any staged virt temps (e.g. the
@@ -1498,21 +1511,16 @@ impl JitInner {
                                         .ins()
                                         .jump(exit_block, &[status.into(), zero64.into()]);
 
-                                    // OK: inline 16-byte copy top -> slot. Both
-                                    // sides are primitive (top is INTEGER; an
-                                    // <int> slot only ever holds int/None), so
-                                    // no Rc/Drop interaction.
+                                    // OK: store via the shared inline path
+                                    // (no FFI — top is a primitive Integer).
                                     builder.switch_to_block(ok_block);
-                                    let slot_const = builder.ins().iconst(types::I64, slot as i64);
-                                    let abs_slot = builder.ins().iadd(slot_offset_val, slot_const);
-                                    let slot_off = builder.ins().imul(abs_slot, value_size);
-                                    let addr_slot = builder.ins().iadd(stack_ptr, slot_off);
-                                    let words = VALUE_SIZE.div_ceil(8);
-                                    for i in 0..words {
-                                        let off = (i * 8) as i32;
-                                        let v = builder.ins().load(types::I64, flags, addr_top, off);
-                                        builder.ins().store(flags, v, addr_slot, off);
-                                    }
+                                    emit_inline_set_local(
+                                        &mut builder,
+                                        &refs,
+                                        vm_val,
+                                        slot_offset_val,
+                                        slot,
+                                    );
                                 } else if constrained {
                                     // Non-int type lock: enforce via the
                                     // fallible checked helper and bail on a
@@ -4599,6 +4607,7 @@ fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usiz
             | OpCode::ShiftLeft
             | OpCode::ShiftRight
             | OpCode::Index
+            | OpCode::IndexAssign
             | OpCode::IterLen
             | OpCode::IterGet
             | OpCode::CloseUpvalue

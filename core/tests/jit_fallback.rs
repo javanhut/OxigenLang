@@ -139,6 +139,74 @@ fn compile_function(source: &str) -> oxigen_core::vm::value::Function {
         .expect("compile should succeed")
 }
 
+/// `arr[i] = v` is JIT-compiled via the shared `VM::eval_index_assign`
+/// FFI helper (mirrors the `Index` read path). Previously `IndexAssign`
+/// was outside the allow-list, so any function mutating an array element
+/// in place fell back entirely to the interpreter. The body is in a hot
+/// loop so it actually compiles, and the checks are order-sensitive (a
+/// sum would hide a slot mix-up) and cover negative and out-of-bounds
+/// (no-op) indices plus read-after-write. No map literal here — a
+/// `BuildMap` would force the function off the JIT for an unrelated
+/// reason (map-assign is covered separately below).
+#[test]
+fn jit_index_assign_matches_and_compiles() {
+    let src = "fun t(n <int>){\n\
+        arr := [10, 20, 30, 40, 50]\n\
+        i <int> := 0\n\
+        acc <int> := 0\n\
+        repeat when i < n {\n\
+            arr[0] = 99\n\
+            arr[-1] = 88\n\
+            arr[2] = arr[0] + arr[4]\n\
+            arr[100] = 7\n\
+            acc = acc + arr[0] * 100000 + arr[4] * 1000 + arr[2]\n\
+            i = i + 1\n\
+        }\n\
+        acc }\n\
+        t(500)";
+    // arr[0]=99, arr[4]=88, arr[2]=99+88=187 → 99*100000+88*1000+187 =
+    // 9988187 per iter * 500 = 4994093500.
+    let expected = "4994093500";
+    assert_eq!(run_disabled(src).0, expected, "interp baseline");
+    let (out, ok, failed) = run(src, Some(1));
+    assert_eq!(out, expected, "jit output must match interpreter");
+    assert!(ok >= 1, "expected the array-mutating fn to JIT-compile (ok={ok})");
+    assert_eq!(failed, 0, "no compile failures expected (failed={failed})");
+}
+
+/// `map[k] = v` index-assign also routes through the helper. The map is
+/// passed in as a param (constructing one needs `BuildMap`, which is not
+/// JIT-supported, so building it inside the hot fn would force a bail).
+#[test]
+fn jit_map_index_assign_matches_and_compiles() {
+    let src = "fun mutate(m <generic>, n <int>){\n\
+        i <int> := 0\n\
+        repeat when i < n { m[\"k\"] = i\n i = i + 1 }\n\
+        m[\"k\"] }\n\
+        fun go(){ m := {\"k\": 0}\n mutate(m, 300) }\n\
+        go()";
+    let expected = "299";
+    assert_eq!(run_disabled(src).0, expected, "interp baseline");
+    let (out, ok, _failed) = run(src, Some(1));
+    assert_eq!(out, expected, "jit output must match interpreter");
+    // `mutate` compiles (its `m[k]=v` is now supported); `go` does NOT —
+    // its `{"k": 0}` map literal is a `BuildMap`, still outside the
+    // allow-list — so we assert a compile happened, not that none failed.
+    assert!(ok >= 1, "expected the map-mutating fn to JIT-compile (ok={ok})");
+}
+
+/// Assigning to an index of a non-indexable value must error identically
+/// under the JIT and the interpreter (the helper stashes the VMError and
+/// returns status 1, which the engine turns into a graceful bail).
+#[test]
+fn jit_index_assign_error_matches_interpreter() {
+    let src = "fun t(){ x <int> := 5\n x[0] = 1\n x }\nt()";
+    let interp = run_result(src, None);
+    let jit = run_result(src, Some(1));
+    assert!(interp.is_err(), "interp should error: {interp:?}");
+    assert_eq!(interp, jit, "JIT and interpreter must report the same error");
+}
+
 #[test]
 fn fallback_matches_interpreter_simple_add() {
     // The nested fn `compute` has a body of just `Constant Constant Add
