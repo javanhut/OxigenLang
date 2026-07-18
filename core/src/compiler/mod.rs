@@ -2797,7 +2797,7 @@ impl Compiler {
         self.loc_column_stack.push(col);
         self.compile_identifier_inner(ident, line);
         self.loc_column_stack.pop();
-        ()
+        
     }
 
     /// Collect the field names visible to a method on `struct_name`, walking

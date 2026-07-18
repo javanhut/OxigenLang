@@ -314,11 +314,11 @@ impl Lexer {
             '/' => match self.peek_char() {
                 '/' => {
                     self.skip_line_comment();
-                    return self.next_token();
+                    self.next_token()
                 }
                 '*' => {
                     self.skip_block_comment();
-                    return self.next_token();
+                    self.next_token()
                 }
                 _ => self.single_with_span(TokenType::FSlash, span),
             },
@@ -332,8 +332,8 @@ impl Lexer {
                 self.read_string('\'', triple, span)
             }
             '`' => self.read_char_literal(span),
-            c if c.is_ascii_digit() => return self.read_number(span),
-            c if is_ident_start(c) => return self.read_ident(span),
+            c if c.is_ascii_digit() => self.read_number(span),
+            c if is_ident_start(c) => self.read_ident(span),
             _ => {
                 let lit = self.ch.to_string();
                 self.read_char();
