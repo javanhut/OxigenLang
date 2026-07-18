@@ -2978,7 +2978,7 @@ impl JitInner {
                             let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
                             let offset_from_top = builder
                                 .ins()
-                                .iconst(types::I64, (arg_count as i64 + 1));
+                                .iconst(types::I64, arg_count as i64 + 1);
                             let callee_slot = builder.ins().isub(stack_len, offset_from_top);
                             let callee_off = builder.ins().imul(callee_slot, value_size);
                             let callee_ptr = builder.ins().iadd(stack_ptr, callee_off);
@@ -3667,7 +3667,7 @@ impl JitInner {
                                     builder.ins().iconst(types::I64, VALUE_SIZE as i64);
                                 let offset_from_top = builder
                                     .ins()
-                                    .iconst(types::I64, (arg_count as i64 + 1));
+                                    .iconst(types::I64, arg_count as i64 + 1);
                                 let receiver_slot = builder.ins().isub(stack_len, offset_from_top);
                                 let receiver_off = builder.ins().imul(receiver_slot, value_size);
                                 let receiver_ptr = builder.ins().iadd(stack_ptr, receiver_off);
