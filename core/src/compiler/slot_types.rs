@@ -426,7 +426,10 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
             };
             let depth_before = state.stack.len();
             let (mut next_state, terminates, targets) = transfer(op, cursor, code, chunk, &state);
-            let fallthrough = cursor + opcode_len(op, code, cursor, chunk);
+            let fallthrough = cursor
+                + chunk
+                    .instruction_len(cursor)
+                    .expect("compiler produced malformed bytecode");
 
             // Initialization-push detection: if the stack grew by one
             // and the new top lands at a position within the local
@@ -881,7 +884,10 @@ fn analyze_states_with_lifted_params(
                 None => break,
             };
             let (next_state, terminates, targets) = transfer(op, cursor, code, chunk, &state);
-            let fallthrough = cursor + opcode_len(op, code, cursor, chunk);
+            let fallthrough = cursor
+                + chunk
+                    .instruction_len(cursor)
+                    .expect("compiler produced malformed bytecode");
 
             for tgt in &targets {
                 let entry = states
@@ -980,7 +986,9 @@ fn compute_specialized_entry_eligibility(
             Some(o) => o,
             None => break,
         };
-        let op_len = opcode_len(op, code, ip, chunk);
+        let op_len = chunk
+            .instruction_len(ip)
+            .expect("compiler produced malformed bytecode");
 
         match op {
             OpCode::Closure => {
@@ -1086,7 +1094,9 @@ fn collect_int_mirror_param_slots(
             Some(o) => o,
             None => break,
         };
-        let op_len = opcode_len(op, code, ip, chunk);
+        let op_len = chunk
+            .instruction_len(ip)
+            .expect("compiler produced malformed bytecode");
 
         match op {
             OpCode::SetLocal => {
@@ -1117,7 +1127,9 @@ fn collect_int_mirror_param_slots(
                         | Some(OpCode::None)
                         | Some(OpCode::True)
                         | Some(OpCode::False) => {
-                            let step = opcode_len(cop.unwrap(), code, cursor, chunk);
+                            let step = chunk
+                                .instruction_len(cursor)
+                                .expect("compiler produced malformed bytecode");
                             cursor += step;
                             skipped += 1;
                             continue;
@@ -1217,7 +1229,9 @@ fn collect_condition_cleanup_pops(code: &[u8], chunk: &Chunk) -> HashSet<usize> 
             Some(o) => o,
             None => break,
         };
-        let op_len = opcode_len(op, code, ip, chunk);
+        let op_len = chunk
+            .instruction_len(ip)
+            .expect("compiler produced malformed bytecode");
 
         match op {
             OpCode::JumpIfFalse | OpCode::JumpIfTrue | OpCode::Unless => {
@@ -1295,7 +1309,9 @@ fn collect_captured_slots(code: &[u8], chunk: &Chunk) -> HashSet<u16> {
             // Advance past the full Closure opcode + descriptors.
             ip = desc_start + upvalue_count * 3;
         } else {
-            ip += opcode_len(op, code, ip, chunk);
+            ip += chunk
+                .instruction_len(ip)
+                .expect("compiler produced malformed bytecode");
         }
     }
     out
@@ -1460,7 +1476,13 @@ fn transfer(
         OpCode::DefineGlobalTyped => {
             next.stack.pop();
         }
-        OpCode::CloseUpvalue => {}
+        // CloseUpvalue snapshots the upvalue that points at the current top
+        // slot and then removes that slot (VM::handle_close_upvalue). Treating
+        // it as stack-neutral makes a loop with a captured body local gain one
+        // abstract slot on every backedge, so this worklist never converges.
+        OpCode::CloseUpvalue => {
+            next.stack.pop();
+        }
         // Closes a buried slot's upvalue in place; no stack effect. (Functions
         // containing it are rejected by the JIT scan, so this branch is never
         // actually reached during analysis — it exists for match exhaustiveness.)
@@ -1750,124 +1772,6 @@ fn transfer(
     (next, terminates, targets)
 }
 
-/// Length in bytes of opcode `op` starting at `ip`. `Closure` is
-/// variable-length (has a trailing run of upvalue descriptors).
-fn opcode_len(op: OpCode, code: &[u8], ip: usize, chunk: &Chunk) -> usize {
-    match op {
-        // 1-byte opcodes
-        OpCode::None
-        | OpCode::True
-        | OpCode::False
-        | OpCode::Pop
-        | OpCode::Dup
-        | OpCode::Add
-        | OpCode::Subtract
-        | OpCode::Multiply
-        | OpCode::Divide
-        | OpCode::Modulo
-        | OpCode::Equal
-        | OpCode::NotEqual
-        | OpCode::Greater
-        | OpCode::GreaterEqual
-        | OpCode::Less
-        | OpCode::LessEqual
-        | OpCode::Not
-        | OpCode::BitAnd
-        | OpCode::BitOr
-        | OpCode::BitXor
-        | OpCode::BitNot
-        | OpCode::ShiftLeft
-        | OpCode::ShiftRight
-        | OpCode::Negate
-        | OpCode::CloseUpvalue
-        | OpCode::Return
-        | OpCode::Index
-        | OpCode::IndexAssign
-        | OpCode::IterLen
-        | OpCode::IterGet
-        | OpCode::ValueConstruct
-        | OpCode::PopHandler
-        | OpCode::Fail => 1,
-
-        // 1-byte opcode + 1-byte operand
-        OpCode::Call | OpCode::ErrorConstruct | OpCode::Slice | OpCode::Log | OpCode::Unpack => 2,
-        OpCode::CallNamed => 3,
-
-        // 1-byte opcode + u16 operand
-        OpCode::Constant
-        | OpCode::Increment
-        | OpCode::Decrement
-        | OpCode::GetLocal
-        | OpCode::SetLocal
-        | OpCode::GetGlobal
-        | OpCode::SetGlobal
-        | OpCode::DefineGlobal
-        | OpCode::GetUpvalue
-        | OpCode::SetUpvalue
-        | OpCode::CloseUpvalueAt
-        | OpCode::Jump
-        | OpCode::JumpIfFalse
-        | OpCode::JumpIfTrue
-        | OpCode::Loop
-        | OpCode::PopJumpIfFalse
-        | OpCode::BuildArray
-        | OpCode::BuildTuple
-        | OpCode::BuildMap
-        | OpCode::BuildSet
-        | OpCode::GetField
-        | OpCode::SetField
-        | OpCode::StructDef
-        | OpCode::EnumDef
-        | OpCode::MakeEnumVariantUnit
-        | OpCode::DefinePattern
-        | OpCode::GetModuleField
-        | OpCode::StringInterp
-        | OpCode::Main
-        | OpCode::Unless
-        | OpCode::TypeWrap
-        | OpCode::IsMut
-        | OpCode::IsType
-        | OpCode::IsTypeMut
-        | OpCode::PushHandler => 3,
-
-        // 1-byte opcode + u16 + u8
-        OpCode::StructLiteral
-        | OpCode::DefineMethod
-        | OpCode::MakeEnumVariantTuple
-        | OpCode::MakeEnumVariantStruct
-        | OpCode::MethodCall
-        | OpCode::Import => 4,
-        // 1-byte opcode + 2*u16
-        OpCode::TestPattern => 5,
-        // 1-byte opcode + 3*u16 (jump offset, binding, tag filter)
-        OpCode::Guard => 7,
-
-        // MethodCallNamed: u16 + u8 + u8
-        OpCode::MethodCallNamed => 5,
-
-        // DefineGlobalTyped: u16 name + u8 mutable + u16 type
-        OpCode::DefineGlobalTyped => 6,
-
-        // Closure is variable-length: u16 constant + N×(u8, u16).
-        // Look up the target function's `upvalue_count` in the chunk
-        // to compute the full length. If the constant isn't a closure
-        // (malformed bytecode), fall back to 3 and let the caller
-        // cope — at worst we step into descriptor bytes and interpret
-        // them as opcodes, which the subsequent analysis handles
-        // conservatively (everything touched becomes `Value`).
-        OpCode::Closure => {
-            let idx = read_u16(code, ip + 1) as usize;
-            let upv = chunk
-                .constants
-                .get(idx)
-                .and_then(|v| v.as_closure())
-                .map(|cl| cl.function.upvalue_count as usize)
-                .unwrap_or(0);
-            3 + upv * 3
-        }
-    }
-}
-
 #[inline]
 fn read_u16(code: &[u8], offset: usize) -> u16 {
     ((code[offset] as u16) << 8) | (code[offset + 1] as u16)
@@ -1958,7 +1862,10 @@ pub fn certify(func: &Function, types: &FunctionSlotTypes) -> CertifyResult {
                 }
             }
         }
-        ip += opcode_len(op, code, ip, &func.chunk);
+        ip += func
+            .chunk
+            .instruction_len(ip)
+            .map_err(|err| format!("invalid bytecode at ip {}: {:?}", ip, err))?;
     }
 
     // 4. scope_pop_slot_ip only references real local slots.
@@ -2886,6 +2793,9 @@ mod tests {
             OpCode::Constant as u8, 0, 0,
             OpCode::Call as u8, 1,
             OpCode::Pop as u8,
+            // A real CloseUpvalue always has the captured local on top and
+            // pops it. Keep this synthetic bytecode stack-valid.
+            OpCode::Constant as u8, 0, 0,
             OpCode::CloseUpvalue as u8,
             OpCode::GetLocal as u8, 0, 1,
             OpCode::Return as u8,
@@ -2898,6 +2808,32 @@ mod tests {
             SpecEligibilityOutcome::RejectedHasUpvalueOp
         ));
         assert!(!r.wants_closure_arg);
+    }
+
+    #[test]
+    fn captured_local_loop_analysis_converges() {
+        // The loop backedge crosses CloseUpvalue for `x`. If CloseUpvalue is
+        // modeled as stack-neutral, every analysis pass grows the abstract
+        // stack and this test never returns.
+        let src = r#"
+            fun f() {
+                out := []
+                each i in [1, 2] {
+                    x := i
+                    g := fun() { x }
+                    out = push(out, g)
+                }
+                out
+            }
+            f()
+        "#;
+        let f = compile_for_analysis(src, Some("f"));
+        let result = analyze(&f);
+        assert!(
+            !result.captured_slots.is_empty(),
+            "the nested closure should mark its captured local"
+        );
+        assert!(certify(&f, &result).is_ok());
     }
 
     #[test]

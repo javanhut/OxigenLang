@@ -35,6 +35,8 @@ fn run_result(source: &str, jit_threshold: Option<u32>) -> Result<String, String
     let mut vm = VM::new();
     if let Some(t) = jit_threshold {
         vm.jit.set_threshold(t);
+    } else {
+        vm.jit.disable();
     }
     vm.run(function)
         .map(|v| format!("{}", v))

@@ -4556,12 +4556,9 @@ fn read_u16(code: &[u8], offset: usize) -> u16 {
     ((code[offset] as u16) << 8) | (code[offset + 1] as u16)
 }
 
-/// Count `GetGlobal` opcodes in a chunk so the translator can
-/// pre-allocate one inline-cache slot each. We walk the stream using
-/// the same length table as the scanner; the scan pass has already
-/// validated every opcode is in the allow-list, so we can assume
-/// fixed-length instructions here — except `Closure`, which is
-/// variable-length and needs the constants pool to resolve its length.
+/// Count inline-cache sites so the translator can pre-allocate their slots.
+/// The scan pass has already validated the bytecode, and instruction
+/// boundaries come from the canonical decoder in `compiler::opcode`.
 fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usize, usize) {
     let code = &chunk.code;
     let mut get_globals = 0usize;
@@ -4570,9 +4567,7 @@ fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usiz
     let mut field_ops = 0usize;
     let mut ip = 0;
     while ip < code.len() {
-        let Some(op) = OpCode::from_byte(code[ip]) else {
-            break;
-        };
+        let op = OpCode::from_byte(code[ip]).expect("scan accepted an invalid opcode");
         match op {
             OpCode::GetGlobal => get_globals += 1,
             OpCode::Call => calls += 1,
@@ -4580,79 +4575,9 @@ fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usiz
             OpCode::GetField | OpCode::SetField => field_ops += 1,
             _ => {}
         }
-        ip += match op {
-            // 1-byte opcodes
-            OpCode::None
-            | OpCode::True
-            | OpCode::False
-            | OpCode::Pop
-            | OpCode::Dup
-            | OpCode::Add
-            | OpCode::Subtract
-            | OpCode::Multiply
-            | OpCode::Divide
-            | OpCode::Modulo
-            | OpCode::Equal
-            | OpCode::NotEqual
-            | OpCode::Less
-            | OpCode::LessEqual
-            | OpCode::Greater
-            | OpCode::GreaterEqual
-            | OpCode::Not
-            | OpCode::Negate
-            | OpCode::BitAnd
-            | OpCode::BitOr
-            | OpCode::BitXor
-            | OpCode::BitNot
-            | OpCode::ShiftLeft
-            | OpCode::ShiftRight
-            | OpCode::Index
-            | OpCode::IndexAssign
-            | OpCode::IterLen
-            | OpCode::IterGet
-            | OpCode::CloseUpvalue
-            | OpCode::Return => 1,
-            // u8 operand
-            OpCode::Call | OpCode::Log => 2,
-            // u16 operand
-            OpCode::Constant
-            | OpCode::BuildArray
-            | OpCode::TypeWrap
-            | OpCode::GetLocal
-            | OpCode::SetLocal
-            | OpCode::GetGlobal
-            | OpCode::SetGlobal
-            | OpCode::DefineGlobal
-            | OpCode::GetUpvalue
-            | OpCode::SetUpvalue
-            | OpCode::Jump
-            | OpCode::JumpIfFalse
-            | OpCode::JumpIfTrue
-            | OpCode::Loop
-            | OpCode::PopJumpIfFalse
-            | OpCode::StructDef
-            | OpCode::GetField
-            | OpCode::SetField => 3,
-            // u16 + u8
-            OpCode::StructLiteral | OpCode::DefineMethod | OpCode::MethodCall => 4,
-            // u16 + u8 + u16
-            OpCode::DefineGlobalTyped => 6,
-            // Variable-length
-            OpCode::Closure => {
-                if ip + 2 >= code.len() {
-                    break;
-                }
-                let fn_idx = ((code[ip + 1] as u16) << 8) | (code[ip + 2] as u16);
-                let uv_count = match chunk.constants.get(fn_idx as usize) {
-                    Some(crate::vm::value::Value::Closure(t)) => t.function.upvalue_count as usize,
-                    _ => break,
-                };
-                3 + 3 * uv_count
-            }
-            // Anything else shouldn't reach here — scan has rejected
-            // the function if we hit a non-allow-listed opcode.
-            _ => break,
-        };
+        ip += chunk
+            .instruction_len(ip)
+            .expect("scan accepted malformed bytecode");
     }
     (get_globals, calls, method_calls, field_ops)
 }

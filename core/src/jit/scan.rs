@@ -102,7 +102,12 @@ fn is_supported(op: OpCode) -> bool {
             // Upvalues / closures
             | OpCode::GetUpvalue
             | OpCode::SetUpvalue
-            | OpCode::CloseUpvalue
+            // CloseUpvalue deliberately falls back to the interpreter. Native
+            // loop-variable capture currently snapshots the initial backing
+            // value instead of the per-iteration value after SSA local
+            // virtualization. Allowing it here turns correct captures such as
+            // 0,1,2,3 into 0,0,0,0. CloseUpvalueAt is rejected for the same
+            // reason: closing captured slots is interpreter-owned for now.
             | OpCode::Closure
             // Control flow
             | OpCode::Jump
@@ -121,77 +126,6 @@ fn is_supported(op: OpCode) -> bool {
             | OpCode::DefineMethod
             | OpCode::MethodCall
     )
-}
-
-/// Length of this instruction in bytes, including its immediate operands.
-/// `Closure` has runtime-determined length (depends on the captured
-/// function's upvalue count), so it's handled specially in `scan`.
-fn instr_fixed_len(op: OpCode) -> usize {
-    match op {
-        // 1-byte (no operand)
-        OpCode::None
-        | OpCode::True
-        | OpCode::False
-        | OpCode::Pop
-        | OpCode::Dup
-        | OpCode::Add
-        | OpCode::Subtract
-        | OpCode::Multiply
-        | OpCode::Divide
-        | OpCode::Modulo
-        | OpCode::Equal
-        | OpCode::NotEqual
-        | OpCode::Less
-        | OpCode::LessEqual
-        | OpCode::Greater
-        | OpCode::GreaterEqual
-        | OpCode::Not
-        | OpCode::Negate
-        | OpCode::BitAnd
-        | OpCode::BitOr
-        | OpCode::BitXor
-        | OpCode::BitNot
-        | OpCode::ShiftLeft
-        | OpCode::ShiftRight
-        | OpCode::Index
-        | OpCode::IndexAssign
-        | OpCode::IterLen
-        | OpCode::IterGet
-        | OpCode::CloseUpvalue
-        | OpCode::Return => 1,
-
-        // u8 operand (2 bytes)
-        OpCode::Call | OpCode::Log => 2,
-
-        // u16 operand (3 bytes)
-        OpCode::Constant
-        | OpCode::GetLocal
-        | OpCode::SetLocal
-        | OpCode::BuildArray
-        | OpCode::TypeWrap
-        | OpCode::GetGlobal
-        | OpCode::SetGlobal
-        | OpCode::DefineGlobal
-        | OpCode::GetUpvalue
-        | OpCode::SetUpvalue
-        | OpCode::Jump
-        | OpCode::JumpIfFalse
-        | OpCode::JumpIfTrue
-        | OpCode::Loop
-        | OpCode::PopJumpIfFalse
-        | OpCode::StructDef
-        | OpCode::GetField
-        | OpCode::SetField => 3,
-
-        // u16 + u8 (4 bytes)
-        OpCode::StructLiteral | OpCode::DefineMethod | OpCode::MethodCall => 4,
-
-        // u16 + u8 + u16 (6 bytes)
-        OpCode::DefineGlobalTyped => 6,
-
-        // Variable — Closure handled outside this function.
-        _ => unreachable!("instr_fixed_len called for unsupported opcode {:?}", op),
-    }
 }
 
 fn read_u16(code: &[u8], offset: usize) -> Option<u16> {
@@ -304,30 +238,37 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
             _ => {}
         }
 
-        // Advance ip.
+        // Advance using the canonical bytecode-width decoder. It also
+        // validates fixed operands and Closure descriptors.
+        let instruction_len = chunk
+            .instruction_len(ip)
+            .map_err(|_| ScanError::InvalidBytecode { offset: ip })?;
         if matches!(op, OpCode::Closure) {
-            // Closure is variable-length: 3 bytes for fn_const_idx, then
-            // 3 bytes per upvalue descriptor (u8 is_local + u16 index).
-            // We need the constants pool to resolve the upvalue count.
-            let fn_idx = read_u16(code, ip + 1).ok_or(ScanError::InvalidBytecode { offset: ip })?;
-            let upvalue_count = chunk
-                .constants
-                .get(fn_idx as usize)
-                .and_then(|v| v.as_closure())
-                .map(|t| t.function.upvalue_count as usize)
-                .ok_or(ScanError::InvalidBytecode { offset: ip })?;
             // Closure opcode means this function may capture locals into
             // upvalues of the inner closure; Return must therefore call
             // close_upvalues. Record that fact so the JIT can NOT inline
             // op_return for this function.
             info.may_capture_upvalues = true;
-            ip += 3 + 3 * upvalue_count;
-        } else {
-            ip += instr_fixed_len(op);
         }
+        ip += instruction_len;
     }
 
     info.branch_targets.sort_unstable();
     info.branch_targets.dedup();
     Ok(info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_upvalue_requires_interpreter_fallback() {
+        let mut chunk = Chunk::new();
+        chunk.code.push(OpCode::CloseUpvalue as u8);
+        assert!(matches!(
+            scan(&chunk),
+            Err(ScanError::UnsupportedOpcode { offset: 0, .. })
+        ));
+    }
 }

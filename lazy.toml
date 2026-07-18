@@ -14,6 +14,14 @@ nvim_config = ""
 
 [commands]
 
+[commands.check]
+desc = "Running a cargo check on all targets"
+run = ["cargo check --all-targets"]
+
+[commands.test]
+desc = "Run cargo test"
+run = ["cargo test --all-targets"]
+
 [commands.build]
 desc = "JIT is on by default (see core/Cargo.toml `default = [\"jit\"]`), so `make build`/`make install` produce the JIT-enabled, VM-improved binary."
 run = ["cargo build --release -p oxigen"]

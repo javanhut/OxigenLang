@@ -126,14 +126,14 @@ pub enum OpCode {
     // --- Structs ---
     /// Define struct. Operand: u16 constant index (struct def info).
     StructDef,
-    /// Create struct instance with named fields. Operands: u16 name constant, u16 field count.
+    /// Create struct instance with named fields. Operands: u16 name constant, u8 field count.
     /// Stack has field name-value pairs.
     StructLiteral,
     /// Get field from struct/module. Operand: u16 field name constant.
     GetField,
     /// Set field on struct. Operand: u16 field name constant.
     SetField,
-    /// Define methods on struct. Operands: u16 struct name constant, u16 method count.
+    /// Define methods on struct. Operands: u16 struct name constant, u8 method count.
     /// Stack has method name-closure pairs.
     DefineMethod,
 
@@ -240,6 +240,126 @@ impl OpCode {
             None
         }
     }
+
+    /// Encoded length for instructions whose operand width is fixed.
+    /// `Closure` is resolved by [`Chunk::instruction_len`] because its
+    /// descriptor count comes from the referenced function constant.
+    pub(crate) fn fixed_len(self) -> Option<usize> {
+        Some(match self {
+            // Opcode only.
+            OpCode::None
+            | OpCode::True
+            | OpCode::False
+            | OpCode::Pop
+            | OpCode::Dup
+            | OpCode::Add
+            | OpCode::Subtract
+            | OpCode::Multiply
+            | OpCode::Divide
+            | OpCode::Modulo
+            | OpCode::Equal
+            | OpCode::NotEqual
+            | OpCode::Greater
+            | OpCode::GreaterEqual
+            | OpCode::Less
+            | OpCode::LessEqual
+            | OpCode::Not
+            | OpCode::BitAnd
+            | OpCode::BitOr
+            | OpCode::BitXor
+            | OpCode::BitNot
+            | OpCode::ShiftLeft
+            | OpCode::ShiftRight
+            | OpCode::Negate
+            | OpCode::CloseUpvalue
+            | OpCode::Return
+            | OpCode::Index
+            | OpCode::IndexAssign
+            | OpCode::IterLen
+            | OpCode::IterGet
+            | OpCode::ValueConstruct
+            | OpCode::PopHandler
+            | OpCode::Fail => 1,
+
+            // Opcode + u8.
+            OpCode::Call
+            | OpCode::ErrorConstruct
+            | OpCode::Slice
+            | OpCode::Log
+            | OpCode::Unpack => 2,
+
+            // Opcode + two u8 operands.
+            OpCode::CallNamed => 3,
+
+            // Opcode + u16.
+            OpCode::Constant
+            | OpCode::Increment
+            | OpCode::Decrement
+            | OpCode::GetLocal
+            | OpCode::SetLocal
+            | OpCode::GetGlobal
+            | OpCode::SetGlobal
+            | OpCode::DefineGlobal
+            | OpCode::GetUpvalue
+            | OpCode::SetUpvalue
+            | OpCode::CloseUpvalueAt
+            | OpCode::Jump
+            | OpCode::JumpIfFalse
+            | OpCode::JumpIfTrue
+            | OpCode::Loop
+            | OpCode::PopJumpIfFalse
+            | OpCode::BuildArray
+            | OpCode::BuildTuple
+            | OpCode::BuildMap
+            | OpCode::BuildSet
+            | OpCode::GetField
+            | OpCode::SetField
+            | OpCode::StructDef
+            | OpCode::EnumDef
+            | OpCode::MakeEnumVariantUnit
+            | OpCode::DefinePattern
+            | OpCode::GetModuleField
+            | OpCode::StringInterp
+            | OpCode::Main
+            | OpCode::Unless
+            | OpCode::TypeWrap
+            | OpCode::IsMut
+            | OpCode::IsType
+            | OpCode::IsTypeMut
+            | OpCode::PushHandler => 3,
+
+            // Opcode + u16 + u8.
+            OpCode::StructLiteral
+            | OpCode::DefineMethod
+            | OpCode::MakeEnumVariantTuple
+            | OpCode::MakeEnumVariantStruct
+            | OpCode::MethodCall
+            | OpCode::Import => 4,
+
+            // Opcode + two u16 operands.
+            OpCode::TestPattern => 5,
+
+            // Opcode + three u16 operands.
+            OpCode::Guard => 7,
+
+            // Opcode + u16 + two u8 operands.
+            OpCode::MethodCallNamed => 5,
+
+            // Opcode + u16 + u8 + u16.
+            OpCode::DefineGlobalTyped => 6,
+
+            OpCode::Closure => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DecodeError {
+    OffsetOutOfBounds { offset: usize },
+    InvalidOpcode { offset: usize, byte: u8 },
+    TruncatedInstruction { offset: usize, expected_len: usize },
+    InvalidClosureConstant { offset: usize, constant: usize },
+    InstructionLengthOverflow { offset: usize },
 }
 
 /// A chunk of bytecode with its associated constant pool and source location info.
@@ -299,6 +419,61 @@ impl Chunk {
         (self.constants.len() - 1) as u16
     }
 
+    /// Return the encoded length of the instruction starting at `ip`.
+    ///
+    /// This is the canonical bytecode-width decoder. It validates operand
+    /// bounds and resolves the variable-length `Closure` descriptor run.
+    pub(crate) fn instruction_len(&self, ip: usize) -> Result<usize, DecodeError> {
+        let &byte = self
+            .code
+            .get(ip)
+            .ok_or(DecodeError::OffsetOutOfBounds { offset: ip })?;
+        let op = OpCode::from_byte(byte).ok_or(DecodeError::InvalidOpcode { offset: ip, byte })?;
+
+        let len = if let Some(len) = op.fixed_len() {
+            len
+        } else {
+            let operands_end = ip
+                .checked_add(3)
+                .ok_or(DecodeError::InstructionLengthOverflow { offset: ip })?;
+            if operands_end > self.code.len() {
+                return Err(DecodeError::TruncatedInstruction {
+                    offset: ip,
+                    expected_len: 3,
+                });
+            }
+
+            let constant = self.read_u16(ip + 1) as usize;
+            let upvalue_count = self
+                .constants
+                .get(constant)
+                .and_then(|value| value.as_closure())
+                .map(|closure| closure.function.upvalue_count as usize)
+                .ok_or(DecodeError::InvalidClosureConstant {
+                    offset: ip,
+                    constant,
+                })?;
+            3usize
+                .checked_add(
+                    upvalue_count
+                        .checked_mul(3)
+                        .ok_or(DecodeError::InstructionLengthOverflow { offset: ip })?,
+                )
+                .ok_or(DecodeError::InstructionLengthOverflow { offset: ip })?
+        };
+
+        let end = ip
+            .checked_add(len)
+            .ok_or(DecodeError::InstructionLengthOverflow { offset: ip })?;
+        if end > self.code.len() {
+            return Err(DecodeError::TruncatedInstruction {
+                offset: ip,
+                expected_len: len,
+            });
+        }
+        Ok(len)
+    }
+
     /// Read a u16 from the bytecode at the given offset.
     pub fn read_u16(&self, offset: usize) -> u16 {
         ((self.code[offset] as u16) << 8) | (self.code[offset + 1] as u16)
@@ -319,5 +494,99 @@ impl Chunk {
 impl Default for Chunk {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vm::value::{Function, ObjClosure, Value};
+    use std::rc::Rc;
+
+    fn chunk_with_code(code: Vec<u8>) -> Chunk {
+        let mut chunk = Chunk::new();
+        chunk.code = code;
+        chunk
+    }
+
+    #[test]
+    fn decodes_each_fixed_width_category() {
+        let cases = [
+            (vec![OpCode::Return as u8], 1),
+            (vec![OpCode::Call as u8, 0], 2),
+            (vec![OpCode::GetLocal as u8, 0, 1], 3),
+            (vec![OpCode::StructLiteral as u8, 0, 1, 2], 4),
+            (vec![OpCode::TestPattern as u8, 0, 1, 0, 2], 5),
+            (vec![OpCode::DefineGlobalTyped as u8, 0, 1, 0, 0, 2], 6),
+            (vec![OpCode::Guard as u8, 0, 1, 0, 2, 0, 3], 7),
+        ];
+
+        for (code, expected) in cases {
+            assert_eq!(chunk_with_code(code).instruction_len(0), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn rejects_truncated_fixed_width_instruction() {
+        let chunk = chunk_with_code(vec![OpCode::GetLocal as u8, 0]);
+        assert_eq!(
+            chunk.instruction_len(0),
+            Err(DecodeError::TruncatedInstruction {
+                offset: 0,
+                expected_len: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_opcode() {
+        let chunk = chunk_with_code(vec![u8::MAX]);
+        assert_eq!(
+            chunk.instruction_len(0),
+            Err(DecodeError::InvalidOpcode {
+                offset: 0,
+                byte: u8::MAX,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_closure_constant() {
+        let chunk = chunk_with_code(vec![OpCode::Closure as u8, 0, 0]);
+        assert_eq!(
+            chunk.instruction_len(0),
+            Err(DecodeError::InvalidClosureConstant {
+                offset: 0,
+                constant: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_closure_descriptors_from_function_metadata() {
+        let mut function = Function::new(Some("inner".to_string()), 0);
+        function.upvalue_count = 2;
+        let closure = Value::Closure(Rc::new(ObjClosure::closed(Rc::new(function), Vec::new())));
+        let mut chunk = chunk_with_code(vec![OpCode::Closure as u8, 0, 0, 1, 0, 1, 0, 0, 2]);
+        chunk.constants.push(closure);
+
+        assert_eq!(chunk.instruction_len(0), Ok(9));
+    }
+
+    #[test]
+    fn rejects_truncated_closure_descriptors() {
+        let mut function = Function::new(Some("inner".to_string()), 0);
+        function.upvalue_count = 1;
+        let closure = Value::Closure(Rc::new(ObjClosure::closed(Rc::new(function), Vec::new())));
+        let mut chunk = chunk_with_code(vec![OpCode::Closure as u8, 0, 0, 1, 0]);
+        chunk.constants.push(closure);
+
+        assert_eq!(
+            chunk.instruction_len(0),
+            Err(DecodeError::TruncatedInstruction {
+                offset: 0,
+                expected_len: 6,
+            })
+        );
     }
 }
