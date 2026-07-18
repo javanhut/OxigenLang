@@ -178,6 +178,13 @@ impl StackView {
     pub const OFFSET_LEN: i32 = 8;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    Interpreter,
+    TieredJit,
+    EagerJit,
+}
+
 pub struct VM {
     /// Cached view of `stack`'s raw parts for the JIT. Read via direct
     /// memory loads at a pinned offset from `&mut VM`. Placed first so
@@ -233,6 +240,7 @@ pub struct VM {
 
     /// Baseline JIT engine. Stub/no-op when the `jit` feature is off.
     pub jit: JitEngine,
+    execution_mode: ExecutionMode,
 }
 
 /// A recoverable-error landing pad installed by `PushHandler`. Records the
@@ -252,6 +260,22 @@ struct ErrorHandler {
 
 impl VM {
     pub fn new() -> Self {
+        Self::new_with_mode(ExecutionMode::TieredJit)
+    }
+
+    pub fn new_interpreter() -> Self {
+        Self::new_with_mode(ExecutionMode::Interpreter)
+    }
+
+    pub fn new_tiered() -> Self {
+        Self::new_with_mode(ExecutionMode::TieredJit)
+    }
+
+    pub fn new_eager_jit() -> Self {
+        Self::new_with_mode(ExecutionMode::EagerJit)
+    }
+
+    pub fn new_with_mode(mode: ExecutionMode) -> Self {
         let mut globals = HashMap::new();
         builtins::register_builtins(&mut globals);
 
@@ -271,7 +295,7 @@ impl VM {
             len: 0,
         };
 
-        VM {
+        let mut vm = VM {
             stack_view,
             jit_frame_view,
             jit_executing: std::cell::Cell::new(false),
@@ -292,7 +316,21 @@ impl VM {
             globals_version: 0,
             error_handlers: Vec::new(),
             jit: JitEngine::new(),
+            execution_mode: mode,
+        };
+        match mode {
+            ExecutionMode::Interpreter => vm.jit.disable(),
+            ExecutionMode::TieredJit => {}
+            ExecutionMode::EagerJit => {
+                vm.jit.set_threshold(1);
+                vm.jit.set_loop_threshold(1);
+            }
         }
+        vm
+    }
+
+    pub fn execution_mode(&self) -> ExecutionMode {
+        self.execution_mode
     }
 
     /// Runtime-computed offset of `stack_view` within `VM`. The JIT uses
@@ -4346,6 +4384,14 @@ mod tests {
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use std::path::PathBuf;
+
+    #[test]
+    fn execution_mode_constructors_are_explicit() {
+        assert_eq!(VM::new_interpreter().execution_mode(), ExecutionMode::Interpreter);
+        assert_eq!(VM::new_tiered().execution_mode(), ExecutionMode::TieredJit);
+        assert_eq!(VM::new_eager_jit().execution_mode(), ExecutionMode::EagerJit);
+        assert_eq!(VM::new().execution_mode(), ExecutionMode::TieredJit);
+    }
 
     fn test_vm(input: &str) -> Result<Value, VMError> {
         let lexer = Lexer::new(input);

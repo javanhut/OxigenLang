@@ -22,6 +22,10 @@ run = ["cargo check --all-targets"]
 desc = "Run cargo test"
 run = ["cargo test --all-targets"]
 
+[commands.fix]
+desc = "Runs a clippy fix for a deep fix"
+run = ["cargo clippy --fix"]
+
 [commands.build]
 desc = "JIT is on by default (see core/Cargo.toml `default = [\"jit\"]`), so `make build`/`make install` produce the JIT-enabled, VM-improved binary."
 run = ["cargo build --release -p oxigen"]

@@ -51,11 +51,13 @@ fn run_vm(source: &str, jit_threshold: Option<u32>) -> Result<String, String> {
     let function = Compiler::new()
         .compile(&program)
         .map_err(|errs| format!("{:?}", errs))?;
-    let mut vm = VM::new();
+    let mut vm = if jit_threshold.is_some() {
+        VM::new_tiered()
+    } else {
+        VM::new_interpreter()
+    };
     if let Some(t) = jit_threshold {
         vm.jit.set_threshold(t);
-    } else {
-        vm.jit.disable();
     }
     vm.run(function)
         .map(|v| format!("{}", v))
