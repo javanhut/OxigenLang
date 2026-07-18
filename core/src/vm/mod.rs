@@ -35,8 +35,8 @@ pub(crate) fn type_matches(expected: &str, actual: &str) -> bool {
 /// then the cwd, then a user install under `~/.oxigen`.
 pub(crate) fn find_stdlib_path() -> PathBuf {
     // 1. Relative to executable (dev: target/debug/oxigen + stdlib/)
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent() {
             let candidate = exe_dir.join("stdlib");
             if candidate.is_dir() {
                 return candidate;
@@ -49,7 +49,6 @@ pub(crate) fn find_stdlib_path() -> PathBuf {
                 }
             }
         }
-    }
     // 3. Current working directory (preferred for local development)
     let candidate = PathBuf::from("stdlib");
     if candidate.is_dir() {
@@ -256,6 +255,12 @@ struct ErrorHandler {
     stack_len: usize,
     /// `jit_frame_view.len` at install time — reset to clean leaked JIT frames.
     jit_frame_len: usize,
+}
+
+impl Default for VM {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl VM {
@@ -1198,11 +1203,10 @@ impl VM {
 
     #[allow(dead_code)]
     pub(crate) fn current_slot_offset(&self) -> usize {
-        if self.jit_executing.get() {
-            if let Some(f) = self.jit_frame_top() {
+        if self.jit_executing.get()
+            && let Some(f) = self.jit_frame_top() {
                 return f.slot_offset;
             }
-        }
         self.frames.last().map(|f| f.slot_offset).unwrap_or(0)
     }
 
@@ -1213,12 +1217,11 @@ impl VM {
         // JIT's `jit_push_constant` helper also materializes a fresh, unaliased
         // collection for typed zero-init heap defaults instead of sharing one
         // `Rc<RefCell<…>>` across calls.
-        if self.jit_executing.get() {
-            if let Some(frame) = self.jit_frame_top() {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top() {
                 let closure = unsafe { &*frame.closure_raw };
                 return closure.function.chunk.constants[idx as usize].fresh_clone();
             }
-        }
         let frame = self.frames.last().unwrap();
         frame.closure.function.chunk.constants[idx as usize].fresh_clone()
     }
@@ -1380,11 +1383,10 @@ impl VM {
     }
 
     fn current_line(&self) -> u32 {
-        if self.jit_executing.get() {
-            if let Some(frame) = self.jit_frame_top() {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top() {
                 return frame.line;
             }
-        }
         // No frame yet (e.g. a cancel check that fires at call entry before the
         // frame is pushed): there's no line to report — diagnostics, never panic.
         let Some(frame) = self.frames.last() else {
@@ -1405,11 +1407,10 @@ impl VM {
     /// since `JitFrame` only carries the line — the caret-rendering code
     /// in `format_error` falls back to no caret when col is 0.
     fn current_column(&self) -> u32 {
-        if self.jit_executing.get() {
-            if let Some(frame) = self.jit_frame_top() {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top() {
                 return frame.column;
             }
-        }
         let Some(frame) = self.frames.last() else {
             return 0;
         };
@@ -1426,11 +1427,10 @@ impl VM {
 
     #[inline(always)]
     pub(crate) fn active_closure(&self) -> &ObjClosure {
-        if self.jit_executing.get() {
-            if let Some(frame) = self.jit_frame_top() {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top() {
                 return unsafe { &*frame.closure_raw };
             }
-        }
         &self.frames.last().unwrap().closure
     }
 
@@ -1443,13 +1443,11 @@ impl VM {
 
     #[inline(always)]
     fn active_module_globals(&self) -> Option<&HashMap<String, Value>> {
-        if self.jit_executing.get() {
-            if let Some(frame) = self.jit_frame_top() {
-                if !frame.module_globals.is_null() {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top()
+                && !frame.module_globals.is_null() {
                     return Some(unsafe { &*frame.module_globals });
                 }
-            }
-        }
         self.frames.last().and_then(|f| f.module_globals.as_deref())
     }
 
@@ -1460,13 +1458,11 @@ impl VM {
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn has_active_module_globals(&self) -> bool {
-        if self.jit_executing.get() {
-            if let Some(frame) = self.jit_frame_top() {
-                if !frame.module_globals.is_null() {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top()
+                && !frame.module_globals.is_null() {
                     return true;
                 }
-            }
-        }
         self.frames
             .last()
             .map(|f| f.module_globals.is_some())
@@ -1490,8 +1486,8 @@ impl VM {
             None => out.push_str(&format!("  --> {}\n", location)),
         }
 
-        if !self.source.is_empty() {
-            if let Some(source_line) = self.source.lines().nth(line_num.saturating_sub(1)) {
+        if !self.source.is_empty()
+            && let Some(source_line) = self.source.lines().nth(line_num.saturating_sub(1)) {
                 let line_str = format!("{}", line_num);
                 let padding = " ".repeat(line_str.len());
                 out.push_str(&format!("{} |\n", padding));
@@ -1501,7 +1497,6 @@ impl VM {
                     out.push_str(&format!("\n{} | {}^", padding, caret_padding));
                 }
             }
-        }
 
         if let Some(hint) = hint {
             out.push_str(&format!("\n  = hint: {}", hint));
@@ -1524,12 +1519,11 @@ impl VM {
     /// the location header so a deep failure says which function it was
     /// in instead of just a line number.
     fn innermost_frame_name(&self) -> Option<String> {
-        if self.jit_executing.get() {
-            if let Some(frame) = self.jit_frame_top() {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top() {
                 let closure = unsafe { &*frame.closure_raw };
                 return closure.function.name.clone();
             }
-        }
         self.frames
             .last()
             .and_then(|f| f.closure.function.name.clone())
@@ -1642,7 +1636,7 @@ impl VM {
                 self.stack_truncate(h.stack_len);
                 self.push(Value::ErrorValue(Rc::new(ErrorValueData {
                     msg: rc_str(err.message),
-                    tag: err.tag.map(|t| rc_str(t)),
+                    tag: err.tag.map(rc_str),
                 })));
                 let fi = self.frames.len() - 1;
                 self.frames[fi].ip = h.catch_ip;
@@ -2240,7 +2234,7 @@ impl VM {
                     selective_names.reverse();
 
                     if let Some(path_str) = path.as_string() {
-                        self.import_module(&path_str, &selective_names)?;
+                        self.import_module(path_str, &selective_names)?;
                     }
                 }
 
@@ -2329,7 +2323,7 @@ impl VM {
                     let value = self.pop();
 
                     if let Some(target) = type_name.as_string() {
-                        let result = self.type_wrap(&target, value)?;
+                        let result = self.type_wrap(target, value)?;
                         self.push(result);
                     } else {
                         return Err(self.runtime_error("invalid type name in TypeWrap"));
@@ -2367,7 +2361,7 @@ impl VM {
                     named_args.reverse();
 
                     if let Some(mname) = method_name.as_string() {
-                        self.call_method(&mname, arg_count, &named_args)?;
+                        self.call_method(mname, arg_count, &named_args)?;
                     } else {
                         return Err(self.runtime_error("invalid method name"));
                     }
@@ -3086,11 +3080,10 @@ impl VM {
         // Inline fast path: JIT-compiled callee with exact arity.
         // This is every recursive/hot-loop call, and we want it to fold
         // straight into `jit_op_call` without a Rust function call.
-        if closure.jit_state.get() == 1 && closure.function.arity as usize == arg_count {
-            if let Some(result) = self.call_closure_fast_path(&closure) {
+        if closure.jit_state.get() == 1 && closure.function.arity as usize == arg_count
+            && let Some(result) = self.call_closure_fast_path(&closure) {
                 return result.map(|_| true);
             }
-        }
         self.call_closure(closure, arg_count, &[], None)?;
         Ok(true)
     }
@@ -3303,11 +3296,10 @@ impl VM {
         // able to construct/inherit structs defined in ITS module (e.g.
         // `Expectation`), which live in the module's globals, not the importing
         // file's globals.
-        if let Some(mg) = self.active_module_globals() {
-            if let Some(Value::StructDef(def)) = mg.get(name) {
+        if let Some(mg) = self.active_module_globals()
+            && let Some(Value::StructDef(def)) = mg.get(name) {
                 return Some(Rc::clone(def));
             }
-        }
         None
     }
 
@@ -3330,11 +3322,10 @@ impl VM {
                 return Some(m);
             }
             cur = d.parent.as_ref().and_then(|p| {
-                if let Some(mg) = d.module_globals.borrow().as_ref() {
-                    if let Some(Value::StructDef(pd)) = mg.get(p) {
+                if let Some(mg) = d.module_globals.borrow().as_ref()
+                    && let Some(Value::StructDef(pd)) = mg.get(p) {
                         return Some(Rc::clone(pd));
                     }
-                }
                 if let Some(Value::StructDef(pd)) = self.globals.get(p) {
                     return Some(Rc::clone(pd));
                 }
@@ -3452,11 +3443,9 @@ impl VM {
         // be lean — we skip the call_count bump (already tiered up), the
         // named-args block, and the arity-fill loop.
         if state == 1 && named_args.is_empty() && arg_count == expected && module_globals.is_none()
-        {
-            if let Some(result) = self.call_closure_fast_path(&closure) {
+            && let Some(result) = self.call_closure_fast_path(&closure) {
                 return result;
             }
-        }
 
         // Slow path: only bump the hot-function counter when we haven't
         // already tiered up. Once state == 1 the counter is never consulted.
@@ -3599,7 +3588,7 @@ impl VM {
             let entry_line = closure.function.chunk.lines.first().copied().unwrap_or(0);
             let mg_ptr = inherited_mg
                 .as_ref()
-                .map(|mg| Rc::as_ptr(mg))
+                .map(Rc::as_ptr)
                 .unwrap_or(std::ptr::null());
             self.jit_frame_push_raw(Rc::as_ptr(&closure), slot_offset, mg_ptr, entry_line);
             let vm_ptr = self as *mut VM;
@@ -3636,11 +3625,10 @@ impl VM {
     pub(crate) fn capture_upvalue(&mut self, stack_slot: usize) -> Rc<RefCell<Upvalue>> {
         // Check if we already have an open upvalue for this slot
         for uv in &self.open_upvalues {
-            if let Upvalue::Open(slot) = &*uv.borrow() {
-                if *slot == stack_slot {
+            if let Upvalue::Open(slot) = &*uv.borrow()
+                && *slot == stack_slot {
                     return Rc::clone(uv);
                 }
-            }
         }
 
         let upvalue = Rc::new(RefCell::new(Upvalue::Open(stack_slot)));
@@ -4053,8 +4041,8 @@ impl VM {
 
     fn resolve_module_path(&self, path_str: &str) -> Result<PathBuf, VMError> {
         // Relative import
-        if path_str.starts_with("./") || path_str.starts_with("../") {
-            if let Some(current) = &self.current_file {
+        if (path_str.starts_with("./") || path_str.starts_with("../"))
+            && let Some(current) = &self.current_file {
                 let base = current.parent().unwrap_or(current);
                 let resolved = base.join(path_str).with_extension("oxi");
                 if resolved.exists() {
@@ -4063,7 +4051,6 @@ impl VM {
                         .map_err(|e| self.runtime_error(&format!("cannot resolve path: {}", e)));
                 }
             }
-        }
 
         // Stdlib import
         let stdlib = self.stdlib_path.join(path_str).with_extension("oxi");
@@ -4118,7 +4105,7 @@ impl VM {
         // Check for Error/Value union pattern: "VALUE || ERROR" or "ERROR || VALUE"
         if target.contains(" || ") {
             let parts: Vec<&str> = target.split(" || ").collect();
-            let has_value = parts.iter().any(|p| *p == "VALUE");
+            let has_value = parts.contains(&"VALUE");
             let has_error = parts.iter().any(|p| p.starts_with("ERROR"));
             if has_value && has_error {
                 // Idempotency (V4): a value already normalized to the SUCCESS
@@ -4156,7 +4143,7 @@ impl VM {
             // General union: try each type
             let actual = value.effective_type_name();
             for member in parts {
-                if member == &actual || member == "GENERIC" {
+                if member == actual || member == "GENERIC" {
                     return Ok(value);
                 }
                 if let Ok(converted) = self.convert_to_type(&value, member) {
@@ -4286,7 +4273,7 @@ impl VM {
             "BYTE" => match value.repr() {
                 ValueRepr::Byte(_) => Ok(value.clone()),
                 ValueRepr::Integer(n) => {
-                    if n < 0 || n > 255 {
+                    if !(0..=255).contains(&n) {
                         Err(self.runtime_error(&format!(
                             "cannot convert INTEGER {} to BYTE (0-255)",
                             n

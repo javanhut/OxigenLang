@@ -1962,7 +1962,7 @@ fn value_to_json(val: &Value) -> Result<String, String> {
         }
         ValueRepr::Array(arr) => {
             let items: Result<Vec<String>, String> =
-                arr.borrow().iter().map(|e| value_to_json(e)).collect();
+                arr.borrow().iter().map(value_to_json).collect();
             Ok(format!("[{}]", items?.join(",")))
         }
         ValueRepr::Map(entries) => {
@@ -1978,7 +1978,7 @@ fn value_to_json(val: &Value) -> Result<String, String> {
             Ok(format!("{{{}}}", items?.join(",")))
         }
         ValueRepr::Tuple(t) => {
-            let items: Result<Vec<String>, String> = t.iter().map(|e| value_to_json(e)).collect();
+            let items: Result<Vec<String>, String> = t.iter().map(value_to_json).collect();
             Ok(format!("[{}]", items?.join(",")))
         }
         ValueRepr::Byte(n) => Ok(n.to_string()),
@@ -2056,12 +2056,12 @@ fn value_to_toml(val: &Value) -> Result<toml::Value, String> {
         ValueRepr::Char(c) => Ok(toml::Value::String(c.to_string())),
         ValueRepr::Array(arr) => {
             let items: Result<Vec<toml::Value>, String> =
-                arr.borrow().iter().map(|e| value_to_toml(e)).collect();
+                arr.borrow().iter().map(value_to_toml).collect();
             Ok(toml::Value::Array(items?))
         }
         ValueRepr::Tuple(t) => {
             let items: Result<Vec<toml::Value>, String> =
-                t.iter().map(|e| value_to_toml(e)).collect();
+                t.iter().map(value_to_toml).collect();
             Ok(toml::Value::Array(items?))
         }
         ValueRepr::Map(entries) => {

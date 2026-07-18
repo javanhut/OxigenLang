@@ -209,7 +209,7 @@ thread_local! {
     static WORKER_FNS: RefCell<HashMap<u32, Rc<Function>>> = RefCell::new(HashMap::new());
 
     /// Worker: the running task's cancel flag (set by cancel() via the handle).
-    static CUR_CANCEL: RefCell<Option<Arc<AtomicBool>>> = RefCell::new(None);
+    static CUR_CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
 }
 
 /// A spawned task's handle: its result channel, a memoized result, and the

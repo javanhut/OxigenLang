@@ -6,6 +6,12 @@ pub struct Formatter {
     output: String,
 }
 
+impl Default for Formatter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Formatter {
     pub fn new() -> Self {
         Self {
@@ -91,8 +97,7 @@ impl Formatter {
                     parameters,
                     body,
                 } = value
-                {
-                    if token.token_type == TokenType::Function {
+                    && token.token_type == TokenType::Function {
                         self.push("fun ");
                         self.push(&name.value);
                         self.push("(");
@@ -101,7 +106,6 @@ impl Formatter {
                         self.format_function_body(body);
                         return;
                     }
-                }
                 self.push(&name.value);
                 self.push(" := ");
                 self.format_expression(value);
@@ -271,13 +275,12 @@ impl Formatter {
                         self.format_expression(cond);
                     }
                     self.push(" -> ");
-                    if arm.body.len() == 1 {
-                        if let Statement::Expr(e) = &arm.body[0] {
+                    if arm.body.len() == 1
+                        && let Statement::Expr(e) = &arm.body[0] {
                             self.format_expression(e);
                             self.newline();
                             continue;
                         }
-                    }
                     self.push("{");
                     self.newline();
                     self.indent += 1;
@@ -941,16 +944,14 @@ impl Formatter {
 
     fn format_function_body(&mut self, body: &[Statement]) {
         // Single expression body: inline on the same line
-        if body.len() == 1 {
-            if let Statement::Expr(expr) = &body[0] {
-                if !is_multiline_expr(expr) {
+        if body.len() == 1
+            && let Statement::Expr(expr) = &body[0]
+                && !is_multiline_expr(expr) {
                     self.push(" { ");
                     self.format_expression(expr);
                     self.push(" }");
                     return;
                 }
-            }
-        }
         self.push(" {");
         self.newline();
         self.indent += 1;
@@ -1019,7 +1020,7 @@ fn format_type_annotation(ann: &TypeAnnotation) -> String {
         TypeAnnotation::ValueType => "Value".to_string(),
         TypeAnnotation::Union(types) => types
             .iter()
-            .map(|t| format_type_annotation(t))
+            .map(format_type_annotation)
             .collect::<Vec<_>>()
             .join("> || <"),
         TypeAnnotation::Struct(name) => name.clone(),
@@ -1091,11 +1092,9 @@ fn strip_negation(expr: &Expression) -> Option<&Expression> {
     if let Expression::Prefix {
         operator, right, ..
     } = expr
-    {
-        if operator == "not" {
+        && operator == "not" {
             return Some(right.as_ref());
         }
-    }
     None
 }
 

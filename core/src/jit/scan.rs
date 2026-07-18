@@ -102,8 +102,8 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
         } else if matches!(op, OpCode::Constant) {
             let idx = read_u16(code, ip + 1)
                 .ok_or(ScanError::InvalidBytecode { offset: ip })?;
-            if let Some(v) = chunk.constants.get(idx as usize) {
-                if !matches!(
+            if let Some(v) = chunk.constants.get(idx as usize)
+                && !matches!(
                     v.repr(),
                     ValueRepr::Integer(_)
                         | ValueRepr::Float(_)
@@ -115,7 +115,6 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
                 ) {
                     info.touches_heap_values = true;
                 }
-            }
         }
 
         // Advance using the canonical bytecode-width decoder. It also

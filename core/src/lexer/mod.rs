@@ -128,7 +128,8 @@ impl Lexer {
 
         let span = self.span();
 
-        let tok = match self.ch {
+        
+        match self.ch {
             '\0' => {
                 // At EOF in indent mode, emit RBrace for any remaining open blocks
                 if self.indent_mode && self.indent_stack.len() > 1 {
@@ -342,8 +343,7 @@ impl Lexer {
                     span,
                 }
             }
-        };
-        tok
+        }
     }
 
     fn single_with_span(&mut self, tt: TokenType, span: Span) -> Token {

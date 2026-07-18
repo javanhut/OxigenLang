@@ -554,7 +554,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                         // cursor (the original rule) attributes init to
                         // the array literal's transient, then int_locals
                         // gets def_var'd with the wrong value.
-                        if prev.map_or(true, |p| cursor > p) {
+                        if prev.is_none_or(|p| cursor > p) {
                             first_init_ip.insert(slot, cursor);
                         }
                     }
@@ -1205,7 +1205,7 @@ fn collect_int_mirror_param_slots(
         if slot_types
             .get(slot as usize)
             .copied()
-            .map_or(false, |t| matches!(t, SlotType::Int64))
+            .is_some_and(|t| matches!(t, SlotType::Int64))
         {
             continue;
         }

@@ -278,6 +278,12 @@ pub struct Compiler {
     fn_counter: u32,
 }
 
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Compiler {
     pub fn new() -> Self {
         let mut compiler = Compiler {
@@ -854,7 +860,7 @@ impl Compiler {
         let line = Self::stmt_line(stmt);
         let col = Self::stmt_column(stmt);
         self.loc_column_stack.push(col);
-        let _r = self.compile_statement_inner(stmt, line);
+        self.compile_statement_inner(stmt, line);
         self.loc_column_stack.pop();
     }
 
@@ -885,8 +891,8 @@ impl Compiler {
                 // pushes the closure into exactly that slot (the next free stack
                 // position), and the body's open upvalue captures that live slot.
                 let mut predeclared_named_fn = false;
-                if let Expression::FunctionLiteral { .. } = value {
-                    if self.current_frame().scope_depth > 0
+                if let Expression::FunctionLiteral { .. } = value
+                    && self.current_frame().scope_depth > 0
                         && self.resolve_local(&name.value).is_none()
                     {
                         let frame_idx = self.frames.len() - 1;
@@ -898,7 +904,6 @@ impl Compiler {
                             predeclared_named_fn = true;
                         }
                     }
-                }
                 // If the value is a function literal, pass the name so the
                 // closure carries it (instead of showing as "anonymous").
                 if let Expression::FunctionLiteral {
@@ -1115,8 +1120,8 @@ impl Compiler {
 
             Statement::Assign { name, value } => {
                 // Check immutability for locals at compile time
-                if let Some(slot) = self.resolve_local(&name.value) {
-                    if !self.current_frame().locals[slot as usize].mutable {
+                if let Some(slot) = self.resolve_local(&name.value)
+                    && !self.current_frame().locals[slot as usize].mutable {
                         self.error(
                             &format!(
                                 "cannot reassign immutable variable '{}'. use := to override",
@@ -1125,7 +1130,6 @@ impl Compiler {
                             line,
                         );
                     }
-                }
                 // Implicit-self field WRITE: a bare-name assignment inside a
                 // method whose name is NOT a local/param but IS a field of the
                 // enclosing method's struct resolves to `self.field = value` —
@@ -1141,8 +1145,8 @@ impl Compiler {
                         .method_field_stack
                         .last()
                         .is_some_and(|f| f.contains(&name.value));
-                    if is_field {
-                        if let Some(self_slot) = self.resolve_local("self") {
+                    if is_field
+                        && let Some(self_slot) = self.resolve_local("self") {
                             // self.field = value : GetLocal self, RHS, SetField.
                             // SetField pops both object and value (net -2), so
                             // no trailing Pop is needed (mirrors DotAssign).
@@ -1155,7 +1159,6 @@ impl Compiler {
                             self.emit_op_u16(OpCode::SetField, field_const, line);
                             return;
                         }
-                    }
                 }
                 self.compile_expression(value);
                 if let Some(slot) = self.resolve_local(&name.value) {
@@ -1865,12 +1868,11 @@ impl Compiler {
         // Fold pure-literal arithmetic/comparison/bitwise subtrees to a single
         // constant (e.g. `60*60*24`, `2 < 3`). Leaves keep their existing fast
         // paths (True/False/None opcodes), so only fold compound nodes.
-        if matches!(expr, Expression::Prefix { .. } | Expression::Infix { .. }) {
-            if let Some(folded) = fold_constant_expression(expr) {
+        if matches!(expr, Expression::Prefix { .. } | Expression::Infix { .. })
+            && let Some(folded) = fold_constant_expression(expr) {
                 self.emit_constant(folded, line);
                 return;
             }
-        }
 
         match expr {
             Expression::Int { value, .. } => {
@@ -2022,8 +2024,8 @@ impl Compiler {
                 // Postfix requires an identifier
                 if let Expression::Ident(ident) = left.as_ref() {
                     // Check immutability
-                    if let Some(slot) = self.resolve_local(&ident.value) {
-                        if !self.current_frame().locals[slot as usize].mutable {
+                    if let Some(slot) = self.resolve_local(&ident.value)
+                        && !self.current_frame().locals[slot as usize].mutable {
                             self.error(
                                 &format!(
                                     "cannot mutate immutable variable '{}' with {}",
@@ -2032,7 +2034,6 @@ impl Compiler {
                                 line,
                             );
                         }
-                    }
                     // Load current value (return value is the pre-increment value)
                     self.compile_identifier(ident);
                     // Duplicate for the return value
@@ -2424,7 +2425,7 @@ impl Compiler {
                 // (e.g. `<int>(...)`) get no handler — their errors propagate.
                 let is_error_union = type_str.contains(" || ") && {
                     let parts: Vec<&str> = type_str.split(" || ").collect();
-                    parts.iter().any(|p| *p == "VALUE")
+                    parts.contains(&"VALUE")
                         && parts.iter().any(|p| p.starts_with("ERROR"))
                 };
                 let handler = if is_error_union {
@@ -2794,9 +2795,9 @@ impl Compiler {
         let line = ident.token.span.line as u32;
         let col = ident.token.span.column as u32;
         self.loc_column_stack.push(col);
-        let result = self.compile_identifier_inner(ident, line);
+        self.compile_identifier_inner(ident, line);
         self.loc_column_stack.pop();
-        result
+        ()
     }
 
     /// Collect the field names visible to a method on `struct_name`, walking
@@ -2834,15 +2835,13 @@ impl Compiler {
             .method_field_stack
             .last()
             .is_some_and(|f| f.contains(&ident.value))
-        {
-            if let Some(self_slot) = self.resolve_local("self") {
+            && let Some(self_slot) = self.resolve_local("self") {
                 self.emit_op_u16(OpCode::GetLocal, self_slot, line);
                 let field_const =
                     self.make_constant(Value::String(rc_str(ident.value.as_str())), line);
                 self.emit_op_u16(OpCode::GetField, field_const, line);
                 return;
             }
-        }
         // Try upvalue
         let frame_idx = self.frames.len() - 1;
         if let Some(uv_idx) = self.resolve_upvalue(frame_idx, &ident.value) {

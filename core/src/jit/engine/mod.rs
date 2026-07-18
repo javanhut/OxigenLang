@@ -917,8 +917,8 @@ impl JitInner {
                 while ip < code.len() {
                     // If this ip starts a new block, switch to it (and glue
                     // the current block to it if fall-through).
-                    if let Some(&block) = blocks.get(&ip) {
-                        if block != current_block {
+                    if let Some(&block) = blocks.get(&ip)
+                        && block != current_block {
                             if !terminated {
                                 // Fall-through into a new block is a control-
                                 // flow edge: materialize any operand-stack
@@ -949,7 +949,6 @@ impl JitInner {
                             // see the right line.
                             last_emitted_loc = None;
                         }
-                    }
 
                     // Dead code after a terminator, before the next block
                     // boundary: the loop back-edge + `None;Return` epilogue the
@@ -1362,14 +1361,13 @@ impl JitInner {
                                 // GetLocal/Constant/Add/SetLocal sequence
                                 // runs and B2.1c handles it.
                                 let slot = read_u16(code, ip + 1);
-                                if let Some(&var) = int_locals.get(&slot) {
-                                    if live_int_slots.contains(&slot) {
+                                if let Some(&var) = int_locals.get(&slot)
+                                    && live_int_slots.contains(&slot) {
                                         let val = builder.use_var(var);
                                         virt_stack.push_int_ssa(val);
                                         ip += 3;
                                         continue;
                                     }
-                                }
                                 // B2.2a: eligible-param mirror. Read-only
                                 // Value params that passed the entry tag
                                 // guard live in a Cranelift Variable for
@@ -1848,8 +1846,8 @@ impl JitInner {
                             // sequence, but doesn't simplify the subsequent
                             // `cmp 0 + brif` down to a single bit-test the
                             // way this peephole's `band 1 + icmp 0` does.
-                            if is_mod {
-                                if let Some(next_ip) = try_emit_parity_branch_peephole(
+                            if is_mod
+                                && let Some(next_ip) = try_emit_parity_branch_peephole(
                                     &mut builder,
                                     chunk,
                                     code,
@@ -1864,7 +1862,6 @@ impl JitInner {
                                     ip = next_ip;
                                     continue;
                                 }
-                            }
 
                             // B2.1h: signed-div-by-power-of-two peephole.
                             // Replaces Cranelift's ~20-cycle `idiv` with a
@@ -1884,8 +1881,8 @@ impl JitInner {
                             if virt_stack.top_n_are_int_ssa(2) {
                                 let rhs = virt_stack.pop_int_ssa().unwrap();
                                 let lhs = virt_stack.pop_int_ssa().unwrap();
-                                if !is_mod {
-                                    if let Some(q) =
+                                if !is_mod
+                                    && let Some(q) =
                                         try_emit_sdiv_pow2_peephole(&mut builder, lhs, rhs)
                                     {
                                         if let Some(cp) = counters_ptr_opt {
@@ -1899,7 +1896,6 @@ impl JitInner {
                                         ip += 1;
                                         continue;
                                     }
-                                }
                                 // Both virt-int and helper paths can raise
                                 // (zero divisor, INT_MIN/-1 overflow). Stamp
                                 // the line so the resulting VMError reports
@@ -2035,15 +2031,14 @@ impl JitInner {
                                     // ops had no dedicated counter pre-B2.1f;
                                     // the diagnostic use-case was specifically
                                     // verifying Equal/NotEqual get fused.
-                                    if matches!(op, OpCode::Equal | OpCode::NotEqual) {
-                                        if let Some(cp) = counters_ptr_opt {
+                                    if matches!(op, OpCode::Equal | OpCode::NotEqual)
+                                        && let Some(cp) = counters_ptr_opt {
                                             emit_counter_bump(
                                                 &mut builder,
                                                 cp,
                                                 counter_offsets::VIRT_BRANCH_EQ_HIT,
                                             );
                                         }
-                                    }
                                     let rhs = virt_stack.pop_int_ssa().unwrap();
                                     let lhs = virt_stack.pop_int_ssa().unwrap();
                                     let pred = builder.ins().icmp(cc, lhs, rhs);
@@ -2983,7 +2978,7 @@ impl JitInner {
                             let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
                             let offset_from_top = builder
                                 .ins()
-                                .iconst(types::I64, (arg_count as i64 + 1) as i64);
+                                .iconst(types::I64, ((arg_count as i64 + 1)));
                             let callee_slot = builder.ins().isub(stack_len, offset_from_top);
                             let callee_off = builder.ins().imul(callee_slot, value_size);
                             let callee_ptr = builder.ins().iadd(stack_ptr, callee_off);
@@ -3672,7 +3667,7 @@ impl JitInner {
                                     builder.ins().iconst(types::I64, VALUE_SIZE as i64);
                                 let offset_from_top = builder
                                     .ins()
-                                    .iconst(types::I64, (arg_count as i64 + 1) as i64);
+                                    .iconst(types::I64, ((arg_count as i64 + 1)));
                                 let receiver_slot = builder.ins().isub(stack_len, offset_from_top);
                                 let receiver_off = builder.ins().imul(receiver_slot, value_size);
                                 let receiver_ptr = builder.ins().iadd(stack_ptr, receiver_off);
@@ -4396,9 +4391,9 @@ impl JitInner {
                     }
                 })?;
 
-            if want_disasm {
-                if let Some(code) = self.ctx.compiled_code() {
-                    if let Some(vcode) = code.vcode.as_ref() {
+            if want_disasm
+                && let Some(code) = self.ctx.compiled_code()
+                    && let Some(vcode) = code.vcode.as_ref() {
                         eprintln!(
                             "=== disasm fn={} kind={:?} ===\n{}",
                             func.name.as_deref().unwrap_or("<anon>"),
@@ -4406,8 +4401,6 @@ impl JitInner {
                             vcode
                         );
                     }
-                }
-            }
 
             self.module.clear_context(&mut self.ctx);
         }
@@ -6070,10 +6063,7 @@ fn try_emit_parity_branch_peephole(
 
     // Top of the virt stack is the Modulo RHS (most recently pushed).
     // It must be `iconst 2`.
-    let rhs = match virt_stack.peek_int_ssa() {
-        Some(v) => v,
-        None => return None,
-    };
+    let rhs = virt_stack.peek_int_ssa()?;
     if !is_iconst_imm(builder, rhs, 2) {
         return None;
     }
@@ -6142,10 +6132,7 @@ fn try_emit_parity_branch_peephole(
 
     // For pattern B, virt_stack[-3] must be `iconst 0`.
     if is_pattern_b {
-        let zero_val = match virt_stack.peek_int_ssa_at(2) {
-            Some(v) => v,
-            None => return None,
-        };
+        let zero_val = virt_stack.peek_int_ssa_at(2)?;
         if !is_iconst_imm(builder, zero_val, 0) {
             return None;
         }
@@ -6274,7 +6261,7 @@ fn try_emit_sdiv_pow2_peephole(
         lhs
     } else {
         let sign = builder.ins().sshr_imm(lhs, 63);
-        let bias_mask = (abs - 1) as i64;
+        let bias_mask = (abs - 1);
         let bias = builder.ins().band_imm(sign, bias_mask);
         let adjusted = builder.ins().iadd(lhs, bias);
         builder.ins().sshr_imm(adjusted, k)
