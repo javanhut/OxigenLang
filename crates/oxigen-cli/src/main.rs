@@ -482,6 +482,15 @@ fn main() {
         }
         Some("fmt") => fmt_files(&filtered_args[2..]),
         Some("test") => run_tests_command(&filtered_args[2..]),
+        Some("--help") | Some("-h") => {
+            println!("Oxigen Version: {}", env!("CARGO_PKG_VERSION"));
+            println!("--version/-v:  Get Oxigen Version");
+            println!("fmt [name of file/directory]:  Formats the Oxigen File with proper Syntax");
+            println!("check [name of file/directory]:  Checks the file for Syntax errors.");
+            println!("test [name of file/directory]:  Runs test suite on file or directory");
+            println!("--help/-h:  Get help information");
+            println!("[empty]:  Runs Oxigen Repl");
+        }
         Some(path) if path.ends_with(".oxi") => {
             run_file_vm(path, &filtered_args[2..], jit_mode);
         }
