@@ -896,14 +896,21 @@ pub unsafe extern "C" fn jit_get_global_ic(
             }
         };
     }
-    if cache.version == vm.globals_version {
+    if cache.version == unsafe { *cache.version_cell } {
         vm.push(cache.value.clone());
         return 0;
     }
     match vm.handle_get_global(name_idx as u16) {
         Ok(()) => {
             cache.value = vm.peek(0).clone();
-            cache.version = vm.globals_version;
+            // Repoint the entry from the never-matching sentinel to this
+            // name's version cell and record the current version, so the
+            // inline hit path stays valid until THIS name is reassigned.
+            if let Ok(name) = vm.name_constant(name_idx as u16) {
+                let cell = vm.jit.global_version_cell(name.as_str());
+                cache.version_cell = cell;
+                cache.version = unsafe { *cell };
+            }
             0
         }
         Err(e) => {

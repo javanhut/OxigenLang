@@ -93,6 +93,12 @@ pub(super) struct JitInner {
 
     /// Per-field-op inline caches for `GetField`/`SetField`.
     field_caches: Vec<Box<FieldCacheEntry>>,
+
+    /// Per-global-name version cells for the GetGlobal ICs. Boxed so the
+    /// address is stable (stored in `GlobalCacheEntry.version_cell` and
+    /// read from emitted IR). `SetGlobal`/`DefineGlobal` bump only the
+    /// written name's cell, so unrelated ICs stay hot.
+    global_version_cells: HashMap<String, Box<u64>>,
 }
 
 // IC entry layouts moved to engine::cache (see use below).
@@ -164,6 +170,26 @@ impl JitInner {
             call_caches: Vec::new(),
             method_caches: Vec::new(),
             field_caches: Vec::new(),
+            global_version_cells: HashMap::new(),
+        }
+    }
+
+    /// Stable pointer to `name`'s version cell, creating it (at version 0)
+    /// on first use. Called by `jit_get_global_ic` when it populates a
+    /// cache entry.
+    pub(crate) fn global_version_cell(&mut self, name: &str) -> *mut u64 {
+        let b = self
+            .global_version_cells
+            .entry(name.to_string())
+            .or_insert_with(|| Box::new(0));
+        b.as_mut() as *mut u64
+    }
+
+    /// Invalidate every IC caching `name`. Names no IC has ever cached
+    /// have no cell and cost only the lookup.
+    pub(crate) fn bump_global_version(&mut self, name: &str) {
+        if let Some(cell) = self.global_version_cells.get_mut(name) {
+            **cell = cell.wrapping_add(1);
         }
     }
 
@@ -181,6 +207,7 @@ impl JitInner {
         self.global_caches.push(Box::new(GlobalCacheEntry {
             version: u64::MAX,
             value: crate::vm::value::Value::None,
+            version_cell: &cache::GLOBAL_VERSION_SENTINEL,
         }));
         let b = self.global_caches.last_mut().unwrap();
         b.as_mut() as *mut _
@@ -2294,12 +2321,17 @@ impl JitInner {
                             use cranelift_codegen::ir::condcodes::IntCC;
                             let flags = MemFlags::trusted();
                             let cache_ver = builder.ins().load(types::I64, flags, cache_val, 0);
-                            let vm_ver = builder.ins().load(
-                                types::I64,
+                            // Per-name version cell: the pointer lives in the
+                            // cache entry (repointed from the sentinel by the
+                            // miss helper), so one extra dependent load
+                            // replaces the old VM-wide globals_version read.
+                            let cell_ptr = builder.ins().load(
+                                ptr_ty,
                                 flags,
-                                vm_val,
-                                VM::globals_version_offset() as i32,
+                                cache_val,
+                                GlobalCacheEntry::OFFSET_VERSION_CELL,
                             );
+                            let vm_ver = builder.ins().load(types::I64, flags, cell_ptr, 0);
                             let is_hit = builder.ins().icmp(IntCC::Equal, cache_ver, vm_ver);
                             let hit_block = builder.create_block();
                             let miss_block = builder.create_block();

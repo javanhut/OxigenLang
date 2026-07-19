@@ -176,6 +176,7 @@ mod layout_tests {
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
+            jit_bailouts: Cell::new(0),
             jit_thunk: Cell::new(None),
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
@@ -220,6 +221,7 @@ mod layout_tests {
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
+            jit_bailouts: Cell::new(0),
             jit_thunk: Cell::new(None),
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
@@ -510,6 +512,13 @@ pub struct ObjClosure {
     /// 2 = compile failed. This avoids a compiled-entry HashMap lookup on
     /// every hot recursive call.
     pub jit_state: Cell<u8>,
+    /// Consecutive JIT entry bailouts (guard failures). Reset to 0 by every
+    /// successful JIT return; once it hits `JIT_BAILOUT_LIMIT` the closure
+    /// deopts permanently (`jit_state = 2`). Without this, a single
+    /// mistyped call (e.g. one Float where Int was specialized) would
+    /// silently drop the closure to interpreter speed for the rest of the
+    /// process.
+    pub jit_bailouts: Cell<u8>,
     /// Cached native entry point for compiled closures. Present only when
     /// `jit_state == 1`.
     pub jit_thunk: Cell<Option<CompiledThunk>>,
@@ -585,6 +594,7 @@ impl ObjClosure {
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
+            jit_bailouts: Cell::new(0),
             jit_thunk: Cell::new(None),
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),

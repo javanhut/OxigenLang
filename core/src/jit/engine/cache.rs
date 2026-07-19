@@ -12,15 +12,32 @@
 
 use crate::vm::value::{ObjClosure, ObjStructDef, Value};
 
-/// Per-call-site GetGlobal cache. `version` tracks the VM's
-/// `globals_version` at the time the entry was populated; a mismatch
-/// means the globals map has been mutated and the cached `value` is
-/// stale.
+/// Per-call-site GetGlobal cache. `version` tracks the *per-name* version
+/// cell (owned by `JitInner::global_version_cells`) at the time the entry
+/// was populated; a mismatch means THIS global has been reassigned and the
+/// cached `value` is stale. Keying on a per-name cell instead of a VM-wide
+/// counter means a hot `total = total + i` loop only invalidates ICs for
+/// `total`, not every global read in the program.
+///
+/// `version_cell` starts pointing at `GLOBAL_VERSION_SENTINEL` (never
+/// written, and `version` starts at `u64::MAX`, so the first probe always
+/// misses); the miss path repoints it at the real per-name cell.
 #[repr(C)]
 pub(crate) struct GlobalCacheEntry {
     pub version: u64,
     pub value: Value,
+    pub version_cell: *const u64,
 }
+
+impl GlobalCacheEntry {
+    /// Byte offset of `version_cell`, loaded from emitted IR. (`version`
+    /// is at 0 and `value` at 8 — both baked into the GetGlobal hit path.)
+    pub(crate) const OFFSET_VERSION_CELL: i32 =
+        std::mem::offset_of!(GlobalCacheEntry, version_cell) as i32;
+}
+
+/// See `GlobalCacheEntry::version_cell`.
+pub(crate) static GLOBAL_VERSION_SENTINEL: u64 = 0;
 
 /// Per-call-site Call cache — readable from Cranelift IR.
 ///

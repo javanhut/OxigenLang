@@ -100,6 +100,19 @@ impl CallFrame {
     }
 }
 
+/// Recover an owned `Rc` from a `JitFrame`'s module-globals raw pointer.
+/// Sound only for pointers produced by `Rc::as_ptr` on an `Rc` that is still
+/// alive at the call site (see `active_module_globals_rc` for the invariant).
+unsafe fn mg_rc(ptr: *const HashMap<String, Value>) -> Option<Rc<HashMap<String, Value>>> {
+    if ptr.is_null() {
+        return None;
+    }
+    unsafe {
+        Rc::increment_strong_count(ptr);
+        Some(Rc::from_raw(ptr))
+    }
+}
+
 /// Opaque handle returned by `VM::frames_pop` to the JIT runtime so it can
 /// complete a Return without depending on the private `CallFrame` layout.
 #[allow(dead_code)]
@@ -228,10 +241,6 @@ pub struct VM {
     global_mutability: HashMap<String, bool>,
     global_type_constraints: HashMap<String, Option<String>>,
 
-    /// Version counter for the globals map — bumped on every write.
-    /// Used by the JIT's GetGlobal inline cache to detect staleness.
-    pub(crate) globals_version: u64,
-
     /// Active error handlers (innermost last). `PushHandler`/`PopHandler` manage
     /// this; on a runtime error the interpreter loop unwinds to the top handler
     /// whose frame is still within the current `execute_until` scope.
@@ -318,7 +327,6 @@ impl VM {
             script_args: Vec::new(),
             global_mutability: HashMap::new(),
             global_type_constraints: HashMap::new(),
-            globals_version: 0,
             error_handlers: Vec::new(),
             jit: JitEngine::new(),
             execution_mode: mode,
@@ -348,14 +356,6 @@ impl VM {
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub const fn jit_frame_view_offset() -> usize {
         std::mem::offset_of!(VM, jit_frame_view)
-    }
-
-    /// Byte offset of `globals_version` within `VM`. Used by the JIT's
-    /// inline GetGlobal hit-path to read the current version without a
-    /// helper call.
-    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
-    pub const fn globals_version_offset() -> usize {
-        std::mem::offset_of!(VM, globals_version)
     }
 
     /// Re-sync `self.stack`'s `Vec::len` from the JIT-visible
@@ -435,6 +435,7 @@ impl VM {
             call_count: std::cell::Cell::new(0),
             loop_count: std::cell::Cell::new(0),
             jit_state: std::cell::Cell::new(0),
+            jit_bailouts: std::cell::Cell::new(0),
             jit_thunk: std::cell::Cell::new(None),
             specialized_thunk: std::cell::Cell::new(None),
             specialized_arity: std::cell::Cell::new(0),
@@ -517,7 +518,7 @@ impl VM {
     /// Read the name string at constant index `name_idx`. The compiler
     /// guarantees globals use string constants, but we defensively return
     /// an error if that invariant is broken.
-    fn name_constant(&self, name_idx: u16) -> Result<Rc<String>, VMError> {
+    pub(crate) fn name_constant(&self, name_idx: u16) -> Result<Rc<String>, VMError> {
         match self.current_constant(name_idx).repr() {
             ValueRepr::String(s) => Ok(Rc::clone(s)),
             _ => Err(self.runtime_error("invalid global name")),
@@ -574,7 +575,7 @@ impl VM {
         }
         let val = self.peek(0).clone();
         self.globals.insert(name.to_string(), val);
-        self.globals_version = self.globals_version.wrapping_add(1);
+        self.jit.bump_global_version(name.as_str());
         Ok(())
     }
 
@@ -602,7 +603,7 @@ impl VM {
         }
         let val = self.pop();
         self.globals.insert(name.to_string(), val);
-        self.globals_version = self.globals_version.wrapping_add(1);
+        self.jit.bump_global_version(name.as_str());
         Ok(())
     }
 
@@ -621,7 +622,7 @@ impl VM {
             self.global_type_constraints
                 .insert(name.to_string(), Some(tn.to_string()));
         }
-        self.globals_version = self.globals_version.wrapping_add(1);
+        self.jit.bump_global_version(name.as_str());
         Ok(())
     }
 
@@ -1105,11 +1106,12 @@ impl VM {
                     .module_globals
                     .borrow()
                     .clone()
-                    .or_else(|| self.active_module_globals().map(|mg| Rc::new(mg.clone()))),
+                    .or_else(|| self.active_module_globals_rc()),
             ),
             call_count: std::cell::Cell::new(0),
             loop_count: std::cell::Cell::new(0),
             jit_state: std::cell::Cell::new(0),
+            jit_bailouts: std::cell::Cell::new(0),
             jit_thunk: std::cell::Cell::new(None),
             specialized_thunk: std::cell::Cell::new(None),
             specialized_arity: std::cell::Cell::new(0),
@@ -1179,6 +1181,29 @@ impl VM {
         unsafe {
             self.stack.set_len(self.stack_view.len);
         }
+        let v = self.stack.pop().expect("stack underflow");
+        self.stack_view.len = self.stack.len();
+        v
+    }
+
+    /// `push`/`pop` without the `set_len` resync. Only callable from the
+    /// dispatch loop, where `stack.len() == stack_view.len` always holds
+    /// (the invariant `peek` and the GetLocal/SetLocal arms already rely
+    /// on). JIT helpers must keep using `push`/`pop`, which tolerate a
+    /// stale `Vec::len` after inline JIT stack ops.
+    #[inline(always)]
+    fn push_fast(&mut self, value: Value) {
+        debug_assert_eq!(self.stack.len(), self.stack_view.len);
+        if self.stack.len() >= STACK_MAX {
+            panic!("stack overflow: exceeded {} slots", STACK_MAX);
+        }
+        self.stack.push(value);
+        self.stack_view.len = self.stack.len();
+    }
+
+    #[inline(always)]
+    fn pop_fast(&mut self) -> Value {
+        debug_assert_eq!(self.stack.len(), self.stack_view.len);
         let v = self.stack.pop().expect("stack underflow");
         self.stack_view.len = self.stack.len();
         v
@@ -1451,6 +1476,25 @@ impl VM {
         self.frames.last().and_then(|f| f.module_globals.as_deref())
     }
 
+    /// Owned-`Rc` variant of `active_module_globals` for call paths that
+    /// store the dict in a new `CallFrame`/`ObjClosure`. Cloning the `Rc`
+    /// instead of the `HashMap` avoids deep-copying every module global
+    /// (all keys + values) on every call made under a module context.
+    ///
+    /// Safety of the JIT-frame arm: a `JitFrame`'s `module_globals` raw
+    /// pointer always originates from `Rc::as_ptr` of an `Rc` that outlives
+    /// the frame (both `jit_frame_push_raw` call sites in `call_closure` /
+    /// `call_closure_fast_path`), so recovering an owned `Rc` via
+    /// `increment_strong_count` is sound.
+    fn active_module_globals_rc(&self) -> Option<Rc<HashMap<String, Value>>> {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top()
+                && !frame.module_globals.is_null() {
+                    return unsafe { mg_rc(frame.module_globals) };
+                }
+        self.frames.last().and_then(|f| f.module_globals.clone())
+    }
+
     /// Cheap presence-only test for `active_module_globals` — the JIT
     /// global IC uses this to decide whether to bypass its cache. We
     /// don't need the dict, just to know one exists, so this avoids
@@ -1648,6 +1692,33 @@ impl VM {
 
     #[inline(always)]
     fn execute_until_inner(&mut self, stop_depth: usize) -> Result<(), VMError> {
+        // Integer fast path for the hot binary ops: check both operands in
+        // place on the stack, compute without the generic ~20-arm type-match
+        // helpers, and write the result over the lhs slot — one Vec pop
+        // instead of two pops + a push (each of which does a
+        // `set_len`/`stack_view` resync). The dispatch loop always runs with
+        // `stack.len() == stack_view.len` (the same invariant `peek` and the
+        // GetLocal/SetLocal arms already rely on), so plain Vec ops + a
+        // trailing `stack_view.len` store are enough here.
+        macro_rules! int_fast_binop {
+            ($l:ident, $r:ident, $guard:expr, $fast:expr, $slow:ident) => {{
+                let n = self.stack.len();
+                if n >= 2
+                    && let (&Value::Integer($l), &Value::Integer($r)) =
+                        (&self.stack[n - 2], &self.stack[n - 1])
+                    && $guard
+                {
+                    self.stack.pop();
+                    self.stack[n - 2] = $fast;
+                    self.stack_view.len = n - 1;
+                } else {
+                    let b = self.pop_fast();
+                    let a = self.pop_fast();
+                    let result = self.$slow(a, b)?;
+                    self.push_fast(result);
+                }
+            }};
+        }
         loop {
             let frame_idx = self.frames.len() - 1;
 
@@ -1670,96 +1741,66 @@ impl VM {
                     // every call. For all other constants this is an ordinary
                     // clone (single discriminant branch of overhead).
                     let value = self.frames[frame_idx].read_constant(idx).fresh_clone();
-                    self.push(value);
+                    self.push_fast(value);
                 }
-                OpCode::None => self.push(Value::None),
-                OpCode::True => self.push(Value::Boolean(true)),
-                OpCode::False => self.push(Value::Boolean(false)),
+                OpCode::None => self.push_fast(Value::None),
+                OpCode::True => self.push_fast(Value::Boolean(true)),
+                OpCode::False => self.push_fast(Value::Boolean(false)),
 
                 // ── Stack Manipulation ──────────────────────────────
                 OpCode::Pop => {
-                    self.pop();
+                    self.pop_fast();
                 }
                 OpCode::Dup => {
                     let val = self.peek(0).clone();
-                    self.push(val);
+                    self.push_fast(val);
                 }
 
                 // ── Arithmetic ──────────────────────────────────────
-                OpCode::Add => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.binary_add(a, b)?;
-                    self.push(result);
-                }
-                OpCode::Subtract => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.binary_sub(a, b)?;
-                    self.push(result);
-                }
-                OpCode::Multiply => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.binary_mul(a, b)?;
-                    self.push(result);
-                }
+                OpCode::Add => int_fast_binop!(l, r, true, Value::Integer(l + r), binary_add),
+                OpCode::Subtract => int_fast_binop!(l, r, true, Value::Integer(l - r), binary_sub),
+                OpCode::Multiply => int_fast_binop!(l, r, true, Value::Integer(l * r), binary_mul),
                 OpCode::Divide => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.binary_div(a, b)?;
-                    self.push(result);
+                    int_fast_binop!(l, r, r != 0, Value::Integer(l / r), binary_div)
                 }
                 OpCode::Modulo => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.binary_mod(a, b)?;
-                    self.push(result);
+                    int_fast_binop!(l, r, r != 0, Value::Integer(l % r), binary_mod)
                 }
 
                 // ── Comparison ──────────────────────────────────────
-                OpCode::Equal => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let eq = self.values_equal_forced(a, b);
-                    self.push(Value::Boolean(eq));
+                OpCode::Equal | OpCode::NotEqual => {
+                    let want = op == OpCode::Equal;
+                    let n = self.stack.len();
+                    if n >= 2
+                        && let (&Value::Integer(l), &Value::Integer(r)) =
+                            (&self.stack[n - 2], &self.stack[n - 1])
+                    {
+                        self.stack.pop();
+                        self.stack[n - 2] = Value::Boolean((l == r) == want);
+                        self.stack_view.len = n - 1;
+                    } else {
+                        let b = self.pop_fast();
+                        let a = self.pop_fast();
+                        let eq = self.values_equal_forced(a, b);
+                        self.push_fast(Value::Boolean(eq == want));
+                    }
                 }
-                OpCode::NotEqual => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let eq = self.values_equal_forced(a, b);
-                    self.push(Value::Boolean(!eq));
-                }
-                OpCode::Less => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.compare_less(a, b)?;
-                    self.push(result);
-                }
+                OpCode::Less => int_fast_binop!(l, r, true, Value::Boolean(l < r), compare_less),
                 OpCode::LessEqual => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.compare_less_equal(a, b)?;
-                    self.push(result);
+                    int_fast_binop!(l, r, true, Value::Boolean(l <= r), compare_less_equal)
                 }
                 OpCode::Greater => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.compare_greater(a, b)?;
-                    self.push(result);
+                    int_fast_binop!(l, r, true, Value::Boolean(l > r), compare_greater)
                 }
                 OpCode::GreaterEqual => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.compare_greater_equal(a, b)?;
-                    self.push(result);
+                    int_fast_binop!(l, r, true, Value::Boolean(l >= r), compare_greater_equal)
                 }
 
                 // ── Logical ─────────────────────────────────────────
                 OpCode::Not => {
-                    let val = self.pop();
+                    let val = self.pop_fast();
                     let val = self.force(val);
-                    self.push(Value::Boolean(!val.is_truthy()));
+                    self.push_fast(Value::Boolean(!val.is_truthy()));
                 }
 
                 // ── Bitwise ─────────────────────────────────────────
@@ -1829,7 +1870,7 @@ impl VM {
                     let slot = self.frames[frame_idx].read_u16() as usize;
                     let offset = self.frames[frame_idx].slot_offset;
                     let value = self.stack[offset + slot].clone();
-                    self.push(value);
+                    self.push_fast(value);
                 }
                 OpCode::SetLocal => {
                     let slot = self.frames[frame_idx].read_u16() as usize;
@@ -1916,7 +1957,7 @@ impl VM {
                 }
                 OpCode::PopJumpIfFalse => {
                     let offset = self.frames[frame_idx].read_u16() as usize;
-                    let val = self.pop();
+                    let val = self.pop_fast();
                     if !val.is_truthy() {
                         self.frames[frame_idx].ip += offset;
                     }
@@ -2163,6 +2204,7 @@ impl VM {
                             // Matching error: bind it, then jump to the fallback.
                             if let Some(name) = binding_name.as_string() {
                                 self.globals.insert(name.to_string(), value);
+                                self.jit.bump_global_version(name);
                             }
                             self.pop();
                             self.frames[frame_idx].ip += jump_offset;
@@ -3400,18 +3442,16 @@ impl VM {
         let vm_ptr = self as *mut VM;
         let exit = unsafe { self.jit.invoke_thunk(vm_ptr, thunk, stop_depth) };
         Some(match exit {
-            crate::jit::JitExit::Returned => Ok(()),
+            crate::jit::JitExit::Returned => {
+                closure.jit_bailouts.set(0);
+                Ok(())
+            }
             crate::jit::JitExit::Bailout => {
                 let jit_frame = self
                     .jit_frame_pop_raw()
                     .expect("compiled bailout without active jit frame");
-                closure.jit_thunk.set(None);
-                closure.jit_state.set(2);
-                let inherited_mg = if jit_frame.module_globals.is_null() {
-                    None
-                } else {
-                    Some(unsafe { Rc::new((*jit_frame.module_globals).clone()) })
-                };
+                self.note_jit_bailout(closure);
+                let inherited_mg = unsafe { mg_rc(jit_frame.module_globals) };
                 self.frames.push(CallFrame {
                     closure: Rc::clone(closure),
                     ip: 0,
@@ -3422,6 +3462,22 @@ impl VM {
             }
             crate::jit::JitExit::RuntimeError(err) => Err(err),
         })
+    }
+
+    /// Record an entry-guard bailout. The frame is re-run by the
+    /// interpreter (bailouts happen before any side effects, at ip 0), and
+    /// the thunk stays installed for the next call — a single mistyped call
+    /// shouldn't drop the closure to interpreter speed forever. Only
+    /// `JIT_BAILOUT_LIMIT` *consecutive* bailouts (counter reset on every
+    /// successful JIT return) deopt permanently.
+    fn note_jit_bailout(&self, closure: &Rc<ObjClosure>) {
+        const JIT_BAILOUT_LIMIT: u8 = 4;
+        let n = closure.jit_bailouts.get().saturating_add(1);
+        closure.jit_bailouts.set(n);
+        if n >= JIT_BAILOUT_LIMIT {
+            closure.jit_thunk.set(None);
+            closure.jit_state.set(2);
+        }
     }
 
     fn call_closure(
@@ -3541,8 +3597,7 @@ impl VM {
 
         // Inherit module globals from the current frame if not explicitly provided,
         // so nested calls within a module function retain module scope access.
-        let inherited_mg =
-            module_globals.or_else(|| self.active_module_globals().map(|mg| Rc::new(mg.clone())));
+        let inherited_mg = module_globals.or_else(|| self.active_module_globals_rc());
 
         // Remember the pre-call depth so the JIT helper (if we enter it)
         // can drive `execute_until` for exactly this one activation.
@@ -3594,11 +3649,10 @@ impl VM {
             let vm_ptr = self as *mut VM;
             let exit = unsafe { self.jit.invoke_thunk(vm_ptr, thunk, stop_depth) };
             match exit {
-                crate::jit::JitExit::Returned => {}
+                crate::jit::JitExit::Returned => closure.jit_bailouts.set(0),
                 crate::jit::JitExit::Bailout => {
                     let _ = self.jit_frame_pop_raw();
-                    closure.jit_thunk.set(None);
-                    closure.jit_state.set(2);
+                    self.note_jit_bailout(&closure);
                     self.frames.push(CallFrame {
                         closure: Rc::clone(&closure),
                         ip: 0,
@@ -4027,12 +4081,14 @@ impl VM {
         if selective_names.is_empty() {
             // Namespace import
             let name = path_str.rsplit('/').next().unwrap_or(path_str).to_string();
+            self.jit.bump_global_version(&name);
             self.globals.insert(name, Value::Module(Rc::clone(module)));
         } else {
             // Selective import
             for name in selective_names {
                 if let Some(val) = module.globals.get(name) {
                     self.globals.insert(name.clone(), val.clone());
+                    self.jit.bump_global_version(name);
                 }
             }
         }

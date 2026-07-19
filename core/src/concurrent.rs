@@ -284,9 +284,20 @@ pub fn is_worker() -> bool {
     IS_WORKER.with(|w| w.get())
 }
 
+/// Set once the first worker picks up a task. Lets `cancelled()` skip the
+/// TLS read entirely in programs that never spawn — it's on every
+/// `call_closure`, so a recursion-heavy no-spawn program pays millions of
+/// TLS round-trips otherwise. Only worker threads can have a cancel flag,
+/// and each sets this before running its task body.
+static ANY_TASK_RUN: AtomicBool = AtomicBool::new(false);
+
 /// True if the running task was cancelled. Checked at every `call_closure`, so a
 /// tight callless loop or a parked recv won't see it until the next call.
+#[inline]
 pub fn cancelled() -> bool {
+    if !ANY_TASK_RUN.load(Ordering::Relaxed) {
+        return false;
+    }
     CUR_CANCEL.with(|c| c.borrow().as_ref().is_some_and(|f| f.load(Ordering::Relaxed)))
 }
 
@@ -434,6 +445,7 @@ fn spawn_worker(rx: Arc<Mutex<mpsc::Receiver<Task>>>, src: String) {
                     Ok(t) => t,
                     Err(_) => break, // channel closed
                 };
+                ANY_TASK_RUN.store(true, Ordering::Relaxed);
                 CUR_CANCEL.with(|c| *c.borrow_mut() = Some(task.cancel.clone()));
                 let result = match &mut built {
                     Ok(vm) => run_task(vm, task.callee, task.args, task.globals),
