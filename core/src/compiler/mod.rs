@@ -416,10 +416,10 @@ impl Compiler {
             other => other,
         };
         let idx = self.current_chunk().add_constant(value);
-        if idx > u16::MAX {
+        if idx > u16::MAX as usize {
             self.error("Too many constants in one chunk", line);
         }
-        idx
+        idx as u16
     }
 
     fn emit_constant(&mut self, value: Value, line: u32) {
@@ -541,7 +541,8 @@ impl Compiler {
     /// 2. `Pop` removes the duplicate top:      [.. RESULT, L1, .., L_{k-1}]
     /// 3. Close/pop L_{k-1}..L1 top-down (each is on top in turn) — `CloseUpvalue`
     ///    when captured (snapshots the still-live slot), else `Pop`:
-    ///                                          [.. RESULT]
+    ///    end state:                            [.. RESULT]
+    ///
     /// The RESULT ends up alone at the floor slot — exactly where the block's
     /// value belongs — with every captured body local closed.
     ///

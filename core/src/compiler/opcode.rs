@@ -307,7 +307,7 @@ impl OpCode {
     pub fn from_byte(byte: u8) -> Option<OpCode> {
         if byte <= OpCode::PopHandler as u8 {
             // SAFETY: OpCode is repr(u8) and we verified the range.
-            Some(unsafe { std::mem::transmute(byte) })
+            Some(unsafe { std::mem::transmute::<u8, OpCode>(byte) })
         } else {
             None
         }
@@ -606,10 +606,11 @@ impl Chunk {
         self.write(value as u8, line);
     }
 
-    /// Add a constant to the pool and return its index.
-    pub fn add_constant(&mut self, value: crate::vm::value::Value) -> u16 {
+    /// Add a constant to the pool and return its index. Returns `usize`
+    /// so the caller can detect u16 overflow before truncating.
+    pub fn add_constant(&mut self, value: crate::vm::value::Value) -> usize {
         self.constants.push(value);
-        (self.constants.len() - 1) as u16
+        self.constants.len() - 1
     }
 
     /// Return the encoded length of the instruction starting at `ip`.
@@ -675,6 +676,11 @@ impl Chunk {
     /// Current length of the bytecode.
     pub fn len(&self) -> usize {
         self.code.len()
+    }
+
+    /// True if no bytecode has been emitted yet.
+    pub fn is_empty(&self) -> bool {
+        self.code.is_empty()
     }
 
     /// Patch a u16 value at a previously emitted offset.

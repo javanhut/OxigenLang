@@ -1940,6 +1940,7 @@ impl Parser {
     }
 
     /// Parse call arguments, handling both positional and named: f(a, b, name=val)
+    #[allow(clippy::type_complexity)]
     fn parse_call_args(&mut self) -> Option<(Vec<Expression>, Vec<(String, Expression)>)> {
         let mut args = Vec::new();
         let mut named_args: Vec<(String, Expression)> = Vec::new();

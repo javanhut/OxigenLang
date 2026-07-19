@@ -42,12 +42,12 @@ fn test_parse_integer_literal() {
 
 #[test]
 fn test_parse_float_literal() {
-    let program = parse_ok("3.14");
+    let program = parse_ok("2.75");
     assert_eq!(program.statements.len(), 1);
 
     match &program.statements[0] {
         Statement::Expr(Expression::Float { value, .. }) => {
-            assert!((value - 3.14).abs() < f64::EPSILON);
+            assert!((value - 2.75).abs() < f64::EPSILON);
         }
         _ => panic!("Expected float expression"),
     }

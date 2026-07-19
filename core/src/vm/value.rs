@@ -146,7 +146,7 @@ mod layout_tests {
 
     #[test]
     fn value_float_layout_is_pinned() {
-        let v = Value::Float(3.141592653589793);
+        let v = Value::Float(std::f64::consts::PI);
         let ptr = &v as *const Value as *const u8;
         let tag = unsafe { *ptr };
         assert_eq!(tag, VALUE_TAG_FLOAT, "Float tag should be 1");
@@ -155,7 +155,7 @@ mod layout_tests {
                 .cast::<u64>()
                 .read_unaligned()
         };
-        assert_eq!(f64::from_bits(payload), 3.141592653589793);
+        assert_eq!(f64::from_bits(payload), std::f64::consts::PI);
     }
 
     /// The JIT's inline Call guard reads the tag byte at offset 0 and
@@ -565,6 +565,7 @@ pub struct ObjClosure {
 /// JIT inline GetUpvalue path defers to `jit_get_upvalue` until the
 /// helper observes `Closed(Integer)` and populates the cache.
 #[inline]
+#[allow(clippy::type_complexity)]
 pub fn make_upvalue_int_caches(n: usize) -> (Box<[Cell<u8>]>, Box<[Cell<i64>]>) {
     let kinds = (0..n)
         .map(|_| Cell::new(0u8))

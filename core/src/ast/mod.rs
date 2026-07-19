@@ -23,6 +23,7 @@ pub enum TypeAnnotation {
 }
 
 impl TypeAnnotation {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<TypeAnnotation> {
         match s {
             "int" => Some(TypeAnnotation::Int),

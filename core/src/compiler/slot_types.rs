@@ -714,9 +714,9 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
     // N ever holds?" answer.
     let mut result = vec![SlotType::Bottom; num_slots];
     for state in states.values() {
-        for i in 0..num_slots {
+        for (i, slot) in result.iter_mut().enumerate() {
             let ty = state.slot_types.get(i).copied().unwrap_or(SlotType::Bottom);
-            result[i] = result[i].join(ty);
+            *slot = slot.join(ty);
         }
     }
 
@@ -1218,6 +1218,7 @@ fn collect_int_mirror_param_slots(
 /// pair. A pair consists of:
 ///   - a `Pop` at IP `fall = branch_ip + branch_len`
 ///   - a `Pop` at IP `target = branch_ip + branch_len + offset`
+///
 /// If either IP isn't a `Pop`, the pair isn't recognized and we record
 /// neither (v1: be conservative — B2.1e falls back to the materialized-
 /// Bool path on unrecognized shapes).
@@ -2197,10 +2198,10 @@ mod tests {
                 // that we haven't built yet, so the compiler embeds the
                 // raw `Function` as a constant).
                 for c in &top.chunk.constants {
-                    if let Some(closure) = c.as_closure() {
-                        if closure.function.name.as_deref() == Some(want) {
-                            return (*closure.function).clone();
-                        }
+                    if let Some(closure) = c.as_closure()
+                        && closure.function.name.as_deref() == Some(want)
+                    {
+                        return (*closure.function).clone();
                     }
                 }
                 // Some compiler versions embed the `Function` directly
@@ -2209,10 +2210,10 @@ mod tests {
                 for c in &top.chunk.constants {
                     if let Some(closure) = c.as_closure() {
                         for inner in &closure.function.chunk.constants {
-                            if let Some(ic) = inner.as_closure() {
-                                if ic.function.name.as_deref() == Some(want) {
-                                    return (*ic.function).clone();
-                                }
+                            if let Some(ic) = inner.as_closure()
+                                && ic.function.name.as_deref() == Some(want)
+                            {
+                                return (*ic.function).clone();
                             }
                         }
                     }

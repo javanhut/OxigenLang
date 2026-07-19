@@ -2461,8 +2461,7 @@ impl VM {
                     if let Some(var_name) = name.as_string() {
                         let has_constraint = self
                             .global_type_constraints
-                            .get(var_name.as_ref())
-                            .is_some();
+                            .contains_key(var_name.as_ref());
                         self.push(Value::Boolean(!has_constraint));
                     } else {
                         self.push(Value::Boolean(true));

@@ -198,8 +198,8 @@ pub(crate) struct JitCounters {
     /// avoiding the ~20-cycle `idiv` lowering Cranelift emits at
     /// `opt_level=none`.
     pub virt_div_pow2_lowered: std::cell::Cell<u64>,
-    /// B2.1f: incremented every time the fused `Equal` / `NotEqual`
-    /// + `JumpIf*` path fires with both operands staged as virt Ints.
+    /// B2.1f: incremented every time the fused `Equal` / `NotEqual` +
+    /// `JumpIf*` path fires with both operands staged as virt Ints.
     /// Measures how often the fast branch-fusion replaces a boxed-Bool
     /// round trip through `refs.eq`/`refs.ne`.
     pub virt_branch_eq_hit: std::cell::Cell<u64>,

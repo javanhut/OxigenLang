@@ -50,6 +50,10 @@ use defs::{
 pub(crate) use defs::{EntryKind, InvokeOutcome, SpecializedEntryKind};
 use helpers::{HelperIds, HelperRefs, declare_helper_refs, declare_helpers, register_helpers};
 
+// vec_box allowed: the IC-cache Boxes are load-bearing — their raw
+// pointers are baked into emitted IR, so entries must not move when
+// the Vec reallocates. See field docs below.
+#[allow(clippy::vec_box)]
 pub(super) struct JitInner {
     module: JITModule,
     ctx: Context,
@@ -5438,6 +5442,7 @@ fn emit_int_fast_arith(
 ///
 /// Any guard failure branches to the miss path so the helper can do the
 /// full dispatch (and repopulate the cache if the shape has changed).
+#[allow(clippy::too_many_arguments)]
 fn emit_inline_struct_field_add(
     builder: &mut FunctionBuilder<'_>,
     exit_block: Block,
@@ -6075,6 +6080,7 @@ fn iconst_imm(builder: &FunctionBuilder<'_>, val: cranelift_codegen::ir::Value) 
 /// Caller must invoke this BEFORE emitting any IR for the Modulo
 /// itself — otherwise the rewrite would be too late and `srem` would
 /// stay in the IR.
+#[allow(clippy::too_many_arguments)]
 fn try_emit_parity_branch_peephole(
     builder: &mut FunctionBuilder<'_>,
     chunk: &Chunk,
@@ -6303,6 +6309,7 @@ fn try_emit_sdiv_pow2_peephole(
     Some(q)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_int_virt_divmod(
     builder: &mut FunctionBuilder<'_>,
     exit_block: Block,
@@ -6397,6 +6404,7 @@ fn emit_int_virt_divmod(
 /// payload in place and skips the temporary stack traffic. Non-integer
 /// locals replay the original helper sequence so mixed numeric/string
 /// semantics stay unchanged.
+#[allow(clippy::too_many_arguments)]
 fn emit_inline_local_const_arith_update(
     builder: &mut FunctionBuilder<'_>,
     exit_block: Block,
@@ -6496,6 +6504,7 @@ fn emit_inline_local_const_arith_update(
 /// Multiply; Add/Subtract; SetLocal(dst); [Pop]`. This covers tight-loop
 /// updates like `total := total + i * 2` without building the temporary
 /// stack values on the integer path.
+#[allow(clippy::too_many_arguments)]
 fn emit_inline_local_scaled_arith_update(
     builder: &mut FunctionBuilder<'_>,
     exit_block: Block,
@@ -6797,6 +6806,7 @@ fn emit_int_fast_eq(
 // status (`refs.lt`/`le`/`gt`/`ge`); false when it returns nothing
 // (`refs.eq`/`ne`). The slow path skips the err-block / status brif
 // when false because there's no value to read.
+#[allow(clippy::too_many_arguments)]
 fn emit_fused_int_cmp_branch(
     builder: &mut FunctionBuilder<'_>,
     exit_block: Block,
@@ -6948,23 +6958,23 @@ fn emit_fused_int_cmp_branch(
     }
 }
 
-/// Inline fast path for `GetLocal(slot)`. Reads the slot's 16-byte
-/// `Value` and pushes a clone onto the VM stack, all inline:
-///
-/// * **Primitive tags (0..=6):** the source value's bit pattern is a
-///   valid clone — just memcpy 16 bytes to the new top and bump
-///   `stack_view.len`. No Rc traffic, no variant dispatch.
-/// * **Heap-Rc tags (7..=12, 14..=21):** memcpy + atomic-free
-///   strong-count bump on the `RcBox` at the payload pointer. Mirrors
-///   what `Value::Clone` does for these variants without crossing FFI.
-///   Eliminates the residual `jit_get_local` helper crossings on hot
-///   GetLocal sites whose slot holds a Closure / Array / String /
-///   StructInstance / etc.
-/// * **`Value::Builtin` (tag 13):** the payload is a function pointer,
-///   not an `Rc`. Memcpy is sufficient (it's `Copy`); no bump.
-///
-/// The whole path is a single straight-line `tag-load + memcpy +
-/// optional Rc bump + len bump`. No helper call.
+// Inline fast path for `GetLocal(slot)`. Reads the slot's 16-byte
+// `Value` and pushes a clone onto the VM stack, all inline:
+//
+// * **Primitive tags (0..=6):** the source value's bit pattern is a
+//   valid clone — just memcpy 16 bytes to the new top and bump
+//   `stack_view.len`. No Rc traffic, no variant dispatch.
+// * **Heap-Rc tags (7..=12, 14..=21):** memcpy + atomic-free
+//   strong-count bump on the `RcBox` at the payload pointer. Mirrors
+//   what `Value::Clone` does for these variants without crossing FFI.
+//   Eliminates the residual `jit_get_local` helper crossings on hot
+//   GetLocal sites whose slot holds a Closure / Array / String /
+//   StructInstance / etc.
+// * **`Value::Builtin` (tag 13):** the payload is a function pointer,
+//   not an `Rc`. Memcpy is sufficient (it's `Copy`); no bump.
+//
+// The whole path is a single straight-line `tag-load + memcpy +
+// optional Rc bump + len bump`. No helper call.
 
 /// Predicate: is it safe to inline the Generic-entry Return as a
 /// raw `stack_view.len = slot_offset + 1` truncation? Returns true
