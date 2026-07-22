@@ -183,11 +183,20 @@ fn executable_script_runs_via_shebang() {
     perms.set_mode(0o755);
     fs::set_permissions(&script, perms).unwrap();
 
-    let output = Command::new(&script)
-        .current_dir(workspace_root())
-        .arg("Alice")
-        .output()
-        .unwrap();
+    // ponytail: sibling tests fork while we hold a writable fd to the script, so exec
+    // can hit ETXTBSY. Retry until that fd is gone.
+    let output = loop {
+        match Command::new(&script)
+            .current_dir(workspace_root())
+            .arg("Alice")
+            .output()
+        {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            other => break other.unwrap(),
+        }
+    };
     assert!(output.status.success(), "stderr:\n{}", stderr(&output));
     assert_eq!(stdout(&output), "Alice\n");
 }
