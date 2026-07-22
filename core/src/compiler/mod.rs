@@ -2531,14 +2531,12 @@ impl Compiler {
         if self.current_frame().scope_depth > 0 {
             // add_local for both "_" and real names — "_" just occupies the slot
             self.add_local(&name.value, true, None);
+        } else if name.value == "_" {
+            self.emit_op(OpCode::Pop, line);
         } else {
-            if name.value == "_" {
-                self.emit_op(OpCode::Pop, line);
-            } else {
-                let name_const =
-                    self.make_constant(Value::String(rc_str(name.value.as_str())), line);
-                self.emit_op_u16(OpCode::DefineGlobal, name_const, line);
-            }
+            let name_const =
+                self.make_constant(Value::String(rc_str(name.value.as_str())), line);
+            self.emit_op_u16(OpCode::DefineGlobal, name_const, line);
         }
     }
 

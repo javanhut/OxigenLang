@@ -4302,7 +4302,15 @@ impl VM {
                         .runtime_error(&format!("cannot convert {} to FLOAT", value.type_name()))),
                 }
             }
-            "STRING" => Ok(Value::String(rc_str(format!("{}", value)))),
+            // None is NOT stringifiable: `t <str> := os.env_get("X")` on an
+            // unset var used to bind the 4-char string "None", which is
+            // truthy and never `== None`, so every absence check silently
+            // failed. Every other target already rejects None; STRING was the
+            // outlier. Use `str(x)` for an explicit "None" rendering.
+            "STRING" => match value.repr() {
+                ValueRepr::None => Err(self.runtime_error("cannot convert NONE to STRING")),
+                _ => Ok(Value::String(rc_str(format!("{}", value)))),
+            },
             "BOOLEAN" => match value.repr() {
                 ValueRepr::Boolean(_) => Ok(value.clone()),
                 _ => Ok(Value::Boolean(value.is_truthy())),

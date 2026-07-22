@@ -484,7 +484,7 @@ fn main() {
         Some("test") => run_tests_command(&filtered_args[2..]),
         Some("--help") | Some("-h") => {
             println!("Oxigen Version: {}", env!("CARGO_PKG_VERSION"));
-            println!("");
+            println!();
             println!("--version/-v:  Get Oxigen Version");
             println!("fmt [name of file/directory]:  Formats the Oxigen File with proper Syntax");
             println!("check [name of file/directory]:  Checks the file for Syntax errors.");
