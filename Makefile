@@ -1,4 +1,6 @@
-PREFIX ?= /usr/local
+# /usr/local when writable (root, sudo, Intel-mac Homebrew), else ~/.local so
+# plain `make install` never needs sudo. Override with PREFIX=.
+PREFIX ?= $(shell [ -w /usr/local/bin ] && echo /usr/local || echo $$HOME/.local)
 BINDIR = $(PREFIX)/bin
 LIBDIR = $(PREFIX)/lib/oxigen/stdlib
 
