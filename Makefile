@@ -68,8 +68,12 @@ install-lsp: build-lsp
 	@echo "Installing oxigen-lsp to $(BINDIR)..."
 	install -d $(BINDIR)
 	install -m 755 target/release/oxigen-lsp $(BINDIR)/oxigen-lsp
+	@echo "Installing stdlib to $(LIBDIR) (the LSP reads it for module completions)..."
+	install -d $(LIBDIR)
+	install -m 644 stdlib/*.oxi $(LIBDIR)/
 	@echo "oxigen-lsp installed successfully."
 	@echo "  Binary: $(BINDIR)/oxigen-lsp"
+	@echo "  Stdlib: $(LIBDIR)/"
 
 # One-shot setup for a Neovim / NvChad ("nvcrow") user: installs the oxigen-lsp
 # binary (via install-lsp) AND drops the ftdetect, syntax, and lsp config files

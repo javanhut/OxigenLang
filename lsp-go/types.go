@@ -134,10 +134,12 @@ type CompletionParams struct {
 }
 
 type CompletionItem struct {
-	Label         string         `json:"label"`
-	Kind          *int           `json:"kind,omitempty"`
-	Detail        string         `json:"detail,omitempty"`
-	Documentation *MarkupContent `json:"documentation,omitempty"`
+	Label            string         `json:"label"`
+	Kind             *int           `json:"kind,omitempty"`
+	Detail           string         `json:"detail,omitempty"`
+	Documentation    *MarkupContent `json:"documentation,omitempty"`
+	InsertText       string         `json:"insertText,omitempty"`
+	InsertTextFormat *int           `json:"insertTextFormat,omitempty"` // 2 = snippet
 }
 
 // ── Hover ──
@@ -194,6 +196,7 @@ const (
 	CompletionKindModule        = 9
 	CompletionKindEnum          = 13
 	CompletionKindKeyword       = 14
+	CompletionKindSnippet       = 15
 	CompletionKindStruct        = 22
 	CompletionKindTypeParameter = 25
 )

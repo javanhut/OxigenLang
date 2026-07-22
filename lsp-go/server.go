@@ -22,6 +22,7 @@ type Server struct {
 	writerMu   sync.Mutex
 	oxigenBin  string
 	stdlibPath string
+	snippetsOK bool
 
 	diagMu     sync.Mutex
 	diagTimers map[string]*time.Timer // per-URI debounce
@@ -154,6 +155,24 @@ func (s *Server) handleNotification(msg Request) {
 // ── Lifecycle ──
 
 func (s *Server) handleInitialize(msg Request) {
+	// Only offer snippet-format completions to clients that can expand them.
+	var params struct {
+		Capabilities struct {
+			TextDocument struct {
+				Completion struct {
+					CompletionItem struct {
+						SnippetSupport bool `json:"snippetSupport"`
+					} `json:"completionItem"`
+				} `json:"completion"`
+			} `json:"textDocument"`
+		} `json:"capabilities"`
+	}
+	if msg.Params != nil {
+		if err := json.Unmarshal(msg.Params, &params); err == nil {
+			s.snippetsOK = params.Capabilities.TextDocument.Completion.CompletionItem.SnippetSupport
+		}
+	}
+
 	result := InitializeResult{
 		Capabilities: ServerCapabilities{
 			TextDocumentSync: 1, // Full
@@ -259,7 +278,7 @@ func (s *Server) handleCompletion(msg Request) {
 		return
 	}
 
-	items := getCompletions(content, params.Position, params.TextDocument.URI, s.stdlibPath)
+	items := getCompletions(content, params.Position, params.TextDocument.URI, s.stdlibPath, s.snippetsOK)
 	s.respond(msg.ID, items)
 }
 

@@ -1,6 +1,9 @@
 package main
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 type keywordInfo struct {
 	name   string
@@ -108,6 +111,34 @@ var typeNames = []keywordInfo{
 	{"Error||Value", "A value that is either an Error or a Value (error/value model)"},
 }
 
+// Block templates offered as snippet completions (when the client supports
+// snippets). Bodies use LSP snippet syntax: ${n:placeholder}, $0 = final stop.
+type snippetInfo struct {
+	label  string
+	detail string
+	body   string
+}
+
+var snippets = []snippetInfo{
+	{"fun", "fun name(args) { ... }", "fun ${1:name}($2) {\n\t$0\n}"},
+	{"struct", "struct Name { ... }", "struct ${1:Name} {\n\t${2:field} <${3:type}>\n}"},
+	{"main", "main { ... }", "main {\n\t$0\n}"},
+	{"each", "each item in collection { ... }", "each ${1:item} in ${2:collection} {\n\t$0\n}"},
+	{"repeat", "repeat when condition { ... }", "repeat when ${1:condition} {\n\t$0\n}"},
+	{"option", "option { cond -> value, default }", "option { ${1:cond} -> ${2:value}, ${3:default} }"},
+	{"choose", "choose val { pattern -> ... }", "choose ${1:val} {\n\t${2:pattern} -> ${3:expr}\n}"},
+	{"introduce", "introduce {names} from module", "introduce {${2:names}} from ${1:module}"},
+	{"test", "<test>(\"name\") { ... }", "<test>(\"${1:name}\") {\n\t$0\n}"},
+	{"includes", "StructName includes { ... }", "${1:StructName} includes {\n\tfun ${2:method}($3) {\n\t\t$0\n\t}\n}"},
+}
+
+var (
+	introduceModRe    = regexp.MustCompile(`^(?:introduce|intro)(?:\s+\w*)?$`)
+	selectiveFromRe   = regexp.MustCompile(`^(?:introduce|intro)\s*\{[^}]*\}\s*from\s+\w*$`)
+	selectiveBracesRe = regexp.MustCompile(`^(?:introduce|intro)\s*\{[^}]*$`)
+	fromModuleRe      = regexp.MustCompile(`\}\s*from\s+(\w+)`)
+)
+
 type completionContext int
 
 const (
@@ -145,10 +176,19 @@ func detectCompletionContext(source string, pos Position, idx *docIndex, stdlibP
 		return contextShebang, ""
 	}
 
-	// Check for introduce/intro context
-	if trimmed == "introduce" || trimmed == "intro" ||
-		strings.HasSuffix(trimmed, "introduce ") || strings.HasSuffix(trimmed, "intro ") {
+	// Check for introduce/intro context. Matches while the module name is
+	// still being typed (`introduce o`), and after `from` in a selective
+	// import (`introduce {upper} from st`).
+	if introduceModRe.MatchString(trimmed) || selectiveFromRe.MatchString(trimmed) {
 		return contextAfterIntroduce, ""
+	}
+
+	// Cursor inside the braces of a selective import: complete the module's
+	// functions if the module is already named after `from` on this line.
+	if selectiveBracesRe.MatchString(trimmed) {
+		if m := fromModuleRe.FindStringSubmatch(line); m != nil {
+			return contextAfterModuleDot, m[1]
+		}
 	}
 
 	// Check for `receiver.member` access. The receiver may be a stdlib module, a
@@ -290,7 +330,7 @@ func isIdentChar(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
 
-func getCompletions(source string, pos Position, uri, stdlibPath string) []CompletionItem {
+func getCompletions(source string, pos Position, uri, stdlibPath string, snippetsOK bool) []CompletionItem {
 	// Don't pop up keyword/builtin completions while the cursor is inside the
 	// text of a string literal — including triple-quoted multi-line strings.
 	// Interpolation expressions (`{...}`) are still real code, so completions
@@ -321,7 +361,7 @@ func getCompletions(source string, pos Position, uri, stdlibPath string) []Compl
 		// `expect` is auto-imported by the test runner in *_test.oxi files, so
 		// only offer it where tests plausibly live.
 		testCtx := strings.HasSuffix(uri, "_test.oxi") || strings.Contains(source, "<test")
-		return generalCompletions(idx, int(pos.Line), testCtx)
+		return generalCompletions(idx, int(pos.Line), testCtx, snippetsOK)
 	}
 }
 
@@ -352,8 +392,22 @@ func shebangCompletions() []CompletionItem {
 	}
 }
 
-func generalCompletions(idx *docIndex, lineIdx int, testCtx bool) []CompletionItem {
-	items := make([]CompletionItem, 0, len(keywords)+len(builtins))
+func generalCompletions(idx *docIndex, lineIdx int, testCtx, snippetsOK bool) []CompletionItem {
+	items := make([]CompletionItem, 0, len(keywords)+len(builtins)+len(snippets))
+
+	if snippetsOK {
+		snipKind := CompletionKindSnippet
+		snipFmt := 2
+		for _, sn := range snippets {
+			items = append(items, CompletionItem{
+				Label:            sn.label,
+				Kind:             &snipKind,
+				Detail:           sn.detail,
+				InsertText:       sn.body,
+				InsertTextFormat: &snipFmt,
+			})
+		}
+	}
 
 	kwKind := CompletionKindKeyword
 	for _, kw := range keywords {
