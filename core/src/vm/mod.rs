@@ -35,8 +35,8 @@ pub(crate) fn type_matches(expected: &str, actual: &str) -> bool {
 /// then the cwd, then a user install under `~/.oxigen`.
 pub(crate) fn find_stdlib_path() -> PathBuf {
     // 1. Relative to executable (dev: target/debug/oxigen + stdlib/)
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent() {
             let candidate = exe_dir.join("stdlib");
             if candidate.is_dir() {
                 return candidate;
@@ -49,7 +49,6 @@ pub(crate) fn find_stdlib_path() -> PathBuf {
                 }
             }
         }
-    }
     // 3. Current working directory (preferred for local development)
     let candidate = PathBuf::from("stdlib");
     if candidate.is_dir() {
@@ -98,6 +97,19 @@ impl CallFrame {
 
     fn read_constant(&self, idx: u16) -> &Value {
         &self.closure.function.chunk.constants[idx as usize]
+    }
+}
+
+/// Recover an owned `Rc` from a `JitFrame`'s module-globals raw pointer.
+/// Sound only for pointers produced by `Rc::as_ptr` on an `Rc` that is still
+/// alive at the call site (see `active_module_globals_rc` for the invariant).
+unsafe fn mg_rc(ptr: *const HashMap<String, Value>) -> Option<Rc<HashMap<String, Value>>> {
+    if ptr.is_null() {
+        return None;
+    }
+    unsafe {
+        Rc::increment_strong_count(ptr);
+        Some(Rc::from_raw(ptr))
     }
 }
 
@@ -178,6 +190,13 @@ impl StackView {
     pub const OFFSET_LEN: i32 = 8;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    Interpreter,
+    TieredJit,
+    EagerJit,
+}
+
 pub struct VM {
     /// Cached view of `stack`'s raw parts for the JIT. Read via direct
     /// memory loads at a pinned offset from `&mut VM`. Placed first so
@@ -222,10 +241,6 @@ pub struct VM {
     global_mutability: HashMap<String, bool>,
     global_type_constraints: HashMap<String, Option<String>>,
 
-    /// Version counter for the globals map — bumped on every write.
-    /// Used by the JIT's GetGlobal inline cache to detect staleness.
-    pub(crate) globals_version: u64,
-
     /// Active error handlers (innermost last). `PushHandler`/`PopHandler` manage
     /// this; on a runtime error the interpreter loop unwinds to the top handler
     /// whose frame is still within the current `execute_until` scope.
@@ -233,6 +248,7 @@ pub struct VM {
 
     /// Baseline JIT engine. Stub/no-op when the `jit` feature is off.
     pub jit: JitEngine,
+    execution_mode: ExecutionMode,
 }
 
 /// A recoverable-error landing pad installed by `PushHandler`. Records the
@@ -250,8 +266,30 @@ struct ErrorHandler {
     jit_frame_len: usize,
 }
 
+impl Default for VM {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VM {
     pub fn new() -> Self {
+        Self::new_with_mode(ExecutionMode::TieredJit)
+    }
+
+    pub fn new_interpreter() -> Self {
+        Self::new_with_mode(ExecutionMode::Interpreter)
+    }
+
+    pub fn new_tiered() -> Self {
+        Self::new_with_mode(ExecutionMode::TieredJit)
+    }
+
+    pub fn new_eager_jit() -> Self {
+        Self::new_with_mode(ExecutionMode::EagerJit)
+    }
+
+    pub fn new_with_mode(mode: ExecutionMode) -> Self {
         let mut globals = HashMap::new();
         builtins::register_builtins(&mut globals);
 
@@ -271,7 +309,7 @@ impl VM {
             len: 0,
         };
 
-        VM {
+        let mut vm = VM {
             stack_view,
             jit_frame_view,
             jit_executing: std::cell::Cell::new(false),
@@ -289,10 +327,23 @@ impl VM {
             script_args: Vec::new(),
             global_mutability: HashMap::new(),
             global_type_constraints: HashMap::new(),
-            globals_version: 0,
             error_handlers: Vec::new(),
             jit: JitEngine::new(),
+            execution_mode: mode,
+        };
+        match mode {
+            ExecutionMode::Interpreter => vm.jit.disable(),
+            ExecutionMode::TieredJit => {}
+            ExecutionMode::EagerJit => {
+                vm.jit.set_threshold(1);
+                vm.jit.set_loop_threshold(1);
+            }
         }
+        vm
+    }
+
+    pub fn execution_mode(&self) -> ExecutionMode {
+        self.execution_mode
     }
 
     /// Runtime-computed offset of `stack_view` within `VM`. The JIT uses
@@ -305,14 +356,6 @@ impl VM {
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub const fn jit_frame_view_offset() -> usize {
         std::mem::offset_of!(VM, jit_frame_view)
-    }
-
-    /// Byte offset of `globals_version` within `VM`. Used by the JIT's
-    /// inline GetGlobal hit-path to read the current version without a
-    /// helper call.
-    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
-    pub const fn globals_version_offset() -> usize {
-        std::mem::offset_of!(VM, globals_version)
     }
 
     /// Re-sync `self.stack`'s `Vec::len` from the JIT-visible
@@ -392,6 +435,7 @@ impl VM {
             call_count: std::cell::Cell::new(0),
             loop_count: std::cell::Cell::new(0),
             jit_state: std::cell::Cell::new(0),
+            jit_bailouts: std::cell::Cell::new(0),
             jit_thunk: std::cell::Cell::new(None),
             specialized_thunk: std::cell::Cell::new(None),
             specialized_arity: std::cell::Cell::new(0),
@@ -474,7 +518,7 @@ impl VM {
     /// Read the name string at constant index `name_idx`. The compiler
     /// guarantees globals use string constants, but we defensively return
     /// an error if that invariant is broken.
-    fn name_constant(&self, name_idx: u16) -> Result<Rc<String>, VMError> {
+    pub(crate) fn name_constant(&self, name_idx: u16) -> Result<Rc<String>, VMError> {
         match self.current_constant(name_idx).repr() {
             ValueRepr::String(s) => Ok(Rc::clone(s)),
             _ => Err(self.runtime_error("invalid global name")),
@@ -531,7 +575,7 @@ impl VM {
         }
         let val = self.peek(0).clone();
         self.globals.insert(name.to_string(), val);
-        self.globals_version = self.globals_version.wrapping_add(1);
+        self.jit.bump_global_version(name.as_str());
         Ok(())
     }
 
@@ -559,7 +603,7 @@ impl VM {
         }
         let val = self.pop();
         self.globals.insert(name.to_string(), val);
-        self.globals_version = self.globals_version.wrapping_add(1);
+        self.jit.bump_global_version(name.as_str());
         Ok(())
     }
 
@@ -578,7 +622,7 @@ impl VM {
             self.global_type_constraints
                 .insert(name.to_string(), Some(tn.to_string()));
         }
-        self.globals_version = self.globals_version.wrapping_add(1);
+        self.jit.bump_global_version(name.as_str());
         Ok(())
     }
 
@@ -1062,11 +1106,12 @@ impl VM {
                     .module_globals
                     .borrow()
                     .clone()
-                    .or_else(|| self.active_module_globals().map(|mg| Rc::new(mg.clone()))),
+                    .or_else(|| self.active_module_globals_rc()),
             ),
             call_count: std::cell::Cell::new(0),
             loop_count: std::cell::Cell::new(0),
             jit_state: std::cell::Cell::new(0),
+            jit_bailouts: std::cell::Cell::new(0),
             jit_thunk: std::cell::Cell::new(None),
             specialized_thunk: std::cell::Cell::new(None),
             specialized_arity: std::cell::Cell::new(0),
@@ -1141,6 +1186,29 @@ impl VM {
         v
     }
 
+    /// `push`/`pop` without the `set_len` resync. Only callable from the
+    /// dispatch loop, where `stack.len() == stack_view.len` always holds
+    /// (the invariant `peek` and the GetLocal/SetLocal arms already rely
+    /// on). JIT helpers must keep using `push`/`pop`, which tolerate a
+    /// stale `Vec::len` after inline JIT stack ops.
+    #[inline(always)]
+    fn push_fast(&mut self, value: Value) {
+        debug_assert_eq!(self.stack.len(), self.stack_view.len);
+        if self.stack.len() >= STACK_MAX {
+            panic!("stack overflow: exceeded {} slots", STACK_MAX);
+        }
+        self.stack.push(value);
+        self.stack_view.len = self.stack.len();
+    }
+
+    #[inline(always)]
+    fn pop_fast(&mut self) -> Value {
+        debug_assert_eq!(self.stack.len(), self.stack_view.len);
+        let v = self.stack.pop().expect("stack underflow");
+        self.stack_view.len = self.stack.len();
+        v
+    }
+
     pub(crate) fn peek(&self, distance: usize) -> &Value {
         &self.stack[self.stack.len() - 1 - distance]
     }
@@ -1160,11 +1228,10 @@ impl VM {
 
     #[allow(dead_code)]
     pub(crate) fn current_slot_offset(&self) -> usize {
-        if self.jit_executing.get() {
-            if let Some(f) = self.jit_frame_top() {
+        if self.jit_executing.get()
+            && let Some(f) = self.jit_frame_top() {
                 return f.slot_offset;
             }
-        }
         self.frames.last().map(|f| f.slot_offset).unwrap_or(0)
     }
 
@@ -1175,12 +1242,11 @@ impl VM {
         // JIT's `jit_push_constant` helper also materializes a fresh, unaliased
         // collection for typed zero-init heap defaults instead of sharing one
         // `Rc<RefCell<…>>` across calls.
-        if self.jit_executing.get() {
-            if let Some(frame) = self.jit_frame_top() {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top() {
                 let closure = unsafe { &*frame.closure_raw };
                 return closure.function.chunk.constants[idx as usize].fresh_clone();
             }
-        }
         let frame = self.frames.last().unwrap();
         frame.closure.function.chunk.constants[idx as usize].fresh_clone()
     }
@@ -1342,11 +1408,10 @@ impl VM {
     }
 
     fn current_line(&self) -> u32 {
-        if self.jit_executing.get() {
-            if let Some(frame) = self.jit_frame_top() {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top() {
                 return frame.line;
             }
-        }
         // No frame yet (e.g. a cancel check that fires at call entry before the
         // frame is pushed): there's no line to report — diagnostics, never panic.
         let Some(frame) = self.frames.last() else {
@@ -1367,11 +1432,10 @@ impl VM {
     /// since `JitFrame` only carries the line — the caret-rendering code
     /// in `format_error` falls back to no caret when col is 0.
     fn current_column(&self) -> u32 {
-        if self.jit_executing.get() {
-            if let Some(frame) = self.jit_frame_top() {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top() {
                 return frame.column;
             }
-        }
         let Some(frame) = self.frames.last() else {
             return 0;
         };
@@ -1388,11 +1452,10 @@ impl VM {
 
     #[inline(always)]
     pub(crate) fn active_closure(&self) -> &ObjClosure {
-        if self.jit_executing.get() {
-            if let Some(frame) = self.jit_frame_top() {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top() {
                 return unsafe { &*frame.closure_raw };
             }
-        }
         &self.frames.last().unwrap().closure
     }
 
@@ -1405,14 +1468,31 @@ impl VM {
 
     #[inline(always)]
     fn active_module_globals(&self) -> Option<&HashMap<String, Value>> {
-        if self.jit_executing.get() {
-            if let Some(frame) = self.jit_frame_top() {
-                if !frame.module_globals.is_null() {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top()
+                && !frame.module_globals.is_null() {
                     return Some(unsafe { &*frame.module_globals });
                 }
-            }
-        }
         self.frames.last().and_then(|f| f.module_globals.as_deref())
+    }
+
+    /// Owned-`Rc` variant of `active_module_globals` for call paths that
+    /// store the dict in a new `CallFrame`/`ObjClosure`. Cloning the `Rc`
+    /// instead of the `HashMap` avoids deep-copying every module global
+    /// (all keys + values) on every call made under a module context.
+    ///
+    /// Safety of the JIT-frame arm: a `JitFrame`'s `module_globals` raw
+    /// pointer always originates from `Rc::as_ptr` of an `Rc` that outlives
+    /// the frame (both `jit_frame_push_raw` call sites in `call_closure` /
+    /// `call_closure_fast_path`), so recovering an owned `Rc` via
+    /// `increment_strong_count` is sound.
+    fn active_module_globals_rc(&self) -> Option<Rc<HashMap<String, Value>>> {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top()
+                && !frame.module_globals.is_null() {
+                    return unsafe { mg_rc(frame.module_globals) };
+                }
+        self.frames.last().and_then(|f| f.module_globals.clone())
     }
 
     /// Cheap presence-only test for `active_module_globals` — the JIT
@@ -1422,13 +1502,11 @@ impl VM {
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn has_active_module_globals(&self) -> bool {
-        if self.jit_executing.get() {
-            if let Some(frame) = self.jit_frame_top() {
-                if !frame.module_globals.is_null() {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top()
+                && !frame.module_globals.is_null() {
                     return true;
                 }
-            }
-        }
         self.frames
             .last()
             .map(|f| f.module_globals.is_some())
@@ -1452,8 +1530,8 @@ impl VM {
             None => out.push_str(&format!("  --> {}\n", location)),
         }
 
-        if !self.source.is_empty() {
-            if let Some(source_line) = self.source.lines().nth(line_num.saturating_sub(1)) {
+        if !self.source.is_empty()
+            && let Some(source_line) = self.source.lines().nth(line_num.saturating_sub(1)) {
                 let line_str = format!("{}", line_num);
                 let padding = " ".repeat(line_str.len());
                 out.push_str(&format!("{} |\n", padding));
@@ -1463,7 +1541,6 @@ impl VM {
                     out.push_str(&format!("\n{} | {}^", padding, caret_padding));
                 }
             }
-        }
 
         if let Some(hint) = hint {
             out.push_str(&format!("\n  = hint: {}", hint));
@@ -1486,12 +1563,11 @@ impl VM {
     /// the location header so a deep failure says which function it was
     /// in instead of just a line number.
     fn innermost_frame_name(&self) -> Option<String> {
-        if self.jit_executing.get() {
-            if let Some(frame) = self.jit_frame_top() {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top() {
                 let closure = unsafe { &*frame.closure_raw };
                 return closure.function.name.clone();
             }
-        }
         self.frames
             .last()
             .and_then(|f| f.closure.function.name.clone())
@@ -1604,7 +1680,7 @@ impl VM {
                 self.stack_truncate(h.stack_len);
                 self.push(Value::ErrorValue(Rc::new(ErrorValueData {
                     msg: rc_str(err.message),
-                    tag: err.tag.map(|t| rc_str(t)),
+                    tag: err.tag.map(rc_str),
                 })));
                 let fi = self.frames.len() - 1;
                 self.frames[fi].ip = h.catch_ip;
@@ -1616,6 +1692,33 @@ impl VM {
 
     #[inline(always)]
     fn execute_until_inner(&mut self, stop_depth: usize) -> Result<(), VMError> {
+        // Integer fast path for the hot binary ops: check both operands in
+        // place on the stack, compute without the generic ~20-arm type-match
+        // helpers, and write the result over the lhs slot — one Vec pop
+        // instead of two pops + a push (each of which does a
+        // `set_len`/`stack_view` resync). The dispatch loop always runs with
+        // `stack.len() == stack_view.len` (the same invariant `peek` and the
+        // GetLocal/SetLocal arms already rely on), so plain Vec ops + a
+        // trailing `stack_view.len` store are enough here.
+        macro_rules! int_fast_binop {
+            ($l:ident, $r:ident, $guard:expr, $fast:expr, $slow:ident) => {{
+                let n = self.stack.len();
+                if n >= 2
+                    && let (&Value::Integer($l), &Value::Integer($r)) =
+                        (&self.stack[n - 2], &self.stack[n - 1])
+                    && $guard
+                {
+                    self.stack.pop();
+                    self.stack[n - 2] = $fast;
+                    self.stack_view.len = n - 1;
+                } else {
+                    let b = self.pop_fast();
+                    let a = self.pop_fast();
+                    let result = self.$slow(a, b)?;
+                    self.push_fast(result);
+                }
+            }};
+        }
         loop {
             let frame_idx = self.frames.len() - 1;
 
@@ -1638,96 +1741,66 @@ impl VM {
                     // every call. For all other constants this is an ordinary
                     // clone (single discriminant branch of overhead).
                     let value = self.frames[frame_idx].read_constant(idx).fresh_clone();
-                    self.push(value);
+                    self.push_fast(value);
                 }
-                OpCode::None => self.push(Value::None),
-                OpCode::True => self.push(Value::Boolean(true)),
-                OpCode::False => self.push(Value::Boolean(false)),
+                OpCode::None => self.push_fast(Value::None),
+                OpCode::True => self.push_fast(Value::Boolean(true)),
+                OpCode::False => self.push_fast(Value::Boolean(false)),
 
                 // ── Stack Manipulation ──────────────────────────────
                 OpCode::Pop => {
-                    self.pop();
+                    self.pop_fast();
                 }
                 OpCode::Dup => {
                     let val = self.peek(0).clone();
-                    self.push(val);
+                    self.push_fast(val);
                 }
 
                 // ── Arithmetic ──────────────────────────────────────
-                OpCode::Add => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.binary_add(a, b)?;
-                    self.push(result);
-                }
-                OpCode::Subtract => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.binary_sub(a, b)?;
-                    self.push(result);
-                }
-                OpCode::Multiply => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.binary_mul(a, b)?;
-                    self.push(result);
-                }
+                OpCode::Add => int_fast_binop!(l, r, true, Value::Integer(l + r), binary_add),
+                OpCode::Subtract => int_fast_binop!(l, r, true, Value::Integer(l - r), binary_sub),
+                OpCode::Multiply => int_fast_binop!(l, r, true, Value::Integer(l * r), binary_mul),
                 OpCode::Divide => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.binary_div(a, b)?;
-                    self.push(result);
+                    int_fast_binop!(l, r, r != 0, Value::Integer(l / r), binary_div)
                 }
                 OpCode::Modulo => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.binary_mod(a, b)?;
-                    self.push(result);
+                    int_fast_binop!(l, r, r != 0, Value::Integer(l % r), binary_mod)
                 }
 
                 // ── Comparison ──────────────────────────────────────
-                OpCode::Equal => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let eq = self.values_equal_forced(a, b);
-                    self.push(Value::Boolean(eq));
+                OpCode::Equal | OpCode::NotEqual => {
+                    let want = op == OpCode::Equal;
+                    let n = self.stack.len();
+                    if n >= 2
+                        && let (&Value::Integer(l), &Value::Integer(r)) =
+                            (&self.stack[n - 2], &self.stack[n - 1])
+                    {
+                        self.stack.pop();
+                        self.stack[n - 2] = Value::Boolean((l == r) == want);
+                        self.stack_view.len = n - 1;
+                    } else {
+                        let b = self.pop_fast();
+                        let a = self.pop_fast();
+                        let eq = self.values_equal_forced(a, b);
+                        self.push_fast(Value::Boolean(eq == want));
+                    }
                 }
-                OpCode::NotEqual => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let eq = self.values_equal_forced(a, b);
-                    self.push(Value::Boolean(!eq));
-                }
-                OpCode::Less => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.compare_less(a, b)?;
-                    self.push(result);
-                }
+                OpCode::Less => int_fast_binop!(l, r, true, Value::Boolean(l < r), compare_less),
                 OpCode::LessEqual => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.compare_less_equal(a, b)?;
-                    self.push(result);
+                    int_fast_binop!(l, r, true, Value::Boolean(l <= r), compare_less_equal)
                 }
                 OpCode::Greater => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.compare_greater(a, b)?;
-                    self.push(result);
+                    int_fast_binop!(l, r, true, Value::Boolean(l > r), compare_greater)
                 }
                 OpCode::GreaterEqual => {
-                    let b = self.pop();
-                    let a = self.pop();
-                    let result = self.compare_greater_equal(a, b)?;
-                    self.push(result);
+                    int_fast_binop!(l, r, true, Value::Boolean(l >= r), compare_greater_equal)
                 }
 
                 // ── Logical ─────────────────────────────────────────
                 OpCode::Not => {
-                    let val = self.pop();
+                    let val = self.pop_fast();
                     let val = self.force(val);
-                    self.push(Value::Boolean(!val.is_truthy()));
+                    self.push_fast(Value::Boolean(!val.is_truthy()));
                 }
 
                 // ── Bitwise ─────────────────────────────────────────
@@ -1797,7 +1870,7 @@ impl VM {
                     let slot = self.frames[frame_idx].read_u16() as usize;
                     let offset = self.frames[frame_idx].slot_offset;
                     let value = self.stack[offset + slot].clone();
-                    self.push(value);
+                    self.push_fast(value);
                 }
                 OpCode::SetLocal => {
                     let slot = self.frames[frame_idx].read_u16() as usize;
@@ -1884,7 +1957,7 @@ impl VM {
                 }
                 OpCode::PopJumpIfFalse => {
                     let offset = self.frames[frame_idx].read_u16() as usize;
-                    let val = self.pop();
+                    let val = self.pop_fast();
                     if !val.is_truthy() {
                         self.frames[frame_idx].ip += offset;
                     }
@@ -2131,6 +2204,7 @@ impl VM {
                             // Matching error: bind it, then jump to the fallback.
                             if let Some(name) = binding_name.as_string() {
                                 self.globals.insert(name.to_string(), value);
+                                self.jit.bump_global_version(name);
                             }
                             self.pop();
                             self.frames[frame_idx].ip += jump_offset;
@@ -2202,7 +2276,7 @@ impl VM {
                     selective_names.reverse();
 
                     if let Some(path_str) = path.as_string() {
-                        self.import_module(&path_str, &selective_names)?;
+                        self.import_module(path_str, &selective_names)?;
                     }
                 }
 
@@ -2280,22 +2354,8 @@ impl VM {
                 // ── Iteration Support ───────────────────────────────
                 OpCode::IterLen => {
                     // Stack: [iterable] -> [length]
-                    // The iterable is accessed via GetLocal, so we just compute length
-                    // from what's on top of stack and replace it.
                     let iterable = self.pop();
-                    let len = match iterable.repr() {
-                        ValueRepr::Array(a) => a.borrow().len() as i64,
-                        ValueRepr::String(s) => s.chars().count() as i64,
-                        ValueRepr::Tuple(t) => t.len() as i64,
-                        ValueRepr::Set(s) => s.borrow().len() as i64,
-                        ValueRepr::Map(m) => m.borrow().len() as i64,
-                        _ => {
-                            return Err(self.runtime_error_hint(
-                                &format!("cannot iterate over {}", iterable.type_name()),
-                                "each loops work with arrays, tuples, strings, sets, and maps",
-                            ));
-                        }
-                    };
+                    let len = self.iter_len(&iterable)?;
                     self.push(Value::Integer(len));
                 }
 
@@ -2305,7 +2365,7 @@ impl VM {
                     let value = self.pop();
 
                     if let Some(target) = type_name.as_string() {
-                        let result = self.type_wrap(&target, value)?;
+                        let result = self.type_wrap(target, value)?;
                         self.push(result);
                     } else {
                         return Err(self.runtime_error("invalid type name in TypeWrap"));
@@ -2315,32 +2375,7 @@ impl VM {
                 OpCode::IterGet => {
                     let index = self.pop();
                     let iterable = self.pop();
-                    let idx = match index.repr() {
-                        ValueRepr::Integer(i) => i as usize,
-                        _ => return Err(self.runtime_error("index must be integer")),
-                    };
-                    let val = match iterable.repr() {
-                        ValueRepr::Array(a) => a.borrow().get(idx).cloned().unwrap_or(Value::None),
-                        ValueRepr::String(s) => s
-                            .chars()
-                            .nth(idx)
-                            .map(|c| Value::String(rc_str(c.to_string())))
-                            .unwrap_or(Value::None),
-                        ValueRepr::Tuple(t) => t.get(idx).cloned().unwrap_or(Value::None),
-                        ValueRepr::Set(s) => {
-                            s.borrow().items().get(idx).cloned().unwrap_or(Value::None)
-                        }
-                        ValueRepr::Map(m) => {
-                            let borrowed = m.borrow();
-                            if let Some((k, v)) = borrowed.entries().get(idx) {
-                                // For maps, yield (key, value) tuple
-                                Value::Tuple(Rc::new(vec![k.clone(), v.clone()]))
-                            } else {
-                                Value::None
-                            }
-                        }
-                        _ => return Err(self.runtime_error("cannot iterate")),
-                    };
+                    let val = self.iter_get(&iterable, &index)?;
                     self.push(val);
                 }
 
@@ -2368,7 +2403,7 @@ impl VM {
                     named_args.reverse();
 
                     if let Some(mname) = method_name.as_string() {
-                        self.call_method(&mname, arg_count, &named_args)?;
+                        self.call_method(mname, arg_count, &named_args)?;
                     } else {
                         return Err(self.runtime_error("invalid method name"));
                     }
@@ -2426,8 +2461,7 @@ impl VM {
                     if let Some(var_name) = name.as_string() {
                         let has_constraint = self
                             .global_type_constraints
-                            .get(var_name.as_ref())
-                            .is_some();
+                            .contains_key(var_name.as_ref());
                         self.push(Value::Boolean(!has_constraint));
                     } else {
                         self.push(Value::Boolean(true));
@@ -3087,11 +3121,10 @@ impl VM {
         // Inline fast path: JIT-compiled callee with exact arity.
         // This is every recursive/hot-loop call, and we want it to fold
         // straight into `jit_op_call` without a Rust function call.
-        if closure.jit_state.get() == 1 && closure.function.arity as usize == arg_count {
-            if let Some(result) = self.call_closure_fast_path(&closure) {
+        if closure.jit_state.get() == 1 && closure.function.arity as usize == arg_count
+            && let Some(result) = self.call_closure_fast_path(&closure) {
                 return result.map(|_| true);
             }
-        }
         self.call_closure(closure, arg_count, &[], None)?;
         Ok(true)
     }
@@ -3304,11 +3337,10 @@ impl VM {
         // able to construct/inherit structs defined in ITS module (e.g.
         // `Expectation`), which live in the module's globals, not the importing
         // file's globals.
-        if let Some(mg) = self.active_module_globals() {
-            if let Some(Value::StructDef(def)) = mg.get(name) {
+        if let Some(mg) = self.active_module_globals()
+            && let Some(Value::StructDef(def)) = mg.get(name) {
                 return Some(Rc::clone(def));
             }
-        }
         None
     }
 
@@ -3331,11 +3363,10 @@ impl VM {
                 return Some(m);
             }
             cur = d.parent.as_ref().and_then(|p| {
-                if let Some(mg) = d.module_globals.borrow().as_ref() {
-                    if let Some(Value::StructDef(pd)) = mg.get(p) {
+                if let Some(mg) = d.module_globals.borrow().as_ref()
+                    && let Some(Value::StructDef(pd)) = mg.get(p) {
                         return Some(Rc::clone(pd));
                     }
-                }
                 if let Some(Value::StructDef(pd)) = self.globals.get(p) {
                     return Some(Rc::clone(pd));
                 }
@@ -3410,18 +3441,16 @@ impl VM {
         let vm_ptr = self as *mut VM;
         let exit = unsafe { self.jit.invoke_thunk(vm_ptr, thunk, stop_depth) };
         Some(match exit {
-            crate::jit::JitExit::Returned => Ok(()),
+            crate::jit::JitExit::Returned => {
+                closure.jit_bailouts.set(0);
+                Ok(())
+            }
             crate::jit::JitExit::Bailout => {
                 let jit_frame = self
                     .jit_frame_pop_raw()
                     .expect("compiled bailout without active jit frame");
-                closure.jit_thunk.set(None);
-                closure.jit_state.set(2);
-                let inherited_mg = if jit_frame.module_globals.is_null() {
-                    None
-                } else {
-                    Some(unsafe { Rc::new((*jit_frame.module_globals).clone()) })
-                };
+                self.note_jit_bailout(closure);
+                let inherited_mg = unsafe { mg_rc(jit_frame.module_globals) };
                 self.frames.push(CallFrame {
                     closure: Rc::clone(closure),
                     ip: 0,
@@ -3432,6 +3461,22 @@ impl VM {
             }
             crate::jit::JitExit::RuntimeError(err) => Err(err),
         })
+    }
+
+    /// Record an entry-guard bailout. The frame is re-run by the
+    /// interpreter (bailouts happen before any side effects, at ip 0), and
+    /// the thunk stays installed for the next call — a single mistyped call
+    /// shouldn't drop the closure to interpreter speed forever. Only
+    /// `JIT_BAILOUT_LIMIT` *consecutive* bailouts (counter reset on every
+    /// successful JIT return) deopt permanently.
+    fn note_jit_bailout(&self, closure: &Rc<ObjClosure>) {
+        const JIT_BAILOUT_LIMIT: u8 = 4;
+        let n = closure.jit_bailouts.get().saturating_add(1);
+        closure.jit_bailouts.set(n);
+        if n >= JIT_BAILOUT_LIMIT {
+            closure.jit_thunk.set(None);
+            closure.jit_state.set(2);
+        }
     }
 
     fn call_closure(
@@ -3453,11 +3498,9 @@ impl VM {
         // be lean — we skip the call_count bump (already tiered up), the
         // named-args block, and the arity-fill loop.
         if state == 1 && named_args.is_empty() && arg_count == expected && module_globals.is_none()
-        {
-            if let Some(result) = self.call_closure_fast_path(&closure) {
+            && let Some(result) = self.call_closure_fast_path(&closure) {
                 return result;
             }
-        }
 
         // Slow path: only bump the hot-function counter when we haven't
         // already tiered up. Once state == 1 the counter is never consulted.
@@ -3553,8 +3596,7 @@ impl VM {
 
         // Inherit module globals from the current frame if not explicitly provided,
         // so nested calls within a module function retain module scope access.
-        let inherited_mg =
-            module_globals.or_else(|| self.active_module_globals().map(|mg| Rc::new(mg.clone())));
+        let inherited_mg = module_globals.or_else(|| self.active_module_globals_rc());
 
         // Remember the pre-call depth so the JIT helper (if we enter it)
         // can drive `execute_until` for exactly this one activation.
@@ -3600,17 +3642,16 @@ impl VM {
             let entry_line = closure.function.chunk.lines.first().copied().unwrap_or(0);
             let mg_ptr = inherited_mg
                 .as_ref()
-                .map(|mg| Rc::as_ptr(mg))
+                .map(Rc::as_ptr)
                 .unwrap_or(std::ptr::null());
             self.jit_frame_push_raw(Rc::as_ptr(&closure), slot_offset, mg_ptr, entry_line);
             let vm_ptr = self as *mut VM;
             let exit = unsafe { self.jit.invoke_thunk(vm_ptr, thunk, stop_depth) };
             match exit {
-                crate::jit::JitExit::Returned => {}
+                crate::jit::JitExit::Returned => closure.jit_bailouts.set(0),
                 crate::jit::JitExit::Bailout => {
                     let _ = self.jit_frame_pop_raw();
-                    closure.jit_thunk.set(None);
-                    closure.jit_state.set(2);
+                    self.note_jit_bailout(&closure);
                     self.frames.push(CallFrame {
                         closure: Rc::clone(&closure),
                         ip: 0,
@@ -3637,11 +3678,10 @@ impl VM {
     pub(crate) fn capture_upvalue(&mut self, stack_slot: usize) -> Rc<RefCell<Upvalue>> {
         // Check if we already have an open upvalue for this slot
         for uv in &self.open_upvalues {
-            if let Upvalue::Open(slot) = &*uv.borrow() {
-                if *slot == stack_slot {
+            if let Upvalue::Open(slot) = &*uv.borrow()
+                && *slot == stack_slot {
                     return Rc::clone(uv);
                 }
-            }
         }
 
         let upvalue = Rc::new(RefCell::new(Upvalue::Open(stack_slot)));
@@ -3719,6 +3759,53 @@ impl VM {
         }
     }
 
+    // ── Iteration (each) ────────────────────────────────────────────────
+    // Shared by the `IterLen`/`IterGet` interpreter arms and the JIT helpers
+    // (`jit_op_iter_len`/`jit_op_iter_get`) so both stay byte-faithful.
+
+    /// Length of an iterable for an `each` loop. `[it] -> len`.
+    pub(crate) fn iter_len(&self, iterable: &Value) -> Result<i64, VMError> {
+        match iterable.repr() {
+            ValueRepr::Array(a) => Ok(a.borrow().len() as i64),
+            ValueRepr::String(s) => Ok(s.chars().count() as i64),
+            ValueRepr::Tuple(t) => Ok(t.len() as i64),
+            ValueRepr::Set(s) => Ok(s.borrow().len() as i64),
+            ValueRepr::Map(m) => Ok(m.borrow().len() as i64),
+            _ => Err(self.runtime_error_hint(
+                &format!("cannot iterate over {}", iterable.type_name()),
+                "each loops work with arrays, tuples, strings, sets, and maps",
+            )),
+        }
+    }
+
+    /// Element `iterable[index]` for an `each` loop. `[it, idx] -> elem`.
+    pub(crate) fn iter_get(&self, iterable: &Value, index: &Value) -> Result<Value, VMError> {
+        let idx = match index.repr() {
+            ValueRepr::Integer(i) => i as usize,
+            _ => return Err(self.runtime_error("index must be integer")),
+        };
+        Ok(match iterable.repr() {
+            ValueRepr::Array(a) => a.borrow().get(idx).cloned().unwrap_or(Value::None),
+            ValueRepr::String(s) => s
+                .chars()
+                .nth(idx)
+                .map(|c| Value::String(rc_str(c.to_string())))
+                .unwrap_or(Value::None),
+            ValueRepr::Tuple(t) => t.get(idx).cloned().unwrap_or(Value::None),
+            ValueRepr::Set(s) => s.borrow().items().get(idx).cloned().unwrap_or(Value::None),
+            ValueRepr::Map(m) => {
+                let borrowed = m.borrow();
+                if let Some((k, v)) = borrowed.entries().get(idx) {
+                    // For maps, yield (key, value) tuple
+                    Value::Tuple(Rc::new(vec![k.clone(), v.clone()]))
+                } else {
+                    Value::None
+                }
+            }
+            _ => return Err(self.runtime_error("cannot iterate")),
+        })
+    }
+
     // ── Index Operations ────────────────────────────────────────────────
 
     pub(crate) fn eval_index(&self, collection: Value, index: Value) -> Result<Value, VMError> {
@@ -3760,7 +3847,7 @@ impl VM {
         }
     }
 
-    fn eval_index_assign(
+    pub(crate) fn eval_index_assign(
         &self,
         collection: Value,
         index: Value,
@@ -3993,12 +4080,14 @@ impl VM {
         if selective_names.is_empty() {
             // Namespace import
             let name = path_str.rsplit('/').next().unwrap_or(path_str).to_string();
+            self.jit.bump_global_version(&name);
             self.globals.insert(name, Value::Module(Rc::clone(module)));
         } else {
             // Selective import
             for name in selective_names {
                 if let Some(val) = module.globals.get(name) {
                     self.globals.insert(name.clone(), val.clone());
+                    self.jit.bump_global_version(name);
                 }
             }
         }
@@ -4007,8 +4096,8 @@ impl VM {
 
     fn resolve_module_path(&self, path_str: &str) -> Result<PathBuf, VMError> {
         // Relative import
-        if path_str.starts_with("./") || path_str.starts_with("../") {
-            if let Some(current) = &self.current_file {
+        if (path_str.starts_with("./") || path_str.starts_with("../"))
+            && let Some(current) = &self.current_file {
                 let base = current.parent().unwrap_or(current);
                 let resolved = base.join(path_str).with_extension("oxi");
                 if resolved.exists() {
@@ -4017,7 +4106,6 @@ impl VM {
                         .map_err(|e| self.runtime_error(&format!("cannot resolve path: {}", e)));
                 }
             }
-        }
 
         // Stdlib import
         let stdlib = self.stdlib_path.join(path_str).with_extension("oxi");
@@ -4072,7 +4160,7 @@ impl VM {
         // Check for Error/Value union pattern: "VALUE || ERROR" or "ERROR || VALUE"
         if target.contains(" || ") {
             let parts: Vec<&str> = target.split(" || ").collect();
-            let has_value = parts.iter().any(|p| *p == "VALUE");
+            let has_value = parts.contains(&"VALUE");
             let has_error = parts.iter().any(|p| p.starts_with("ERROR"));
             if has_value && has_error {
                 // Idempotency (V4): a value already normalized to the SUCCESS
@@ -4110,7 +4198,7 @@ impl VM {
             // General union: try each type
             let actual = value.effective_type_name();
             for member in parts {
-                if member == &actual || member == "GENERIC" {
+                if member == actual || member == "GENERIC" {
                     return Ok(value);
                 }
                 if let Ok(converted) = self.convert_to_type(&value, member) {
@@ -4240,7 +4328,7 @@ impl VM {
             "BYTE" => match value.repr() {
                 ValueRepr::Byte(_) => Ok(value.clone()),
                 ValueRepr::Integer(n) => {
-                    if n < 0 || n > 255 {
+                    if !(0..=255).contains(&n) {
                         Err(self.runtime_error(&format!(
                             "cannot convert INTEGER {} to BYTE (0-255)",
                             n
@@ -4338,6 +4426,14 @@ mod tests {
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use std::path::PathBuf;
+
+    #[test]
+    fn execution_mode_constructors_are_explicit() {
+        assert_eq!(VM::new_interpreter().execution_mode(), ExecutionMode::Interpreter);
+        assert_eq!(VM::new_tiered().execution_mode(), ExecutionMode::TieredJit);
+        assert_eq!(VM::new_eager_jit().execution_mode(), ExecutionMode::EagerJit);
+        assert_eq!(VM::new().execution_mode(), ExecutionMode::TieredJit);
+    }
 
     fn test_vm(input: &str) -> Result<Value, VMError> {
         let lexer = Lexer::new(input);

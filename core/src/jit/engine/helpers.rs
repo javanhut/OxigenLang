@@ -33,6 +33,9 @@ pub(super) struct HelperIds {
     // Collections
     pub build_array: FuncId,               // (vm, u32)
     pub index_fast_array_int: FuncId,      // (vm) -> u32
+    pub iter_len: FuncId,                  // (vm) -> u32
+    pub iter_get: FuncId,                  // (vm) -> u32
+    pub index_assign: FuncId,              // (vm) -> u32
     pub type_wrap: FuncId,                 // (vm, u32) -> u32
     pub local_add_array_mod_index: FuncId, // (vm, u32, u32, u32, i64, u32) -> u32
     pub struct_field_add_const: FuncId,    // (vm, u32, u32, i64) -> u32
@@ -136,6 +139,9 @@ pub(super) struct HelperRefs {
     pub dup: FuncRef,
     pub build_array: FuncRef,
     pub index_fast_array_int: FuncRef,
+    pub iter_len: FuncRef,
+    pub iter_get: FuncRef,
+    pub index_assign: FuncRef,
     pub type_wrap: FuncRef,
     pub local_add_array_mod_index: FuncRef,
     pub struct_field_add_const: FuncRef,
@@ -229,6 +235,9 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
         "jit_op_index_fast_array_int",
         runtime::jit_op_index_fast_array_int
     );
+    reg!("jit_op_iter_len", runtime::jit_op_iter_len);
+    reg!("jit_op_iter_get", runtime::jit_op_iter_get);
+    reg!("jit_op_index_assign", runtime::jit_op_index_assign);
     reg!("jit_type_wrap", runtime::jit_type_wrap);
     reg!(
         "jit_local_add_array_mod_index",
@@ -487,6 +496,9 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         dup: decl(module, "jit_dup", &sig_vm_only),
         build_array: decl(module, "jit_build_array", &sig_vm_u32),
         index_fast_array_int: decl(module, "jit_op_index_fast_array_int", &sig_vm_to_u32),
+        iter_len: decl(module, "jit_op_iter_len", &sig_vm_to_u32),
+        iter_get: decl(module, "jit_op_iter_get", &sig_vm_to_u32),
+        index_assign: decl(module, "jit_op_index_assign", &sig_vm_to_u32),
         type_wrap: decl(module, "jit_type_wrap", sig_vm_u32_fallible),
         local_add_array_mod_index: decl(
             module,
@@ -575,6 +587,9 @@ pub(super) fn declare_helper_refs(
         dup: r(ids.dup),
         build_array: r(ids.build_array),
         index_fast_array_int: r(ids.index_fast_array_int),
+        iter_len: r(ids.iter_len),
+        iter_get: r(ids.iter_get),
+        index_assign: r(ids.index_assign),
         type_wrap: r(ids.type_wrap),
         local_add_array_mod_index: r(ids.local_add_array_mod_index),
         struct_field_add_const: r(ids.struct_field_add_const),

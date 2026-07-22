@@ -7,7 +7,7 @@
 //! interpreter. This is the "no mid-execution deopt" guarantee from the
 //! plan.
 
-use crate::compiler::opcode::{Chunk, OpCode};
+use crate::compiler::opcode::{Chunk, ControlFlow, JitSupport, OpCode};
 use crate::vm::value::ValueRepr;
 
 /// Result of a successful scan. The branch-target list is sorted and
@@ -48,146 +48,6 @@ pub enum ScanError {
     InvalidBytecode { offset: usize },
 }
 
-/// Return `true` if the baseline JIT's translator can currently emit
-/// native code for this opcode.
-fn is_supported(op: OpCode) -> bool {
-    matches!(
-        op,
-        // Basic stack / constants
-        OpCode::Constant
-            | OpCode::None
-            | OpCode::True
-            | OpCode::False
-            | OpCode::Pop
-            | OpCode::Dup
-            | OpCode::BuildArray
-            | OpCode::Index
-            | OpCode::TypeWrap
-            // Arithmetic
-            | OpCode::Add
-            | OpCode::Subtract
-            | OpCode::Multiply
-            | OpCode::Divide
-            | OpCode::Modulo
-            // Comparison
-            | OpCode::Equal
-            | OpCode::NotEqual
-            | OpCode::Less
-            | OpCode::LessEqual
-            | OpCode::Greater
-            | OpCode::GreaterEqual
-            // Logical / unary
-            | OpCode::Not
-            | OpCode::Negate
-            // Bitwise
-            | OpCode::BitAnd
-            | OpCode::BitOr
-            | OpCode::BitXor
-            | OpCode::BitNot
-            | OpCode::ShiftLeft
-            | OpCode::ShiftRight
-            // Logging
-            | OpCode::Log
-            // Locals
-            | OpCode::GetLocal
-            | OpCode::SetLocal
-            // Globals
-            | OpCode::GetGlobal
-            | OpCode::SetGlobal
-            | OpCode::DefineGlobal
-            | OpCode::DefineGlobalTyped
-            // Upvalues / closures
-            | OpCode::GetUpvalue
-            | OpCode::SetUpvalue
-            | OpCode::CloseUpvalue
-            | OpCode::Closure
-            // Control flow
-            | OpCode::Jump
-            | OpCode::JumpIfFalse
-            | OpCode::JumpIfTrue
-            | OpCode::Loop
-            | OpCode::PopJumpIfFalse
-            // Functions
-            | OpCode::Call
-            | OpCode::Return
-            // Structs
-            | OpCode::StructDef
-            | OpCode::StructLiteral
-            | OpCode::GetField
-            | OpCode::SetField
-            | OpCode::DefineMethod
-            | OpCode::MethodCall
-    )
-}
-
-/// Length of this instruction in bytes, including its immediate operands.
-/// `Closure` has runtime-determined length (depends on the captured
-/// function's upvalue count), so it's handled specially in `scan`.
-fn instr_fixed_len(op: OpCode) -> usize {
-    match op {
-        // 1-byte (no operand)
-        OpCode::None
-        | OpCode::True
-        | OpCode::False
-        | OpCode::Pop
-        | OpCode::Dup
-        | OpCode::Add
-        | OpCode::Subtract
-        | OpCode::Multiply
-        | OpCode::Divide
-        | OpCode::Modulo
-        | OpCode::Equal
-        | OpCode::NotEqual
-        | OpCode::Less
-        | OpCode::LessEqual
-        | OpCode::Greater
-        | OpCode::GreaterEqual
-        | OpCode::Not
-        | OpCode::Negate
-        | OpCode::BitAnd
-        | OpCode::BitOr
-        | OpCode::BitXor
-        | OpCode::BitNot
-        | OpCode::ShiftLeft
-        | OpCode::ShiftRight
-        | OpCode::Index
-        | OpCode::CloseUpvalue
-        | OpCode::Return => 1,
-
-        // u8 operand (2 bytes)
-        OpCode::Call | OpCode::Log => 2,
-
-        // u16 operand (3 bytes)
-        OpCode::Constant
-        | OpCode::GetLocal
-        | OpCode::SetLocal
-        | OpCode::BuildArray
-        | OpCode::TypeWrap
-        | OpCode::GetGlobal
-        | OpCode::SetGlobal
-        | OpCode::DefineGlobal
-        | OpCode::GetUpvalue
-        | OpCode::SetUpvalue
-        | OpCode::Jump
-        | OpCode::JumpIfFalse
-        | OpCode::JumpIfTrue
-        | OpCode::Loop
-        | OpCode::PopJumpIfFalse
-        | OpCode::StructDef
-        | OpCode::GetField
-        | OpCode::SetField => 3,
-
-        // u16 + u8 (4 bytes)
-        OpCode::StructLiteral | OpCode::DefineMethod | OpCode::MethodCall => 4,
-
-        // u16 + u8 + u16 (6 bytes)
-        OpCode::DefineGlobalTyped => 6,
-
-        // Variable — Closure handled outside this function.
-        _ => unreachable!("instr_fixed_len called for unsupported opcode {:?}", op),
-    }
-}
-
 fn read_u16(code: &[u8], offset: usize) -> Option<u16> {
     if offset + 1 >= code.len() {
         return None;
@@ -203,21 +63,22 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
     while ip < code.len() {
         let byte = code[ip];
         let op = OpCode::from_byte(byte).ok_or(ScanError::InvalidBytecode { offset: ip })?;
+        let op_info = op.info();
 
-        if !is_supported(op) {
+        if op_info.jit != JitSupport::Native {
             return Err(ScanError::UnsupportedOpcode { offset: ip, byte });
         }
 
         // Branch targets: jumps use u16 offsets right after the opcode
         // byte.
-        match op {
-            OpCode::Jump | OpCode::JumpIfFalse | OpCode::JumpIfTrue | OpCode::PopJumpIfFalse => {
+        match op_info.control_flow {
+            ControlFlow::ForwardJump | ControlFlow::ConditionalJump => {
                 let off =
                     read_u16(code, ip + 1).ok_or(ScanError::InvalidBytecode { offset: ip })?;
                 let target = ip + 3 + off as usize;
                 info.branch_targets.push(target);
             }
-            OpCode::Loop => {
+            ControlFlow::BackwardJump => {
                 let off =
                     read_u16(code, ip + 1).ok_or(ScanError::InvalidBytecode { offset: ip })?;
                 let after = ip + 3;
@@ -228,7 +89,7 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
                 info.branch_targets.push(target);
                 info.loop_ranges.push((target, ip));
             }
-            _ => {}
+            ControlFlow::Fallthrough | ControlFlow::Return | ControlFlow::ErrorHandler => {}
         }
 
         // Heap-value detection. Conservative: any opcode that can put a
@@ -236,92 +97,57 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
         // Also any Constant pointing to an Rc-backed constant. Opcodes
         // that only touch primitives (arithmetic, comparison, jumps,
         // local/global primitive ops) don't set the flag.
-        match op {
-            OpCode::Closure
-            | OpCode::StructDef
-            | OpCode::StructLiteral
-            | OpCode::DefineMethod
-            | OpCode::EnumDef
-            | OpCode::MakeEnumVariantUnit
-            | OpCode::MakeEnumVariantTuple
-            | OpCode::MakeEnumVariantStruct
-            | OpCode::BuildArray
-            | OpCode::BuildTuple
-            | OpCode::BuildMap
-            | OpCode::BuildSet
-            | OpCode::StringInterp
-            | OpCode::Index
-            | OpCode::IndexAssign
-            | OpCode::Slice
-            | OpCode::GetField
-            | OpCode::SetField
-            | OpCode::MethodCall
-            | OpCode::MethodCallNamed
-            | OpCode::TypeWrap
-            | OpCode::Import
-            | OpCode::GetModuleField
-            | OpCode::GetUpvalue
-            | OpCode::SetUpvalue
-            | OpCode::CloseUpvalue
-            | OpCode::GetGlobal
-            | OpCode::SetGlobal
-            | OpCode::Call
-            | OpCode::CallNamed
-            | OpCode::ErrorConstruct
-            | OpCode::ValueConstruct
-            | OpCode::Guard
-            | OpCode::Fail
-            | OpCode::IterLen
-            | OpCode::IterGet
-            | OpCode::Unpack
-            | OpCode::Log => {
-                info.touches_heap_values = true;
-            }
-            OpCode::Constant => {
-                let idx =
-                    read_u16(code, ip + 1).ok_or(ScanError::InvalidBytecode { offset: ip })?;
-                if let Some(v) = chunk.constants.get(idx as usize) {
-                    if !matches!(
-                        v.repr(),
-                        ValueRepr::Integer(_)
-                            | ValueRepr::Float(_)
-                            | ValueRepr::Boolean(_)
-                            | ValueRepr::Byte(_)
-                            | ValueRepr::Uint(_)
-                            | ValueRepr::Char(_)
-                            | ValueRepr::None
-                    ) {
-                        info.touches_heap_values = true;
-                    }
+        if op_info.properties.touches_heap {
+            info.touches_heap_values = true;
+        } else if matches!(op, OpCode::Constant) {
+            let idx = read_u16(code, ip + 1)
+                .ok_or(ScanError::InvalidBytecode { offset: ip })?;
+            if let Some(v) = chunk.constants.get(idx as usize)
+                && !matches!(
+                    v.repr(),
+                    ValueRepr::Integer(_)
+                        | ValueRepr::Float(_)
+                        | ValueRepr::Boolean(_)
+                        | ValueRepr::Byte(_)
+                        | ValueRepr::Uint(_)
+                        | ValueRepr::Char(_)
+                        | ValueRepr::None
+                ) {
+                    info.touches_heap_values = true;
                 }
-            }
-            _ => {}
         }
 
-        // Advance ip.
-        if matches!(op, OpCode::Closure) {
-            // Closure is variable-length: 3 bytes for fn_const_idx, then
-            // 3 bytes per upvalue descriptor (u8 is_local + u16 index).
-            // We need the constants pool to resolve the upvalue count.
-            let fn_idx = read_u16(code, ip + 1).ok_or(ScanError::InvalidBytecode { offset: ip })?;
-            let upvalue_count = chunk
-                .constants
-                .get(fn_idx as usize)
-                .and_then(|v| v.as_closure())
-                .map(|t| t.function.upvalue_count as usize)
-                .ok_or(ScanError::InvalidBytecode { offset: ip })?;
+        // Advance using the canonical bytecode-width decoder. It also
+        // validates fixed operands and Closure descriptors.
+        let instruction_len = chunk
+            .instruction_len(ip)
+            .map_err(|_| ScanError::InvalidBytecode { offset: ip })?;
+        if op_info.properties.captures {
             // Closure opcode means this function may capture locals into
             // upvalues of the inner closure; Return must therefore call
             // close_upvalues. Record that fact so the JIT can NOT inline
             // op_return for this function.
             info.may_capture_upvalues = true;
-            ip += 3 + 3 * upvalue_count;
-        } else {
-            ip += instr_fixed_len(op);
         }
+        ip += instruction_len;
     }
 
     info.branch_targets.sort_unstable();
     info.branch_targets.dedup();
     Ok(info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_upvalue_requires_interpreter_fallback() {
+        let mut chunk = Chunk::new();
+        chunk.code.push(OpCode::CloseUpvalue as u8);
+        assert!(matches!(
+            scan(&chunk),
+            Err(ScanError::UnsupportedOpcode { offset: 0, .. })
+        ));
+    }
 }

@@ -64,6 +64,29 @@ sudo make install-no-jit         # interpreter-only build (no Cranelift)
 sudo make uninstall              # removes it
 ```
 
+
+### Imlazy
+
+Imlazy is a task runner built by javanhut to replace makefile with toml and interactive runner command and simple task running. This repo has the lazy toml file.
+
+* If not already installed install imlazy [Imlazy](https://github.com/javanhut/ImLazy)
+
+#### Interactive
+```bash
+sudo imlazy -i
+```
+
+#### Install
+```bash
+sudo imlazy install
+```
+
+#### Uninstall
+```bash
+sudo imlazy uninstall
+```
+
+
 ### Development
 
 Run directly from the source tree without installing:
@@ -79,7 +102,7 @@ cargo run -p oxigen -- check file.oxi # parse and report errors as JSON
 cargo run -p oxigen -- test         # discover and run every *_test.oxi file
 ```
 
-### JIT (experimental)
+### JIT
 
 OxigenLang ships with a baseline Cranelift-backed JIT that's **compiled
 in and enabled by default** — a default build tiers hot functions up to
@@ -125,6 +148,12 @@ scripts/bench.sh bench_loop bench_fib
 scripts/bench.sh --warmup=8 --runs=15
 OXIGEN_BIN_B=/path/to/baseline/oxigen scripts/bench.sh
 ```
+
+Imlazy Benchmarking
+```bash
+sudo imlazy bench
+```
+
 
 ## Editor Support
 

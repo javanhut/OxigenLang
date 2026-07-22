@@ -146,7 +146,7 @@ mod layout_tests {
 
     #[test]
     fn value_float_layout_is_pinned() {
-        let v = Value::Float(3.141592653589793);
+        let v = Value::Float(std::f64::consts::PI);
         let ptr = &v as *const Value as *const u8;
         let tag = unsafe { *ptr };
         assert_eq!(tag, VALUE_TAG_FLOAT, "Float tag should be 1");
@@ -155,7 +155,7 @@ mod layout_tests {
                 .cast::<u64>()
                 .read_unaligned()
         };
-        assert_eq!(f64::from_bits(payload), 3.141592653589793);
+        assert_eq!(f64::from_bits(payload), std::f64::consts::PI);
     }
 
     /// The JIT's inline Call guard reads the tag byte at offset 0 and
@@ -176,6 +176,7 @@ mod layout_tests {
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
+            jit_bailouts: Cell::new(0),
             jit_thunk: Cell::new(None),
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
@@ -220,6 +221,7 @@ mod layout_tests {
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
+            jit_bailouts: Cell::new(0),
             jit_thunk: Cell::new(None),
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
@@ -510,6 +512,13 @@ pub struct ObjClosure {
     /// 2 = compile failed. This avoids a compiled-entry HashMap lookup on
     /// every hot recursive call.
     pub jit_state: Cell<u8>,
+    /// Consecutive JIT entry bailouts (guard failures). Reset to 0 by every
+    /// successful JIT return; once it hits `JIT_BAILOUT_LIMIT` the closure
+    /// deopts permanently (`jit_state = 2`). Without this, a single
+    /// mistyped call (e.g. one Float where Int was specialized) would
+    /// silently drop the closure to interpreter speed for the rest of the
+    /// process.
+    pub jit_bailouts: Cell<u8>,
     /// Cached native entry point for compiled closures. Present only when
     /// `jit_state == 1`.
     pub jit_thunk: Cell<Option<CompiledThunk>>,
@@ -556,6 +565,7 @@ pub struct ObjClosure {
 /// JIT inline GetUpvalue path defers to `jit_get_upvalue` until the
 /// helper observes `Closed(Integer)` and populates the cache.
 #[inline]
+#[allow(clippy::type_complexity)]
 pub fn make_upvalue_int_caches(n: usize) -> (Box<[Cell<u8>]>, Box<[Cell<i64>]>) {
     let kinds = (0..n)
         .map(|_| Cell::new(0u8))
@@ -585,6 +595,7 @@ impl ObjClosure {
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
+            jit_bailouts: Cell::new(0),
             jit_thunk: Cell::new(None),
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),

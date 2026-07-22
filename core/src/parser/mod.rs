@@ -834,8 +834,8 @@ impl Parser {
         let expr = self.parse_expression(Precedence::Conditional)?;
 
         // Check for dot-assign: expr.field = value
-        if let Expression::DotAccess { token, left, field } = &expr {
-            if self.peek_token.token_type == TokenType::Assign {
+        if let Expression::DotAccess { token, left, field } = &expr
+            && self.peek_token.token_type == TokenType::Assign {
                 let tok = token.clone();
                 let obj = *left.clone();
                 let fld = field.clone();
@@ -849,12 +849,11 @@ impl Parser {
                     value,
                 });
             }
-        }
 
         // Check for index-assign: expr[key] = value  or  expr[key] := value
-        if let Expression::Index { token, left, index } = &expr {
-            if self.peek_token.token_type == TokenType::Assign
-                || self.peek_token.token_type == TokenType::Walrus
+        if let Expression::Index { token, left, index } = &expr
+            && (self.peek_token.token_type == TokenType::Assign
+                || self.peek_token.token_type == TokenType::Walrus)
             {
                 let tok = token.clone();
                 let obj = *left.clone();
@@ -869,7 +868,6 @@ impl Parser {
                     value,
                 });
             }
-        }
 
         Some(Statement::Expr(expr))
     }
@@ -1942,6 +1940,7 @@ impl Parser {
     }
 
     /// Parse call arguments, handling both positional and named: f(a, b, name=val)
+    #[allow(clippy::type_complexity)]
     fn parse_call_args(&mut self) -> Option<(Vec<Expression>, Vec<(String, Expression)>)> {
         let mut args = Vec::new();
         let mut named_args: Vec<(String, Expression)> = Vec::new();
@@ -2081,8 +2080,8 @@ impl Parser {
         // Only recognized when LHS is a plain Ident and the braces contain a
         // struct-literal shape (Ident Colon ... or empty). Prevents grabbing
         // any `{` that happens to follow an expression-level dot access.
-        if let Expression::Ident(ref ident) = left {
-            if self.peek_token.token_type == TokenType::LBrace {
+        if let Expression::Ident(ref ident) = left
+            && self.peek_token.token_type == TokenType::LBrace {
                 let mut idx = 1;
                 let mut is_struct_shape = false;
                 let mut is_empty = false;
@@ -2108,7 +2107,6 @@ impl Parser {
                     return self.parse_enum_struct_variant(tok, ident.value.clone(), field.value);
                 }
             }
-        }
 
         Some(Expression::DotAccess {
             token: tok,

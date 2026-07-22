@@ -278,6 +278,12 @@ pub struct Compiler {
     fn_counter: u32,
 }
 
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Compiler {
     pub fn new() -> Self {
         let mut compiler = Compiler {
@@ -410,10 +416,10 @@ impl Compiler {
             other => other,
         };
         let idx = self.current_chunk().add_constant(value);
-        if idx > u16::MAX {
+        if idx > u16::MAX as usize {
             self.error("Too many constants in one chunk", line);
         }
-        idx
+        idx as u16
     }
 
     fn emit_constant(&mut self, value: Value, line: u32) {
@@ -535,7 +541,8 @@ impl Compiler {
     /// 2. `Pop` removes the duplicate top:      [.. RESULT, L1, .., L_{k-1}]
     /// 3. Close/pop L_{k-1}..L1 top-down (each is on top in turn) — `CloseUpvalue`
     ///    when captured (snapshots the still-live slot), else `Pop`:
-    ///                                          [.. RESULT]
+    ///    end state:                            [.. RESULT]
+    ///
     /// The RESULT ends up alone at the floor slot — exactly where the block's
     /// value belongs — with every captured body local closed.
     ///
@@ -653,6 +660,17 @@ impl Compiler {
             }
         }
         None
+    }
+
+    /// True if `name` is bound by the user as a local (current or any
+    /// enclosing frame → would resolve as local/upvalue) or a declared
+    /// global. Read-only — unlike `resolve_upvalue` it registers no capture.
+    /// Used to confirm a bare `range` actually means the builtin.
+    fn name_is_user_bound(&self, name: &str) -> bool {
+        self.frames
+            .iter()
+            .any(|f| f.locals.iter().any(|l| l.name == name))
+            || self.declared_globals.contains(name)
     }
 
     /// Resolve an upvalue (captured variable from enclosing scope).
@@ -843,7 +861,7 @@ impl Compiler {
         let line = Self::stmt_line(stmt);
         let col = Self::stmt_column(stmt);
         self.loc_column_stack.push(col);
-        let _r = self.compile_statement_inner(stmt, line);
+        self.compile_statement_inner(stmt, line);
         self.loc_column_stack.pop();
     }
 
@@ -874,8 +892,8 @@ impl Compiler {
                 // pushes the closure into exactly that slot (the next free stack
                 // position), and the body's open upvalue captures that live slot.
                 let mut predeclared_named_fn = false;
-                if let Expression::FunctionLiteral { .. } = value {
-                    if self.current_frame().scope_depth > 0
+                if let Expression::FunctionLiteral { .. } = value
+                    && self.current_frame().scope_depth > 0
                         && self.resolve_local(&name.value).is_none()
                     {
                         let frame_idx = self.frames.len() - 1;
@@ -887,7 +905,6 @@ impl Compiler {
                             predeclared_named_fn = true;
                         }
                     }
-                }
                 // If the value is a function literal, pass the name so the
                 // closure carries it (instead of showing as "anonymous").
                 if let Expression::FunctionLiteral {
@@ -1104,8 +1121,8 @@ impl Compiler {
 
             Statement::Assign { name, value } => {
                 // Check immutability for locals at compile time
-                if let Some(slot) = self.resolve_local(&name.value) {
-                    if !self.current_frame().locals[slot as usize].mutable {
+                if let Some(slot) = self.resolve_local(&name.value)
+                    && !self.current_frame().locals[slot as usize].mutable {
                         self.error(
                             &format!(
                                 "cannot reassign immutable variable '{}'. use := to override",
@@ -1114,7 +1131,6 @@ impl Compiler {
                             line,
                         );
                     }
-                }
                 // Implicit-self field WRITE: a bare-name assignment inside a
                 // method whose name is NOT a local/param but IS a field of the
                 // enclosing method's struct resolves to `self.field = value` —
@@ -1130,8 +1146,8 @@ impl Compiler {
                         .method_field_stack
                         .last()
                         .is_some_and(|f| f.contains(&name.value));
-                    if is_field {
-                        if let Some(self_slot) = self.resolve_local("self") {
+                    if is_field
+                        && let Some(self_slot) = self.resolve_local("self") {
                             // self.field = value : GetLocal self, RHS, SetField.
                             // SetField pops both object and value (net -2), so
                             // no trailing Pop is needed (mirrors DotAssign).
@@ -1144,7 +1160,6 @@ impl Compiler {
                             self.emit_op_u16(OpCode::SetField, field_const, line);
                             return;
                         }
-                    }
                 }
                 self.compile_expression(value);
                 if let Some(slot) = self.resolve_local(&name.value) {
@@ -1257,38 +1272,84 @@ impl Compiler {
                 body,
                 ..
             } => {
-                // Compile iterable, store it in a local
-                self.compile_expression(iterable);
+                // `each i in range(a)` / `range(a, b)` with the *builtin* range
+                // (not user-shadowed): lower to a counting loop. No array is
+                // materialised, and with IterLen/IterGet gone the body is
+                // JIT-eligible. `range` is always ascending, step 1, `a..b`.
+                let range_args: Option<&[Expression]> = match iterable {
+                    Expression::Call {
+                        function,
+                        args,
+                        named_args,
+                        ..
+                    } if named_args.is_empty()
+                        && (args.len() == 1 || args.len() == 2)
+                        && matches!(&**function, Expression::Ident(id) if id.value == "range")
+                        && !self.name_is_user_bound("range") =>
+                    {
+                        Some(args.as_slice())
+                    }
+                    _ => None,
+                };
+
                 self.begin_scope();
 
-                // Local for the iterable itself
-                self.add_local("__iterable__", false, None);
-
-                // Local for the index counter
-                self.emit_constant(Value::Integer(0), line);
-                self.add_local("__index__", true, None);
-
-                // Get iterable length
-                let iterable_slot = self.resolve_local("__iterable__").unwrap();
-                let index_slot = self.resolve_local("__index__").unwrap();
+                // `iter_slot` holds the iterable (array path); unused for range.
+                // `index_slot` is the counter; `end_slot` the exclusive bound.
+                let (index_slot, iter_slot, end_slot) = if let Some(args) = range_args {
+                    // counter = start (0 for 1-arg form), evaluated once
+                    if args.len() == 1 {
+                        self.emit_constant(Value::Integer(0), line);
+                    } else {
+                        self.compile_expression(&args[0]);
+                    }
+                    self.add_local("__index__", true, None);
+                    // end = last arg, evaluated once
+                    self.compile_expression(&args[args.len() - 1]);
+                    self.add_local("__range_end__", false, None);
+                    let i = self.resolve_local("__index__").unwrap();
+                    let e = self.resolve_local("__range_end__").unwrap();
+                    (i, 0, e)
+                } else {
+                    self.compile_expression(iterable);
+                    self.add_local("__iterable__", false, None);
+                    self.emit_constant(Value::Integer(0), line);
+                    self.add_local("__index__", true, None);
+                    let it = self.resolve_local("__iterable__").unwrap();
+                    let i = self.resolve_local("__index__").unwrap();
+                    (i, it, 0)
+                };
+                let is_range = range_args.is_some();
 
                 let loop_start = self.current_chunk().len();
                 self.current_frame_mut().loop_starts.push(loop_start);
                 self.current_frame_mut().loop_exits.push(Vec::new());
                 self.current_frame_mut().loop_continues.push(Vec::new());
 
-                // Check index < len: push iterable, push IterLen, push index, compare
-                self.emit_op_u16(OpCode::GetLocal, iterable_slot, line);
-                self.emit_op(OpCode::IterLen, line);
-                self.emit_op_u16(OpCode::GetLocal, index_slot, line);
-                self.emit_op(OpCode::Greater, line); // len > index
+                // Loop condition (leaves a bool both branches Pop).
+                if is_range {
+                    // index < end
+                    self.emit_op_u16(OpCode::GetLocal, index_slot, line);
+                    self.emit_op_u16(OpCode::GetLocal, end_slot, line);
+                    self.emit_op(OpCode::Less, line);
+                } else {
+                    // len(iterable) > index
+                    self.emit_op_u16(OpCode::GetLocal, iter_slot, line);
+                    self.emit_op(OpCode::IterLen, line);
+                    self.emit_op_u16(OpCode::GetLocal, index_slot, line);
+                    self.emit_op(OpCode::Greater, line);
+                }
                 let exit_jump = self.emit_jump(OpCode::JumpIfFalse, line);
                 self.emit_op(OpCode::Pop, line);
 
-                // Get element: iterable[index]
-                self.emit_op_u16(OpCode::GetLocal, iterable_slot, line);
-                self.emit_op_u16(OpCode::GetLocal, index_slot, line);
-                self.emit_op(OpCode::IterGet, line);
+                // Push the loop value: the counter (range) or iterable[index].
+                if is_range {
+                    self.emit_op_u16(OpCode::GetLocal, index_slot, line);
+                } else {
+                    self.emit_op_u16(OpCode::GetLocal, iter_slot, line);
+                    self.emit_op_u16(OpCode::GetLocal, index_slot, line);
+                    self.emit_op(OpCode::IterGet, line);
+                }
 
                 // `stop` exits to the loop's outer scope, which does NOT include
                 // the loop variable (the exit path never bound it that
@@ -1804,6 +1865,16 @@ impl Compiler {
         // captured context; everything else descends as consumed.
         let consumed = self.value_consumed;
         self.value_consumed = true;
+
+        // Fold pure-literal arithmetic/comparison/bitwise subtrees to a single
+        // constant (e.g. `60*60*24`, `2 < 3`). Leaves keep their existing fast
+        // paths (True/False/None opcodes), so only fold compound nodes.
+        if matches!(expr, Expression::Prefix { .. } | Expression::Infix { .. })
+            && let Some(folded) = fold_constant_expression(expr) {
+                self.emit_constant(folded, line);
+                return;
+            }
+
         match expr {
             Expression::Int { value, .. } => {
                 self.emit_constant(Value::Integer(*value), line);
@@ -1954,8 +2025,8 @@ impl Compiler {
                 // Postfix requires an identifier
                 if let Expression::Ident(ident) = left.as_ref() {
                     // Check immutability
-                    if let Some(slot) = self.resolve_local(&ident.value) {
-                        if !self.current_frame().locals[slot as usize].mutable {
+                    if let Some(slot) = self.resolve_local(&ident.value)
+                        && !self.current_frame().locals[slot as usize].mutable {
                             self.error(
                                 &format!(
                                     "cannot mutate immutable variable '{}' with {}",
@@ -1964,7 +2035,6 @@ impl Compiler {
                                 line,
                             );
                         }
-                    }
                     // Load current value (return value is the pre-increment value)
                     self.compile_identifier(ident);
                     // Duplicate for the return value
@@ -2356,7 +2426,7 @@ impl Compiler {
                 // (e.g. `<int>(...)`) get no handler — their errors propagate.
                 let is_error_union = type_str.contains(" || ") && {
                     let parts: Vec<&str> = type_str.split(" || ").collect();
-                    parts.iter().any(|p| *p == "VALUE")
+                    parts.contains(&"VALUE")
                         && parts.iter().any(|p| p.starts_with("ERROR"))
                 };
                 let handler = if is_error_union {
@@ -2726,9 +2796,9 @@ impl Compiler {
         let line = ident.token.span.line as u32;
         let col = ident.token.span.column as u32;
         self.loc_column_stack.push(col);
-        let result = self.compile_identifier_inner(ident, line);
+        self.compile_identifier_inner(ident, line);
         self.loc_column_stack.pop();
-        result
+        
     }
 
     /// Collect the field names visible to a method on `struct_name`, walking
@@ -2766,15 +2836,13 @@ impl Compiler {
             .method_field_stack
             .last()
             .is_some_and(|f| f.contains(&ident.value))
-        {
-            if let Some(self_slot) = self.resolve_local("self") {
+            && let Some(self_slot) = self.resolve_local("self") {
                 self.emit_op_u16(OpCode::GetLocal, self_slot, line);
                 let field_const =
                     self.make_constant(Value::String(rc_str(ident.value.as_str())), line);
                 self.emit_op_u16(OpCode::GetField, field_const, line);
                 return;
             }
-        }
         // Try upvalue
         let frame_idx = self.frames.len() - 1;
         if let Some(uv_idx) = self.resolve_upvalue(frame_idx, &ident.value) {
@@ -2874,6 +2942,7 @@ impl Compiler {
                 call_count: std::cell::Cell::new(0),
                 loop_count: std::cell::Cell::new(0),
                 jit_state: std::cell::Cell::new(0),
+                jit_bailouts: std::cell::Cell::new(0),
                 jit_thunk: std::cell::Cell::new(None),
                 specialized_thunk: std::cell::Cell::new(None),
                 specialized_arity: std::cell::Cell::new(0),

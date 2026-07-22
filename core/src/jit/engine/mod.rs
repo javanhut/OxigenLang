@@ -50,6 +50,10 @@ use defs::{
 pub(crate) use defs::{EntryKind, InvokeOutcome, SpecializedEntryKind};
 use helpers::{HelperIds, HelperRefs, declare_helper_refs, declare_helpers, register_helpers};
 
+// vec_box allowed: the IC-cache Boxes are load-bearing — their raw
+// pointers are baked into emitted IR, so entries must not move when
+// the Vec reallocates. See field docs below.
+#[allow(clippy::vec_box)]
 pub(super) struct JitInner {
     module: JITModule,
     ctx: Context,
@@ -93,6 +97,12 @@ pub(super) struct JitInner {
 
     /// Per-field-op inline caches for `GetField`/`SetField`.
     field_caches: Vec<Box<FieldCacheEntry>>,
+
+    /// Per-global-name version cells for the GetGlobal ICs. Boxed so the
+    /// address is stable (stored in `GlobalCacheEntry.version_cell` and
+    /// read from emitted IR). `SetGlobal`/`DefineGlobal` bump only the
+    /// written name's cell, so unrelated ICs stay hot.
+    global_version_cells: HashMap<String, Box<u64>>,
 }
 
 // IC entry layouts moved to engine::cache (see use below).
@@ -164,6 +174,26 @@ impl JitInner {
             call_caches: Vec::new(),
             method_caches: Vec::new(),
             field_caches: Vec::new(),
+            global_version_cells: HashMap::new(),
+        }
+    }
+
+    /// Stable pointer to `name`'s version cell, creating it (at version 0)
+    /// on first use. Called by `jit_get_global_ic` when it populates a
+    /// cache entry.
+    pub(crate) fn global_version_cell(&mut self, name: &str) -> *mut u64 {
+        let b = self
+            .global_version_cells
+            .entry(name.to_string())
+            .or_insert_with(|| Box::new(0));
+        b.as_mut() as *mut u64
+    }
+
+    /// Invalidate every IC caching `name`. Names no IC has ever cached
+    /// have no cell and cost only the lookup.
+    pub(crate) fn bump_global_version(&mut self, name: &str) {
+        if let Some(cell) = self.global_version_cells.get_mut(name) {
+            **cell = cell.wrapping_add(1);
         }
     }
 
@@ -181,6 +211,7 @@ impl JitInner {
         self.global_caches.push(Box::new(GlobalCacheEntry {
             version: u64::MAX,
             value: crate::vm::value::Value::None,
+            version_cell: &cache::GLOBAL_VERSION_SENTINEL,
         }));
         let b = self.global_caches.last_mut().unwrap();
         b.as_mut() as *mut _
@@ -917,8 +948,8 @@ impl JitInner {
                 while ip < code.len() {
                     // If this ip starts a new block, switch to it (and glue
                     // the current block to it if fall-through).
-                    if let Some(&block) = blocks.get(&ip) {
-                        if block != current_block {
+                    if let Some(&block) = blocks.get(&ip)
+                        && block != current_block {
                             if !terminated {
                                 // Fall-through into a new block is a control-
                                 // flow edge: materialize any operand-stack
@@ -949,7 +980,6 @@ impl JitInner {
                             // see the right line.
                             last_emitted_loc = None;
                         }
-                    }
 
                     // Dead code after a terminator, before the next block
                     // boundary: the loop back-edge + `None;Return` epilogue the
@@ -1147,6 +1177,36 @@ impl JitInner {
                             emit_early_exit_on_err(&mut builder, exit_block, status);
                             ip += 1;
                         }
+                        OpCode::IndexAssign => {
+                            // The helper reads value+index+collection from
+                            // `vm.stack` via pop(), so flush staged virt
+                            // temps (e.g. a virtualized int rhs) to memory
+                            // first — same contract as IterGet/TypeWrap.
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
+                            }
+                            let call = builder.ins().call(refs.index_assign, &[vm_val]);
+                            let status = builder.inst_results(call)[0];
+                            emit_early_exit_on_err(&mut builder, exit_block, status);
+                            ip += 1;
+                        }
+                        OpCode::IterLen | OpCode::IterGet => {
+                            // The helpers read operands from `vm.stack` via
+                            // pop(), so flush any staged virt temps (e.g. the
+                            // virtualized `__index__`) to memory first.
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
+                            }
+                            let func = if op == OpCode::IterLen {
+                                refs.iter_len
+                            } else {
+                                refs.iter_get
+                            };
+                            let call = builder.ins().call(func, &[vm_val]);
+                            let status = builder.inst_results(call)[0];
+                            emit_early_exit_on_err(&mut builder, exit_block, status);
+                            ip += 1;
+                        }
                         OpCode::TypeWrap => {
                             // Fast path: slot_types proved this TypeWrap is
                             // identity (target is "INTEGER", input slot type
@@ -1332,14 +1392,13 @@ impl JitInner {
                                 // GetLocal/Constant/Add/SetLocal sequence
                                 // runs and B2.1c handles it.
                                 let slot = read_u16(code, ip + 1);
-                                if let Some(&var) = int_locals.get(&slot) {
-                                    if live_int_slots.contains(&slot) {
+                                if let Some(&var) = int_locals.get(&slot)
+                                    && live_int_slots.contains(&slot) {
                                         let val = builder.use_var(var);
                                         virt_stack.push_int_ssa(val);
                                         ip += 3;
                                         continue;
                                     }
-                                }
                                 // B2.2a: eligible-param mirror. Read-only
                                 // Value params that passed the entry tag
                                 // guard live in a Cranelift Variable for
@@ -1423,11 +1482,78 @@ impl JitInner {
                                     .get(slot as usize)
                                     .map(|li| li.type_constraint.is_some())
                                     .unwrap_or(false);
-                                if constrained {
-                                    // Type-locked slot: enforce the lock via the
+                                let int_constraint = func
+                                    .locals
+                                    .get(slot as usize)
+                                    .and_then(|li| li.type_constraint.as_deref())
+                                    == Some("INTEGER");
+                                if constrained && int_constraint {
+                                    // Inline the int type-lock check. The hot
+                                    // case — storing an Integer into an <int>
+                                    // slot whose value came off a call result
+                                    // (on memory, not virt-staged) — is a tag
+                                    // compare + 16-byte copy, no FFI. Only a
+                                    // real violation crosses into the checked
+                                    // helper to raise the exact lock error and
+                                    // bail. Removes the per-iteration FFI on
+                                    // typed-int accumulators fed by calls
+                                    // (bench_closure `total <int> = total +
+                                    // add5(i)`: 500k crossings; collatz: 50k).
+                                    // The lock is still enforced: anything but
+                                    // tag INTEGER takes the error path.
+                                    use cranelift_codegen::ir::MemFlags;
+                                    use cranelift_codegen::ir::condcodes::IntCC;
+                                    let flags = MemFlags::trusted();
+                                    let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
+                                    let stack_len = emit_load_stack_len(&mut builder, vm_val);
+                                    let value_size =
+                                        builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+                                    let one = builder.ins().iconst(types::I64, 1);
+                                    let top_idx = builder.ins().isub(stack_len, one);
+                                    let top_off = builder.ins().imul(top_idx, value_size);
+                                    let addr_top = builder.ins().iadd(stack_ptr, top_off);
+                                    let top_tag = builder.ins().load(types::I8, flags, addr_top, 0);
+                                    let int_tag =
+                                        builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
+                                    let is_int = builder.ins().icmp(IntCC::Equal, top_tag, int_tag);
+                                    let ok_block = builder.create_block();
+                                    let err_block = builder.create_block();
+                                    builder.ins().brif(is_int, ok_block, &[], err_block, &[]);
+
+                                    // Rare violation: the helper raises the
+                                    // exact lock error and returns 1; bail.
+                                    builder.switch_to_block(err_block);
+                                    maybe_emit_current_line(
+                                        &mut builder,
+                                        vm_val,
+                                        line,
+                                        col,
+                                        &mut last_emitted_loc,
+                                    );
+                                    let slot_arg = builder.ins().iconst(types::I32, slot as i64);
+                                    let call = builder
+                                        .ins()
+                                        .call(refs.set_local_checked, &[vm_val, slot_arg]);
+                                    let status = builder.inst_results(call)[0];
+                                    let zero64 = builder.ins().iconst(types::I64, 0);
+                                    builder
+                                        .ins()
+                                        .jump(exit_block, &[status.into(), zero64.into()]);
+
+                                    // OK: store via the shared inline path
+                                    // (no FFI — top is a primitive Integer).
+                                    builder.switch_to_block(ok_block);
+                                    emit_inline_set_local(
+                                        &mut builder,
+                                        &refs,
+                                        vm_val,
+                                        slot_offset_val,
+                                        slot,
+                                    );
+                                } else if constrained {
+                                    // Non-int type lock: enforce via the
                                     // fallible checked helper and bail on a
-                                    // mismatch, so a set type is never ignored
-                                    // even once the function is JIT-compiled.
+                                    // mismatch.
                                     maybe_emit_current_line(
                                         &mut builder,
                                         vm_val,
@@ -1751,8 +1877,8 @@ impl JitInner {
                             // sequence, but doesn't simplify the subsequent
                             // `cmp 0 + brif` down to a single bit-test the
                             // way this peephole's `band 1 + icmp 0` does.
-                            if is_mod {
-                                if let Some(next_ip) = try_emit_parity_branch_peephole(
+                            if is_mod
+                                && let Some(next_ip) = try_emit_parity_branch_peephole(
                                     &mut builder,
                                     chunk,
                                     code,
@@ -1767,7 +1893,6 @@ impl JitInner {
                                     ip = next_ip;
                                     continue;
                                 }
-                            }
 
                             // B2.1h: signed-div-by-power-of-two peephole.
                             // Replaces Cranelift's ~20-cycle `idiv` with a
@@ -1787,8 +1912,8 @@ impl JitInner {
                             if virt_stack.top_n_are_int_ssa(2) {
                                 let rhs = virt_stack.pop_int_ssa().unwrap();
                                 let lhs = virt_stack.pop_int_ssa().unwrap();
-                                if !is_mod {
-                                    if let Some(q) =
+                                if !is_mod
+                                    && let Some(q) =
                                         try_emit_sdiv_pow2_peephole(&mut builder, lhs, rhs)
                                     {
                                         if let Some(cp) = counters_ptr_opt {
@@ -1802,7 +1927,6 @@ impl JitInner {
                                         ip += 1;
                                         continue;
                                     }
-                                }
                                 // Both virt-int and helper paths can raise
                                 // (zero divisor, INT_MIN/-1 overflow). Stamp
                                 // the line so the resulting VMError reports
@@ -1938,15 +2062,14 @@ impl JitInner {
                                     // ops had no dedicated counter pre-B2.1f;
                                     // the diagnostic use-case was specifically
                                     // verifying Equal/NotEqual get fused.
-                                    if matches!(op, OpCode::Equal | OpCode::NotEqual) {
-                                        if let Some(cp) = counters_ptr_opt {
+                                    if matches!(op, OpCode::Equal | OpCode::NotEqual)
+                                        && let Some(cp) = counters_ptr_opt {
                                             emit_counter_bump(
                                                 &mut builder,
                                                 cp,
                                                 counter_offsets::VIRT_BRANCH_EQ_HIT,
                                             );
                                         }
-                                    }
                                     let rhs = virt_stack.pop_int_ssa().unwrap();
                                     let lhs = virt_stack.pop_int_ssa().unwrap();
                                     let pred = builder.ins().icmp(cc, lhs, rhs);
@@ -2202,12 +2325,17 @@ impl JitInner {
                             use cranelift_codegen::ir::condcodes::IntCC;
                             let flags = MemFlags::trusted();
                             let cache_ver = builder.ins().load(types::I64, flags, cache_val, 0);
-                            let vm_ver = builder.ins().load(
-                                types::I64,
+                            // Per-name version cell: the pointer lives in the
+                            // cache entry (repointed from the sentinel by the
+                            // miss helper), so one extra dependent load
+                            // replaces the old VM-wide globals_version read.
+                            let cell_ptr = builder.ins().load(
+                                ptr_ty,
                                 flags,
-                                vm_val,
-                                VM::globals_version_offset() as i32,
+                                cache_val,
+                                GlobalCacheEntry::OFFSET_VERSION_CELL,
                             );
+                            let vm_ver = builder.ins().load(types::I64, flags, cell_ptr, 0);
                             let is_hit = builder.ins().icmp(IntCC::Equal, cache_ver, vm_ver);
                             let hit_block = builder.create_block();
                             let miss_block = builder.create_block();
@@ -2678,10 +2806,10 @@ impl JitInner {
                                 // graceful "stack overflow" error and we
                                 // early-exit the thunk with status 1, so the
                                 // JIT rejects what the VM rejects.
-                                emit_fallible(
+                                emit_inline_recursion_guard(
                                     &mut builder,
                                     exit_block,
-                                    refs.check_recursion_depth,
+                                    &refs,
                                     vm_val,
                                 );
 
@@ -2886,7 +3014,7 @@ impl JitInner {
                             let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
                             let offset_from_top = builder
                                 .ins()
-                                .iconst(types::I64, (arg_count as i64 + 1) as i64);
+                                .iconst(types::I64, arg_count as i64 + 1);
                             let callee_slot = builder.ins().isub(stack_len, offset_from_top);
                             let callee_off = builder.ins().imul(callee_slot, value_size);
                             let callee_ptr = builder.ins().iadd(stack_ptr, callee_off);
@@ -3092,10 +3220,10 @@ impl JitInner {
                                 // 16384 JitFrames fit on the native stack and
                                 // THIS FRAMES_MAX guard becomes the graceful
                                 // limit (no native-stack SIGABRT below 16384).
-                                emit_fallible(
+                                emit_inline_recursion_guard(
                                     &mut builder,
                                     exit_block,
-                                    refs.check_recursion_depth,
+                                    &refs,
                                     vm_val,
                                 );
 
@@ -3308,10 +3436,10 @@ impl JitInner {
                             // 256 MB-stack thread, so all 16384 JitFrames fit
                             // and this FRAMES_MAX guard fires gracefully before
                             // the native stack is exhausted (no SIGABRT).
-                            emit_fallible(
+                            emit_inline_recursion_guard(
                                 &mut builder,
                                 exit_block,
-                                refs.check_recursion_depth,
+                                &refs,
                                 vm_val,
                             );
 
@@ -3575,7 +3703,7 @@ impl JitInner {
                                     builder.ins().iconst(types::I64, VALUE_SIZE as i64);
                                 let offset_from_top = builder
                                     .ins()
-                                    .iconst(types::I64, (arg_count as i64 + 1) as i64);
+                                    .iconst(types::I64, arg_count as i64 + 1);
                                 let receiver_slot = builder.ins().isub(stack_len, offset_from_top);
                                 let receiver_off = builder.ins().imul(receiver_slot, value_size);
                                 let receiver_ptr = builder.ins().iadd(stack_ptr, receiver_off);
@@ -3858,10 +3986,10 @@ impl JitInner {
                                 // thread so all 16384 JitFrames fit and this
                                 // FRAMES_MAX guard fires gracefully before the
                                 // native stack overflows (no SIGABRT).
-                                emit_fallible(
+                                emit_inline_recursion_guard(
                                     &mut builder,
                                     exit_block,
-                                    refs.check_recursion_depth,
+                                    &refs,
                                     vm_val,
                                 );
                                 let closure_raw_box = builder.ins().load(
@@ -4299,9 +4427,9 @@ impl JitInner {
                     }
                 })?;
 
-            if want_disasm {
-                if let Some(code) = self.ctx.compiled_code() {
-                    if let Some(vcode) = code.vcode.as_ref() {
+            if want_disasm
+                && let Some(code) = self.ctx.compiled_code()
+                    && let Some(vcode) = code.vcode.as_ref() {
                         eprintln!(
                             "=== disasm fn={} kind={:?} ===\n{}",
                             func.name.as_deref().unwrap_or("<anon>"),
@@ -4309,8 +4437,6 @@ impl JitInner {
                             vcode
                         );
                     }
-                }
-            }
 
             self.module.clear_context(&mut self.ctx);
         }
@@ -4397,18 +4523,71 @@ fn emit_early_exit_on_err(
     builder.switch_to_block(ok_block);
 }
 
+/// Inline replacement for the per-call `check_recursion_depth` FFI guard.
+/// The inline JIT call paths push a `JitFrame` + operands directly into the
+/// pre-allocated `jit_frames` (cap `FRAMES_MAX`) and value-stack (cap
+/// `STACK_MAX`) buffers, so each recursive call must bounds-check before the
+/// push or it overruns the buffer and SIGSEGVs (the V7 guard). The old code
+/// crossed into an FFI helper for that check on EVERY call — millions of
+/// crossings on a recursive workload (fib(30) ≈ 2.7M). Here the common path
+/// is two loads + two compares + a branch; only the rare overflow crosses
+/// into the helper to stash the exact graceful "stack overflow" error and
+/// exit. The inline bound omits the (constant, ≥0) interpreter-frame count
+/// the helper adds, so it triggers no earlier than the buffers fill — it
+/// still can't overrun (no SIGSEGV) and still raises `Err` on unbounded
+/// recursion, matching the guard's contract. (`fix_jit_recursion_guard`.)
+fn emit_inline_recursion_guard(
+    builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
+    refs: &HelperRefs,
+    vm_val: cranelift_codegen::ir::Value,
+) {
+    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::condcodes::IntCC;
+    let flags = MemFlags::trusted();
+    let jfl = builder
+        .ins()
+        .load(types::I64, flags, vm_val, vm_jit_frame_view_len_offset());
+    let sl = builder
+        .ins()
+        .load(types::I64, flags, vm_val, vm_stack_view_len_offset());
+    let frame_max = builder
+        .ins()
+        .iconst(types::I64, crate::vm::FRAMES_MAX as i64);
+    let stack_lim = builder
+        .ins()
+        .iconst(types::I64, (crate::vm::STACK_MAX - 8192) as i64);
+    let frame_of = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, jfl, frame_max);
+    let stack_of = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, sl, stack_lim);
+    let overflow = builder.ins().bor(frame_of, stack_of);
+    let ovf_block = builder.create_block();
+    let ok_block = builder.create_block();
+    builder.ins().brif(overflow, ovf_block, &[], ok_block, &[]);
+    // Rare overflow: the helper re-checks (stricter bound, always true here)
+    // and stashes the graceful error; exit with its status.
+    builder.switch_to_block(ovf_block);
+    let call = builder.ins().call(refs.check_recursion_depth, &[vm_val]);
+    let status = builder.inst_results(call)[0];
+    let zero64 = builder.ins().iconst(types::I64, 0);
+    builder
+        .ins()
+        .jump(exit_block, &[status.into(), zero64.into()]);
+    builder.switch_to_block(ok_block);
+}
+
 // ── Bytecode helpers ───────────────────────────────────────────────────
 
 fn read_u16(code: &[u8], offset: usize) -> u16 {
     ((code[offset] as u16) << 8) | (code[offset + 1] as u16)
 }
 
-/// Count `GetGlobal` opcodes in a chunk so the translator can
-/// pre-allocate one inline-cache slot each. We walk the stream using
-/// the same length table as the scanner; the scan pass has already
-/// validated every opcode is in the allow-list, so we can assume
-/// fixed-length instructions here — except `Closure`, which is
-/// variable-length and needs the constants pool to resolve its length.
+/// Count inline-cache sites so the translator can pre-allocate their slots.
+/// The scan pass has already validated the bytecode, and instruction
+/// boundaries come from the canonical decoder in `compiler::opcode`.
 fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usize, usize) {
     let code = &chunk.code;
     let mut get_globals = 0usize;
@@ -4417,9 +4596,7 @@ fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usiz
     let mut field_ops = 0usize;
     let mut ip = 0;
     while ip < code.len() {
-        let Some(op) = OpCode::from_byte(code[ip]) else {
-            break;
-        };
+        let op = OpCode::from_byte(code[ip]).expect("scan accepted an invalid opcode");
         match op {
             OpCode::GetGlobal => get_globals += 1,
             OpCode::Call => calls += 1,
@@ -4427,76 +4604,9 @@ fn count_ic_sites(chunk: &crate::compiler::opcode::Chunk) -> (usize, usize, usiz
             OpCode::GetField | OpCode::SetField => field_ops += 1,
             _ => {}
         }
-        ip += match op {
-            // 1-byte opcodes
-            OpCode::None
-            | OpCode::True
-            | OpCode::False
-            | OpCode::Pop
-            | OpCode::Dup
-            | OpCode::Add
-            | OpCode::Subtract
-            | OpCode::Multiply
-            | OpCode::Divide
-            | OpCode::Modulo
-            | OpCode::Equal
-            | OpCode::NotEqual
-            | OpCode::Less
-            | OpCode::LessEqual
-            | OpCode::Greater
-            | OpCode::GreaterEqual
-            | OpCode::Not
-            | OpCode::Negate
-            | OpCode::BitAnd
-            | OpCode::BitOr
-            | OpCode::BitXor
-            | OpCode::BitNot
-            | OpCode::ShiftLeft
-            | OpCode::ShiftRight
-            | OpCode::Index
-            | OpCode::CloseUpvalue
-            | OpCode::Return => 1,
-            // u8 operand
-            OpCode::Call | OpCode::Log => 2,
-            // u16 operand
-            OpCode::Constant
-            | OpCode::BuildArray
-            | OpCode::TypeWrap
-            | OpCode::GetLocal
-            | OpCode::SetLocal
-            | OpCode::GetGlobal
-            | OpCode::SetGlobal
-            | OpCode::DefineGlobal
-            | OpCode::GetUpvalue
-            | OpCode::SetUpvalue
-            | OpCode::Jump
-            | OpCode::JumpIfFalse
-            | OpCode::JumpIfTrue
-            | OpCode::Loop
-            | OpCode::PopJumpIfFalse
-            | OpCode::StructDef
-            | OpCode::GetField
-            | OpCode::SetField => 3,
-            // u16 + u8
-            OpCode::StructLiteral | OpCode::DefineMethod | OpCode::MethodCall => 4,
-            // u16 + u8 + u16
-            OpCode::DefineGlobalTyped => 6,
-            // Variable-length
-            OpCode::Closure => {
-                if ip + 2 >= code.len() {
-                    break;
-                }
-                let fn_idx = ((code[ip + 1] as u16) << 8) | (code[ip + 2] as u16);
-                let uv_count = match chunk.constants.get(fn_idx as usize) {
-                    Some(crate::vm::value::Value::Closure(t)) => t.function.upvalue_count as usize,
-                    _ => break,
-                };
-                3 + 3 * uv_count
-            }
-            // Anything else shouldn't reach here — scan has rejected
-            // the function if we hit a non-allow-listed opcode.
-            _ => break,
-        };
+        ip += chunk
+            .instruction_len(ip)
+            .expect("scan accepted malformed bytecode");
     }
     (get_globals, calls, method_calls, field_ops)
 }
@@ -5332,6 +5442,7 @@ fn emit_int_fast_arith(
 ///
 /// Any guard failure branches to the miss path so the helper can do the
 /// full dispatch (and repopulate the cache if the shape has changed).
+#[allow(clippy::too_many_arguments)]
 fn emit_inline_struct_field_add(
     builder: &mut FunctionBuilder<'_>,
     exit_block: Block,
@@ -5969,6 +6080,7 @@ fn iconst_imm(builder: &FunctionBuilder<'_>, val: cranelift_codegen::ir::Value) 
 /// Caller must invoke this BEFORE emitting any IR for the Modulo
 /// itself — otherwise the rewrite would be too late and `srem` would
 /// stay in the IR.
+#[allow(clippy::too_many_arguments)]
 fn try_emit_parity_branch_peephole(
     builder: &mut FunctionBuilder<'_>,
     chunk: &Chunk,
@@ -5989,10 +6101,7 @@ fn try_emit_parity_branch_peephole(
 
     // Top of the virt stack is the Modulo RHS (most recently pushed).
     // It must be `iconst 2`.
-    let rhs = match virt_stack.peek_int_ssa() {
-        Some(v) => v,
-        None => return None,
-    };
+    let rhs = virt_stack.peek_int_ssa()?;
     if !is_iconst_imm(builder, rhs, 2) {
         return None;
     }
@@ -6061,10 +6170,7 @@ fn try_emit_parity_branch_peephole(
 
     // For pattern B, virt_stack[-3] must be `iconst 0`.
     if is_pattern_b {
-        let zero_val = match virt_stack.peek_int_ssa_at(2) {
-            Some(v) => v,
-            None => return None,
-        };
+        let zero_val = virt_stack.peek_int_ssa_at(2)?;
         if !is_iconst_imm(builder, zero_val, 0) {
             return None;
         }
@@ -6193,7 +6299,7 @@ fn try_emit_sdiv_pow2_peephole(
         lhs
     } else {
         let sign = builder.ins().sshr_imm(lhs, 63);
-        let bias_mask = (abs - 1) as i64;
+        let bias_mask = abs - 1;
         let bias = builder.ins().band_imm(sign, bias_mask);
         let adjusted = builder.ins().iadd(lhs, bias);
         builder.ins().sshr_imm(adjusted, k)
@@ -6203,6 +6309,7 @@ fn try_emit_sdiv_pow2_peephole(
     Some(q)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_int_virt_divmod(
     builder: &mut FunctionBuilder<'_>,
     exit_block: Block,
@@ -6297,6 +6404,7 @@ fn emit_int_virt_divmod(
 /// payload in place and skips the temporary stack traffic. Non-integer
 /// locals replay the original helper sequence so mixed numeric/string
 /// semantics stay unchanged.
+#[allow(clippy::too_many_arguments)]
 fn emit_inline_local_const_arith_update(
     builder: &mut FunctionBuilder<'_>,
     exit_block: Block,
@@ -6396,6 +6504,7 @@ fn emit_inline_local_const_arith_update(
 /// Multiply; Add/Subtract; SetLocal(dst); [Pop]`. This covers tight-loop
 /// updates like `total := total + i * 2` without building the temporary
 /// stack values on the integer path.
+#[allow(clippy::too_many_arguments)]
 fn emit_inline_local_scaled_arith_update(
     builder: &mut FunctionBuilder<'_>,
     exit_block: Block,
@@ -6697,6 +6806,7 @@ fn emit_int_fast_eq(
 // status (`refs.lt`/`le`/`gt`/`ge`); false when it returns nothing
 // (`refs.eq`/`ne`). The slow path skips the err-block / status brif
 // when false because there's no value to read.
+#[allow(clippy::too_many_arguments)]
 fn emit_fused_int_cmp_branch(
     builder: &mut FunctionBuilder<'_>,
     exit_block: Block,
@@ -6848,23 +6958,23 @@ fn emit_fused_int_cmp_branch(
     }
 }
 
-/// Inline fast path for `GetLocal(slot)`. Reads the slot's 16-byte
-/// `Value` and pushes a clone onto the VM stack, all inline:
-///
-/// * **Primitive tags (0..=6):** the source value's bit pattern is a
-///   valid clone — just memcpy 16 bytes to the new top and bump
-///   `stack_view.len`. No Rc traffic, no variant dispatch.
-/// * **Heap-Rc tags (7..=12, 14..=21):** memcpy + atomic-free
-///   strong-count bump on the `RcBox` at the payload pointer. Mirrors
-///   what `Value::Clone` does for these variants without crossing FFI.
-///   Eliminates the residual `jit_get_local` helper crossings on hot
-///   GetLocal sites whose slot holds a Closure / Array / String /
-///   StructInstance / etc.
-/// * **`Value::Builtin` (tag 13):** the payload is a function pointer,
-///   not an `Rc`. Memcpy is sufficient (it's `Copy`); no bump.
-///
-/// The whole path is a single straight-line `tag-load + memcpy +
-/// optional Rc bump + len bump`. No helper call.
+// Inline fast path for `GetLocal(slot)`. Reads the slot's 16-byte
+// `Value` and pushes a clone onto the VM stack, all inline:
+//
+// * **Primitive tags (0..=6):** the source value's bit pattern is a
+//   valid clone — just memcpy 16 bytes to the new top and bump
+//   `stack_view.len`. No Rc traffic, no variant dispatch.
+// * **Heap-Rc tags (7..=12, 14..=21):** memcpy + atomic-free
+//   strong-count bump on the `RcBox` at the payload pointer. Mirrors
+//   what `Value::Clone` does for these variants without crossing FFI.
+//   Eliminates the residual `jit_get_local` helper crossings on hot
+//   GetLocal sites whose slot holds a Closure / Array / String /
+//   StructInstance / etc.
+// * **`Value::Builtin` (tag 13):** the payload is a function pointer,
+//   not an `Rc`. Memcpy is sufficient (it's `Copy`); no bump.
+//
+// The whole path is a single straight-line `tag-load + memcpy +
+// optional Rc bump + len bump`. No helper call.
 
 /// Predicate: is it safe to inline the Generic-entry Return as a
 /// raw `stack_view.len = slot_offset + 1` truncation? Returns true

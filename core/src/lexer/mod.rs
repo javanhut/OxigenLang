@@ -128,7 +128,8 @@ impl Lexer {
 
         let span = self.span();
 
-        let tok = match self.ch {
+        
+        match self.ch {
             '\0' => {
                 // At EOF in indent mode, emit RBrace for any remaining open blocks
                 if self.indent_mode && self.indent_stack.len() > 1 {
@@ -313,11 +314,11 @@ impl Lexer {
             '/' => match self.peek_char() {
                 '/' => {
                     self.skip_line_comment();
-                    return self.next_token();
+                    self.next_token()
                 }
                 '*' => {
                     self.skip_block_comment();
-                    return self.next_token();
+                    self.next_token()
                 }
                 _ => self.single_with_span(TokenType::FSlash, span),
             },
@@ -331,8 +332,8 @@ impl Lexer {
                 self.read_string('\'', triple, span)
             }
             '`' => self.read_char_literal(span),
-            c if c.is_ascii_digit() => return self.read_number(span),
-            c if is_ident_start(c) => return self.read_ident(span),
+            c if c.is_ascii_digit() => self.read_number(span),
+            c if is_ident_start(c) => self.read_ident(span),
             _ => {
                 let lit = self.ch.to_string();
                 self.read_char();
@@ -342,8 +343,7 @@ impl Lexer {
                     span,
                 }
             }
-        };
-        tok
+        }
     }
 
     fn single_with_span(&mut self, tt: TokenType, span: Span) -> Token {

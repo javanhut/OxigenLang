@@ -34,7 +34,7 @@ fn fmt_const(v: &Value) -> String {
         ),
         Value::None => "None".into(),
         Value::Boolean(b) => format!("Bool({})", b),
-        _ => format!("<other>"),
+        _ => "<other>".into(),
     }
 }
 

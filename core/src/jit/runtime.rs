@@ -286,6 +286,61 @@ pub unsafe extern "C" fn jit_op_index_fast_array_int(vm: *mut VM) -> u32 {
     }
 }
 
+/// `each`-loop length: pops the iterable, pushes its length. `[it] -> len`.
+/// Mirrors the `IterLen` interpreter arm via the shared `VM::iter_len`.
+pub unsafe extern "C" fn jit_op_iter_len(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.sync_stack_from_view();
+    let iterable = vm.pop();
+    match vm.iter_len(&iterable) {
+        Ok(len) => {
+            vm.push(Value::Integer(len));
+            0
+        }
+        Err(err) => {
+            vm.jit.stash_error(err);
+            1
+        }
+    }
+}
+
+/// `arr[i] = v` / `map[k] = v`: pops value+index+collection, assigns in
+/// place, pushes nothing. `[coll, idx, val] -> []`. Mirrors the
+/// `IndexAssign` interpreter arm via the shared `VM::eval_index_assign`.
+pub unsafe extern "C" fn jit_op_index_assign(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.sync_stack_from_view();
+    let value = vm.pop();
+    let index = vm.pop();
+    let collection = vm.pop();
+    match vm.eval_index_assign(collection, index, value) {
+        Ok(()) => 0,
+        Err(err) => {
+            vm.jit.stash_error(err);
+            1
+        }
+    }
+}
+
+/// `each`-loop element: pops index+iterable, pushes `iterable[index]`.
+/// `[it, idx] -> elem`. Mirrors `IterGet` via the shared `VM::iter_get`.
+pub unsafe extern "C" fn jit_op_iter_get(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.sync_stack_from_view();
+    let index = vm.pop();
+    let iterable = vm.pop();
+    match vm.iter_get(&iterable, &index) {
+        Ok(val) => {
+            vm.push(val);
+            0
+        }
+        Err(err) => {
+            vm.jit.stash_error(err);
+            1
+        }
+    }
+}
+
 pub unsafe extern "C" fn jit_type_wrap(vm: *mut VM, type_idx: u32) -> u32 {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::TypeWrap);
@@ -407,8 +462,8 @@ pub unsafe extern "C" fn jit_struct_field_add_const(
 
     if let Some(inst) = self_val.as_struct_instance() {
         let field_name = vm.current_constant(field_idx as u16);
-        if let Some(fname) = field_name.as_string() {
-            if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+        if let Some(fname) = field_name.as_string()
+            && let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
                 // SAFETY: single-threaded; nothing else borrows inst.fields.
                 // Integer→Integer update: no Drop needed on the old value,
                 // so patch the i64 payload in place.
@@ -425,7 +480,6 @@ pub unsafe extern "C" fn jit_struct_field_add_const(
                     }
                 }
             }
-        }
     }
 
     match vm.handle_get_field_from_value(self_val.clone(), field_idx as u16) {
@@ -499,8 +553,8 @@ pub unsafe extern "C" fn jit_struct_field_add_local(
 
     if let (Some(inst), Some(rhs)) = (self_val.as_struct_instance(), rhs_val.as_integer()) {
         let field_name = vm.current_constant(field_idx as u16);
-        if let Some(fname) = field_name.as_string() {
-            if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+        if let Some(fname) = field_name.as_string()
+            && let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
                 // SAFETY: same as jit_struct_field_add_const.
                 unsafe {
                     let slot = inst.fields.ptr.add(idx);
@@ -515,7 +569,6 @@ pub unsafe extern "C" fn jit_struct_field_add_local(
                     }
                 }
             }
-        }
     }
 
     match vm.handle_get_field_from_value(self_val.clone(), field_idx as u16) {
@@ -843,14 +896,21 @@ pub unsafe extern "C" fn jit_get_global_ic(
             }
         };
     }
-    if cache.version == vm.globals_version {
+    if cache.version == unsafe { *cache.version_cell } {
         vm.push(cache.value.clone());
         return 0;
     }
     match vm.handle_get_global(name_idx as u16) {
         Ok(()) => {
             cache.value = vm.peek(0).clone();
-            cache.version = vm.globals_version;
+            // Repoint the entry from the never-matching sentinel to this
+            // name's version cell and record the current version, so the
+            // inline hit path stays valid until THIS name is reassigned.
+            if let Ok(name) = vm.name_constant(name_idx as u16) {
+                let cell = vm.jit.global_version_cell(name.as_str());
+                cache.version_cell = cell;
+                cache.version = unsafe { *cell };
+            }
             0
         }
         Err(e) => {
@@ -1156,8 +1216,8 @@ pub unsafe extern "C" fn jit_op_set_field_ic_miss(
     let Some(fname) = field_name.as_string().cloned() else {
         return 0;
     };
-    if let Some(inst) = object.as_struct_instance() {
-        if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+    if let Some(inst) = object.as_struct_instance()
+        && let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
             let def_raw: *const crate::vm::value::ObjStructDef = unsafe {
                 *(&inst.def as *const Rc<crate::vm::value::ObjStructDef>
                     as *const *const crate::vm::value::ObjStructDef)
@@ -1167,7 +1227,6 @@ pub unsafe extern "C" fn jit_op_set_field_ic_miss(
             cache.kind = super::engine::FieldCacheKind::InstanceField;
             cache.struct_def = Some(Rc::clone(&inst.def));
         }
-    }
     0
 }
 
@@ -1224,8 +1283,7 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
     // Cache hit: cached def matches current def.
     if let (Some(cached_def), Some(cached_closure)) =
         (cache.struct_def.as_ref(), cache.closure.as_ref())
-    {
-        if Rc::ptr_eq(cached_def, &struct_def) {
+        && Rc::ptr_eq(cached_def, &struct_def) {
             let closure = Rc::clone(cached_closure);
             let owning_mg = struct_def.module_globals.borrow().clone();
             let before_depth = vm.frames_len();
@@ -1249,7 +1307,6 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
                 }
             };
         }
-    }
 
     // Miss: resolve method, populate cache, dispatch.
     let method_name_val = vm.current_constant(method_idx as u16);
@@ -1287,8 +1344,8 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
             cache.inline_kind = super::engine::MethodInlineKind::None;
             cache.inline_field_index = 0;
             cache.inline_addend = 0;
-            if arg_count <= 1 {
-                if let Some(info) = super::engine::detect_inline_method_info(&closure.function) {
+            if arg_count <= 1
+                && let Some(info) = super::engine::detect_inline_method_info(&closure.function) {
                     let expected_arity: u8 = match info.kind {
                         super::engine::MethodInlineKind::FieldAddConst => 1,
                         super::engine::MethodInlineKind::FieldAddLocal => 2,
@@ -1297,18 +1354,16 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
                     if closure.function.arity == expected_arity {
                         // Resolve the field name to the instance's layout
                         // index using the current receiver's FieldLayout.
-                        if let Some(inst) = vm.stack_at(instance_idx).as_struct_instance() {
-                            if let Some(&layout_idx) =
+                        if let Some(inst) = vm.stack_at(instance_idx).as_struct_instance()
+                            && let Some(&layout_idx) =
                                 inst.layout.indices.get(info.field_name.as_ref())
                             {
                                 cache.inline_kind = info.kind;
                                 cache.inline_field_index = layout_idx as u32;
                                 cache.inline_addend = info.addend;
                             }
-                        }
                     }
                 }
-            }
             cache.struct_def = Some(Rc::clone(&struct_def));
             cache.closure = Some(Rc::clone(&closure));
             let owning_mg = struct_def.module_globals.borrow().clone();
@@ -1515,10 +1570,10 @@ pub unsafe extern "C" fn jit_op_call_miss(
     };
 
     // Populate cache on success when the callee is a JIT-compiled closure.
-    if status == 0 {
-        if let Some(c) = callee_candidate {
-            if c.jit_state.get() == 1 && c.function.arity as usize == ac {
-                if let Some(thunk) = c.jit_thunk.get() {
+    if status == 0
+        && let Some(c) = callee_candidate
+            && c.jit_state.get() == 1 && c.function.arity as usize == ac
+                && let Some(thunk) = c.jit_thunk.get() {
                     // Store the *raw Rc bit pattern* (the `NonNull<RcBox<T>>`
                     // pointer) so it matches what `Value::Closure`'s 8-byte
                     // payload holds. `Rc::as_ptr` points to T inside the
@@ -1542,9 +1597,6 @@ pub unsafe extern "C" fn jit_op_call_miss(
                         .unwrap_or(std::ptr::null());
                     cache._keeper = Some(c);
                 }
-            }
-        }
-    }
 
     status
 }

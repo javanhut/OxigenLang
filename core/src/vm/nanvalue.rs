@@ -1093,7 +1093,7 @@ mod tests {
         assert_eq!(TAG_POINTER_A, 0xFFFC_0000_0000_0000);
         assert_eq!(TAG_POINTER_B, 0xFFFD_0000_0000_0000);
         // f64 sentinel must sit strictly below the tagged-value range.
-        assert!(CANONICAL_F64_NAN_BITS < TAG_SMI);
+        const { assert!(CANONICAL_F64_NAN_BITS < TAG_SMI) }
     }
 
     /// Pointer-group subkind tags ride in the low 3 bits of the 48-bit
@@ -1310,7 +1310,15 @@ mod tests {
 
     #[test]
     fn f64_roundtrips_normal_values() {
-        for x in [0.0, -0.0, 1.0, -1.0, 3.14, f64::INFINITY, f64::NEG_INFINITY] {
+        for x in [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            std::f64::consts::PI,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
             let v = NanValue::from_f64(x);
             let back = v.as_f64().expect("should be f64");
             if x == 0.0 {
@@ -1492,6 +1500,7 @@ mod tests {
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
+            jit_bailouts: Cell::new(0),
             jit_thunk: Cell::new(None),
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
@@ -1522,7 +1531,7 @@ mod tests {
 
         // Module.
         let mut globals = HashMap::new();
-        globals.insert("PI".to_string(), OldValue::Float(3.14));
+        globals.insert("PI".to_string(), OldValue::Float(std::f64::consts::PI));
         let module = Rc::new(ObjModule {
             name: "math".to_string(),
             globals: Rc::new(globals),
@@ -1535,7 +1544,7 @@ mod tests {
             OldValue::Integer(i64::MAX),  // forces boxed-int path
             OldValue::Integer(i64::MIN),  // forces boxed-int path
             OldValue::Float(0.0),
-            OldValue::Float(-3.14),
+            OldValue::Float(-std::f64::consts::PI),
             OldValue::Float(f64::INFINITY),
             OldValue::Char('a'),
             OldValue::Char('☃'),
@@ -1770,6 +1779,7 @@ mod tests {
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
+            jit_bailouts: Cell::new(0),
             jit_thunk: Cell::new(None),
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
@@ -1995,6 +2005,7 @@ mod tests {
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
+            jit_bailouts: Cell::new(0),
             jit_thunk: Cell::new(None),
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),

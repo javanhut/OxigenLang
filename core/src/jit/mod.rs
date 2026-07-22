@@ -123,6 +123,30 @@ impl JitEngine {
         }
     }
 
+    /// Invalidate every GetGlobal IC caching `name` by bumping its version
+    /// cell. No-op before first compilation, for names no IC ever cached,
+    /// and in non-JIT builds.
+    #[cfg(feature = "jit")]
+    #[inline]
+    pub(crate) fn bump_global_version(&mut self, name: &str) {
+        if let Some(inner) = self.inner.as_mut() {
+            inner.bump_global_version(name);
+        }
+    }
+
+    #[cfg(not(feature = "jit"))]
+    #[inline]
+    pub(crate) fn bump_global_version(&mut self, _name: &str) {}
+
+    /// Stable per-name version cell pointer for the GetGlobal IC miss
+    /// helper. Only callable from compiled code, so the engine exists.
+    #[cfg(feature = "jit")]
+    pub(crate) fn global_version_cell(&mut self, name: &str) -> *mut u64 {
+        self.inner
+            .get_or_insert_with(engine::JitInner::new)
+            .global_version_cell(name)
+    }
+
     /// Lower the hot-threshold so `--jit` runs and tests don't need a long
     /// warmup. Clamped to at least 1.
     pub fn set_threshold(&mut self, t: u32) {
