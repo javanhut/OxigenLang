@@ -2,7 +2,7 @@ package main
 
 import "strings"
 
-func getHoverInfo(source string, pos Position) *Hover {
+func getHoverInfo(source string, pos Position, stdlibPath string) *Hover {
 	if info := headerHover(source, pos); info != "" {
 		return &Hover{
 			Contents: MarkupContent{
@@ -19,6 +19,9 @@ func getHoverInfo(source string, pos Position) *Hover {
 
 	info := getHoverText(word)
 	if info == "" {
+		info = stdlibHover(source, pos, word, stdlibPath)
+	}
+	if info == "" {
 		return nil
 	}
 
@@ -28,6 +31,56 @@ func getHoverInfo(source string, pos Position) *Hover {
 			Value: info,
 		},
 	}
+}
+
+// stdlibHover describes standard-library modules and their functions. It fires
+// when the hovered word is a module name (`math`) or a function qualified by a
+// module (`math.sqrt`), using the same discovered stdlib data as completion.
+func stdlibHover(source string, pos Position, word, stdlibPath string) string {
+	funcMap := getStdlibFuncMap(stdlibPath)
+	if len(funcMap) == 0 {
+		return ""
+	}
+
+	lines := strings.Split(source, "\n")
+	lineIdx := int(pos.Line)
+	if lineIdx >= len(lines) {
+		return ""
+	}
+	line := lines[lineIdx]
+	col := int(pos.Character)
+	if col > len(line) {
+		col = len(line)
+	}
+
+	// Qualified access: the word sits right after `module.`
+	start := col
+	for start > 0 && isIdentChar(line[start-1]) {
+		start--
+	}
+	if start > 0 && line[start-1] == '.' {
+		if mod := extractLastWord(line[:start-1]); mod != "" {
+			if funcs, ok := funcMap[mod]; ok {
+				for _, f := range funcs {
+					if f.name == word {
+						return "**" + mod + "." + f.signature + "**\n\nStandard library function from `" + mod + "`."
+					}
+				}
+			}
+		}
+		return ""
+	}
+
+	// Bare module name.
+	if funcs, ok := funcMap[word]; ok {
+		var b strings.Builder
+		b.WriteString("**" + word + "** — Oxigen standard library module\n\n```oxigen\nintroduce " + word + "\n```\n\nFunctions:\n")
+		for _, f := range funcs {
+			b.WriteString("- `" + f.signature + "`\n")
+		}
+		return b.String()
+	}
+	return ""
 }
 
 func headerHover(source string, pos Position) string {
@@ -128,7 +181,9 @@ func keywordHover(word string) string {
 	case "pattern":
 		return "**pattern** — Define a named pattern for use with choose\n\n```oxigen\npattern name(x) = condition\n```"
 	case "guard":
-		return "**guard** — Recover from an error in the error/value model. Recovers only on a matching tag, else re-raises.\n\n```oxigen\nresult := <guard<Error<not_found>>> {\n    risky()\n}\n```"
+		return "**guard** — Recover from an error with a fallback value.\n\nPostfix angle form (optionally tag-filtered), or keyword form with the caught error bound:\n\n```oxigen\nname := read_name() <guard>(\"Guest\")\nprofile := fetch_profile() <guard<Error<retry_error>>>(\"Guest\")\nname := read_name() guard err -> \"Unknown (error: {err.msg})\"\n```"
+	case "log":
+		return "**<log>** — Write a timestamped message to stdout. Tags are uppercased; nested tags join with `:`.\n\n```oxigen\n<log>(\"server started\")\n<log<info>>(\"request received\")\n<log<Error<network>>>(\"connection lost\")\n```"
 	case "fail":
 		return "**fail** — Raise an error value, short-circuiting the current body.\n\n```oxigen\n<fail>(\"something went wrong\")\n```"
 	case "Error":
@@ -205,7 +260,7 @@ func builtinHover(word string) string {
 	case "float":
 		return "**float**(value) -> float\n\nConvert a value to a float."
 	case "range":
-		return "**range**(start, end) -> array\n\nGenerate an array of integers from start to end (exclusive)."
+		return "**range**(end) or **range**(start, end) -> array\n\nGenerate an array of integers. One argument: `[0, ..., end-1]`; two: `[start, ..., end-1]`."
 	case "chars":
 		return "**chars**(string) -> array\n\nSplit a string into an array of individual characters."
 	case "byte":
@@ -227,11 +282,19 @@ func builtinHover(word string) string {
 	case "tuple":
 		return "**tuple**(...values) -> tuple\n\nCreate a tuple from the given values."
 	case "error":
-		return "**error**(message) -> error\n\nCreate an error value with the given message."
+		return "**error**(message)\n\nCreate a propagating error (legacy form). Prefer `<fail>(\"msg\")` in new code; use `<Error>(\"msg\")` for an error *value* that does not halt the program."
 	case "is_value":
 		return "**is_value**(obj) -> bool\n\nCheck if an object is a Value wrapper."
 	case "is_error":
 		return "**is_error**(obj) -> bool\n\nCheck if an object is an error value."
+	case "is_type":
+		return "**is_type**(value, type_name) -> bool\n\nRuntime type check — true if the value's type matches `type_name` (a string, e.g. `\"int\"`, or a struct name)."
+	case "is_mut":
+		return "**is_mut**(variable) -> bool\n\nCheck whether a binding is mutable (declared with `:=`)."
+	case "is_type_mut":
+		return "**is_type_mut**(variable) -> bool\n\nCheck whether a binding's type annotation allows reassignment to a different type."
+	case "expect":
+		return "**expect**(actual) -> Expectation\n\nTest assertion matcher, auto-imported by `oxigen test` in `*_test.oxi` files. Matchers: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `truthy`, `falsy`, `contains`, `is_error`, `is_value`.\n\n```oxigen\n<test>(\"addition\") {\n    expect(2 + 3).eq(5)\n}\n```"
 	case "cancel":
 		return "**cancel**(task)\n\nAsk a task to stop. Cancellation is cooperative — the task stops at its next function call. Joining a cancelled task returns an error value (test with `is_error`)."
 	default:
@@ -241,14 +304,28 @@ func builtinHover(word string) string {
 
 func typeHover(word string) string {
 	switch word {
+	case "int":
+		return "**int** — 64-bit signed integer type\n\nZero value: `0`"
+	case "str":
+		return "**str** — Unicode string type\n\nZero value: `\"\"`"
+	case "float":
+		return "**float** — 64-bit floating point type\n\nZero value: `0.0`"
+	case "char":
+		return "**char** — Single Unicode character type"
+	case "byte":
+		return "**byte** — Unsigned 8-bit integer type (0-255)"
+	case "uint":
+		return "**uint** — Unsigned 64-bit integer type"
+	case "set":
+		return "**set** — Unique unordered collection type\n\nCreate with `set(array)`."
 	case "array":
-		return "**array** — Dynamic ordered collection type\n\nLiteral: `[1, 2, 3]`"
+		return "**array** — Dynamic ordered collection type\n\nLiteral: `[1, 2, 3]`\n\nZero value: `[]`"
 	case "tuple":
 		return "**tuple** — Fixed-size immutable collection type\n\nLiteral: `(1, 2, 3)`"
 	case "map":
-		return "**map** — Key-value pair collection type\n\nLiteral: `{\"key\": value}`"
+		return "**map** — Key-value pair collection type\n\nLiteral: `{\"key\": value}`\n\nZero value: `{}`"
 	case "bool":
-		return "**bool** — Boolean type (`True` or `False`)"
+		return "**bool** — Boolean type (`True` or `False`)\n\nZero value: `False`"
 	case "generic":
 		return "**generic** — Dynamic type that accepts any value"
 	default:

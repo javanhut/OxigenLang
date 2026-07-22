@@ -166,7 +166,7 @@ func (s *Server) handleInitialize(msg Request) {
 		},
 		ServerInfo: &ServerInfo{
 			Name:    "oxigen-lsp",
-			Version: "0.3.0",
+			Version: "0.4.0",
 		},
 	}
 	s.respond(msg.ID, result)
@@ -283,7 +283,7 @@ func (s *Server) handleHover(msg Request) {
 		return
 	}
 
-	hover := getHoverInfo(content, params.Position)
+	hover := getHoverInfo(content, params.Position, s.stdlibPath)
 	s.respond(msg.ID, hover)
 }
 

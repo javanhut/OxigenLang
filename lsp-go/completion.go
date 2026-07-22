@@ -45,13 +45,16 @@ var keywords = []keywordInfo{
 	{"None", "Absence of a value"},
 }
 
-// Angle-bracket constructs offered after `<`: the error/value model wrappers
-// and the test block, alongside the plain type names.
+// Angle-bracket constructs offered after `<`: the error/value model wrappers,
+// logging, result normalization, and the test block, alongside the plain type
+// names.
 var angleConstructs = []keywordInfo{
 	{"Error", "Error wrapper: <Error>(\"msg\") or tagged <Error<tag>>(\"msg\")"},
 	{"Value", "Value wrapper: <Value>(expr) — the success arm of the error/value model"},
 	{"fail", "Raise an error: <fail>(\"msg\") — short-circuits the current body"},
-	{"guard", "Recover from an error: <guard<Error<tag>>> { ... }"},
+	{"guard", "Recover from an error: expr <guard>(fallback) or expr <guard<Error<tag>>>(fallback)"},
+	{"log", "Timestamped log to stdout: <log>(\"msg\") or <log<tag>>(\"msg\")"},
+	{"type", "Normalize a result: <type<Error || Value>>(expr) — catches errors into values"},
 	{"test", "Test block: <test>(\"name\") { ... } (run with `oxigen test`)"},
 }
 
@@ -69,7 +72,7 @@ var builtins = []keywordInfo{
 	{"str", "str(value) — Convert to string"},
 	{"int", "int(value) — Convert to integer"},
 	{"float", "float(value) — Convert to float"},
-	{"range", "range(start, end) — Generate integer range"},
+	{"range", "range(end) or range(start, end) — Generate an integer range"},
 	{"chars", "chars(string) — Split string into char array"},
 	{"byte", "byte(value) — Convert to byte"},
 	{"uint", "uint(value) — Convert to unsigned integer"},
@@ -80,9 +83,12 @@ var builtins = []keywordInfo{
 	{"remove", "remove(collection, item) — Remove from collection"},
 	{"has", "has(collection, item) — Check membership"},
 	{"tuple", "tuple(...values) — Create a tuple"},
-	{"error", "error(message) — Create an error value"},
+	{"error", "error(message) — Create a propagating error (legacy; prefer <fail>)"},
 	{"is_value", "is_value(obj) — Check if obj is a Value wrapper"},
 	{"is_error", "is_error(obj) — Check if obj is an error"},
+	{"is_type", "is_type(value, type_name) — Runtime type check"},
+	{"is_mut", "is_mut(variable) — Check if a binding is mutable"},
+	{"is_type_mut", "is_type_mut(variable) — Check if a binding's type is mutable"},
 	{"cancel", "cancel(task) — Ask a task to stop (cooperative)"},
 }
 
@@ -312,7 +318,10 @@ func getCompletions(source string, pos Position, uri, stdlibPath string) []Compl
 	case contextTypeAnnotation:
 		return typeCompletions(idx)
 	default:
-		return generalCompletions(idx, int(pos.Line))
+		// `expect` is auto-imported by the test runner in *_test.oxi files, so
+		// only offer it where tests plausibly live.
+		testCtx := strings.HasSuffix(uri, "_test.oxi") || strings.Contains(source, "<test")
+		return generalCompletions(idx, int(pos.Line), testCtx)
 	}
 }
 
@@ -343,7 +352,7 @@ func shebangCompletions() []CompletionItem {
 	}
 }
 
-func generalCompletions(idx *docIndex, lineIdx int) []CompletionItem {
+func generalCompletions(idx *docIndex, lineIdx int, testCtx bool) []CompletionItem {
 	items := make([]CompletionItem, 0, len(keywords)+len(builtins))
 
 	kwKind := CompletionKindKeyword
@@ -363,6 +372,15 @@ func generalCompletions(idx *docIndex, lineIdx int) []CompletionItem {
 			Kind:          &fnKind,
 			Detail:        b.detail,
 			Documentation: docMarkup(builtinHover(b.name)),
+		})
+	}
+
+	if testCtx {
+		items = append(items, CompletionItem{
+			Label:         "expect",
+			Kind:          &fnKind,
+			Detail:        "expect(value) — Test assertion matcher (auto-imported by `oxigen test`)",
+			Documentation: docMarkup(builtinHover("expect")),
 		})
 	}
 
