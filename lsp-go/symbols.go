@@ -102,7 +102,7 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 		// Introduce (import)
 		if m := introduceRe.FindStringSubmatchIndex(line); m != nil {
 			path := strings.TrimSpace(line[m[2]:m[3]])
-			if idx := strings.Index(path, "{"); idx >= 0 {
+			if found := strings.Contains(path, "{"); found {
 				// Handle selective imports: introduce {a, b} from module
 				// Keep the full text for display
 			}

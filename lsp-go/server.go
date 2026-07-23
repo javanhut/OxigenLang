@@ -74,7 +74,7 @@ func (s *Server) send(data []byte) {
 	s.writer.Flush()
 }
 
-func (s *Server) respond(id *json.RawMessage, result interface{}) {
+func (s *Server) respond(id *json.RawMessage, result any) {
 	resp := Response{JSONRPC: "2.0", ID: id}
 	if result != nil {
 		raw, err := json.Marshal(result)
@@ -95,7 +95,7 @@ func (s *Server) respond(id *json.RawMessage, result interface{}) {
 	s.send(body)
 }
 
-func (s *Server) notify(method string, params interface{}) {
+func (s *Server) notify(method string, params any) {
 	raw, err := json.Marshal(params)
 	if err != nil {
 		log.Printf("marshal notification: %v", err)

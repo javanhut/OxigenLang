@@ -52,6 +52,9 @@ fi
 # Create directories
 echo "Installing to $PREFIX..."
 mkdir -p "$BIN_DIR"
+# Wipe the installed stdlib first so modules removed or renamed in the repo
+# don't linger in the install.
+rm -rf "$LIB_DIR"
 mkdir -p "$LIB_DIR"
 
 # Copy binary and stdlib

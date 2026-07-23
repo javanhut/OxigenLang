@@ -48,10 +48,7 @@ func stdlibHover(source string, pos Position, word, stdlibPath string) string {
 		return ""
 	}
 	line := lines[lineIdx]
-	col := int(pos.Character)
-	if col > len(line) {
-		col = len(line)
-	}
+	col := min(int(pos.Character), len(line))
 
 	// Qualified access: the word sits right after `module.`
 	start := col

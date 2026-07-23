@@ -160,10 +160,7 @@ func detectCompletionContext(source string, pos Position, idx *docIndex, stdlibP
 	}
 
 	line := lines[lineIdx]
-	col := int(pos.Character)
-	if col > len(line) {
-		col = len(line)
-	}
+	col := min(int(pos.Character), len(line))
 	textBefore := line[:col]
 	trimmed := strings.TrimSpace(textBefore)
 	trimmedLeft := strings.TrimLeft(textBefore, " \t")

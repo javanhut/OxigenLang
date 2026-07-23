@@ -33,6 +33,7 @@ install: build
 	install -d $(BINDIR)
 	install -m 755 target/release/oxigen $(BINDIR)/oxigen
 	@echo "Installing stdlib to $(LIBDIR)..."
+	rm -rf $(LIBDIR)
 	install -d $(LIBDIR)
 	install -m 644 stdlib/*.oxi $(LIBDIR)/
 	@echo ""
@@ -45,6 +46,7 @@ install-with-jit: build-with-jit
 	install -d $(BINDIR)
 	install -m 755 target/release/oxigen $(BINDIR)/oxigen
 	@echo "Installing stdlib to $(LIBDIR)..."
+	rm -rf $(LIBDIR)
 	install -d $(LIBDIR)
 	install -m 644 stdlib/*.oxi $(LIBDIR)/
 	@echo ""
@@ -57,6 +59,7 @@ install-no-jit: build-no-jit
 	install -d $(BINDIR)
 	install -m 755 target/release/oxigen $(BINDIR)/oxigen
 	@echo "Installing stdlib to $(LIBDIR)..."
+	rm -rf $(LIBDIR)
 	install -d $(LIBDIR)
 	install -m 644 stdlib/*.oxi $(LIBDIR)/
 	@echo ""
@@ -69,6 +72,7 @@ install-lsp: build-lsp
 	install -d $(BINDIR)
 	install -m 755 target/release/oxigen-lsp $(BINDIR)/oxigen-lsp
 	@echo "Installing stdlib to $(LIBDIR) (the LSP reads it for module completions)..."
+	rm -rf $(LIBDIR)
 	install -d $(LIBDIR)
 	install -m 644 stdlib/*.oxi $(LIBDIR)/
 	@echo "oxigen-lsp installed successfully."

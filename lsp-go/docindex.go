@@ -64,7 +64,7 @@ func indexDocument(source, uri string) *docIndex {
 	lines := strings.Split(source, "\n")
 
 	// ── Pass 1: declarations ──
-	for i := 0; i < len(lines); i++ {
+	for i := range lines {
 		line := lines[i]
 		topLevel := countLeadingSpaces(line) == 0
 

@@ -12,7 +12,7 @@ func posAt(t *testing.T, src, marker string) Position {
 	}
 	target := idx + len(marker)
 	line, col := 0, 0
-	for i := 0; i < target; i++ {
+	for i := range target {
 		if src[i] == '\n' {
 			line++
 			col = 0

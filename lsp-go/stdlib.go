@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,11 +21,14 @@ type functionInfo struct {
 	signature string
 }
 
+// stdlib discovery is cached, but the cache is invalidated whenever the set of
+// .oxi files in the stdlib directory changes (added, removed, or edited), so
+// newly installed or modified modules are picked up without a server restart.
 var (
-	stdlibCache     []moduleInfo
-	stdlibCacheOnce sync.Once
-	stdlibFuncMap   map[string][]functionInfo
-	stdlibFuncOnce  sync.Once
+	stdlibMu      sync.Mutex
+	stdlibSig     string
+	stdlibCache   []moduleInfo
+	stdlibFuncMap map[string][]functionInfo
 )
 
 var funDeclRe = regexp.MustCompile(`^fun\s+(\w+)\s*\(([^)]*)\)`)
@@ -109,19 +113,68 @@ func discoverStdlib(stdlibPath string) []moduleInfo {
 	return modules
 }
 
+// stdlibSignature fingerprints the .oxi files in the stdlib directory by name,
+// size, and modification time. Any module that is added, removed, or edited
+// changes the signature.
+func stdlibSignature(stdlibPath string) (string, bool) {
+	entries, err := os.ReadDir(stdlibPath)
+	if err != nil {
+		return "", false
+	}
+
+	var b strings.Builder
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".oxi") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&b, "%s:%d:%d;", entry.Name(), info.Size(), info.ModTime().UnixNano())
+	}
+	return b.String(), true
+}
+
+func buildFuncMap(modules []moduleInfo) map[string][]functionInfo {
+	funcMap := make(map[string][]functionInfo, len(modules))
+	for _, mod := range modules {
+		funcMap[mod.name] = mod.functions
+	}
+	return funcMap
+}
+
+// refreshStdlib re-scans the stdlib directory if its contents changed since
+// the last scan. Callers must not hold stdlibMu.
+func refreshStdlib(stdlibPath string) {
+	if stdlibPath == "" {
+		return
+	}
+	sig, ok := stdlibSignature(stdlibPath)
+	if !ok {
+		return
+	}
+
+	stdlibMu.Lock()
+	defer stdlibMu.Unlock()
+	if sig == stdlibSig {
+		return
+	}
+	stdlibCache = discoverStdlib(stdlibPath)
+	stdlibFuncMap = buildFuncMap(stdlibCache)
+	stdlibSig = sig
+}
+
 func getStdlib(stdlibPath string) []moduleInfo {
-	stdlibCacheOnce.Do(func() {
-		stdlibCache = discoverStdlib(stdlibPath)
-	})
+	refreshStdlib(stdlibPath)
+	stdlibMu.Lock()
+	defer stdlibMu.Unlock()
 	return stdlibCache
 }
 
 func getStdlibFuncMap(stdlibPath string) map[string][]functionInfo {
-	stdlibFuncOnce.Do(func() {
-		stdlibFuncMap = make(map[string][]functionInfo)
-		for _, mod := range getStdlib(stdlibPath) {
-			stdlibFuncMap[mod.name] = mod.functions
-		}
-	})
+	refreshStdlib(stdlibPath)
+	stdlibMu.Lock()
+	defer stdlibMu.Unlock()
 	return stdlibFuncMap
 }
