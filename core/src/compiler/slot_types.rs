@@ -767,8 +767,14 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
     // Post-pass 3 (B2.2a): param mirror eligibility. Scan the bytecode
     // once to find SetLocal-written slots and GetLocal-read slots,
     // then cross-check against the param range + captured_slots.
-    let int_mirror_param_slots =
-        collect_int_mirror_param_slots(code, chunk, func.arity as u16, &captured_slots, &result);
+    let int_mirror_param_slots = collect_int_mirror_param_slots(
+        code,
+        chunk,
+        func.arity as u16,
+        &captured_slots,
+        &result,
+        &func.params,
+    );
 
     // Post-pass 4 (A1): specialized-entry eligibility.
     //
@@ -1087,6 +1093,7 @@ fn collect_int_mirror_param_slots(
     arity: u16,
     captured_slots: &HashSet<u16>,
     slot_types: &[SlotType],
+    params: &[crate::vm::value::ParamInfo],
 ) -> HashSet<u16> {
     if arity == 0 {
         return HashSet::new();
@@ -1138,10 +1145,28 @@ fn collect_int_mirror_param_slots(
                         // Neutral "push a constant" — the param is
                         // still on the stack, just below the new top.
                         // Skip past it and keep scanning.
-                        Some(OpCode::Constant)
-                        | Some(OpCode::None)
-                        | Some(OpCode::True)
-                        | Some(OpCode::False) => {
+                        Some(OpCode::Constant) => {
+                            // Only an *integer* constant is neutral. A float
+                            // constant means the arithmetic that follows is
+                            // float arithmetic (`a / 4.0`), so the param is
+                            // not an int however the operator reads.
+                            let idx = read_u16(code, cursor + 1) as usize;
+                            let is_int_const = chunk
+                                .constants
+                                .get(idx)
+                                .and_then(|v| v.as_integer())
+                                .is_some();
+                            if !is_int_const {
+                                break Some(OpCode::Constant);
+                            }
+                            let step = chunk
+                                .instruction_len(cursor)
+                                .expect("compiler produced malformed bytecode");
+                            cursor += step;
+                            skipped += 1;
+                            continue;
+                        }
+                        Some(OpCode::None) | Some(OpCode::True) | Some(OpCode::False) => {
                             let step = chunk
                                 .instruction_len(cursor)
                                 .expect("compiler produced malformed bytecode");
@@ -1168,7 +1193,8 @@ fn collect_int_mirror_param_slots(
                         has_int_demand.insert(slot);
                     }
                     Some(
-                        OpCode::GetField
+                        OpCode::Constant
+                        | OpCode::GetField
                         | OpCode::SetField
                         | OpCode::MethodCall
                         | OpCode::MethodCallNamed
@@ -1201,6 +1227,23 @@ fn collect_int_mirror_param_slots(
     let mut out = HashSet::new();
     for slot in 1..=arity {
         if written.contains(&slot) {
+            continue;
+        }
+        // A param declared `<float>` is never an int, however the int-demand
+        // heuristic reads its arithmetic. Mirroring one makes the entry tag
+        // guard fail on every ordinary call, and that bail-out leaves the
+        // caller's stack inconsistent — silently corrupting the *caller's*
+        // locals (a loop counter read one increment ahead and then frozen).
+        //
+        // Only FLOAT is excluded here, not every declared type: other
+        // annotations reach this point already working, and widening the rule
+        // shifts functions onto different entry paths for no benefit.
+        // `<int>` params are covered by B2.1 via `is_virtualizable` below.
+        if params
+            .get(slot as usize - 1)
+            .and_then(|p| p.type_ann.as_deref())
+            .is_some_and(|t| t.eq_ignore_ascii_case("float"))
+        {
             continue;
         }
         if !has_int_demand.contains(&slot) {

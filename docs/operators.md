@@ -88,11 +88,25 @@ The `+` operator concatenates tuples:
 
 ### Division by Zero
 
-Division `/` and modulo `%` by zero produce an error:
+Division `/` and modulo `%` by zero produce an error, for every numeric type —
+floats included. There is no `inf` or `NaN` result:
 
 ```oxi
-10 / 0
-10 % 0
+10 / 0        // error: division by zero
+10 % 0        // error: modulo by zero
+10.0 / 0.0    // error: division by zero
+10.0 / 0      // error: division by zero
+0.0 / 0.0     // error: division by zero
+```
+
+Negative zero is still zero, so `10.0 / -0.0` is an error too. Guard the divisor
+if it may be zero:
+
+```oxi
+option {
+    d != 0.0 -> n / d,
+    0.0
+}
 ```
 
 ## Comparison Operators

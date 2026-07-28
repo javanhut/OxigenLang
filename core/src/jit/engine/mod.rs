@@ -3524,13 +3524,55 @@ impl JitInner {
                             let hit_status = builder.inst_results(hit_call)[0];
                             let restore_err_block = builder.create_block();
                             builder.append_block_param(restore_err_block, types::I32);
+                            // Status 2 is the callee's *entry-guard bailout*
+                            // (e.g. an int-mirrored param handed a Float), not
+                            // an error. Propagating it like one made it the
+                            // CALLER's exit status, so the VM treated the
+                            // caller as having bailed and re-ran it from ip 0
+                            // — mid-loop, after side effects. That silently
+                            // replayed part of the loop and left the caller's
+                            // locals reading a stale counter.
+                            //
+                            // The bailed thunk stopped before any side effect,
+                            // so the callee + args are still on the stack
+                            // exactly as the miss path expects: pop the
+                            // JitFrame we pushed and redo the call through
+                            // `op_call_miss`, which interprets the callee.
+                            // `jit_op_call_hit`/`_miss` already did this; only
+                            // this inline dispatch did not.
+                            let hit_nonzero_block = builder.create_block();
                             builder.ins().brif(
                                 hit_status,
-                                restore_err_block,
-                                &[hit_status.into()],
+                                hit_nonzero_block,
+                                &[],
                                 ok_block,
                                 &[],
                             );
+
+                            builder.switch_to_block(hit_nonzero_block);
+                            let bail_block = builder.create_block();
+                            let is_bailout = builder.ins().icmp_imm(
+                                cranelift_codegen::ir::condcodes::IntCC::Equal,
+                                hit_status,
+                                2,
+                            );
+                            builder.ins().brif(
+                                is_bailout,
+                                bail_block,
+                                &[],
+                                restore_err_block,
+                                &[hit_status.into()],
+                            );
+
+                            builder.switch_to_block(bail_block);
+                            builder.ins().store(
+                                flags,
+                                jit_frames_len,
+                                vm_val,
+                                vm_jit_frame_view_len_offset(),
+                            );
+                            builder.ins().jump(miss_block, &[]);
+
                             builder.switch_to_block(restore_err_block);
                             let err_status = builder.block_params(restore_err_block)[0];
                             builder.ins().store(

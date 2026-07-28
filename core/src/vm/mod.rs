@@ -2786,30 +2786,64 @@ impl VM {
         }
     }
 
+    /// The one division-by-zero error. Shared by every numeric type so the
+    /// message can't drift between them.
+    ///
+    /// The hint matches the tree-walker's (evaluator/mod.rs
+    /// `eval_integer_infix`) so file vs REPL output agrees.
+    fn division_by_zero(&self) -> VMError {
+        self.runtime_error_hint(
+            "division by zero",
+            "ensure the divisor is not zero before dividing",
+        )
+    }
+
+    fn modulo_by_zero(&self) -> VMError {
+        self.runtime_error_hint(
+            "modulo by zero",
+            "ensure the divisor is not zero before using %",
+        )
+    }
+
     pub(crate) fn binary_div(&self, a: Value, b: Value) -> Result<Value, VMError> {
         let (a, b) = (self.force(a), self.force(b));
+        // Float division by zero is an error too, not `inf`/`NaN`. Integers
+        // already errored, and the language documents `/` by zero as an error
+        // — silently yielding a float that poisons every later computation is
+        // the more surprising half of that inconsistency. `-0.0 == 0.0` in
+        // IEEE, so comparing against 0.0 catches negative zero as well.
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 if *r == 0 {
-                    // Match the tree-walker's hint (evaluator/mod.rs
-                    // `eval_integer_infix`) so file vs REPL output agrees.
-                    Err(self.runtime_error_hint(
-                        "division by zero",
-                        "ensure the divisor is not zero before dividing",
-                    ))
+                    Err(self.division_by_zero())
                 } else {
                     Ok(Value::Integer(l / r))
                 }
             }
-            (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l / r)),
-            (Value::Integer(l), Value::Float(r)) => Ok(Value::Float(*l as f64 / r)),
-            (Value::Float(l), Value::Integer(r)) => Ok(Value::Float(l / *r as f64)),
+            (Value::Float(l), Value::Float(r)) => {
+                if *r == 0.0 {
+                    Err(self.division_by_zero())
+                } else {
+                    Ok(Value::Float(l / r))
+                }
+            }
+            (Value::Integer(l), Value::Float(r)) => {
+                if *r == 0.0 {
+                    Err(self.division_by_zero())
+                } else {
+                    Ok(Value::Float(*l as f64 / r))
+                }
+            }
+            (Value::Float(l), Value::Integer(r)) => {
+                if *r == 0 {
+                    Err(self.division_by_zero())
+                } else {
+                    Ok(Value::Float(l / *r as f64))
+                }
+            }
             (Value::Uint(l), Value::Uint(r)) => {
                 if *r == 0 {
-                    Err(self.runtime_error_hint(
-                        "division by zero",
-                        "ensure the divisor is not zero before dividing",
-                    ))
+                    Err(self.division_by_zero())
                 } else {
                     Ok(Value::Uint(l / r))
                 }
@@ -2826,25 +2860,35 @@ impl VM {
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 if *r == 0 {
-                    // Match the tree-walker's hint (evaluator/mod.rs
-                    // `eval_integer_infix`) so file vs REPL output agrees.
-                    Err(self.runtime_error_hint(
-                        "modulo by zero",
-                        "ensure the divisor is not zero before using %",
-                    ))
+                    Err(self.modulo_by_zero())
                 } else {
                     Ok(Value::Integer(l % r))
                 }
             }
-            (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l % r)),
-            (Value::Integer(l), Value::Float(r)) => Ok(Value::Float(*l as f64 % r)),
-            (Value::Float(l), Value::Integer(r)) => Ok(Value::Float(l % *r as f64)),
+            (Value::Float(l), Value::Float(r)) => {
+                if *r == 0.0 {
+                    Err(self.modulo_by_zero())
+                } else {
+                    Ok(Value::Float(l % r))
+                }
+            }
+            (Value::Integer(l), Value::Float(r)) => {
+                if *r == 0.0 {
+                    Err(self.modulo_by_zero())
+                } else {
+                    Ok(Value::Float(*l as f64 % r))
+                }
+            }
+            (Value::Float(l), Value::Integer(r)) => {
+                if *r == 0 {
+                    Err(self.modulo_by_zero())
+                } else {
+                    Ok(Value::Float(l % *r as f64))
+                }
+            }
             (Value::Uint(l), Value::Uint(r)) => {
                 if *r == 0 {
-                    Err(self.runtime_error_hint(
-                        "modulo by zero",
-                        "ensure the divisor is not zero before using %",
-                    ))
+                    Err(self.modulo_by_zero())
                 } else {
                     Ok(Value::Uint(l % r))
                 }
