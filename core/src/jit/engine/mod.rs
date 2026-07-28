@@ -1190,17 +1190,17 @@ impl JitInner {
                             emit_early_exit_on_err(&mut builder, exit_block, status);
                             ip += 1;
                         }
-                        OpCode::IterLen | OpCode::IterGet => {
+                        OpCode::IterLen | OpCode::IterGet | OpCode::IterEntry => {
                             // The helpers read operands from `vm.stack` via
                             // pop(), so flush any staged virt temps (e.g. the
                             // virtualized `__index__`) to memory first.
                             if !virt_stack.is_empty() {
                                 virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
-                            let func = if op == OpCode::IterLen {
-                                refs.iter_len
-                            } else {
-                                refs.iter_get
+                            let func = match op {
+                                OpCode::IterLen => refs.iter_len,
+                                OpCode::IterGet => refs.iter_get,
+                                _ => refs.iter_entry,
                             };
                             let call = builder.ins().call(func, &[vm_val]);
                             let status = builder.inst_results(call)[0];

@@ -98,7 +98,12 @@ pub enum Statement {
     Expr(Expression),
     Each {
         token: Token,
+        /// The element binding — always the value, in both the one- and
+        /// two-name forms.
         variable: Identifier,
+        /// Present for `each k, v in coll`: the leading name, bound to the
+        /// map key or the sequence index. `None` is the plain `each v in coll`.
+        index_variable: Option<Identifier>,
         iterable: Expression,
         body: Vec<Statement>,
     },
@@ -490,6 +495,7 @@ pub fn desugar_diverge_each(
     let spawn_loop = Statement::Each {
         token: tok.clone(),
         variable: variable.clone(),
+        index_variable: None,
         iterable: iterable.clone(),
         body: vec![Statement::Expr(syn_call(
             tok,
@@ -503,6 +509,7 @@ pub fn desugar_diverge_each(
     let join_loop = Statement::Each {
         token: tok.clone(),
         variable: id("__dv_h"),
+        index_variable: None,
         iterable: syn_ident(tok, "__dv_hs"),
         body: vec![Statement::Expr(syn_call(
             tok,

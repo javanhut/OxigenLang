@@ -386,18 +386,37 @@ fn builtin_float(args: &[Value]) -> Value {
 }
 
 fn builtin_range(args: &[Value]) -> Value {
-    let (start, end) = match args.len() {
-        1 => match args[0].repr() {
-            ValueRepr::Integer(n) => (0i64, n),
+    let mut ints = Vec::with_capacity(args.len());
+    for arg in args {
+        match arg.repr() {
+            ValueRepr::Integer(n) => ints.push(n),
             _ => return Value::Error(rc_str("range() requires integer arguments")),
-        },
-        2 => match (&args[0], &args[1]) {
-            (Value::Integer(s), Value::Integer(e)) => (*s, *e),
-            _ => return Value::Error(rc_str("range() requires integer arguments")),
-        },
-        _ => return Value::Error(rc_str("range() takes 1 or 2 arguments")),
+        }
+    }
+    // range(end) / range(start, end) / range(start, end, step). A negative step
+    // counts down, so the bound is exclusive from whichever side it is
+    // approached.
+    let (start, end, step) = match ints[..] {
+        [end] => (0, end, 1),
+        [start, end] => (start, end, 1),
+        [start, end, step] => (start, end, step),
+        _ => return Value::Error(rc_str("range() takes 1 to 3 arguments")),
     };
-    let arr: Vec<Value> = (start..end).map(Value::Integer).collect();
+    if step == 0 {
+        return Value::Error(rc_str("range() step must not be zero"));
+    }
+
+    let mut arr = Vec::new();
+    let mut i = start;
+    while if step > 0 { i < end } else { i > end } {
+        arr.push(Value::Integer(i));
+        match i.checked_add(step) {
+            Some(next) => i = next,
+            // A step that runs past i64 bounds ends the range rather than
+            // wrapping back around into it.
+            None => break,
+        }
+    }
     Value::Array(Rc::new(RefCell::new(arr)))
 }
 

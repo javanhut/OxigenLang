@@ -2379,6 +2379,14 @@ impl VM {
                     self.push(val);
                 }
 
+                OpCode::IterEntry => {
+                    let index = self.pop();
+                    let iterable = self.pop();
+                    let (key, val) = self.iter_entry(&iterable, &index)?;
+                    self.push(key);
+                    self.push(val);
+                }
+
                 // ── Method Call ──────────────────────────────────
                 OpCode::MethodCall => {
                     let method_idx = self.frames[frame_idx].read_u16();
@@ -3776,6 +3784,34 @@ impl VM {
                 "each loops work with arrays, tuples, strings, sets, and maps",
             )),
         }
+    }
+
+    /// Both halves of an `each k, v in coll` step. `[it, idx] -> (key, value)`.
+    ///
+    /// A map yields its entry's own key; every other iterable yields the
+    /// ordinal index, so `each i, ch in "hi"` and `each i, x in [..]` number
+    /// their elements. The value half always matches what the one-name form
+    /// would bind, except for maps — there the one-name form binds the whole
+    /// `(k, v)` tuple, and this splits it.
+    pub(crate) fn iter_entry(
+        &self,
+        iterable: &Value,
+        index: &Value,
+    ) -> Result<(Value, Value), VMError> {
+        if let ValueRepr::Map(m) = iterable.repr() {
+            let borrowed = m.borrow();
+            let idx = match index.repr() {
+                ValueRepr::Integer(i) => i as usize,
+                _ => return Err(self.runtime_error("index must be integer")),
+            };
+            return Ok(match borrowed.entries().get(idx) {
+                Some((k, v)) => (k.clone(), v.clone()),
+                None => (Value::None, Value::None),
+            });
+        }
+        // Non-map iterables keep `iter_get`'s element semantics verbatim.
+        let value = self.iter_get(iterable, index)?;
+        Ok((index.clone(), value))
     }
 
     /// Element `iterable[index]` for an `each` loop. `[it, idx] -> elem`.

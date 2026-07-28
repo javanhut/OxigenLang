@@ -1268,35 +1268,50 @@ impl Compiler {
 
             Statement::Each {
                 variable,
+                index_variable,
                 iterable,
                 body,
                 ..
             } => {
-                // `each i in range(a)` / `range(a, b)` with the *builtin* range
-                // (not user-shadowed): lower to a counting loop. No array is
-                // materialised, and with IterLen/IterGet gone the body is
-                // JIT-eligible. `range` is always ascending, step 1, `a..b`.
-                let range_args: Option<&[Expression]> = match iterable {
+                // `each i in range(a)` / `range(a, b)` / `range(a, b, step)`
+                // with the *builtin* range (not user-shadowed): lower to a
+                // counting loop. No array is materialised, and with
+                // IterLen/IterGet gone the body is JIT-eligible.
+                //
+                // The step has to be a literal because it picks the loop's
+                // comparison direction at compile time; a computed step falls
+                // back to the builtin, which materialises the array. The
+                // two-name form falls back too, so its first name is a real
+                // ordinal index rather than a copy of the counter.
+                let range_args: Option<(&[Expression], i64)> = match iterable {
                     Expression::Call {
                         function,
                         args,
                         named_args,
                         ..
                     } if named_args.is_empty()
-                        && (args.len() == 1 || args.len() == 2)
+                        && index_variable.is_none()
+                        && (1..=3).contains(&args.len())
                         && matches!(&**function, Expression::Ident(id) if id.value == "range")
                         && !self.name_is_user_bound("range") =>
                     {
-                        Some(args.as_slice())
+                        match args.get(2) {
+                            None => Some((args.as_slice(), 1)),
+                            Some(step) => match literal_int(step) {
+                                Some(step) if step != 0 => Some((args.as_slice(), step)),
+                                _ => None,
+                            },
+                        }
                     }
                     _ => None,
                 };
+                let range_step = range_args.map(|(_, step)| step).unwrap_or(1);
 
                 self.begin_scope();
 
                 // `iter_slot` holds the iterable (array path); unused for range.
                 // `index_slot` is the counter; `end_slot` the exclusive bound.
-                let (index_slot, iter_slot, end_slot) = if let Some(args) = range_args {
+                let (index_slot, iter_slot, end_slot) = if let Some((args, _)) = range_args {
                     // counter = start (0 for 1-arg form), evaluated once
                     if args.len() == 1 {
                         self.emit_constant(Value::Integer(0), line);
@@ -1304,8 +1319,10 @@ impl Compiler {
                         self.compile_expression(&args[0]);
                     }
                     self.add_local("__index__", true, None);
-                    // end = last arg, evaluated once
-                    self.compile_expression(&args[args.len() - 1]);
+                    // end = the bound argument, evaluated once. `range(n)` puts
+                    // it first; every other form puts it second (a third
+                    // argument is the step, not the bound).
+                    self.compile_expression(if args.len() == 1 { &args[0] } else { &args[1] });
                     self.add_local("__range_end__", false, None);
                     let i = self.resolve_local("__index__").unwrap();
                     let e = self.resolve_local("__range_end__").unwrap();
@@ -1328,10 +1345,18 @@ impl Compiler {
 
                 // Loop condition (leaves a bool both branches Pop).
                 if is_range {
-                    // index < end
+                    // Counting up stops at `index < end`; counting down stops
+                    // at `index > end`, so the bound stays exclusive either way.
                     self.emit_op_u16(OpCode::GetLocal, index_slot, line);
                     self.emit_op_u16(OpCode::GetLocal, end_slot, line);
-                    self.emit_op(OpCode::Less, line);
+                    self.emit_op(
+                        if range_step > 0 {
+                            OpCode::Less
+                        } else {
+                            OpCode::Greater
+                        },
+                        line,
+                    );
                 } else {
                     // len(iterable) > index
                     self.emit_op_u16(OpCode::GetLocal, iter_slot, line);
@@ -1343,12 +1368,20 @@ impl Compiler {
                 self.emit_op(OpCode::Pop, line);
 
                 // Push the loop value: the counter (range) or iterable[index].
+                // The two-name form pushes key and value together instead.
                 if is_range {
                     self.emit_op_u16(OpCode::GetLocal, index_slot, line);
                 } else {
                     self.emit_op_u16(OpCode::GetLocal, iter_slot, line);
                     self.emit_op_u16(OpCode::GetLocal, index_slot, line);
-                    self.emit_op(OpCode::IterGet, line);
+                    self.emit_op(
+                        if index_variable.is_some() {
+                            OpCode::IterEntry
+                        } else {
+                            OpCode::IterGet
+                        },
+                        line,
+                    );
                 }
 
                 // `stop` exits to the loop's outer scope, which does NOT include
@@ -1356,7 +1389,11 @@ impl Compiler {
                 // iteration), so its floor is the height before binding it.
                 let exit_floor = self.current_frame().locals.len();
                 self.current_frame_mut().loop_exit_floors.push(exit_floor);
-                // Bind to loop variable
+                // Bind the loop variables. IterEntry pushed key then value, so
+                // the key takes the lower slot.
+                if let Some(index) = index_variable {
+                    self.add_local(&index.value, false, None);
+                }
                 self.add_local(&variable.value, false, None);
                 // `skip` cleans body locals back to here (keeping the loop
                 // variable, which the shared pop below closes/pops), then jumps
@@ -1392,27 +1429,30 @@ impl Compiler {
                 self.current_frame_mut().loop_exit_floors.pop();
                 self.current_frame_mut().loop_handler_depths.pop();
 
-                // Pop (or close, when captured by a closure) the loop variable.
-                // Closing per iteration gives each closure its own value.
-                let captured = self
-                    .current_frame()
-                    .locals
-                    .last()
-                    .map(|l| l.is_captured)
-                    .unwrap_or(false);
-                self.current_frame_mut().locals.pop();
-                self.emit_op(
-                    if captured {
-                        OpCode::CloseUpvalue
-                    } else {
-                        OpCode::Pop
-                    },
-                    line,
-                );
+                // Pop (or close, when captured by a closure) the loop
+                // variables. Closing per iteration gives each closure its own
+                // value. The two-name form bound two, popped value-first.
+                for _ in 0..(1 + usize::from(index_variable.is_some())) {
+                    let captured = self
+                        .current_frame()
+                        .locals
+                        .last()
+                        .map(|l| l.is_captured)
+                        .unwrap_or(false);
+                    self.current_frame_mut().locals.pop();
+                    self.emit_op(
+                        if captured {
+                            OpCode::CloseUpvalue
+                        } else {
+                            OpCode::Pop
+                        },
+                        line,
+                    );
+                }
 
-                // Increment index
+                // Advance the index by the range's step (1 for the array path).
                 self.emit_op_u16(OpCode::GetLocal, index_slot, line);
-                self.emit_constant(Value::Integer(1), line);
+                self.emit_constant(Value::Integer(range_step), line);
                 self.emit_op(OpCode::Add, line);
                 self.emit_op_u16(OpCode::SetLocal, index_slot, line);
                 self.emit_op(OpCode::Pop, line);
@@ -3017,5 +3057,20 @@ fn default_for_type(type_name: &str) -> Value {
             crate::vm::collections::OxSet::new(),
         ))),
         _ => Value::None,
+    }
+}
+
+/// An integer the compiler can read straight out of the AST. A negated literal
+/// (`-1`) parses as a prefix expression rather than a negative `Int`, so match
+/// that shape too — otherwise `range(a, b, -1)` misses the counting-loop
+/// lowering and falls back to materialising an array.
+fn literal_int(expr: &Expression) -> Option<i64> {
+    match expr {
+        Expression::Int { value, .. } => Some(*value),
+        Expression::Grouped(inner) => literal_int(inner),
+        Expression::Prefix {
+            operator, right, ..
+        } if operator == "-" => literal_int(right).and_then(i64::checked_neg),
+        _ => None,
     }
 }

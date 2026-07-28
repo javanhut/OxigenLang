@@ -407,6 +407,43 @@ each i in range(5) {
 }
 ```
 
+`range()` also takes a step, which may be negative to count down. See
+[`range()`](builtins.md#rangeend--rangestart-end--rangestart-end-step).
+
+```oxi
+each i in range(10, 0, -2) {
+    println(i)          // 10, 8, 6, 4, 2
+}
+```
+
+#### Two names: index/key and value
+
+Naming two variables binds both halves of each step. No separate enumerate
+function is needed — the iterable decides what the first name means:
+
+```oxi
+each i, item in ["a", "b", "c"] {
+    println("{i} = {item}")     // 0 = a, 1 = b, 2 = c
+}
+
+each key, value in {"x": 1, "y": 2} {
+    println("{key} -> {value}") // x -> 1, y -> 2
+}
+```
+
+- **Maps** bind the entry's key and value.
+- **Arrays, tuples, sets, strings, and ranges** bind the ordinal index and the
+  element.
+
+With a single name the behaviour is unchanged, so a map still yields each entry
+as one `(key, value)` tuple:
+
+```oxi
+each entry in {"x": 1} {
+    println(entry)      // (x, 1)
+}
+```
+
 ### `repeat` — While Loop
 
 `repeat when` loops while the condition remains true:

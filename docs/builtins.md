@@ -131,14 +131,23 @@ has((10, 20), 10)
 
 ## Iteration
 
-### `range(n)`
+### `range(end)` / `range(start, end)` / `range(start, end, step)`
 
-Returns an array of integers from `0` up to (but not including) `n`.
+Returns an array of integers from `start` (default `0`) up to but not including
+`end`, advancing by `step` (default `1`).
 
 ```oxi
-range(5)
-range(0)
-range(1)
+range(5)            // [0, 1, 2, 3, 4]
+range(2, 5)         // [2, 3, 4]
+range(0, 10, 3)     // [0, 3, 6, 9]
+```
+
+A negative step counts down. The bound stays exclusive from whichever side it is
+approached:
+
+```oxi
+range(5, 0, -1)     // [5, 4, 3, 2, 1]
+range(10, 0, -3)    // [10, 7, 4, 1]
 ```
 
 Commonly used with `each` for counted iteration:
@@ -147,9 +156,19 @@ Commonly used with `each` for counted iteration:
 each i in range(10) {
     println(i)
 }
+
+each i in range(10, 0, -2) {
+    println(i)
+}
 ```
 
-**Argument types:** Integer only. Negative values produce an empty array.
+**Argument types:** Integer only.
+
+**Empty results:** the range is empty when the step points away from the bound —
+`range(0, 5, -1)` and `range(5, 0)` both yield `[]`. A two-argument range is
+never auto-reversed; pass a negative step to count down.
+
+**Errors:** a `step` of `0` is an error, since the range could never terminate.
 
 ## Type Conversion
 

@@ -341,6 +341,26 @@ pub unsafe extern "C" fn jit_op_iter_get(vm: *mut VM) -> u32 {
     }
 }
 
+/// `each k, v` step: pops index+iterable, pushes key then value.
+/// `[it, idx] -> [key, val]`. Mirrors `IterEntry` via `VM::iter_entry`.
+pub unsafe extern "C" fn jit_op_iter_entry(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.sync_stack_from_view();
+    let index = vm.pop();
+    let iterable = vm.pop();
+    match vm.iter_entry(&iterable, &index) {
+        Ok((key, val)) => {
+            vm.push(key);
+            vm.push(val);
+            0
+        }
+        Err(err) => {
+            vm.jit.stash_error(err);
+            1
+        }
+    }
+}
+
 pub unsafe extern "C" fn jit_type_wrap(vm: *mut VM, type_idx: u32) -> u32 {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::TypeWrap);

@@ -448,18 +448,29 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
             // the v1 eligibility rule.
             let depth_after = next_state.stack.len();
 
-            // A collection-build consumes its literal-element transients off
-            // the stack. Any `first_init_ip` recorded for a vacated element
-            // position is stale: an element Constant's stack slot can coincide
-            // with a later local slot (e.g. `each i in [1,2,3,4]` puts element
-            // `3` at the loop-var slot), and the real value there arrives from
-            // a non-Constant op (BuildArray's result, IterGet, a later store).
-            // Leaving the stale entry makes the JIT materialize that element
-            // into its slot out of literal order, reordering `[1,2,3,4]` →
-            // `[1,3,2,4]`. Drop them; a genuine Constant init at the position
-            // re-records itself below if it lands later in the walk. Scoped to
-            // Build* (not plain Pop) so loop scope-teardown doesn't clobber a
-            // real local's init record.
+            // A collection-build or a call consumes its operand transients off
+            // the stack. Any `first_init_ip` recorded for a vacated position is
+            // stale: a transient's stack slot can coincide with a later local
+            // slot (e.g. `each i in [1,2,3,4]` puts element `3` at the loop-var
+            // slot), and the real value there arrives from a non-Constant op
+            // (BuildArray's result, IterGet, a later store). Leaving the stale
+            // entry makes the JIT materialize that transient into the slot,
+            // reordering `[1,2,3,4]` → `[1,3,2,4]`. Drop them; a genuine
+            // Constant init at the position re-records itself below if it lands
+            // later in the walk.
+            //
+            // Calls belong here for the same reason, and the
+            // `next_consumes_top` filter below cannot cover them: it only sees
+            // the immediately-following op, so in `f(1, 2, 3)` —
+            // `Constant 1; Constant 2; Constant 3; Call 3` — only the LAST
+            // argument is followed by the `Call`. Arguments 1 and 2 are each
+            // followed by another `Constant` and were recorded as initializers
+            // for whatever locals later occupy those positions, which swapped a
+            // call's first two arguments in any script whose top level also had
+            // an `each` loop.
+            //
+            // Scoped to these consuming ops (not plain Pop) so loop
+            // scope-teardown doesn't clobber a real local's init record.
             if matches!(
                 op,
                 OpCode::BuildArray
@@ -467,6 +478,10 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                     | OpCode::BuildSet
                     | OpCode::BuildMap
                     | OpCode::StructLiteral
+                    | OpCode::Call
+                    | OpCode::CallNamed
+                    | OpCode::MethodCall
+                    | OpCode::MethodCallNamed
             ) && depth_after < depth_before
             {
                 for pos in depth_after..depth_before {
@@ -1167,6 +1182,7 @@ fn collect_int_mirror_param_slots(
                         | OpCode::StructLiteral
                         | OpCode::IterLen
                         | OpCode::IterGet
+                        | OpCode::IterEntry
                         | OpCode::Closure,
                     ) => {
                         has_non_int_demand.insert(slot);
@@ -1720,18 +1736,23 @@ fn transfer(
             let off = read_u16(code, ip + 1) as usize;
             targets.push(ip + 3 + off);
         }
-        OpCode::IterLen | OpCode::IterGet => {
+        OpCode::IterLen | OpCode::IterGet | OpCode::IterEntry => {
             // Must match the VM dispatch arms' stack effect exactly, or the
             // JIT virtualizes the wrong slots (silent infinite loops).
-            // IterLen: [it] → [len]  (VM pops the iterable, pushes the length).
-            // IterGet: [it, idx] → [elem].
-            // The result is left conservative (Value): len is int-in-range but
-            // we don't know if it'll be consumed as Int.
+            // IterLen:   [it] → [len]  (VM pops the iterable, pushes the length).
+            // IterGet:   [it, idx] → [elem].
+            // IterEntry: [it, idx] → [key, val].
+            // Results are left conservative (Value): len is int-in-range but
+            // we don't know if it'll be consumed as Int, and a key/element can
+            // be any value.
             next.stack.pop();
-            if matches!(op, OpCode::IterGet) {
+            if matches!(op, OpCode::IterGet | OpCode::IterEntry) {
                 next.stack.pop();
             }
             next.stack.push(SlotType::Value);
+            if matches!(op, OpCode::IterEntry) {
+                next.stack.push(SlotType::Value);
+            }
         }
         OpCode::TypeWrap => {
             // For `<int>` annotations ("INTEGER" target), TypeWrap is

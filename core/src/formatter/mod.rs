@@ -401,11 +401,16 @@ impl Formatter {
             }
             Statement::Each {
                 variable,
+                index_variable,
                 iterable,
                 body,
                 ..
             } => {
                 self.push("each ");
+                if let Some(index) = index_variable {
+                    self.push(&index.value);
+                    self.push(", ");
+                }
                 self.push(&variable.value);
                 self.push(" in ");
                 self.format_expression(iterable);

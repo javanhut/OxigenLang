@@ -2309,10 +2309,23 @@ impl Parser {
         let token = self.curr_token.clone(); // 'each'
 
         self.next_token(); // move to variable name
-        let variable = Identifier {
+        let mut variable = Identifier {
             token: self.curr_token.clone(),
             value: self.curr_token.literal.clone(),
         };
+
+        // `each k, v in coll`: the leading name binds the map key / sequence
+        // index, the second binds the element.
+        let mut index_variable = None;
+        if self.peek_token.token_type == TokenType::Comma {
+            self.next_token(); // curr is ','
+            self.next_token(); // move to the value name
+            index_variable = Some(variable);
+            variable = Identifier {
+                token: self.curr_token.clone(),
+                value: self.curr_token.literal.clone(),
+            };
+        }
 
         self.expect_peek(TokenType::In)?; // 'in'
         self.next_token(); // move to iterable
@@ -2325,6 +2338,7 @@ impl Parser {
         Some(Statement::Each {
             token,
             variable,
+            index_variable,
             iterable,
             body,
         })
