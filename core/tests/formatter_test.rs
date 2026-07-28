@@ -430,3 +430,64 @@ fn fmt_keeps_comments_above_option_arms() {
     assert!(out.contains("// big"), "{out}");
     assert_reparses_and_stable(src, &out);
 }
+
+// ── string interpolation ────────────────────────────────────────────────────
+// The expression inside `{ ... }` used to be scanned by a hand-written lexer
+// that accepted only identifiers, numbers, strings and `( ) , + - * / . [ ]`,
+// so every comparison, `%`, and logical keyword was a syntax error even though
+// the parser behind it handled them. It now runs the real lexer.
+
+/// Parses a source string, asserting it has no parse errors.
+fn parse_ok_source(source: &str) {
+    let lexer = Lexer::new(source);
+    let mut parser = Parser::new(lexer, source);
+    parser.parse_program();
+    assert!(
+        parser.errors().is_empty(),
+        "unexpected parse errors for {source:?}:\n{}",
+        parser.format_errors()
+    );
+}
+
+#[test]
+fn interpolation_accepts_operators_the_parser_supports() {
+    for expr in [
+        "a == b", "a != b", "a < b", "a <= b", "a > b", "a >= b", "x % 2",
+        "a and b", "a or b", "not a", "-a", "a + b * 2", "(a + b) * 2",
+        "f(a, b)", "items[0]", "p.n", "p.m()", "a == b or x % 2 == 0",
+    ] {
+        parse_ok_source(&format!("println(\"{{{expr}}}\")"));
+    }
+}
+
+#[test]
+fn interpolation_handles_nested_braces_and_strings() {
+    // A map literal inside the interpolation must not be mistaken for the
+    // closing brace, and a nested string literal must lex as one.
+    parse_ok_source("println(\"{ {\"k\": 7}[\"k\"] }\")");
+    parse_ok_source("println(\"{ upper(\"hi\") }\")");
+}
+
+#[test]
+fn interpolated_expressions_survive_formatting() {
+    // The formatter reprints the expression; it must still parse afterwards.
+    let src = "println(\"{a == b} {x % 2} {a < b and b > 0} {items[0]} {(a + b) * 2}\")\n";
+    let formatted = format_source(src);
+    parse_ok_source(&formatted);
+    assert_eq!(format_source(&formatted), formatted, "fmt is not idempotent");
+    assert!(formatted.contains("{a == b}"), "{formatted}");
+    assert!(formatted.contains("{x % 2}"), "{formatted}");
+}
+
+#[test]
+fn escaped_braces_are_literal_and_round_trip() {
+    // `\{` is the only way to write a brace that does not open an
+    // interpolation. It must survive fmt: emitting a bare `{` back out would
+    // turn the rest of the string into a live interpolation.
+    let src = "println(\"literal \\{x\\} here\")\n";
+    let formatted = format_source(src);
+    parse_ok_source(&formatted);
+    assert!(!formatted.contains("\\\\{"), "double-escaped: {formatted}");
+    assert!(formatted.contains("\\{"), "brace not escaped: {formatted}");
+    assert_eq!(format_source(&formatted), formatted, "fmt is not idempotent");
+}

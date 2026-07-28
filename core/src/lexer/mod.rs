@@ -153,8 +153,22 @@ impl Lexer {
         }
 
         let span = self.span();
+        self.lex_token_at(span)
+    }
 
-        
+    /// Lexes exactly one token starting at the current character.
+    ///
+    /// Split out of `next_token` so string interpolation can reuse the real
+    /// lexer for the expression inside `{ ... }`. That used to be a separate
+    /// hand-written scanner accepting only a whitelist of characters
+    /// (identifiers, numbers, strings, and `( ) , + - * / . [ ]`), which made
+    /// `"{a == b}"`, `"{x % 2}"` and every other operator a syntax error while
+    /// the parser behind it was perfectly capable of handling them.
+    ///
+    /// Callers are responsible for the parts of `next_token` NOT included here:
+    /// the pending-token queue, indent-mode bookkeeping, leading whitespace and
+    /// the newline token.
+    fn lex_token_at(&mut self, span: Span) -> Token {
         match self.ch {
             '\0' => {
                 // At EOF in indent mode, emit RBrace for any remaining open blocks
@@ -639,16 +653,7 @@ impl Lexer {
 
                 // Lex tokens inside {} using a brace depth counter
                 let mut brace_depth = 1;
-                while brace_depth > 0 && self.ch != '\0' {
-                    if self.ch == '{' {
-                        brace_depth += 1;
-                    } else if self.ch == '}' {
-                        brace_depth -= 1;
-                        if brace_depth == 0 {
-                            break;
-                        }
-                    }
-
+                loop {
                     // Skip whitespace inside the interpolation expression.
                     // Newlines are only valid here inside a triple-quoted
                     // string, where `{ ... }` may span lines; single-line
@@ -661,43 +666,43 @@ impl Lexer {
                         }
                         break;
                     }
+
+                    if self.ch == '\0' {
+                        break;
+                    }
+
+                    // Depth is counted from the first significant character,
+                    // AFTER whitespace: `"{ {"k": 1}["k"] }"` opens a nested
+                    // brace that must not be read as the end of the
+                    // interpolation. (Before the expression inside `{ ... }`
+                    // was lexed properly, no nested brace could occur here.)
                     if self.ch == '}' {
+                        brace_depth -= 1;
+                        if brace_depth == 0 {
+                            break; // caller consumes the closing brace
+                        }
+                    } else if self.ch == '{' {
+                        brace_depth += 1;
+                    }
+
+                    // A comment inside an interpolation is pathological, but
+                    // `lex_token_at`'s comment arms restart via `next_token`,
+                    // which would pop the interpolation tokens already queued
+                    // below. Consume them here so that path is unreachable.
+                    if self.ch == '/' && matches!(self.peek_char(), '/' | '*') {
+                        if self.peek_char() == '/' {
+                            self.skip_line_comment();
+                        } else {
+                            self.skip_block_comment();
+                        }
                         continue;
                     }
 
+                    // Lex one token with the real lexer, so the expression
+                    // inside `{ ... }` supports the whole language rather than
+                    // a hand-maintained subset of it.
                     let inner_span = self.span();
-                    // Lex one token from inside the interpolation
-                    let inner_tok = match self.ch {
-                        c if c.is_ascii_digit() => self.read_number(inner_span),
-                        c if is_ident_start(c) => self.read_ident(inner_span),
-                        '"' => {
-                            let inner_triple = self.at_triple_quote('"');
-                            self.read_string('"', inner_triple, inner_span)
-                        }
-                        '\'' => {
-                            let inner_triple = self.at_triple_quote('\'');
-                            self.read_string('\'', inner_triple, inner_span)
-                        }
-                        '(' => self.single_with_span(TokenType::LParen, inner_span),
-                        ')' => self.single_with_span(TokenType::RParen, inner_span),
-                        ',' => self.single_with_span(TokenType::Comma, inner_span),
-                        '+' => self.single_with_span(TokenType::Plus, inner_span),
-                        '-' => self.single_with_span(TokenType::Minus, inner_span),
-                        '*' => self.single_with_span(TokenType::Asterisk, inner_span),
-                        '/' => self.single_with_span(TokenType::FSlash, inner_span),
-                        '.' => self.single_with_span(TokenType::FullStop, inner_span),
-                        '[' => self.single_with_span(TokenType::LBracket, inner_span),
-                        ']' => self.single_with_span(TokenType::RBracket, inner_span),
-                        _ => {
-                            let lit = self.ch.to_string();
-                            self.read_char();
-                            Token {
-                                token_type: TokenType::Illegal,
-                                literal: lit,
-                                span: inner_span,
-                            }
-                        }
-                    };
+                    let inner_tok = self.lex_token_at(inner_span);
                     self.pending_tokens.push_back(inner_tok);
                 }
 
@@ -813,6 +818,16 @@ impl Lexer {
             }
             c if c == delimiter => {
                 literal.push(c);
+                self.read_char();
+            }
+            // `\{` / `\}` are the only way to put a literal brace in a string —
+            // a bare `{` starts an interpolation. They yield the brace alone,
+            // so `"\{x\}"` prints `{x}`; keeping the backslash in the value
+            // would also make the string impossible to format back out (the
+            // formatter would have to escape the backslash, and `\\{` re-parses
+            // as a backslash followed by a live interpolation).
+            '{' | '}' => {
+                literal.push(self.ch);
                 self.read_char();
             }
             other => {

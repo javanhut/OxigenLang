@@ -115,6 +115,18 @@ Both `"""` and `'''` behave identically; choose whichever lets you embed the oth
   println("Type: {type(42)}")
   ```
 
+  "Any valid expression" includes comparisons, `%`, and the logical keywords —
+  there is no need to compute them into a variable first:
+
+  ```oxi
+  a := 1
+  b := 2
+  println("{a == b}")             // False
+  println("{a < b and b % 2 == 0}")  // True
+  println("{not (a == b)}")       // True
+  println("{ {"k": 7}["k"] }")    // 7 — nested braces are fine
+  ```
+
   Strings without `{}` remain plain strings — no special syntax is needed to opt out. Both double-quoted and single-quoted strings support interpolation.
 
 - **Escape Sequences**: Strings support the following escape sequences:
@@ -130,6 +142,8 @@ Both `"""` and `'''` behave identically; choose whichever lets you embed the oth
   | `\"` | Double quote (inside `"..."`) |
   | `\'` | Single quote (inside `'...'`) |
   | `\0` | Null character |
+  | `\{` | Literal `{` (a bare `{` would start an interpolation) |
+  | `\}` | Literal `}` |
 
   ```oxi
   println("line one\nline two")
@@ -137,6 +151,7 @@ Both `"""` and `'''` behave identically; choose whichever lets you embed the oth
   println("she said \"hello\"")
   println('it\'s fine')
   println("\e[31mred\e[0m")
+  println("\{not an interpolation\}")   // {not an interpolation}
   ```
 
   Escape sequences work in both plain strings and interpolated strings.

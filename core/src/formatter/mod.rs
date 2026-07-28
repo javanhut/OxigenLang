@@ -1348,6 +1348,8 @@ fn escape_string(s: &str) -> String {
             '\n' => result.push_str("\\n"),
             '\t' => result.push_str("\\t"),
             '\r' => result.push_str("\\r"),
+            // A bare `{` would re-open an interpolation on the way back in.
+            '{' => result.push_str("\\{"),
             _ => result.push(c),
         }
     }
@@ -1389,6 +1391,11 @@ fn escape_string_triple(s: &str) -> String {
             '"' => {
                 result.push('"');
                 quote_run += 1;
+            }
+            // A bare `{` would re-open an interpolation on the way back in.
+            '{' => {
+                result.push_str("\\{");
+                quote_run = 0;
             }
             _ => {
                 result.push(c);
