@@ -4,7 +4,8 @@
 // as its own sub-program, but `diverge` ships a thunk by compile-order function
 // id and the worker pool resolves it against a single, process-global source —
 // so a thunk's id only lines up when the whole file is compiled as one program.
-// Run it via `oxigen run` (which sets that source to the full file). It
+// Run it via `oxigen tests/concurrency.oxi` (which sets that source to the
+// full file). It
 // self-asserts with `expect`; any mismatch raises and exits non-zero, failing
 // CI. See .github/workflows/ci.yml (oxigen-tests job).
 

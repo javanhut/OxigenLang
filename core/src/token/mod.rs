@@ -38,7 +38,6 @@ pub enum TokenType {
     // Delimiters
     Comma,     // ,
     Colon,     // :
-    Semicolon, // ;
     LBrace,    // {
     RBrace,    // }
     LBracket,  // [

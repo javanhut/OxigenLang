@@ -301,9 +301,19 @@ impl Lexer {
                 }
                 _ => self.single_with_span(TokenType::Pipe, span),
             },
+            // Oxigen has no statement terminator — a newline ends a statement.
+            // Lexed as Illegal carrying its own message so the parser reports
+            // the fix instead of a bare "unexpected token".
+            ';' => {
+                self.read_char();
+                Token {
+                    token_type: TokenType::Illegal,
+                    literal: "`;` is not an Oxigen statement terminator — end the statement with a newline".to_string(),
+                    span,
+                }
+            }
             '^' => self.single_with_span(TokenType::Caret, span),
             '~' => self.single_with_span(TokenType::Tilde, span),
-            ';' => self.single_with_span(TokenType::Semicolon, span),
             '[' => self.single_with_span(TokenType::LBracket, span),
             ']' => self.single_with_span(TokenType::RBracket, span),
             '{' => self.single_with_span(TokenType::LBrace, span),
