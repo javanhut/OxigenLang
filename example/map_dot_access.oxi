@@ -2,7 +2,12 @@ y <map> := {"name": "oxigen", "version": "0.1"}
 println(y.name)
 println(y["name"])
 println(y.version)
-println(y.missing)
+
+// The dot form is field access: a missing key is an error, so a typo does not
+// pass silently. Use the bracket form (or `has`) when a key may be absent.
+println(y["missing"])       // None
+println(has(y, "missing"))  // False
+
 y.name = "OXI"
 println(y.name)
 println(y["name"])

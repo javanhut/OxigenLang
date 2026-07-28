@@ -388,10 +388,26 @@ Note: An empty map `{}` and an empty block `{}` use the same syntax. The parser 
   y <map> := {"name": "oxigen"}
   y.name              // "oxigen"  (same as y["name"])
   y.version = "0.1"   // inserts the key
-  y.missing           // None (missing keys return None)
   ```
 
   Dot access is limited to string keys. Non-string keys still require bracket syntax.
+
+  **Reading a missing key with the dot form is an error**, the same as a missing
+  struct field — so a mistyped key does not pass silently:
+
+  ```oxi
+  y.mising            // error: key 'mising' not found on map
+  ```
+
+  Bracket access is a lookup and still answers `None` for an absent key, so use
+  it (or `has`) whenever a key may legitimately be missing. Writing through the
+  dot form still inserts:
+
+  ```oxi
+  y["mising"]         // None
+  has(y, "mising")    // False
+  y.author = "ada"    // inserts, no error
+  ```
 
 - **Insert**: Returns a new map with the key-value pair added or updated:
 

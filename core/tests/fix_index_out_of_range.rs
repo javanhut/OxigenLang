@@ -46,6 +46,15 @@ fn assert_all_backends_reject(source: &str) -> String {
     interp
 }
 
+/// Asserts every backend rejects `source` with a message containing `needle`.
+fn assert_all_backends_reject_with(source: &str, needle: &str) -> String {
+    let interp = run_on(VM::new_interpreter(), source).expect_err("interpreter should reject");
+    let jit = run_on(VM::new_eager_jit(), source).expect_err("jit should reject");
+    assert_eq!(interp, jit, "backends disagree for:\n{source}");
+    assert!(interp.contains(needle), "expected {needle:?}, got: {interp}");
+    interp
+}
+
 /// Asserts every backend accepts `source` and yields `expected`.
 fn assert_all_backends_yield(source: &str, expected: &str) {
     for (name, vm) in [
@@ -132,4 +141,46 @@ fn the_error_names_the_index_and_the_length() {
     let err = assert_all_backends_reject("a := [10, 20, 30]\na[7]");
     assert!(err.contains('7'), "should name the index: {err}");
     assert!(err.contains('3'), "should name the length: {err}");
+}
+
+// ── map dot access ──────────────────────────────────────────────────────────
+// The dot form reads as field access but used to return `None` for a missing
+// key, so `m.nmae` was a silent typo — and the same syntax behaved one way on a
+// map and the opposite way on a struct, decided by runtime type. It now errors
+// like a missing struct field. Bracket access stays a lookup.
+
+#[test]
+fn dot_access_on_a_missing_key_is_an_error() {
+    let err = assert_all_backends_reject_with(
+        "m := {\"name\": \"ada\"}\nm.nmae",
+        "not found",
+    );
+    assert!(err.contains("nmae"), "should name the key: {err}");
+}
+
+#[test]
+fn dot_access_matches_struct_field_behaviour() {
+    // Both are "field access on a value that lacks it"; both must reject.
+    assert_all_backends_reject_with("struct P { n <int> }\np := P(1)\np.nn", "not found");
+    assert_all_backends_reject_with("m := {\"n\": 1}\nm.nn", "not found");
+}
+
+#[test]
+fn dot_access_on_a_present_key_is_unchanged() {
+    assert_all_backends_yield("m := {\"name\": \"ada\"}\nm.name", "ada");
+    assert_all_backends_yield("m := {\"a\": 1, \"b\": 2}\nm.b", "2");
+}
+
+#[test]
+fn bracket_access_remains_a_lookup() {
+    // The escape hatch for keys that may legitimately be absent.
+    assert_all_backends_yield("m := {\"name\": \"ada\"}\nm[\"nmae\"]", "None");
+    assert_all_backends_yield("m := {\"name\": \"ada\"}\nhas(m, \"nmae\")", "False");
+}
+
+#[test]
+fn dot_assignment_still_inserts_new_keys() {
+    // Writing is not a lookup — `m.k = v` must keep working for absent keys.
+    assert_all_backends_yield("m := {\"a\": 1}\nm.b = 2\nm.b", "2");
+    assert_all_backends_yield("m := {\"a\": 1}\nm.a = 9\nm.a", "9");
 }

@@ -867,16 +867,23 @@ impl VM {
                 _ => Err(self.runtime_error(&format!("ErrorValue has no field '{}'", fname))),
             },
             ValueRepr::Map(entries) => {
+                // The dot form reads as field access, so a missing key is
+                // treated like a missing struct field: an error. Returning
+                // `None` here made `m.nmae` a silent typo, and made the same
+                // syntax behave one way on a map and another on a struct.
+                // `m["k"]` stays a lookup and still answers `None` — that is
+                // the form to use when a key may legitimately be absent.
                 let entries = entries.borrow();
                 let key = Value::String(Rc::clone(fname));
-                let mut found = None;
-                for (k, v) in entries.iter() {
-                    if *k == key {
-                        found = Some(v.clone());
-                        break;
-                    }
+                match entries.get(&key) {
+                    Some(v) => Ok(v.clone()),
+                    None => Err(self.runtime_error_hint(
+                        &format!("key '{fname}' not found on map"),
+                        &format!(
+                            "use m[\"{fname}\"] or has(m, \"{fname}\") if the key may be absent"
+                        ),
+                    )),
                 }
-                Ok(found.unwrap_or(Value::None))
             }
             ValueRepr::EnumDef(def) => {
                 let variant = def
