@@ -6,8 +6,6 @@ use oxigen_core::vm::value::Value;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
-const OXI_VERSION: &str = env!("CARGO_PKG_VERSION");
-
 pub fn run_repl() {
     // Run the session on a large-stack thread so a function that tiers up to
     // the JIT has room for its native frames (mirrors run_file_vm). rustyline
@@ -30,7 +28,8 @@ fn repl_loop() {
     // `enum` declarations compile to globals, so they carry across lines.
     let mut vm = VM::new();
 
-    println!("Oxigen REPL v{}", OXI_VERSION);
+    println!("Oxigen REPL");
+    crate::print_version();
     println!("Type 'exit' or 'quit' to exit, 'version' for version info");
 
     loop {
@@ -48,7 +47,7 @@ fn repl_loop() {
                 }
 
                 if line == "version" {
-                    println!("Oxi Version {OXI_VERSION}");
+                    crate::print_version();
                     continue;
                 }
 

@@ -5,6 +5,12 @@ use std::path::PathBuf;
 
 mod repl;
 
+/// Single source of truth for the version banner — `--version`, `--help` and
+/// the REPL's `version` command all route here so they can't drift apart.
+pub fn print_version() {
+    println!("Oxigen Version: {}", env!("CARGO_PKG_VERSION"));
+}
+
 use oxigen_core::compiler::Compiler;
 use oxigen_core::formatter::Formatter;
 use oxigen_core::lexer::Lexer;
@@ -469,9 +475,7 @@ fn main() {
         .collect();
 
     match filtered_args.get(1).map(|s| s.as_str()) {
-        Some("--version") | Some("-v") => {
-            println!("oxigen {}", env!("CARGO_PKG_VERSION"));
-        }
+        Some("--version") | Some("-v") => print_version(),
         Some("check") => {
             if let Some(path) = filtered_args.get(2) {
                 check_file(path);
@@ -483,7 +487,7 @@ fn main() {
         Some("fmt") => fmt_files(&filtered_args[2..]),
         Some("test") => run_tests_command(&filtered_args[2..]),
         Some("--help") | Some("-h") => {
-            println!("Oxigen Version: {}", env!("CARGO_PKG_VERSION"));
+            print_version();
             println!();
             println!("--version/-v:  Get Oxigen Version");
             println!("fmt [name of file/directory]:  Formats the Oxigen File with proper Syntax");
