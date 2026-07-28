@@ -215,3 +215,218 @@ fn test_format_enum_variant_construct_struct() {
     let expected = "s := Shape.Rectangle { w: 3.0, h: 4.0 }\n";
     assert_eq!(format_source(input), expected);
 }
+
+// ── fmt must not corrupt the file it formats ────────────────────────────────
+// Three ways it used to: dropping every comment, emitting brace blocks into an
+// `#[indent]` file, and writing `{:}` for an empty map (which the parser
+// rejects). Each left behind a file that no longer parsed.
+
+/// Formats like `oxigen fmt` does: comments restored, block style preserved.
+fn format_faithful(source: &str) -> String {
+    let lexer = Lexer::new(source);
+    let mut parser = Parser::new(lexer, source);
+    let program = parser.parse_program();
+    assert!(
+        parser.errors().is_empty(),
+        "Parse errors: {:?}",
+        parser.errors()
+    );
+    let indent_style = source.lines().any(|l| l.trim() == "#[indent]");
+    Formatter::format_source(&program, parser.comments(), indent_style)
+}
+
+/// Asserts the formatted output still parses, and that formatting is a fixed
+/// point (running fmt twice changes nothing).
+fn assert_reparses_and_stable(source: &str, formatted: &str) {
+    let header: String = source
+        .lines()
+        .take_while(|l| l.trim() == "#[indent]")
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let round_tripped = format!("{header}{formatted}");
+
+    let lexer = Lexer::new(&round_tripped);
+    let mut parser = Parser::new(lexer, &round_tripped);
+    parser.parse_program();
+    assert!(
+        parser.errors().is_empty(),
+        "formatted output does not parse: {:?}\n--- output ---\n{round_tripped}",
+        parser.errors()
+    );
+    assert_eq!(
+        format_faithful(&round_tripped),
+        formatted,
+        "fmt is not idempotent"
+    );
+}
+
+#[test]
+fn fmt_preserves_comments() {
+    let input = "// leading comment\nfun add(a, b) {\n// inner comment\na + b // trailing comment\n}\n";
+    let out = format_faithful(input);
+    assert!(out.contains("// leading comment"), "{out}");
+    assert!(out.contains("// inner comment"), "{out}");
+    assert!(out.contains("// trailing comment"), "{out}");
+    assert_reparses_and_stable(input, &out);
+}
+
+#[test]
+fn fmt_keeps_trailing_comment_on_its_statement() {
+    let out = format_faithful("main {\nx := 1 // why one\ny := 2\n}\n");
+    assert!(out.contains("x := 1  // why one"), "{out}");
+}
+
+#[test]
+fn fmt_preserves_block_comments_and_trailing_file_comments() {
+    let input = "/* block header */\nx := 1\n// last word\n";
+    let out = format_faithful(input);
+    assert!(out.contains("/* block header */"), "{out}");
+    assert!(out.contains("// last word"), "{out}");
+}
+
+#[test]
+fn fmt_emits_indent_style_for_indent_files() {
+    let input = "#[indent]\nfun add(a, b):\n  // inner\n  a + b\n\nmain:\n  println(add(1, 2))\n";
+    let out = format_faithful(input);
+    assert!(!out.contains('{'), "indent file must not gain braces:\n{out}");
+    assert!(!out.contains('}'), "indent file must not gain braces:\n{out}");
+    assert!(out.contains("fun add(a, b):"), "{out}");
+    assert!(out.contains("// inner"), "{out}");
+    assert_reparses_and_stable(input, &out);
+}
+
+#[test]
+fn fmt_emits_indent_style_for_nested_blocks() {
+    let input = "#[indent]\nmain:\n  each i in [1, 2]:\n    repeat when i > 9:\n      stop\n    println(i)\n";
+    let out = format_faithful(input);
+    assert!(!out.contains('{') && !out.contains('}'), "{out}");
+    assert_reparses_and_stable(input, &out);
+}
+
+#[test]
+fn fmt_writes_reparsable_empty_map() {
+    // `{:}` is rejected by the parser in every position, so fmt must not write it.
+    let input = "fun f(h <map> = {}) { len(h) }\n";
+    let out = format_faithful(input);
+    assert!(!out.contains("{:}"), "{out}");
+    assert_reparses_and_stable(input, &out);
+}
+
+#[test]
+fn fmt_leaves_brace_style_files_alone() {
+    let input = "main {\n    x := 1\n}\n";
+    let out = format_faithful(input);
+    assert!(out.contains('{') && out.contains('}'), "{out}");
+    assert_reparses_and_stable(input, &out);
+}
+
+// A comment after a block's last statement belongs inside that block. There is
+// no span for a `}` in the AST, so placement is decided by the next sibling
+// statement's line plus the comment's own column.
+
+/// Index of the line containing `needle`, for asserting relative order.
+fn line_of(haystack: &str, needle: &str) -> usize {
+    haystack
+        .lines()
+        .position(|l| l.contains(needle))
+        .unwrap_or_else(|| panic!("{needle:?} missing from:\n{haystack}"))
+}
+
+#[test]
+fn fmt_keeps_end_of_block_comment_inside_the_block() {
+    let out = format_faithful("main {\nx := 1\n  // end of block\n}\n\ny := 2\n");
+    assert!(line_of(&out, "// end of block") < line_of(&out, "}"), "{out}");
+}
+
+#[test]
+fn fmt_treats_a_margin_comment_at_a_block_boundary_as_outside() {
+    // These two sources differ only in which side of `}` the comment sits on,
+    // and the AST records no position for `}` — so they necessarily format
+    // alike. Attaching to the outer level matches the comment's own column.
+    let inside = format_faithful("main {\nx := 1\n// boundary\n}\n\ny := 2\n");
+    let outside = format_faithful("main {\nx := 1\n}\n// boundary\n\ny := 2\n");
+    assert_eq!(inside, outside);
+    assert!(line_of(&inside, "}") < line_of(&inside, "// boundary"), "{inside}");
+}
+
+#[test]
+fn fmt_keeps_end_of_block_comment_inside_the_files_last_block() {
+    // Nothing follows the block, so the line bound alone cannot place this —
+    // the comment's indentation is what marks it as inside.
+    let out = format_faithful("y := 2\n\nmain {\nx := 1\n  // end of block\n}\n");
+    assert!(line_of(&out, "// end of block") < line_of(&out, "}"), "{out}");
+}
+
+#[test]
+fn fmt_keeps_a_margin_comment_after_the_final_block_outside_it() {
+    let out = format_faithful("main {\nx := 1\n}\n// file trailer\n");
+    assert!(line_of(&out, "}") < line_of(&out, "// file trailer"), "{out}");
+}
+
+#[test]
+fn fmt_places_nested_end_of_block_comments_in_the_innermost_block() {
+    let src = "main {\n    each i in [1, 2] {\n        println(i)\n        // inner end\n    }\n    // outer end\n}\n\n// file trailer\n";
+    let out = format_faithful(src);
+    let (inner, outer) = (line_of(&out, "// inner end"), line_of(&out, "// outer end"));
+    let close_each = line_of(&out, "    }");
+    let close_main = out
+        .lines()
+        .position(|l| l == "}")
+        .unwrap_or_else(|| panic!("no top-level close in:\n{out}"));
+    assert!(inner < close_each, "inner comment escaped its block:\n{out}");
+    assert!(close_each < outer && outer < close_main, "{out}");
+    assert!(close_main < line_of(&out, "// file trailer"), "{out}");
+    assert_reparses_and_stable(src, &out);
+}
+
+#[test]
+fn fmt_keeps_end_of_block_comment_inside_indent_style_blocks() {
+    let src = "#[indent]\nmain:\n  x := 1\n  // end of block\n";
+    let out = format_faithful(src);
+    assert!(out.contains("// end of block"), "{out}");
+    assert_reparses_and_stable(src, &out);
+}
+
+// Methods, struct fields, enum variants and match arms are not statements, so
+// they need their own comment flush — without it a comment written above one of
+// them was swallowed into the previous item's body, and a second fmt pass then
+// moved it again (formatting was not idempotent).
+
+#[test]
+fn fmt_keeps_comments_above_includes_methods() {
+    let src = "struct S {\n    n <int>\n}\n\nS includes {\n    // doubles n\n    fun double() { self.n * 2 }\n\n    // triples n\n    fun triple() { self.n * 3 }\n}\n";
+    let out = format_faithful(src);
+    assert!(
+        line_of(&out, "// doubles n") < line_of(&out, "fun double"),
+        "{out}"
+    );
+    assert!(
+        line_of(&out, "// triples n") < line_of(&out, "fun triple"),
+        "{out}"
+    );
+    assert_reparses_and_stable(src, &out);
+}
+
+#[test]
+fn fmt_keeps_comments_above_struct_fields_and_enum_variants() {
+    let src = "struct Point {\n    // horizontal\n    x <int>\n    // vertical\n    y <int>\n}\n\nenum Color {\n    // warm\n    Red\n    // cool\n    Blue\n}\n";
+    let out = format_faithful(src);
+    for (comment, item) in [
+        ("// horizontal", "x <int>"),
+        ("// vertical", "y <int>"),
+        ("// warm", "Red"),
+        ("// cool", "Blue"),
+    ] {
+        assert!(line_of(&out, comment) < line_of(&out, item), "{out}");
+    }
+    assert_reparses_and_stable(src, &out);
+}
+
+#[test]
+fn fmt_keeps_comments_above_option_arms() {
+    let src = "fun pick(n) {\n    option {\n        // small\n        n < 10 -> \"small\"\n        // big\n        \"big\"\n    }\n}\n";
+    let out = format_faithful(src);
+    assert!(line_of(&out, "// small") < line_of(&out, "n < 10"), "{out}");
+    assert!(out.contains("// big"), "{out}");
+    assert_reparses_and_stable(src, &out);
+}

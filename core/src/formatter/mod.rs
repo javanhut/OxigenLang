@@ -1,9 +1,31 @@
 use crate::ast::*;
+use crate::lexer::Comment;
+use crate::token::Span;
 use crate::token::TokenType;
 
 pub struct Formatter {
     indent: usize,
     output: String,
+    /// Comments from the source, in line order, and how far we have replayed
+    /// them. The AST has no comment nodes, so they are re-inserted by comparing
+    /// each comment's source line against the line each statement came from.
+    comments: Vec<Comment>,
+    next_comment: usize,
+    /// `#[indent]` files delimit blocks with a trailing `:` and indentation
+    /// rather than braces; emitting braces into one produces a file that no
+    /// longer parses.
+    indent_style: bool,
+    /// Where the next sibling of the statement/item that opened the current
+    /// block starts. A comment on or after that line, or indented no further
+    /// than it, was written for that sibling rather than inside the block.
+    next_anchor: Option<Span>,
+    /// Source column of the last statement emitted in the current block, and of
+    /// the statement that opened it. A comment belongs to the block when it is
+    /// indented at least as far as the block's statements *and* strictly past
+    /// the opener — the first test keeps it out of a sibling's block, the second
+    /// keeps an unindented comment at the opener's own margin outside entirely.
+    body_column: usize,
+    open_column: usize,
 }
 
 impl Default for Formatter {
@@ -17,19 +39,85 @@ impl Formatter {
         Self {
             indent: 0,
             output: String::new(),
+            comments: Vec::new(),
+            next_comment: 0,
+            indent_style: false,
+            next_anchor: None,
+            body_column: usize::MAX,
+            open_column: 0,
         }
     }
 
     pub fn format(program: &Program) -> String {
+        Formatter::new().run(program)
+    }
+
+    /// Format `program`, restoring `comments` and matching the source's block
+    /// style. `indent_style` must be true when the source carries `#[indent]`.
+    pub fn format_source(program: &Program, comments: &[Comment], indent_style: bool) -> String {
         let mut f = Formatter::new();
-        f.format_program(program);
+        f.comments = comments.to_vec();
+        f.indent_style = indent_style;
+        f.run(program)
+    }
+
+    fn run(mut self, program: &Program) -> String {
+        self.format_program(program);
         // Ensure file ends with exactly one newline
-        let result = f.output.trim_end().to_string();
+        let result = self.output.trim_end().to_string();
         if result.is_empty() {
             String::new()
         } else {
             result + "\n"
         }
+    }
+
+    /// Opens a statement block. In brace style this is `<lead>{`; in indent
+    /// style it is `<lead>:` with the body's indentation doing the delimiting —
+    /// the exact inverse of the lexer's colon-at-end-of-line to `{` rule.
+    fn open_block(&mut self, lead: &str) {
+        // Until a statement is emitted in it, the new block admits no comments.
+        self.body_column = usize::MAX;
+        if self.indent_style {
+            self.push(lead.trim_end());
+            self.push(":");
+        } else {
+            self.push(lead);
+            self.push("{");
+        }
+        self.newline();
+        self.indent += 1;
+    }
+
+    /// Closes a block opened by `open_block`, leaving the cursor at the end of
+    /// the block's last line so callers can append or newline uniformly.
+    fn close_block(&mut self) {
+        self.flush_comments_inside_block();
+        self.indent -= 1;
+        if self.indent_style {
+            // A dedent closes the block, so there is no `}` to write; drop the
+            // body's trailing newline to match brace style's cursor position.
+            while self.output.ends_with('\n') {
+                self.output.pop();
+            }
+        } else {
+            self.push_indent();
+            self.push("}");
+        }
+    }
+
+    /// `open_block` + statements + `close_block`. An empty body has no
+    /// indentable content, so indent style needs an explicit `none` placeholder
+    /// where brace style can just write `{}`.
+    fn block(&mut self, lead: &str, body: &[Statement]) {
+        self.open_block(lead);
+        if self.indent_style && body.is_empty() {
+            self.push_indent();
+            self.push("none");
+            self.newline();
+        }
+        self.format_block(body);
+        self.close_block();
     }
 
     fn current_column(&self) -> usize {
@@ -69,22 +157,142 @@ impl Formatter {
     fn format_program(&mut self, program: &Program) {
         let stmts = &program.statements;
         for (i, stmt) in stmts.iter().enumerate() {
-            self.push_indent();
-            self.format_statement(stmt);
-            self.newline();
+            self.emit_statement_line(stmt, stmts.get(i + 1));
 
             if i + 1 < stmts.len() && should_add_top_level_blank_line(stmt, &stmts[i + 1]) {
                 self.newline();
             }
         }
+        // Anything after the last statement — a trailing comment block, or the
+        // whole file when it has no statements at all.
+        self.flush_comments_before(usize::MAX);
     }
 
     fn format_block(&mut self, statements: &[Statement]) {
-        for stmt in statements {
+        for (i, stmt) in statements.iter().enumerate() {
+            self.emit_statement_line(stmt, statements.get(i + 1));
+        }
+    }
+
+    /// Emits one statement on its own line, replaying any comments the author
+    /// wrote above it and re-attaching a comment that trailed it.
+    ///
+    /// `next` is the following statement in the same list. Any block this
+    /// statement opens must end before `next` begins, which is what lets
+    /// `close_block` tell an end-of-block comment from one written after it.
+    fn emit_statement_line(&mut self, stmt: &Statement, next: Option<&Statement>) {
+        let span = stmt_span(stmt);
+        if let Some(span) = span {
+            self.flush_comments_before(span.line);
+        }
+        self.push_indent();
+
+        let (saved_anchor, saved_open) = (self.next_anchor, self.open_column);
+        self.next_anchor = next.and_then(stmt_span).or(saved_anchor);
+        if let Some(span) = span {
+            self.open_column = span.column;
+        }
+
+        self.format_statement(stmt);
+
+        self.next_anchor = saved_anchor;
+        self.open_column = saved_open;
+        // Set after formatting, so any block this statement opened closed
+        // against its own body's column first; now the enclosing block sees
+        // this statement as its latest.
+        if let Some(span) = span {
+            self.body_column = span.column;
+            self.push_trailing_comment(span.line);
+        }
+        self.newline();
+    }
+
+    /// Replays own-line comments that appeared before source line `line`.
+    fn flush_comments_before(&mut self, line: usize) {
+        while let Some(comment) = self.comments.get(self.next_comment) {
+            if comment.line >= line {
+                break;
+            }
+            // A comment that trailed code whose statement we already passed
+            // would duplicate that code's position; emit it on its own line
+            // rather than dropping it.
+            let text = comment.text.clone();
+            self.next_comment += 1;
             self.push_indent();
-            self.format_statement(stmt);
+            self.push(&text);
             self.newline();
         }
+    }
+
+    /// Replays comments that trailed a block's last statement, before the block
+    /// is closed.
+    ///
+    /// The AST stores no span for a closing `}`, so "is this comment inside the
+    /// block?" is answered from two sides: it must come before `block_bound`
+    /// (the next sibling of the statement that opened the block), and it must
+    /// be indented past the block's delimiters (see `body_column`). The column
+    /// tests are what keep a comment written after a block's close — including
+    /// after the last block in a file, where no line bound exists — from being
+    /// pulled inside it.
+    fn flush_comments_inside_block(&mut self) {
+        while let Some(comment) = self.comments.get(self.next_comment) {
+            let claimed_by_next = self
+                .next_anchor
+                .is_some_and(|a| comment.line >= a.line || comment.column <= a.column);
+            if claimed_by_next
+                || comment.column < self.body_column
+                || comment.column <= self.open_column
+            {
+                break;
+            }
+            let text = comment.text.clone();
+            self.next_comment += 1;
+            self.push_indent();
+            self.push(&text);
+            self.newline();
+        }
+    }
+
+    /// Comment handling for the items of a block that aren't statements —
+    /// methods, struct fields, enum variants, match arms. They still sit on
+    /// source lines authors write comments above, so without this they would be
+    /// swept into the previous item's body instead.
+    ///
+    /// Call around each item: `before` replays what was written above it,
+    /// `after` re-attaches a trailing comment and marks the item as the block's
+    /// latest, so the block closes against the right column.
+    fn before_item(&mut self, span: Option<Span>, next: Option<Span>) -> (Option<Span>, usize) {
+        if let Some(span) = span {
+            self.flush_comments_before(span.line);
+        }
+        let saved = (self.next_anchor, self.open_column);
+        self.next_anchor = next.or(self.next_anchor);
+        if let Some(span) = span {
+            self.open_column = span.column;
+        }
+        saved
+    }
+
+    fn after_item(&mut self, span: Option<Span>, saved: (Option<Span>, usize)) {
+        (self.next_anchor, self.open_column) = saved;
+        if let Some(span) = span {
+            self.push_trailing_comment(span.line);
+            self.body_column = span.column;
+        }
+    }
+
+    /// Appends a comment that shared a line with the statement just emitted.
+    fn push_trailing_comment(&mut self, line: usize) {
+        let Some(comment) = self.comments.get(self.next_comment) else {
+            return;
+        };
+        if comment.line != line || comment.own_line {
+            return;
+        }
+        let text = comment.text.clone();
+        self.next_comment += 1;
+        self.push("  ");
+        self.push(&text);
     }
 
     fn format_statement(&mut self, stmt: &Statement) {
@@ -179,13 +387,7 @@ impl Formatter {
                     } else {
                         self.push("unless ");
                         self.format_expression(inner);
-                        self.push(" {");
-                        self.newline();
-                        self.indent += 1;
-                        self.format_block(consequence);
-                        self.indent -= 1;
-                        self.push_indent();
-                        self.push("}");
+                        self.block(" ", consequence);
                     }
                     return;
                 } else if consequence.len() == 1 {
@@ -207,13 +409,7 @@ impl Formatter {
                 self.push(&variable.value);
                 self.push(" in ");
                 self.format_expression(iterable);
-                self.push(" {");
-                self.newline();
-                self.indent += 1;
-                self.format_block(body);
-                self.indent -= 1;
-                self.push_indent();
-                self.push("}");
+                self.block(" ", body);
             }
             Statement::Repeat {
                 condition, body, ..
@@ -225,13 +421,7 @@ impl Formatter {
                     self.push("repeat when ");
                     self.format_expression(condition);
                 }
-                self.push(" {");
-                self.newline();
-                self.indent += 1;
-                self.format_block(body);
-                self.indent -= 1;
-                self.push_indent();
-                self.push("}");
+                self.block(" ", body);
             }
             Statement::Pattern {
                 name,
@@ -254,10 +444,10 @@ impl Formatter {
             Statement::Choose { subject, arms, .. } => {
                 self.push("choose ");
                 self.format_expression(subject);
-                self.push(" {");
-                self.newline();
-                self.indent += 1;
-                for arm in arms {
+                self.open_block(" ");
+                for (i, arm) in arms.iter().enumerate() {
+                    let span = choose_arm_span(arm);
+                    let saved = self.before_item(span, arms.get(i + 1).and_then(choose_arm_span));
                     self.push_indent();
                     self.push(&arm.pattern_name);
                     if let Some(params) = &arm.inline_params {
@@ -278,21 +468,15 @@ impl Formatter {
                     if arm.body.len() == 1
                         && let Statement::Expr(e) = &arm.body[0] {
                             self.format_expression(e);
+                            self.after_item(span, saved);
                             self.newline();
                             continue;
                         }
-                    self.push("{");
-                    self.newline();
-                    self.indent += 1;
-                    self.format_block(&arm.body);
-                    self.indent -= 1;
-                    self.push_indent();
-                    self.push("}");
+                    self.block("", &arm.body);
+                    self.after_item(span, saved);
                     self.newline();
                 }
-                self.indent -= 1;
-                self.push_indent();
-                self.push("}");
+                self.close_block();
             }
             Statement::StructDef {
                 name,
@@ -307,10 +491,11 @@ impl Formatter {
                     self.push(&p.value);
                     self.push(")");
                 }
-                self.push(" {");
-                self.newline();
-                self.indent += 1;
-                for field in fields {
+                self.open_block(" ");
+                for (i, field) in fields.iter().enumerate() {
+                    let span = Some(field.name.token.span);
+                    let saved =
+                        self.before_item(span, fields.get(i + 1).map(|f| f.name.token.span));
                     self.push_indent();
                     if field.hidden {
                         self.push("hide ");
@@ -319,19 +504,19 @@ impl Formatter {
                     self.push(" <");
                     self.push(&format_type_annotation(&field.type_ann));
                     self.push(">");
+                    self.after_item(span, saved);
                     self.newline();
                 }
-                self.indent -= 1;
-                self.push_indent();
-                self.push("}");
+                self.close_block();
             }
             Statement::EnumDef { name, variants, .. } => {
                 self.push("enum ");
                 self.push(&name.value);
-                self.push(" {");
-                self.newline();
-                self.indent += 1;
-                for variant in variants {
+                self.open_block(" ");
+                for (i, variant) in variants.iter().enumerate() {
+                    let span = Some(variant.name.token.span);
+                    let saved =
+                        self.before_item(span, variants.get(i + 1).map(|v| v.name.token.span));
                     self.push_indent();
                     self.push(&variant.name.value);
                     match &variant.kind {
@@ -367,11 +552,10 @@ impl Formatter {
                             self.push(" }");
                         }
                     }
+                    self.after_item(span, saved);
                     self.newline();
                 }
-                self.indent -= 1;
-                self.push_indent();
-                self.push("}");
+                self.close_block();
             }
             Statement::IncludesDef {
                 struct_name,
@@ -379,13 +563,14 @@ impl Formatter {
                 ..
             } => {
                 self.push(&struct_name.value);
-                self.push(" includes {");
-                self.newline();
-                self.indent += 1;
+                self.open_block(" includes ");
                 for (i, (method_name, method_expr)) in methods.iter().enumerate() {
                     if i > 0 {
                         self.newline();
                     }
+                    let span = Some(method_name.token.span);
+                    let saved =
+                        self.before_item(span, methods.get(i + 1).map(|m| m.0.token.span));
                     self.push_indent();
                     self.push("fun ");
                     self.push(&method_name.value);
@@ -399,11 +584,10 @@ impl Formatter {
                         self.push(")");
                         self.format_function_body(body);
                     }
+                    self.after_item(span, saved);
                     self.newline();
                 }
-                self.indent -= 1;
-                self.push_indent();
-                self.push("}");
+                self.close_block();
             }
             Statement::DotAssign {
                 object,
@@ -472,24 +656,12 @@ impl Formatter {
                 }
             }
             Statement::Main { body, .. } => {
-                self.push("main {");
-                self.newline();
-                self.indent += 1;
-                self.format_block(body);
-                self.indent -= 1;
-                self.push_indent();
-                self.push("}");
+                self.block("main ", body);
             }
             Statement::Test { name, body, .. } => {
                 self.push("<test>(");
                 self.format_expression(name);
-                self.push(") {");
-                self.newline();
-                self.indent += 1;
-                self.format_block(body);
-                self.indent -= 1;
-                self.push_indent();
-                self.push("}");
+                self.block(") ", body);
             }
         }
     }
@@ -719,7 +891,9 @@ impl Formatter {
             }
             Expression::MapLiteral { entries, .. } => {
                 if entries.is_empty() {
-                    self.push("{:}");
+                    // `{}` is the only empty-map form the parser accepts; `{:}`
+                    // is rejected in every position.
+                    self.push("{}");
                     return;
                 }
                 self.push("{");
@@ -739,46 +913,37 @@ impl Formatter {
                 error_default,
                 ..
             } => {
-                self.push("option {");
-                self.newline();
-                self.indent += 1;
-                for arm in arms {
+                self.push("option");
+                self.open_block(" ");
+                let tail_anchor = error_default
+                    .as_deref()
+                    .or(default.as_deref())
+                    .and_then(|b| b.first())
+                    .and_then(stmt_span);
+                for (i, arm) in arms.iter().enumerate() {
+                    let span = expr_span(&arm.condition);
+                    let next = arms
+                        .get(i + 1)
+                        .and_then(|a| expr_span(&a.condition))
+                        .or(tail_anchor);
+                    let saved = self.before_item(span, next);
                     self.push_indent();
                     self.format_expression(&arm.condition);
-                    self.push(" -> {");
-                    self.newline();
-                    self.indent += 1;
-                    self.format_block(&arm.body);
-                    self.indent -= 1;
-                    self.push_indent();
-                    self.push("}");
+                    self.block(" -> ", &arm.body);
+                    self.after_item(span, saved);
                     self.newline();
                 }
                 if let Some(err_default) = error_default {
                     self.push_indent();
-                    self.push("error -> {");
-                    self.newline();
-                    self.indent += 1;
-                    self.format_block(err_default);
-                    self.indent -= 1;
-                    self.push_indent();
-                    self.push("}");
+                    self.block("error -> ", err_default);
                     self.newline();
                 }
                 if let Some(def) = default {
                     self.push_indent();
-                    self.push("{");
-                    self.newline();
-                    self.indent += 1;
-                    self.format_block(def);
-                    self.indent -= 1;
-                    self.push_indent();
-                    self.push("}");
+                    self.block("", def);
                     self.newline();
                 }
-                self.indent -= 1;
-                self.push_indent();
-                self.push("}");
+                self.close_block();
             }
             Expression::Guard {
                 value,
@@ -850,13 +1015,7 @@ impl Formatter {
                 self.push(")");
             }
             Expression::Diverge { body, .. } => {
-                self.push("diverge {");
-                self.newline();
-                self.indent += 1;
-                self.format_block(body);
-                self.indent -= 1;
-                self.push_indent();
-                self.push("}");
+                self.block("diverge ", body);
             }
             Expression::DivergeEach {
                 variable,
@@ -868,13 +1027,7 @@ impl Formatter {
                 self.push(&variable.value);
                 self.push(" in ");
                 self.format_expression(iterable);
-                self.push(" {");
-                self.newline();
-                self.indent += 1;
-                self.format_block(body);
-                self.indent -= 1;
-                self.push_indent();
-                self.push("}");
+                self.block(" ", body);
             }
             Expression::Converge { task, timeout, .. } => {
                 self.push("converge ");
@@ -943,8 +1096,10 @@ impl Formatter {
     }
 
     fn format_function_body(&mut self, body: &[Statement]) {
-        // Single expression body: inline on the same line
-        if body.len() == 1
+        // Single expression body: inline on the same line. Indent style has no
+        // inline block form — the body must go on its own indented line.
+        if !self.indent_style
+            && body.len() == 1
             && let Statement::Expr(expr) = &body[0]
                 && !is_multiline_expr(expr) {
                     self.push(" { ");
@@ -952,13 +1107,7 @@ impl Formatter {
                     self.push(" }");
                     return;
                 }
-        self.push(" {");
-        self.newline();
-        self.indent += 1;
-        self.format_block(body);
-        self.indent -= 1;
-        self.push_indent();
-        self.push("}");
+        self.block(" ", body);
     }
 
     fn format_if_as_option(
@@ -967,9 +1116,8 @@ impl Formatter {
         consequence: &[Statement],
         alternative: Option<&[Statement]>,
     ) {
-        self.push("option {");
-        self.newline();
-        self.indent += 1;
+        self.push("option");
+        self.open_block(" ");
         self.push_indent();
         self.format_expression(condition);
         self.push(" -> ");
@@ -982,19 +1130,107 @@ impl Formatter {
             self.newline();
         }
 
-        self.indent -= 1;
-        self.push_indent();
-        self.push("}");
+        self.close_block();
     }
 
     fn format_option_body(&mut self, body: &[Statement]) {
-        self.push("{");
-        self.newline();
-        self.indent += 1;
-        self.format_block(body);
-        self.indent -= 1;
-        self.push_indent();
-        self.push("}");
+        self.block("", body);
+    }
+}
+
+/// Source line a statement starts on, used to decide which comments belong
+/// above it. `None` for statements that carry no token at all (`skip`/`stop`);
+/// those simply don't trigger a comment flush, so pending comments land on the
+/// next statement that does have a position.
+/// A choose arm's pattern name is a bare `String` with no token, so the arm is
+/// located by its guard condition or, failing that, its first body statement.
+fn choose_arm_span(arm: &ChooseArm) -> Option<Span> {
+    arm.inline_params
+        .as_ref()
+        .and_then(|p| p.first())
+        .map(|p| p.token.span)
+        .or_else(|| arm.inline_condition.as_ref().and_then(expr_span))
+        .or_else(|| arm.body.first().and_then(stmt_span))
+}
+
+fn stmt_span(stmt: &Statement) -> Option<Span> {
+    match stmt {
+        Statement::Skip | Statement::Stop => None,
+        Statement::Let { name, .. }
+        | Statement::TypedLet { name, .. }
+        | Statement::TypedDeclare { name, .. }
+        | Statement::Assign { name, .. } => Some(name.token.span),
+        Statement::Unpack { names, value, .. } => names
+            .first()
+            .map(|n| n.token.span)
+            .or_else(|| expr_span(value)),
+        Statement::Expr(expr) => expr_span(expr),
+        Statement::Each { token, .. }
+        | Statement::Repeat { token, .. }
+        | Statement::Pattern { token, .. }
+        | Statement::Choose { token, .. }
+        | Statement::If { token, .. }
+        | Statement::Give { token, .. }
+        | Statement::StructDef { token, .. }
+        | Statement::EnumDef { token, .. }
+        | Statement::IncludesDef { token, .. }
+        | Statement::Introduce { token, .. }
+        | Statement::Main { token, .. }
+        | Statement::Test { token, .. } => Some(token.span),
+        // Assignment targets are expressions; the statement starts where the
+        // target does, not at the `=` the token points to.
+        Statement::DotAssign { token, object, .. } => {
+            expr_span(object).or(Some(token.span))
+        }
+        Statement::IndexAssign { token, object, .. } => {
+            expr_span(object).or(Some(token.span))
+        }
+    }
+}
+
+/// Source line an expression starts on. Infix/postfix/call nodes hold the
+/// operator's token, which sits after the expression begins, so those recurse
+/// into their leftmost child.
+fn expr_span(expr: &Expression) -> Option<Span> {
+    match expr {
+        Expression::Ident(ident) => Some(ident.token.span),
+        Expression::Grouped(inner) => expr_span(inner),
+        Expression::Infix { left, token, .. }
+        | Expression::Postfix { left, token, .. }
+        | Expression::Index { left, token, .. }
+        | Expression::DotAccess { left, token, .. }
+        | Expression::Slice { left, token, .. } => expr_span(left).or(Some(token.span)),
+        Expression::Call { function, token, .. } => {
+            expr_span(function).or(Some(token.span))
+        }
+        Expression::Guard { value, token, .. } | Expression::TypeWrap { value, token, .. } => {
+            expr_span(value).or(Some(token.span))
+        }
+        Expression::Unless {
+            consequence, token, ..
+        } => expr_span(consequence).or(Some(token.span)),
+        Expression::Int { token, .. }
+        | Expression::Str { token, .. }
+        | Expression::Float { token, .. }
+        | Expression::Char { token, .. }
+        | Expression::Boolean { token, .. }
+        | Expression::NoneExpr { token }
+        | Expression::Array { token, .. }
+        | Expression::Prefix { token, .. }
+        | Expression::FunctionLiteral { token, .. }
+        | Expression::StructLiteral { token, .. }
+        | Expression::EnumVariantConstruct { token, .. }
+        | Expression::TupleLiteral { token, .. }
+        | Expression::MapLiteral { token, .. }
+        | Expression::Option { token, .. }
+        | Expression::Log { token, .. }
+        | Expression::ErrorConstruct { token, .. }
+        | Expression::ValueConstruct { token, .. }
+        | Expression::Fail { token, .. }
+        | Expression::StringInterp { token, .. }
+        | Expression::Diverge { token, .. }
+        | Expression::DivergeEach { token, .. }
+        | Expression::Converge { token, .. } => Some(token.span),
     }
 }
 

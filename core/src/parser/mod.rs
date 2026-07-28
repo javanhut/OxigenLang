@@ -232,6 +232,12 @@ impl Parser {
         &self.errors
     }
 
+    /// Comments stripped during lexing. Valid after `parse_program`, which
+    /// drives the lexer to EOF. Only `fmt` needs these.
+    pub fn comments(&self) -> &[crate::lexer::Comment] {
+        self.lexer.comments()
+    }
+
     pub fn format_errors(&self) -> String {
         let displayed: Vec<_> = self
             .errors

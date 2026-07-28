@@ -437,7 +437,13 @@ fn fmt_files(paths: &[String]) {
             std::process::exit(1);
         }
 
-        let formatted = restore_header(&contents, Formatter::format(&program));
+        // `restore_header` puts `#[indent]` back, so the body has to be emitted
+        // in indent style or the reformatted file no longer parses.
+        let indent_style = header_prefix(&contents)
+            .lines()
+            .any(|l| l.trim() == "#[indent]");
+        let body = Formatter::format_source(&program, parser.comments(), indent_style);
+        let formatted = restore_header(&contents, body);
 
         if formatted != contents {
             if let Err(e) = fs::write(path, &formatted) {

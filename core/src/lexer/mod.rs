@@ -2,6 +2,24 @@ use crate::token::{Span, Token, TokenType, token_map};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
+/// A comment seen while lexing.
+///
+/// Comments carry no semantics, so they never become tokens and never reach the
+/// AST — but `fmt` reprints from the AST, so without this record it would drop
+/// every comment in the file. `line`/`column` are where the comment started and
+/// `own_line` distinguishes a comment sitting alone on its line from one
+/// trailing code, which is all the formatter needs to put it back where the
+/// author wrote it. `column` is what separates a comment indented inside a
+/// block from one written past the block's closing delimiter — a distinction
+/// the AST cannot make, since it stores no span for a `}`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Comment {
+    pub line: usize,
+    pub column: usize,
+    pub text: String,
+    pub own_line: bool,
+}
+
 pub struct Lexer {
     input: Vec<char>,
     position: usize,
@@ -16,6 +34,7 @@ pub struct Lexer {
     // Source location tracking
     line: usize,
     column: usize,
+    comments: Vec<Comment>,
 }
 
 impl Lexer {
@@ -34,9 +53,16 @@ impl Lexer {
             at_line_start: true, // We start at the beginning of input
             line: start_line,
             column: 0,
+            comments: Vec::new(),
         };
         l.read_char();
         l
+    }
+
+    /// Comments collected so far, in source order. Only complete once the lexer
+    /// has been driven to EOF (which `Parser::parse_program` does).
+    pub fn comments(&self) -> &[Comment] {
+        &self.comments
     }
 
     fn preprocess_input(input: &str) -> (&str, usize, bool) {
@@ -398,15 +424,18 @@ impl Lexer {
     }
 
     fn skip_line_comment(&mut self) {
+        let (span, own_line, start) = self.comment_start();
         self.read_char(); // skip first '/'
         self.read_char(); // skip second '/'
         while self.ch != '\n' && self.ch != '\0' {
             self.read_char();
         }
+        self.record_comment(span, own_line, start);
         // Leave self.ch at '\n' or '\0' so next_token handles it
     }
 
     fn skip_block_comment(&mut self) {
+        let (span, own_line, start) = self.comment_start();
         self.read_char(); // skip '/'
         self.read_char(); // skip '*'
         loop {
@@ -420,6 +449,35 @@ impl Lexer {
             }
             self.read_char();
         }
+        self.record_comment(span, own_line, start);
+    }
+
+    /// Snapshot taken before a comment is consumed: its span, whether anything
+    /// but whitespace precedes it on that line, and where its text begins.
+    fn comment_start(&self) -> (Span, bool, usize) {
+        let mut i = self.position;
+        let own_line = loop {
+            if i == 0 {
+                break true;
+            }
+            i -= 1;
+            match self.input[i] {
+                '\n' => break true,
+                c if c.is_whitespace() => {}
+                _ => break false,
+            }
+        };
+        (self.span(), own_line, self.position)
+    }
+
+    fn record_comment(&mut self, span: Span, own_line: bool, start: usize) {
+        let text: String = self.input[start..self.position].iter().collect();
+        self.comments.push(Comment {
+            line: span.line,
+            column: span.column,
+            text: text.trim_end().to_string(),
+            own_line,
+        });
     }
 
     fn read_ident(&mut self, span: Span) -> Token {

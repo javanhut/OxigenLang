@@ -120,7 +120,7 @@ fn cli_version_flag_still_works_before_script_path() {
         .output()
         .unwrap();
     assert!(output.status.success(), "stderr:\n{}", stderr(&output));
-    assert!(stdout(&output).starts_with("oxigen "));
+    assert!(stdout(&output).starts_with("Oxigen Version: "));
 }
 
 #[test]
