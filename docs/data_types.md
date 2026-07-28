@@ -280,6 +280,20 @@ Type keyword: `array`. Zero value: `[]`.
   println(arr)        // [99, 20, 77]
   ```
 
+- **Out-of-range indices are an error**, for both reads and writes. This applies
+  to arrays, tuples, and strings; negative indices are valid down to `-len`:
+
+  ```oxi
+  arr := [10, 20, 30]
+  arr[3]              // error: index 3 out of range for ARRAY of length 3
+  arr[-4]             // error: index -4 out of range for ARRAY of length 3
+  arr[3] = 1          // error — an out-of-range write does not append
+  ```
+
+  Use `len(arr)` to bounds-check, or `push(arr, value)` to grow an array.
+  Slicing clamps instead of erroring, so `arr[0:99]` is the whole array. Maps
+  are unaffected: a missing key is a lookup miss, and still returns `None`.
+
 - **Slicing**: Extract a sub-array with `[start:end]`:
 
   ```oxi

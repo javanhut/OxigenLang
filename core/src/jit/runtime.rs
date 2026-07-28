@@ -261,16 +261,22 @@ pub unsafe extern "C" fn jit_op_index_fast_array_int(vm: *mut VM) -> u32 {
     let index = vm.pop();
     let collection = vm.pop();
 
+    // In-range array reads answer here; anything else — wrong types, or an
+    // out-of-range index — falls through to `VM::eval_index` so the bounds
+    // check and its error message live in exactly one place.
     if let (Value::Array(arr), Value::Integer(i)) = (&collection, &index) {
         let borrowed = arr.borrow();
-        let idx = if *i < 0 {
-            (borrowed.len() as i64 + i) as usize
-        } else {
-            *i as usize
-        };
-        vm.push(borrowed.get(idx).cloned().unwrap_or(Value::None));
-        vm.jit.record_array_index_fast_hit();
-        return 0;
+        let len = borrowed.len() as i64;
+        let idx = if *i < 0 { len.checked_add(*i) } else { Some(*i) };
+        if let Some(idx) = idx
+            && (0..len).contains(&idx)
+        {
+            let value = borrowed[idx as usize].clone();
+            drop(borrowed);
+            vm.push(value);
+            vm.jit.record_array_index_fast_hit();
+            return 0;
+        }
     }
 
     vm.jit.record_array_index_fast_miss();

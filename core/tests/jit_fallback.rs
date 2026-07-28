@@ -162,7 +162,6 @@ fn jit_index_assign_matches_and_compiles() {
             arr[0] = 99\n\
             arr[-1] = 88\n\
             arr[2] = arr[0] + arr[4]\n\
-            arr[100] = 7\n\
             acc = acc + arr[0] * 100000 + arr[4] * 1000 + arr[2]\n\
             i = i + 1\n\
         }\n\
@@ -819,20 +818,32 @@ pick()
 
 #[test]
 fn jit_array_index_out_of_range_matches_interpreter() {
-    let source = r#"
-fun pick() {
-    arr <array> := [10, 20, 30]
-    arr[99]
+    // Was: both engines returned `None` for an out-of-range read. It is now a
+    // runtime error, and the JIT's array fast path must raise the same one
+    // rather than quietly producing a value.
+    for index in ["99", "-4"] {
+        let source = format!(
+            "\nfun pick() {{\n    arr <array> := [10, 20, 30]\n    arr[{index}]\n}}\npick()\n"
+        );
+        let baseline = run_result(&source, None).expect_err("interpreter should error");
+        let jitted = run_result(&source, Some(1)).expect_err("jit should error");
+        assert!(baseline.contains("out of range"), "{baseline}");
+        assert_eq!(baseline, jitted, "jit and interpreter must agree for [{index}]");
+    }
 }
-pick()
-"#;
 
-    let (baseline, _, _) = run(source, None);
-    let (jitted, j_ok, _) = run(source, Some(1));
-
-    assert_eq!(baseline, "None");
+#[test]
+fn jit_index_assign_out_of_range_matches_interpreter() {
+    // An out-of-range write used to be dropped silently by both engines.
+    let src = "fun t() {\n\
+        arr := [10, 20, 30]\n\
+        arr[100] = 7\n\
+        arr }\n\
+        t()";
+    let baseline = run_result(src, None).expect_err("interpreter should error");
+    let jitted = run_result(src, Some(1)).expect_err("jit should error");
+    assert!(baseline.contains("out of range"), "{baseline}");
     assert_eq!(baseline, jitted);
-    assert!(j_ok >= 1, "array indexing function should compile");
 }
 
 #[test]

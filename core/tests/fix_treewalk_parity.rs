@@ -131,9 +131,16 @@ fn tw2_array_positive_still_works() {
 }
 
 #[test]
-fn tw2_array_out_of_range_positive_none() {
-    // Out-of-range positive index yields None in both engines.
-    assert_parity("a := [10, 20, 30]\na[5]", "None");
+fn tw2_array_out_of_range_is_an_error() {
+    // Was: out-of-range yielded `None` in both engines. That turned a bad
+    // index into a value that blew up somewhere else (or silently read as a
+    // legitimately-absent map entry), so it is now a runtime error. Negative
+    // in-range indexing — the point of TW2 — is unchanged, see the tests above.
+    let err = run_vm("a := [10, 20, 30]\na[5]").expect_err("out-of-range read should fail");
+    assert!(err.contains("out of range"), "{err}");
+
+    let under = run_vm("a := [10, 20, 30]\na[-4]").expect_err("under-range read should fail");
+    assert!(under.contains("out of range"), "{under}");
 }
 
 // ── TW4: String `<` lexicographic ───────────────────────────────────────────

@@ -3844,36 +3844,63 @@ impl VM {
 
     // ── Index Operations ────────────────────────────────────────────────
 
+    /// Resolves a sequence index against `len`, with negative indices counting
+    /// back from the end, and reports an out-of-range access as an error.
+    ///
+    /// Reading past the end used to yield `None`, which silently turned a
+    /// bad index into a value that failed somewhere else entirely (or, worse,
+    /// looked like a legitimately absent map entry). Maps keep `None` for a
+    /// missing key — that is a lookup, not an out-of-range access.
+    pub(crate) fn sequence_index(
+        &self,
+        index: i64,
+        len: usize,
+        type_name: &str,
+    ) -> Result<usize, VMError> {
+        let len_i64 = len as i64;
+        let resolved = if index < 0 {
+            // `checked_add` because a hostile index (i64::MIN) would wrap.
+            len_i64.checked_add(index)
+        } else {
+            Some(index)
+        };
+        match resolved {
+            Some(i) if i >= 0 && i < len_i64 => Ok(i as usize),
+            _ if len == 0 => Err(self.runtime_error_hint(
+                &format!("index {index} out of range: {type_name} is empty"),
+                "check the length before indexing",
+            )),
+            _ => Err(self.runtime_error_hint(
+                &format!(
+                    "index {index} out of range for {type_name} of length {len}",
+                    ),
+                &format!(
+                    "valid indices are 0 to {} (or -1 to -{len} counting from the end)",
+                    len - 1
+                ),
+            )),
+        }
+    }
+
     pub(crate) fn eval_index(&self, collection: Value, index: Value) -> Result<Value, VMError> {
         let (collection, index) = (self.force(collection), self.force(index));
         match (&collection, &index) {
             (Value::Array(arr), Value::Integer(i)) => {
                 let borrowed = arr.borrow();
-                let idx = if *i < 0 {
-                    (borrowed.len() as i64 + i) as usize
-                } else {
-                    *i as usize
-                };
-                Ok(borrowed.get(idx).cloned().unwrap_or(Value::None))
+                let idx = self.sequence_index(*i, borrowed.len(), "ARRAY")?;
+                Ok(borrowed[idx].clone())
             }
             (Value::String(s), Value::Integer(i)) => {
-                let idx = if *i < 0 {
-                    (s.len() as i64 + i) as usize
-                } else {
-                    *i as usize
-                };
-                Ok(s.chars()
-                    .nth(idx)
-                    .map(|c| Value::String(rc_str(c.to_string())))
-                    .unwrap_or(Value::None))
+                // Indices are in characters, so the bound has to be the
+                // character count — `len()` is bytes and disagrees for any
+                // non-ASCII string.
+                let chars: Vec<char> = s.chars().collect();
+                let idx = self.sequence_index(*i, chars.len(), "STRING")?;
+                Ok(Value::String(rc_str(chars[idx].to_string())))
             }
             (Value::Tuple(t), Value::Integer(i)) => {
-                let idx = if *i < 0 {
-                    (t.len() as i64 + i) as usize
-                } else {
-                    *i as usize
-                };
-                Ok(t.get(idx).cloned().unwrap_or(Value::None))
+                let idx = self.sequence_index(*i, t.len(), "TUPLE")?;
+                Ok(t[idx].clone())
             }
             (Value::Map(m), _) => Ok(m.borrow().get(&index).cloned().unwrap_or(Value::None)),
             _ => Err(self.runtime_error_hint(
@@ -3892,14 +3919,10 @@ impl VM {
         match (&collection, &index) {
             (Value::Array(arr), Value::Integer(i)) => {
                 let mut borrowed = arr.borrow_mut();
-                let idx = if *i < 0 {
-                    (borrowed.len() as i64 + i) as usize
-                } else {
-                    *i as usize
-                };
-                if idx < borrowed.len() {
-                    borrowed[idx] = value;
-                }
+                // An out-of-range write used to be dropped on the floor: no
+                // error, no growth, and the next read returned the old value.
+                let idx = self.sequence_index(*i, borrowed.len(), "ARRAY")?;
+                borrowed[idx] = value;
                 Ok(())
             }
             (Value::Map(m), _) => {
