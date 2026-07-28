@@ -118,13 +118,17 @@ The REPL maintains state across lines — variables, functions, structs, and pat
 | Command / Flag | Description |
 |----------------|-------------|
 | `oxigen file.oxi [args...]` | Execute a script (bytecode VM) |
-| `oxigen file.oxi --jit` | Experimental: tier up to the baseline JIT on first call. Only available in builds produced with `--features jit`; ignored otherwise. `OXIGEN_JIT=1` is an equivalent env toggle. |
-| `oxigen file.oxi --no-jit` | Force the pure interpreter even in a JIT-enabled build. |
+| `oxigen --jit file.oxi` | Experimental: tier up to the baseline JIT on first call. Only available in builds produced with `--features jit`; ignored otherwise. `OXIGEN_JIT=1` is an equivalent env toggle. |
+| `oxigen --no-jit file.oxi` | Force the pure interpreter even in a JIT-enabled build. |
 | `oxigen` | Start the interactive REPL |
 | `oxigen fmt file.oxi [...]` | Format one or more `.oxi` files in-place |
 | `oxigen check file.oxi` | Parse a file and output diagnostics as JSON |
 | `oxigen test [path ...]` | Run `<test>` blocks. With no arguments, discovers `*_test.oxi` files recursively; a path may be a file or directory ([testing guide](testing.md)) |
 | `--version`, `-v` | Print the version and exit |
+
+Options must come **before** the file. Anything after it is passed to the
+script itself, so `oxigen file.oxi --no-jit` hands `--no-jit` to your program
+rather than to Oxigen.
 
 Scripts can read forwarded arguments through `os.args()`:
 

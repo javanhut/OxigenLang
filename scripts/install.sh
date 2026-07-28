@@ -14,10 +14,35 @@ BIN_DIR="$PREFIX/bin"
 LIB_DIR="$PREFIX/lib/oxigen/stdlib"
 WITH_LSP=false
 
-# Parse arguments
+usage() {
+    cat <<EOF
+Usage: install.sh [--with-lsp]
+
+  --with-lsp   Also build and install the Oxigen language server
+  --help, -h   Show this message
+
+Environment:
+  PREFIX       Install prefix (default: /usr/local)
+EOF
+}
+
+# Parse arguments. Unknown options are an error rather than being ignored —
+# silently skipping a misspelled --with-lsp installs without the LSP and only
+# shows up much later, when the editor has no language server.
 for arg in "$@"; do
     case "$arg" in
         --with-lsp) WITH_LSP=true ;;
+        --help|-h) usage; exit 0 ;;
+        *)
+            echo "Error: unknown option: $arg" >&2
+            # Options are lowercase; --with-LSP is a common near-miss.
+            if [ "$(printf '%s' "$arg" | tr '[:upper:]' '[:lower:]')" = "--with-lsp" ]; then
+                echo "  hint: options are lowercase — did you mean --with-lsp?" >&2
+            fi
+            echo "" >&2
+            usage >&2
+            exit 2
+            ;;
     esac
 done
 

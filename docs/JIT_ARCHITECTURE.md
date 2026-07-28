@@ -64,7 +64,7 @@ dependency tree. To enable:
 ```bash
 # Cargo (dev)
 cargo build --release --features jit -p oxigen
-cargo run --release --features jit -p oxigen -- path/to/script.oxi --jit
+cargo run --release --features jit -p oxigen -- --jit path/to/script.oxi
 
 # Makefile install
 make build-with-jit
