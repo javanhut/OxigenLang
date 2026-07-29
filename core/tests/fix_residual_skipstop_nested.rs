@@ -50,12 +50,18 @@ fn nested_discarded_skip_compiles_and_runs() {
 
 #[test]
 fn skip_escaping_to_function_return_is_rejected_everywhere() {
-    // `give option{… -> {skip}}` returns a skip sentinel — not a value. The
-    // bytecode compiler rejects it with a static skip/stop-as-value analysis
-    // ("'skip' cannot be used as a value").
+    // `give option{… -> {skip}}` returns a skip sentinel — not a value, so the
+    // compiler rejects it statically.
+    //
+    // These assert on the CODE, not the prose. They also now expect E0016
+    // ("used outside of loop") rather than E0017 ("used as a value"): there is
+    // no loop anywhere in these programs, so the lack of one is the real
+    // problem, and it is reported the same way regardless of whether the
+    // keyword lands in value position. E0017 is still correct — and still
+    // asserted below — when a loop IS present and the value is consumed.
     let give = "fun g(){ give option { 1 >= 0 -> { skip } } }\nprintln(g())\n";
     assert!(
-        run_vm(give, None).unwrap_err().contains("cannot be used as a value"),
+        run_vm(give, None).unwrap_err().contains("E0016"),
         "VM should reject skip as a give value, got: {:?}",
         run_vm(give, None)
     );
@@ -64,7 +70,7 @@ fn skip_escaping_to_function_return_is_rejected_everywhere() {
     // Same via an implicit (tail) return.
     let implicit = "fun g(){ option { 1 >= 0 -> { stop } } }\nprintln(g())\n";
     assert!(
-        run_vm(implicit, None).unwrap_err().contains("cannot be used as a value"),
+        run_vm(implicit, None).unwrap_err().contains("E0016"),
         "VM should reject stop as an implicit return, got: {:?}",
         run_vm(implicit, None)
     );
@@ -73,8 +79,9 @@ fn skip_escaping_to_function_return_is_rejected_everywhere() {
 #[test]
 fn consumed_skip_still_errors_and_normal_loops_unaffected() {
     // A genuinely consumed skip is rejected statically by the VM/JIT compiler...
+    // A loop IS present here, so "used as a value" (E0017) is the real reason.
     let consumed = "each i in [1] { x := 1 + option { i == 1 -> { skip }, 5 }\nprintln(x) }\n";
-    assert!(run_vm(consumed, None).unwrap_err().contains("cannot be used as a value"),
+    assert!(run_vm(consumed, None).unwrap_err().contains("E0017"),
         "VM should reject a consumed skip, got: {:?}", run_vm(consumed, None));
 
     // ...while ordinary in-loop skip/stop control flow is untouched.
@@ -90,7 +97,7 @@ fn dead_skip_arm_is_rejected_on_all_backends() {
     // reject it statically (compile-error) regardless of which arm runs.
     let src = "fun c(n){ option { n > 0 -> \"p\", True -> { skip } } }\nprintln(c(5))\n";
     assert!(
-        run_vm(src, None).unwrap_err().contains("cannot be used as a value"),
+        run_vm(src, None).unwrap_err().contains("E0016"),
         "VM must reject a dead consumed skip arm, got: {:?}",
         run_vm(src, None)
     );
@@ -100,7 +107,7 @@ fn dead_skip_arm_is_rejected_on_all_backends() {
     // never selected at the call — same static rejection.
     let stop_src = "fun pick(n){ option { n < 0 -> -1, n == 0 -> 0, True -> { stop } } }\npick(0)\n";
     assert!(
-        run_vm(stop_src, None).unwrap_err().contains("cannot be used as a value"),
+        run_vm(stop_src, None).unwrap_err().contains("E0016"),
         "VM must reject a dead consumed stop arm, got: {:?}",
         run_vm(stop_src, None)
     );
@@ -118,7 +125,7 @@ fn skip_stop_outside_loop_in_uncalled_function_rejected_everywhere() {
         "struct Foo { n <int> }\nFoo includes { fun bar(){ skip when self.n == 2 } }\nprintln(\"ok\")\n",
     ] {
         assert!(
-            run_vm(src, None).unwrap_err().contains("used outside of loop"),
+            run_vm(src, None).unwrap_err().contains("E0016"),
             "VM must reject skip/stop outside a loop, got: {:?}\n{src}",
             run_vm(src, None)
         );
@@ -129,15 +136,16 @@ fn skip_stop_outside_loop_in_uncalled_function_rejected_everywhere() {
 #[test]
 fn non_tail_skip_stop_in_consumed_block_rejected_everywhere() {
     // CLASS B (parity hunt): a NON-tail bare `skip`/`stop` in an option arm block
-    // whose value is consumed makes the block's value ill-defined. The VM/JIT
-    // reject it ("cannot be used as a value").
+    // whose value is consumed makes the block's value ill-defined. A loop IS
+    // present in each of these, so "used as a value" (E0017) is the real reason
+    // — unlike the no-loop cases above, which report E0016.
     for src in [
         "each i in [1,2,3] {\n  println(option { i == 2 -> { skip\n99 }, i })\n}\n",
         "each i in [1,2,3] {\n  println(option { i == 2 -> { stop\n99 }, i })\n}\n",
         "each i in [1,2,3] {\n  x := 100 + option { i == 2 -> { skip\n5 }, i }\n  println(x)\n}\n",
     ] {
         assert!(
-            run_vm(src, None).unwrap_err().contains("cannot be used as a value"),
+            run_vm(src, None).unwrap_err().contains("E0017"),
             "VM must reject non-tail consumed skip/stop, got: {:?}\n{src}",
             run_vm(src, None)
         );

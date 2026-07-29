@@ -163,6 +163,12 @@ fn r2_moderate_recursion_still_correct() {
 }
 
 // ── R3a: skip/stop escaping a loop into a value context is an error ─────────
+//
+// These programs have no loop at all, so the reported problem is the missing
+// loop (E0016) rather than the value use (E0017). E0017 still applies — and is
+// asserted in `fix_residual_skipstop_nested.rs` — when a loop IS present and
+// the value is genuinely consumed. Asserting the code rather than the prose so
+// the wording stays free to improve.
 
 const R3A_STOP_VALUE_SRC: &str = r#"
 a := option { 1 >= 0 -> { stop } }
@@ -176,7 +182,7 @@ fn r3a_stop_as_value_errors_on_all_backends() {
     assert!(
         run_vm(R3A_STOP_VALUE_SRC, None)
             .unwrap_err()
-            .contains("cannot be used as a value"),
+            .contains("E0016"),
         "VM interp should reject stop-as-value, got: {:?}",
         run_vm(R3A_STOP_VALUE_SRC, None)
     );
@@ -197,7 +203,7 @@ fn r3a_skip_as_value_errors_on_vm() {
     assert!(
         run_vm(R3A_SKIP_VALUE_SRC, None)
             .unwrap_err()
-            .contains("cannot be used as a value"),
+            .contains("E0016"),
         "VM should reject skip-as-value, got: {:?}",
         run_vm(R3A_SKIP_VALUE_SRC, None)
     );

@@ -132,10 +132,15 @@ pub struct CompileError {
     pub line: u32,
     pub code: Code,
     pub span: Option<Span>,
+    /// Pre-built diagnostic for sites that attach labels, notes or helps.
+    diagnostic: Option<Diagnostic>,
 }
 
 impl CompileError {
     pub fn into_diagnostic(self) -> Diagnostic {
+        if let Some(d) = self.diagnostic {
+            return d;
+        }
         let span = self
             .span
             .unwrap_or_else(|| Span::new(self.line as usize, 0));
@@ -515,7 +520,69 @@ impl Compiler {
             line: span.line() as u32,
             code,
             span: Some(span),
+            diagnostic: None,
         });
+    }
+
+    /// Reports a fully-formed diagnostic (labels, notes, helps).
+    fn report(&mut self, d: Diagnostic) {
+        self.errors.push(CompileError {
+            message: d.message.clone(),
+            line: d.span().line() as u32,
+            code: d.code,
+            span: Some(d.span()),
+            diagnostic: Some(d),
+        });
+    }
+
+    /// Reports a misused `skip`/`stop`.
+    ///
+    /// Which problem this is depends on the *fact*, not on where the keyword
+    /// happens to sit. With no enclosing loop the keyword has nothing to
+    /// control — that is the error, whether or not it also lands in value
+    /// position. Only when a loop IS present is "used as a value" the real
+    /// story. Previously the site decided, so `fun f() { skip }` and
+    /// `fun f() { skip\n 0 }` — the same mistake — reported different errors
+    /// purely because one had `skip` as the last statement.
+    fn report_skip_stop_misuse(&mut self, is_skip: bool, span: Span, value_consumed: bool) {
+        let kw = if is_skip { "skip" } else { "stop" };
+        let in_loop = if is_skip {
+            !self.current_frame().loop_continue_floors.is_empty()
+        } else {
+            !self.current_frame().loop_exit_floors.is_empty()
+        };
+
+        if !in_loop {
+            self.report(
+                Diagnostic::error(
+                    codes::SKIP_STOP_OUTSIDE_LOOP,
+                    span,
+                    format!("'{kw}' used outside of loop"),
+                )
+                .label(format!("no loop for `{kw}` to control"))
+                .note(format!(
+                    "`{kw}` applies to the loop it is written inside; a function \
+                     called from a loop cannot control it"
+                ))
+                .help("return a value and let the caller decide"),
+            );
+            return;
+        }
+
+        if value_consumed {
+            self.report(
+                Diagnostic::error(
+                    codes::SKIP_STOP_AS_VALUE,
+                    span,
+                    format!("'{kw}' cannot be used as a value"),
+                )
+                .label("this produces no value")
+                .note(format!(
+                    "`{kw}` jumps before the surrounding expression can produce a \
+                     value, so there is nothing to use"
+                )),
+            );
+        }
     }
 
     /// Reports at a line only. Retained for sites that have no span to hand;
@@ -526,6 +593,7 @@ impl Compiler {
             line,
             code,
             span: None,
+            diagnostic: None,
         });
     }
 
@@ -1513,11 +1581,7 @@ impl Compiler {
                 // since code after the `skip` still references them), then jump
                 // to that loop's continue target.
                 if self.current_frame().loop_continue_floors.is_empty() {
-                    self.error_at(
-                        codes::SKIP_STOP_OUTSIDE_LOOP,
-                        token.span,
-                        "'skip' used outside of loop",
-                    );
+                    self.report_skip_stop_misuse(true, token.span, false);
                 } else {
                     let floor = *self.current_frame().loop_continue_floors.last().unwrap();
                     let n = self.current_frame().locals.len();
@@ -1549,11 +1613,7 @@ impl Compiler {
                 // Leaving them on the operand stack would corrupt an enclosing
                 // loop's iterator.
                 if self.current_frame().loop_exit_floors.is_empty() {
-                    self.error_at(
-                        codes::SKIP_STOP_OUTSIDE_LOOP,
-                        token.span,
-                        "'stop' used outside of loop",
-                    );
+                    self.report_skip_stop_misuse(false, token.span, false);
                 } else {
                     let floor = *self.current_frame().loop_exit_floors.last().unwrap();
                     let n = self.current_frame().locals.len();
@@ -2565,12 +2625,9 @@ impl Compiler {
     /// left to compile + run.
     fn compile_last_statement_as_value(&mut self, stmt: &Statement, line: u32, consumed: bool) {
         match stmt {
-            Statement::Skip { .. } | Statement::Stop { .. } if consumed => {
-                let kw = if matches!(stmt, Statement::Skip { .. }) { "skip" } else { "stop" };
-                self.error_coded(codes::SKIP_STOP_AS_VALUE,
-                    &format!("'{kw}' cannot be used as a value"),
-                    line,
-                );
+            Statement::Skip { token } | Statement::Stop { token } if consumed => {
+                let is_skip = matches!(stmt, Statement::Skip { .. });
+                self.report_skip_stop_misuse(is_skip, token.span, true);
             }
             Statement::Expr(expr) => {
                 // Propagate the consumed/discarded context into the inner
@@ -2698,8 +2755,12 @@ impl Compiler {
                 // control flow, and a `skip`/`stop` nested inside an inner loop is
                 // a Statement::Each/Repeat here, not a bare Skip/Stop, so it is
                 // unaffected.
-                let kw = if matches!(stmt, Statement::Skip { .. }) { "skip" } else { "stop" };
-                self.error_coded(codes::SKIP_STOP_AS_VALUE,&format!("'{kw}' cannot be used as a value"), line);
+                let is_skip = matches!(stmt, Statement::Skip { .. });
+                let span = match stmt {
+                    Statement::Skip { token } | Statement::Stop { token } => token.span,
+                    _ => unreachable!("guarded by the matches! above"),
+                };
+                self.report_skip_stop_misuse(is_skip, span, true);
             } else {
                 self.compile_statement(stmt);
             }

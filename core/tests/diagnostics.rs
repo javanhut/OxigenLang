@@ -302,3 +302,90 @@ fn compiler_errors_that_have_a_span_underline_it() {
     assert!(out.contains("^^^^"), "expected `skip` underlined:\n{out}");
     assert!(!out.contains(":0"), "column should not be 0:\n{out}");
 }
+
+// ── skip / stop misuse ──────────────────────────────────────────────────────
+// `skip` and `stop` are lexically scoped to the loop they are written inside: a
+// function called from a loop must not be able to continue it, or the
+// function's control flow would depend on its call site.
+//
+// The rule was already enforced, but *which* error you got was decided by where
+// the keyword happened to sit. `fun f() { skip }` reported "cannot be used as a
+// value" (because a function body's last statement is its return value) while
+// `fun f() { skip\n 0 }` reported "used outside of loop" — one mistake, two
+// errors. The message is now derived from the fact: no enclosing loop.
+
+/// Compiles and returns the first diagnostic's code, or "" if it compiled.
+fn compile_code(src: &str) -> String {
+    let lexer = Lexer::new(src);
+    let mut parser = Parser::with_file(lexer, src, "t.oxi");
+    let program = parser.parse_program();
+    if let Some(d) = parser.errors().first() {
+        return d.code.0.to_string();
+    }
+    match oxigen_core::compiler::Compiler::new().compile(&program) {
+        Ok(_) => String::new(),
+        Err(errs) => errs[0].code.0.to_string(),
+    }
+}
+
+#[test]
+fn no_enclosing_loop_reports_the_same_code_whatever_the_position() {
+    // Identical mistake; `skip` is last in one and not in the other.
+    assert_eq!(compile_code("fun f() { skip }\neach i in range(2) { f() }"), "E0016");
+    assert_eq!(compile_code("fun f() { skip\n 0 }\neach i in range(2) { f() }"), "E0016");
+}
+
+#[test]
+fn a_closure_or_thread_body_is_not_inside_the_loop() {
+    assert_eq!(compile_code("each i in range(2) { g := fun() { skip }\n g() }"), "E0016");
+    assert_eq!(compile_code("each i in range(2) { diverge { skip } }"), "E0016");
+}
+
+#[test]
+fn skip_and_stop_outside_any_loop_are_rejected() {
+    assert_eq!(compile_code("main { skip }"), "E0016");
+    assert_eq!(compile_code("main { stop }"), "E0016");
+}
+
+#[test]
+fn used_as_a_value_survives_where_it_is_the_real_reason() {
+    // With a loop present and the value genuinely consumed, "cannot be used as
+    // a value" IS the correct diagnosis — so E0016 must not swallow it.
+    assert_eq!(
+        compile_code("each i in range(3) { x := option { i == 1 -> skip, 0 }\n println(x) }"),
+        "E0017"
+    );
+}
+
+#[test]
+fn legitimate_loop_control_still_compiles() {
+    assert_eq!(compile_code("each i in range(3) { skip when i == 1\n println(i) }"), "");
+    assert_eq!(compile_code("each i in range(3) { stop when i == 1\n println(i) }"), "");
+    // Value discarded — this is ordinary loop control flow, not a value use.
+    assert_eq!(
+        compile_code("each i in range(3) { option { i == 1 -> skip, 0 }\n println(i) }"),
+        ""
+    );
+    assert_eq!(
+        compile_code("each i in range(2) { each j in range(2) { skip when j == 0\n println(j) } }"),
+        ""
+    );
+}
+
+#[test]
+fn the_outside_loop_error_explains_lexical_scoping() {
+    let src = "fun f() { skip }\neach i in range(2) { f() }";
+    let lexer = Lexer::new(src);
+    let mut parser = Parser::with_file(lexer, src, "t.oxi");
+    let program = parser.parse_program();
+    let errs = oxigen_core::compiler::Compiler::new()
+        .compile(&program)
+        .expect_err("should not compile");
+    let out = render::render_human(
+        &errs.into_iter().next().unwrap().into_diagnostic(),
+        &SourceFile::named("t.oxi", src),
+    );
+    assert!(out.contains("no loop for `skip` to control"), "{out}");
+    assert!(out.contains("cannot control it"), "{out}");
+    assert!(out.contains("^^^^"), "should underline the keyword:\n{out}");
+}
