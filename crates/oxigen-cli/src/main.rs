@@ -12,12 +12,12 @@ pub fn print_version() {
 }
 
 use oxigen_core::compiler::Compiler;
+use oxigen_core::diagnostics::{DiagnosticSink, SourceFile, render};
 use oxigen_core::formatter::Formatter;
 use oxigen_core::lexer::Lexer;
 use oxigen_core::parser::Parser;
 use oxigen_core::vm::VM;
 
-use serde_json::json;
 
 fn read_source(file_path: &str) -> String {
     match fs::read_to_string(file_path) {
@@ -109,8 +109,17 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
             let function = match compiler.compile(&program) {
                 Ok(f) => f,
                 Err(errors) => {
-                    for err in &errors {
-                        eprintln!("{}", err);
+                    // Render through the shared renderer so a compile error
+                    // looks like every other diagnostic. It used to print as
+                    // `[line N] Compile error: ...`, so the same file produced
+                    // two visually unrelated kinds of error depending on which
+                    // stage caught it.
+                    let source = SourceFile::named(
+                        file_path_buf.display().to_string(),
+                        contents.clone(),
+                    );
+                    for err in errors {
+                        eprint!("{}", render::render_human(&err.into_diagnostic(), &source));
                     }
                     std::process::exit(1);
                 }
@@ -387,38 +396,39 @@ fn check_file(file_path: &str) {
     let contents = read_source(file_path);
 
     let lexer = Lexer::new(&contents);
-    let mut parser = Parser::new(lexer, &contents);
-    let _program = parser.parse_program();
+    let mut parser = Parser::with_file(lexer, &contents, file_path);
+    let program = parser.parse_program();
 
-    let diagnostics: Vec<serde_json::Value> = parser
-        .errors()
+    let source = parser.source_file();
+    let mut sink = DiagnosticSink::new();
+    sink.extend(parser.errors().iter().cloned());
+
+    // Compile too, so compile errors reach the editor. `check` used to parse
+    // and stop, and the LSP is `oxigen check` read back out — which meant a
+    // compile error had never once been shown in an editor, and every
+    // improvement to compiler messages was invisible where users read errors.
+    //
+    // Only worth attempting on a clean parse: compiling a broken tree produces
+    // cascades from the syntax error rather than real findings.
+    if !sink.has_errors()
+        && let Err(errors) = Compiler::new().compile(&program)
+    {
+        sink.extend(errors.into_iter().map(|e| e.into_diagnostic()));
+    }
+
+    sink.deduplicate();
+    let payload: Vec<serde_json::Value> = sink
+        .diagnostics()
         .iter()
-        .map(|d| {
-            let severity = match d.severity {
-                oxigen_core::parser::Severity::Error => "error",
-                oxigen_core::parser::Severity::Warning => "warning",
-            };
-            json!({
-                "line": d.span.line,
-                "column": d.span.column,
-                "message": d.message,
-                "suggestion": d.suggestion,
-                "severity": severity
-            })
-        })
+        .map(|d| render::render_json(d, &source))
         .collect();
+    println!("{}", serde_json::to_string(&payload).unwrap());
 
-    println!("{}", serde_json::to_string(&diagnostics).unwrap());
-
-    // Exit non-zero when the file actually failed to parse, so `oxigen check`
-    // is usable as a CI gate. Warnings alone still exit 0. The JSON is written
-    // either way — the LSP reads stdout regardless of status (see
+    // Non-zero when the file actually failed, so `check` is usable as a CI
+    // gate. Warnings alone still exit 0. The JSON goes to stdout either way —
+    // the LSP parses stdout regardless of exit status (see
     // `lsp-go/diagnostics.go`), so this stays compatible with it.
-    let has_error = parser
-        .errors()
-        .iter()
-        .any(|d| d.severity == oxigen_core::parser::Severity::Error);
-    if has_error {
+    if sink.has_errors() {
         std::process::exit(1);
     }
 }
@@ -471,7 +481,7 @@ fn fmt_files(paths: &[String]) {
 /// the tool ran and the *code* was bad) so scripts can tell the two apart.
 const EXIT_USAGE: i32 = 2;
 
-const SUBCOMMANDS: [&str; 3] = ["check", "fmt", "test"];
+const SUBCOMMANDS: [&str; 4] = ["check", "fmt", "test", "explain"];
 
 fn print_usage() {
     print_version();
@@ -482,6 +492,7 @@ fn print_usage() {
     println!("  oxigen check <file.oxi>                        Report syntax errors as JSON");
     println!("  oxigen fmt <file.oxi|dir>...                   Format files in place");
     println!("  oxigen test [file.oxi|dir]                     Run *_test.oxi suites");
+    println!("  oxigen explain <CODE>                          Explain an error code");
     println!();
     println!("Options (must come BEFORE the file; anything after it goes to the script):");
     println!("  --jit          Compile eagerly instead of tiering up");
@@ -578,6 +589,16 @@ fn main() {
             fmt_files(tail);
         }
         Some("test") => run_tests_command(tail),
+        Some("explain") => match rest.get(1) {
+            Some(code) => match render::explain(code) {
+                Some(text) => println!("{text}"),
+                None => usage_error(
+                    &format!("unknown error code `{code}`"),
+                    Some("run `oxigen explain --list` to see every code"),
+                ),
+            },
+            None => usage_error("`explain` needs an error code", Some("oxigen explain E0003")),
+        },
         Some(path) if path.ends_with(".oxi") => {
             if !PathBuf::from(path).exists() {
                 usage_error(&format!("no such file: `{path}`"), None);

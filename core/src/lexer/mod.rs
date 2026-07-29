@@ -1,4 +1,6 @@
-use crate::token::{Span, Token, TokenType, token_map};
+use crate::diagnostics::registry as codes;
+use crate::diagnostics::Diagnostic;
+use crate::token::{Pos, Span, Token, TokenType, token_map};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
@@ -34,12 +36,39 @@ pub struct Lexer {
     // Source location tracking
     line: usize,
     column: usize,
+    /// Byte offset of each char in `input`, plus a final entry for EOF, so a
+    /// position can be reported as a byte index without rescanning. `input` is
+    /// `Vec<char>`, and diagnostics/edits need byte offsets into the original
+    /// source text.
+    char_byte_offsets: Vec<usize>,
+    /// Bytes `preprocess_input` stripped (shebang, `#[...]` directives). Added
+    /// to every offset so they index the ORIGINAL source, matching the
+    /// line numbers, which are already original-relative via `start_line`.
+    base_offset: usize,
     comments: Vec<Comment>,
+    /// Real diagnostics for lexical problems.
+    ///
+    /// These used to be smuggled through `TokenType::Illegal`'s `literal`
+    /// field — the error text stored where a token's *text* belongs — leaving
+    /// the parser to guess whether a literal was a message or a stray
+    /// character. `Illegal` is now only a recovery placeholder.
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl Lexer {
     pub fn new(input: &str) -> Self {
         let (effective_input, start_line, indent_mode) = Self::preprocess_input(input);
+
+        // `preprocess_input` returns a suffix of `input`, so the difference in
+        // byte length is exactly what it stripped.
+        let base_offset = input.len() - effective_input.len();
+        let mut char_byte_offsets = Vec::with_capacity(effective_input.len() + 1);
+        let mut running = 0usize;
+        for c in effective_input.chars() {
+            char_byte_offsets.push(running);
+            running += c.len_utf8();
+        }
+        char_byte_offsets.push(running); // EOF
 
         let mut l = Self {
             input: effective_input.chars().collect(),
@@ -53,10 +82,18 @@ impl Lexer {
             at_line_start: true, // We start at the beginning of input
             line: start_line,
             column: 0,
+            char_byte_offsets,
+            base_offset,
             comments: Vec::new(),
+            diagnostics: Vec::new(),
         };
         l.read_char();
         l
+    }
+
+    /// Lexical diagnostics collected so far. Complete once driven to EOF.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
     }
 
     /// Comments collected so far, in source order. Only complete once the lexer
@@ -116,9 +153,21 @@ impl Lexer {
         Some((&input[start..], newlines, enables_indent))
     }
 
-    /// Returns the current span (line, column) for the character being processed.
+    /// Current source position, including the byte offset into the original
+    /// source.
+    fn pos(&self) -> Pos {
+        let offset = self
+            .char_byte_offsets
+            .get(self.position)
+            .copied()
+            .unwrap_or_else(|| self.char_byte_offsets.last().copied().unwrap_or(0));
+        Pos::new(self.line, self.column, self.base_offset + offset)
+    }
+
+    /// Zero-width span at the character being processed. `next_token` widens
+    /// the returned token's span to the text it actually consumed.
     fn span(&self) -> Span {
-        Span::new(self.line, self.column)
+        Span::point(self.pos())
     }
 
     pub fn next_token(&mut self) -> Token {
@@ -153,7 +202,12 @@ impl Lexer {
         }
 
         let span = self.span();
-        self.lex_token_at(span)
+        let mut token = self.lex_token_at(span);
+        // Widen to the text actually consumed. `start` is left as the arm set
+        // it — `read_string` deliberately anchors an unterminated string at its
+        // opening quote — so only the end moves.
+        token.span.end = self.pos();
+        token
     }
 
     /// Lexes exactly one token starting at the current character.
@@ -346,11 +400,17 @@ impl Lexer {
             // the fix instead of a bare "unexpected token".
             ';' => {
                 self.read_char();
-                Token {
-                    token_type: TokenType::Illegal,
-                    literal: "`;` is not an Oxigen statement terminator — end the statement with a newline".to_string(),
-                    span,
-                }
+                let span = Span::range(span.start, self.pos());
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        codes::ILLEGAL_TOKEN,
+                        span,
+                        "`;` is not an Oxigen statement terminator",
+                    )
+                    .label("remove this")
+                    .note("Oxigen ends a statement at the newline"),
+                );
+                self.illegal(";", span)
             }
             '^' => self.single_with_span(TokenType::Caret, span),
             '~' => self.single_with_span(TokenType::Tilde, span),
@@ -387,11 +447,17 @@ impl Lexer {
             _ => {
                 let lit = self.ch.to_string();
                 self.read_char();
-                Token {
-                    token_type: TokenType::Illegal,
-                    literal: lit,
-                    span,
+                let span = Span::range(span.start, self.pos());
+                // `?` is a real marker (optional parameters) that the parser
+                // consumes from the token stream, so it is not an error.
+                if lit != "?" {
+                    self.diagnostics.push(Diagnostic::error(
+                        codes::ILLEGAL_TOKEN,
+                        span,
+                        format!("unexpected character {lit:?}"),
+                    ));
                 }
+                self.illegal(&lit, span)
             }
         }
     }
@@ -487,8 +553,8 @@ impl Lexer {
     fn record_comment(&mut self, span: Span, own_line: bool, start: usize) {
         let text: String = self.input[start..self.position].iter().collect();
         self.comments.push(Comment {
-            line: span.line,
-            column: span.column,
+            line: span.line(),
+            column: span.column(),
             text: text.trim_end().to_string(),
             own_line,
         });
@@ -774,10 +840,20 @@ impl Lexer {
     /// location of the mistake — instead of letting the lexer swallow the rest
     /// of the file and produce a misleading cascade of parser errors. The
     /// parser turns this `Illegal` token into a reported diagnostic.
-    fn unterminated_string_token(&self, span: Span) -> Token {
+    fn unterminated_string_token(&mut self, span: Span) -> Token {
+        self.diagnostics.push(
+            Diagnostic::error(codes::UNTERMINATED_STRING, span, "unterminated string literal")
+                .label("this string is never closed")
+                .help("close it on the same line, or use a triple-quoted string to span lines"),
+        );
+        self.illegal("unterminated string literal", span)
+    }
+
+    /// A recovery placeholder. The diagnostic is recorded separately.
+    fn illegal(&self, literal: &str, span: Span) -> Token {
         Token {
             token_type: TokenType::Illegal,
-            literal: "unterminated string literal".to_string(),
+            literal: literal.to_string(),
             span,
         }
     }
@@ -894,11 +970,17 @@ impl Lexer {
 
         // Validate it's exactly one character
         if literal.chars().count() != 1 {
-            return Token {
-                token_type: TokenType::Illegal,
-                literal: format!("invalid char literal: `{}`", literal),
-                span,
-            };
+            let span = Span::range(span.start, self.pos());
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::INVALID_CHAR_LITERAL,
+                    span,
+                    format!("invalid character literal `{literal}`"),
+                )
+                .note("a character literal holds exactly one character")
+                .help("use a string literal for zero or more than one character"),
+            );
+            return self.illegal(&format!("invalid char literal: `{}`", literal), span);
         }
 
         Token {

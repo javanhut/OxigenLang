@@ -129,8 +129,15 @@ pub enum Statement {
         consequence: Vec<Statement>,
         alternative: Option<Vec<Statement>>,
     },
-    Skip,
-    Stop,
+    /// `skip` / `stop` carry their keyword token purely for the span: without
+    /// one, a diagnostic about them had no location (`--> file:0:0`) and the
+    /// formatter could not place a comment written above them.
+    Skip {
+        token: Token,
+    },
+    Stop {
+        token: Token,
+    },
     Give {
         token: Token,
         value: Expression,

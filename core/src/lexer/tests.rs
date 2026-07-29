@@ -95,7 +95,7 @@ fn test_location_directive_is_stripped() {
     let tokens = collect_tokens(input);
 
     let x_tok = tokens.iter().find(|t| t.literal == "x").unwrap();
-    assert_eq!(x_tok.span.line, 2);
+    assert_eq!(x_tok.span.line(), 2);
 
     let has_location_tokens = tokens
         .iter()
@@ -140,7 +140,7 @@ fn test_shebang_line_is_stripped() {
     let tokens = collect_tokens(input);
 
     assert_eq!(tokens[0].literal, "x");
-    assert_eq!(tokens[0].span.line, 2);
+    assert_eq!(tokens[0].span.line(), 2);
     assert!(
         tokens
             .iter()
@@ -190,13 +190,13 @@ fn test_span_tracking() {
     let tokens = collect_tokens(input);
 
     // 'x' should be at line 1, col 1
-    assert_eq!(tokens[0].span.line, 1);
-    assert_eq!(tokens[0].span.column, 1);
+    assert_eq!(tokens[0].span.line(), 1);
+    assert_eq!(tokens[0].span.column(), 1);
 
     // 'y' should be at line 2, col 1
     let y_tok = tokens.iter().find(|t| t.literal == "y").unwrap();
-    assert_eq!(y_tok.span.line, 2);
-    assert_eq!(y_tok.span.column, 1);
+    assert_eq!(y_tok.span.line(), 2);
+    assert_eq!(y_tok.span.column(), 1);
 }
 
 #[test]
@@ -206,15 +206,15 @@ fn test_span_column_tracking() {
 
     // 'abc' at col 1
     assert_eq!(tokens[0].literal, "abc");
-    assert_eq!(tokens[0].span.column, 1);
+    assert_eq!(tokens[0].span.column(), 1);
 
     // ':=' at col 5
     assert_eq!(tokens[1].literal, ":=");
-    assert_eq!(tokens[1].span.column, 5);
+    assert_eq!(tokens[1].span.column(), 5);
 
     // '42' at col 8
     assert_eq!(tokens[2].literal, "42");
-    assert_eq!(tokens[2].span.column, 8);
+    assert_eq!(tokens[2].span.column(), 8);
 }
 
 #[test]
@@ -272,11 +272,11 @@ fn test_unterminated_string_anchored_at_opening_quote() {
         .find(|t| t.token_type == TokenType::Illegal)
         .expect("unterminated string should emit an Illegal token");
     assert_eq!(
-        illegal.span.line, 1,
+        illegal.span.line(), 1,
         "error should be anchored at the opening quote's line"
     );
     assert_eq!(
-        illegal.span.column, 6,
+        illegal.span.column(), 6,
         "error should be anchored at the opening quote's column"
     );
 }
@@ -321,7 +321,7 @@ fn test_unterminated_interpolated_string_is_illegal() {
         .find(|t| t.token_type == TokenType::Illegal)
         .expect("unterminated interpolated string should emit an Illegal token");
     assert!(illegal.literal.contains("unterminated"));
-    assert_eq!(illegal.span.line, 1);
+    assert_eq!(illegal.span.line(), 1);
     // No interpolation part tokens should leak out for the broken string.
     assert!(
         !tokens
@@ -449,11 +449,11 @@ fn test_unterminated_triple_quoted_string_is_illegal() {
         .expect("unterminated triple-quoted string should emit an Illegal token");
     assert!(illegal.literal.contains("unterminated"));
     assert_eq!(
-        illegal.span.line, 1,
+        illegal.span.line(), 1,
         "error should be anchored at the opening fence's line"
     );
     assert_eq!(
-        illegal.span.column, 6,
+        illegal.span.column(), 6,
         "error should be anchored at the opening fence's column"
     );
     assert!(

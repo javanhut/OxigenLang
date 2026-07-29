@@ -1,6 +1,9 @@
 pub mod opcode;
 pub mod slot_types;
 
+use crate::diagnostics::registry as codes;
+use crate::diagnostics::{Code, Diagnostic};
+use crate::token::Span;
 use crate::ast::*;
 use crate::vm::value::{
     Function, LocalInfo, ObjEnumDef, ParamInfo, Value, VmEnumVariantDef, VmEnumVariantKind, rc_str,
@@ -118,10 +121,26 @@ fn fold_constant_expression(expr: &Expression) -> Option<Value> {
 }
 
 /// Compilation error with source location.
+///
+/// Carries a [`Code`] and, where the site has one, a real [`Span`]. Sites that
+/// only know a line still work — `into_diagnostic` widens a bare line into a
+/// point span — so span plumbing can be finished incrementally rather than as
+/// one flag-day change.
 #[derive(Debug)]
 pub struct CompileError {
     pub message: String,
     pub line: u32,
+    pub code: Code,
+    pub span: Option<Span>,
+}
+
+impl CompileError {
+    pub fn into_diagnostic(self) -> Diagnostic {
+        let span = self
+            .span
+            .unwrap_or_else(|| Span::new(self.line as usize, 0));
+        Diagnostic::error(self.code, span, self.message)
+    }
 }
 
 impl std::fmt::Display for CompileError {
@@ -417,7 +436,7 @@ impl Compiler {
         };
         let idx = self.current_chunk().add_constant(value);
         if idx > u16::MAX as usize {
-            self.error("Too many constants in one chunk", line);
+            self.error_coded(codes::CHUNK_LIMIT,"Too many constants in one chunk", line);
         }
         idx as u16
     }
@@ -473,7 +492,7 @@ impl Compiler {
         let current = self.current_chunk().len();
         let jump = current - offset - 2; // subtract the 2 bytes of the operand itself
         if jump > u16::MAX as usize {
-            self.error("Jump too large", 0);
+            self.error_coded(codes::CHUNK_LIMIT,"Jump too large", 0);
             return;
         }
         self.current_chunk().patch_u16(offset, jump as u16);
@@ -484,15 +503,29 @@ impl Compiler {
         self.emit_op(OpCode::Loop, line);
         let offset = self.current_chunk().len() + 2 - loop_start;
         if offset > u16::MAX as usize {
-            self.error("Loop body too large", line);
+            self.error_coded(codes::CHUNK_LIMIT,"Loop body too large", line);
         }
         self.current_chunk().write_u16(offset as u16, line);
     }
 
-    fn error(&mut self, message: &str, line: u32) {
+    /// Reports with a code and a real span.
+    fn error_at(&mut self, code: Code, span: Span, message: &str) {
+        self.errors.push(CompileError {
+            message: message.to_string(),
+            line: span.line() as u32,
+            code,
+            span: Some(span),
+        });
+    }
+
+    /// Reports at a line only. Retained for sites that have no span to hand;
+    /// they render without a caret until one is plumbed through.
+    fn error_coded(&mut self, code: Code, message: &str, line: u32) {
         self.errors.push(CompileError {
             message: message.to_string(),
             line,
+            code,
+            span: None,
         });
     }
 
@@ -752,15 +785,15 @@ impl Compiler {
             | Expression::Diverge { token, .. }
             | Expression::DivergeEach { token, .. }
             | Expression::Converge { token, .. }
-            | Expression::EnumVariantConstruct { token, .. } => token.span.line as u32,
-            Expression::Ident(ident) => ident.token.span.line as u32,
+            | Expression::EnumVariantConstruct { token, .. } => token.span.line() as u32,
+            Expression::Ident(ident) => ident.token.span.line() as u32,
             Expression::Grouped(inner) => Self::expr_line(inner),
         }
     }
 
     fn stmt_line(stmt: &Statement) -> u32 {
         match stmt {
-            Statement::Let { name, .. } => name.token.span.line as u32,
+            Statement::Let { name, .. } => name.token.span.line() as u32,
             Statement::Expr(expr) => Self::expr_line(expr),
             Statement::Each { token, .. }
             | Statement::Repeat { token, .. }
@@ -775,14 +808,14 @@ impl Compiler {
             | Statement::Introduce { token, .. }
             | Statement::IndexAssign { token, .. }
             | Statement::Main { token, .. }
-            | Statement::Test { token, .. } => token.span.line as u32,
+            | Statement::Test { token, .. } => token.span.line() as u32,
             Statement::TypedLet { name, .. }
             | Statement::TypedDeclare { name, .. }
-            | Statement::Assign { name, .. } => name.token.span.line as u32,
+            | Statement::Assign { name, .. } => name.token.span.line() as u32,
             Statement::Unpack { names, .. } => {
-                names.first().map_or(0, |n| n.token.span.line as u32)
+                names.first().map_or(0, |n| n.token.span.line() as u32)
             }
-            Statement::Skip | Statement::Stop => 0,
+            Statement::Skip { token } | Statement::Stop { token } => token.span.line() as u32,
         }
     }
 
@@ -821,15 +854,15 @@ impl Compiler {
             | Expression::Diverge { token, .. }
             | Expression::DivergeEach { token, .. }
             | Expression::Converge { token, .. }
-            | Expression::EnumVariantConstruct { token, .. } => token.span.column as u32,
-            Expression::Ident(ident) => ident.token.span.column as u32,
+            | Expression::EnumVariantConstruct { token, .. } => token.span.column() as u32,
+            Expression::Ident(ident) => ident.token.span.column() as u32,
             Expression::Grouped(inner) => Self::expr_column(inner),
         }
     }
 
     fn stmt_column(stmt: &Statement) -> u32 {
         match stmt {
-            Statement::Let { name, .. } => name.token.span.column as u32,
+            Statement::Let { name, .. } => name.token.span.column() as u32,
             Statement::Expr(expr) => Self::expr_column(expr),
             Statement::Each { token, .. }
             | Statement::Repeat { token, .. }
@@ -844,14 +877,14 @@ impl Compiler {
             | Statement::Introduce { token, .. }
             | Statement::IndexAssign { token, .. }
             | Statement::Main { token, .. }
-            | Statement::Test { token, .. } => token.span.column as u32,
+            | Statement::Test { token, .. } => token.span.column() as u32,
             Statement::TypedLet { name, .. }
             | Statement::TypedDeclare { name, .. }
-            | Statement::Assign { name, .. } => name.token.span.column as u32,
+            | Statement::Assign { name, .. } => name.token.span.column() as u32,
             Statement::Unpack { names, .. } => {
-                names.first().map_or(0, |n| n.token.span.column as u32)
+                names.first().map_or(0, |n| n.token.span.column() as u32)
             }
-            Statement::Skip | Statement::Stop => 0,
+            Statement::Skip { token } | Statement::Stop { token } => token.span.line() as u32,
         }
     }
 
@@ -975,7 +1008,7 @@ impl Compiler {
             } => {
                 // <generic> with = is not allowed — generic implies type mutability
                 if !walrus && matches!(type_ann, TypeAnnotation::Generic) {
-                    self.error(
+                    self.error_coded(codes::GENERIC_WITH_EQUALS,
                         &format!(
                             "<generic> cannot be used with '=' (immutable). use ':=' for '{}'",
                             name.value
@@ -1123,7 +1156,7 @@ impl Compiler {
                 // Check immutability for locals at compile time
                 if let Some(slot) = self.resolve_local(&name.value)
                     && !self.current_frame().locals[slot as usize].mutable {
-                        self.error(
+                        self.error_coded(codes::IMMUTABLE_ASSIGN,
                             &format!(
                                 "cannot reassign immutable variable '{}'. use := to override",
                                 name.value
@@ -1474,13 +1507,17 @@ impl Compiler {
                 self.end_scope(line);
             }
 
-            Statement::Skip => {
+            Statement::Skip { token } => {
                 // Continue: clean up every local above the innermost loop's
                 // continue floor (without removing them from compile-time scope,
                 // since code after the `skip` still references them), then jump
                 // to that loop's continue target.
                 if self.current_frame().loop_continue_floors.is_empty() {
-                    self.error("'skip' used outside of loop", line);
+                    self.error_at(
+                        codes::SKIP_STOP_OUTSIDE_LOOP,
+                        token.span,
+                        "'skip' used outside of loop",
+                    );
                 } else {
                     let floor = *self.current_frame().loop_continue_floors.last().unwrap();
                     let n = self.current_frame().locals.len();
@@ -1505,14 +1542,18 @@ impl Compiler {
                 }
             }
 
-            Statement::Stop => {
+            Statement::Stop { token } => {
                 // Break: clean up every local above the loop's exit floor
                 // (loop variable + body locals — without removing them from
                 // compile-time scope), then jump to the loop's exit target.
                 // Leaving them on the operand stack would corrupt an enclosing
                 // loop's iterator.
                 if self.current_frame().loop_exit_floors.is_empty() {
-                    self.error("'stop' used outside of loop", line);
+                    self.error_at(
+                        codes::SKIP_STOP_OUTSIDE_LOOP,
+                        token.span,
+                        "'stop' used outside of loop",
+                    );
                 } else {
                     let floor = *self.current_frame().loop_exit_floors.last().unwrap();
                     let n = self.current_frame().locals.len();
@@ -1982,7 +2023,7 @@ impl Compiler {
                     "-" => self.emit_op(OpCode::Negate, line),
                     "!" | "not" => self.emit_op(OpCode::Not, line),
                     "~" => self.emit_op(OpCode::BitNot, line),
-                    _ => self.error(&format!("unknown prefix operator: {}", operator), line),
+                    _ => self.error_coded(codes::UNKNOWN_OPERATOR,&format!("unknown prefix operator: {}", operator), line),
                 }
             }
 
@@ -2057,7 +2098,7 @@ impl Compiler {
                     "^" => self.emit_op(OpCode::BitXor, line),
                     "<<" => self.emit_op(OpCode::ShiftLeft, line),
                     ">>" => self.emit_op(OpCode::ShiftRight, line),
-                    _ => self.error(&format!("unknown infix operator: {}", operator), line),
+                    _ => self.error_coded(codes::UNKNOWN_OPERATOR,&format!("unknown infix operator: {}", operator), line),
                 }
             }
 
@@ -2067,7 +2108,7 @@ impl Compiler {
                     // Check immutability
                     if let Some(slot) = self.resolve_local(&ident.value)
                         && !self.current_frame().locals[slot as usize].mutable {
-                            self.error(
+                            self.error_coded(codes::IMMUTABLE_ASSIGN,
                                 &format!(
                                     "cannot mutate immutable variable '{}' with {}",
                                     ident.value, operator
@@ -2085,7 +2126,7 @@ impl Compiler {
                     match operator.as_str() {
                         "++" => self.emit_op(OpCode::Add, line),
                         "--" => self.emit_op(OpCode::Subtract, line),
-                        _ => self.error(&format!("unknown postfix operator: {}", operator), line),
+                        _ => self.error_coded(codes::UNKNOWN_OPERATOR,&format!("unknown postfix operator: {}", operator), line),
                     }
                     // Store back
                     if let Some(slot) = self.resolve_local(&ident.value) {
@@ -2102,7 +2143,7 @@ impl Compiler {
                     }
                     self.emit_op(OpCode::Pop, line); // pop the stored (new) value, leaving pre-inc
                 } else {
-                    self.error("postfix operator requires identifier", line);
+                    self.error_coded(codes::UNKNOWN_OPERATOR,"postfix operator requires identifier", line);
                 }
             }
 
@@ -2151,24 +2192,25 @@ impl Compiler {
             }
 
             Expression::Call {
+                token,
                 function,
                 args,
                 named_args,
-                ..
             } => {
                 // Detect special builtins that need AST-level access
                 if let Expression::Ident(ident) = function.as_ref() {
+                    let call_span = ident.token.span.to(token.span);
                     match ident.value.as_str() {
                         "is_mut" => {
-                            self.compile_is_mut(args, line);
+                            self.compile_is_mut(args, call_span);
                             return;
                         }
                         "is_type" => {
-                            self.compile_is_type(args, line);
+                            self.compile_is_type(args, call_span);
                             return;
                         }
                         "is_type_mut" => {
-                            self.compile_is_type_mut(args, line);
+                            self.compile_is_type_mut(args, call_span);
                             return;
                         }
                         _ => {}
@@ -2523,9 +2565,9 @@ impl Compiler {
     /// left to compile + run.
     fn compile_last_statement_as_value(&mut self, stmt: &Statement, line: u32, consumed: bool) {
         match stmt {
-            Statement::Skip | Statement::Stop if consumed => {
-                let kw = if matches!(stmt, Statement::Skip) { "skip" } else { "stop" };
-                self.error(
+            Statement::Skip { .. } | Statement::Stop { .. } if consumed => {
+                let kw = if matches!(stmt, Statement::Skip { .. }) { "skip" } else { "stop" };
+                self.error_coded(codes::SKIP_STOP_AS_VALUE,
                     &format!("'{kw}' cannot be used as a value"),
                     line,
                 );
@@ -2633,7 +2675,7 @@ impl Compiler {
                         self.compile_last_statement_as_value(stmt, line, consumed);
                         self.end_scope_keeping_value(line);
                     }
-                    Statement::Skip | Statement::Stop if consumed => {
+                    Statement::Skip { .. } | Statement::Stop { .. } if consumed => {
                         // A `skip`/`stop` whose value is consumed by an enclosing
                         // expression (e.g. `1 + option{... -> {skip}}`) is the
                         // same error the tree-walker raises on `INTEGER + SKIP`.
@@ -2646,7 +2688,7 @@ impl Compiler {
                         self.emit_op(OpCode::None, line);
                     }
                 }
-            } else if consumed && matches!(stmt, Statement::Skip | Statement::Stop) {
+            } else if consumed && matches!(stmt, Statement::Skip { .. } | Statement::Stop { .. }) {
                 // A NON-tail bare `skip`/`stop` in a block whose value is CONSUMED
                 // makes the block's value ill-defined: the `skip`/`stop` jumps
                 // before the tail value is produced, so the enclosing expression
@@ -2656,8 +2698,8 @@ impl Compiler {
                 // control flow, and a `skip`/`stop` nested inside an inner loop is
                 // a Statement::Each/Repeat here, not a bare Skip/Stop, so it is
                 // unaffected.
-                let kw = if matches!(stmt, Statement::Skip) { "skip" } else { "stop" };
-                self.error(&format!("'{kw}' cannot be used as a value"), line);
+                let kw = if matches!(stmt, Statement::Skip { .. }) { "skip" } else { "stop" };
+                self.error_coded(codes::SKIP_STOP_AS_VALUE,&format!("'{kw}' cannot be used as a value"), line);
             } else {
                 self.compile_statement(stmt);
             }
@@ -2742,14 +2784,15 @@ impl Compiler {
             "<=" => self.emit_op(OpCode::LessEqual, line),
             ">" => self.emit_op(OpCode::Greater, line),
             ">=" => self.emit_op(OpCode::GreaterEqual, line),
-            _ => self.error(&format!("unknown comparison operator: {}", op), line),
+            _ => self.error_coded(codes::UNKNOWN_OPERATOR,&format!("unknown comparison operator: {}", op), line),
         }
     }
 
     /// Compile `is_mut(x)` — check if variable is mutable.
-    fn compile_is_mut(&mut self, args: &[Expression], line: u32) {
+    fn compile_is_mut(&mut self, args: &[Expression], span: Span) {
+        let line = span.line() as u32;
         if args.len() != 1 {
-            self.error("is_mut() takes exactly 1 argument", line);
+            self.error_at(codes::INTRINSIC_MISUSE, span, "is_mut() takes exactly 1 argument");
             self.emit_op(OpCode::False, line);
             return;
         }
@@ -2768,15 +2811,16 @@ impl Compiler {
             // Struct fields are always mutable
             self.emit_op(OpCode::True, line);
         } else {
-            self.error("argument to is_mut must be a variable name", line);
+            self.error_at(codes::INTRINSIC_MISUSE, span, "argument to is_mut must be a variable name");
             self.emit_op(OpCode::False, line);
         }
     }
 
     /// Compile `is_type(x, int)` — check if value matches type.
-    fn compile_is_type(&mut self, args: &[Expression], line: u32) {
+    fn compile_is_type(&mut self, args: &[Expression], span: Span) {
+        let line = span.line() as u32;
         if args.len() != 2 {
-            self.error("is_type() takes exactly 2 arguments", line);
+            self.error_at(codes::INTRINSIC_MISUSE, span, "is_type() takes exactly 2 arguments");
             self.emit_op(OpCode::False, line);
             return;
         }
@@ -2788,16 +2832,17 @@ impl Compiler {
                 self.make_constant(Value::String(rc_str(type_ident.value.as_str())), line);
             self.emit_op_u16(OpCode::IsType, type_const, line);
         } else {
-            self.error("second argument to is_type must be a type name", line);
+            self.error_at(codes::INTRINSIC_MISUSE, span, "second argument to is_type must be a type name");
             self.emit_op(OpCode::Pop, line);
             self.emit_op(OpCode::False, line);
         }
     }
 
     /// Compile `is_type_mut(x)` — check if variable has no type constraint.
-    fn compile_is_type_mut(&mut self, args: &[Expression], line: u32) {
+    fn compile_is_type_mut(&mut self, args: &[Expression], span: Span) {
+        let line = span.line() as u32;
         if args.len() != 1 {
-            self.error("is_type_mut() takes exactly 1 argument", line);
+            self.error_at(codes::INTRINSIC_MISUSE, span, "is_type_mut() takes exactly 1 argument");
             self.emit_op(OpCode::False, line);
             return;
         }
@@ -2825,14 +2870,14 @@ impl Compiler {
             // Struct fields have locked types
             self.emit_op(OpCode::False, line);
         } else {
-            self.error("argument to is_type_mut must be a variable name", line);
+            self.error_at(codes::INTRINSIC_MISUSE, span, "argument to is_type_mut must be a variable name");
             self.emit_op(OpCode::False, line);
         }
     }
 
     fn compile_identifier(&mut self, ident: &Identifier) {
-        let line = ident.token.span.line as u32;
-        let col = ident.token.span.column as u32;
+        let line = ident.token.span.line() as u32;
+        let col = ident.token.span.column() as u32;
         self.loc_column_stack.push(col);
         self.compile_identifier_inner(ident, line);
         self.loc_column_stack.pop();

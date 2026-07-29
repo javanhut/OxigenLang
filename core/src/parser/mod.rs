@@ -6,7 +6,6 @@ use crate::lexer::Lexer;
 use crate::token::{Span, Token, TokenType};
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Precedence {
@@ -57,66 +56,23 @@ fn precedence_of(tt: &TokenType) -> Precedence {
 type PrefixParseFn = fn(&mut Parser) -> Option<Expression>;
 type InfixParseFn = fn(&mut Parser, Expression) -> Option<Expression>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum Severity {
-    Error,
-    Warning,
+pub use crate::diagnostics::{Diagnostic, Severity};
+use crate::diagnostics::registry as codes;
+use crate::diagnostics::{Code, SourceFile, render};
+
+/// Builds a parser diagnostic. Every call site names a code so the message text
+/// stays free to change without breaking tests or tooling.
+fn diag(code: Code, span: Span, message: impl Into<String>) -> Diagnostic {
+    Diagnostic::error(code, span, message)
 }
 
-impl fmt::Display for Severity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Severity::Error => write!(f, "error"),
-            Severity::Warning => write!(f, "warning"),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Diagnostic {
-    pub span: Span,
-    pub message: String,
-    pub suggestion: Option<String>,
-    pub severity: Severity,
-}
-
-impl fmt::Display for Diagnostic {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}: {} [{}:{}]",
-            self.severity, self.message, self.span.line, self.span.column
-        )?;
-        if let Some(ref hint) = self.suggestion {
-            write!(f, "\n  hint: {}", hint)?;
-        }
-        Ok(())
-    }
-}
-
-impl Diagnostic {
-    fn error(span: Span, message: impl Into<String>) -> Self {
-        Self {
-            span,
-            message: message.into(),
-            suggestion: None,
-            severity: Severity::Error,
-        }
-    }
-
-    fn error_with_hint(
-        span: Span,
-        message: impl Into<String>,
-        suggestion: impl Into<String>,
-    ) -> Self {
-        Self {
-            span,
-            message: message.into(),
-            suggestion: Some(suggestion.into()),
-            severity: Severity::Error,
-        }
-    }
+fn diag_hint(
+    code: Code,
+    span: Span,
+    message: impl Into<String>,
+    hint: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic::error(code, span, message).help(hint)
 }
 
 pub struct Parser {
@@ -125,12 +81,28 @@ pub struct Parser {
     peek_token: Token,
     errors: Vec<Diagnostic>,
     source: String,
+    file_name: Option<String>,
     prefix_fns: HashMap<TokenType, PrefixParseFn>,
     infix_fns: HashMap<TokenType, InfixParseFn>,
     lookahead_buffer: VecDeque<Token>,
 }
 
 impl Parser {
+    /// Parser that knows the file it is reading, so diagnostics can name it.
+    pub fn with_file(lexer: Lexer, source: &str, file_name: impl Into<String>) -> Self {
+        let mut p = Self::new(lexer, source);
+        p.file_name = Some(file_name.into());
+        p
+    }
+
+    /// The source these diagnostics refer to, for the renderer.
+    pub fn source_file(&self) -> SourceFile {
+        match &self.file_name {
+            Some(name) => SourceFile::named(name.clone(), self.source.clone()),
+            None => SourceFile::new(self.source.clone()),
+        }
+    }
+
     pub fn new(lexer: Lexer, source: &str) -> Self {
         let dummy = Token {
             token_type: TokenType::Illegal,
@@ -144,6 +116,7 @@ impl Parser {
             peek_token: dummy,
             errors: Vec::new(),
             source: source.to_string(),
+            file_name: None,
             prefix_fns: HashMap::new(),
             infix_fns: HashMap::new(),
             lookahead_buffer: VecDeque::new(),
@@ -238,60 +211,29 @@ impl Parser {
         self.lexer.comments()
     }
 
+    /// Renders every diagnostic, most important first.
+    ///
+    /// The old renderer capped output at three and appended
+    /// `... and N more error(s)` — a workaround for cascade noise that also hid
+    /// genuinely independent errors. Same-line repeats are deduplicated
+    /// instead, and everything that survives is shown.
     pub fn format_errors(&self) -> String {
-        let displayed: Vec<_> = self
-            .errors
+        let src = self.source_file();
+        let mut sink = crate::diagnostics::DiagnosticSink::new();
+        sink.extend(self.errors.iter().cloned());
+        sink.deduplicate();
+        sink.diagnostics()
             .iter()
-            .map(|d| self.format_diagnostic(d))
-            .collect();
-        if displayed.len() > 1 {
-            let mut out = displayed[0].clone();
-            // Show up to 3 additional errors, skip noise
-            let rest: Vec<_> = displayed[1..].iter().take(2).collect();
-            for d in rest {
-                out.push_str("\n\n");
-                out.push_str(d);
-            }
-            if displayed.len() > 3 {
-                out.push_str(&format!(
-                    "\n\n... and {} more error(s)",
-                    displayed.len() - 3
-                ));
-            }
-            out
-        } else {
-            displayed.join("\n\n")
-        }
+            .map(|d| render::render_human(d, &src))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
+    #[allow(dead_code)]
     fn format_diagnostic(&self, diag: &Diagnostic) -> String {
-        let mut out = String::new();
-        let line_num = diag.span.line;
-        let col = diag.span.column;
-
-        // Header
-        out.push_str(&format!("{}: {}\n", diag.severity, diag.message));
-        out.push_str(&format!("  --> line {}:{}\n", line_num, col));
-
-        // Source context
-        if let Some(source_line) = self.source.lines().nth(line_num.saturating_sub(1)) {
-            let line_str = format!("{}", line_num);
-            let padding = " ".repeat(line_str.len());
-            out.push_str(&format!("{} |\n", padding));
-            out.push_str(&format!("{} | {}\n", line_str, source_line));
-            if col > 0 {
-                let caret_padding = " ".repeat(col.saturating_sub(1));
-                out.push_str(&format!("{} | {}^", padding, caret_padding));
-            }
-        }
-
-        // Suggestion
-        if let Some(ref hint) = diag.suggestion {
-            out.push_str(&format!("\n  = hint: {}", hint));
-        }
-
-        out
+        render::render_human(diag, &self.source_file())
     }
+
 
     fn negate_expression(expr: Expression) -> Expression {
         Expression::Prefix {
@@ -358,7 +300,7 @@ impl Parser {
             if self.peek_token.token_type == TokenType::Lt {
                 self.next_token(); // consume inner '<'
                 if self.peek_token.token_type != TokenType::Ident {
-                    self.errors.push(Diagnostic::error_with_hint(
+                    self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                         self.peek_token.span,
                         format!("expected error tag name, got {:?}", self.peek_token.literal),
                         "provide a tag name like Error<MyTag>",
@@ -386,7 +328,7 @@ impl Parser {
 
     fn parse_type_union_member(&mut self) -> Option<TypeAnnotation> {
         if !Self::is_type_name_token(&self.curr_token.token_type) {
-            self.errors.push(Diagnostic::error_with_hint(
+            self.errors.push(diag_hint(codes::EXPECTED_TYPE_NAME, 
                 self.curr_token.span,
                 format!("expected type name, got {:?}", self.curr_token.literal),
                 "valid types: int, str, float, char, bool, array, byte, uint, tuple, map, set",
@@ -400,7 +342,7 @@ impl Parser {
     /// Supports both `<A || B>` and legacy `<A> || <B>` unions.
     fn parse_type_annotation(&mut self) -> Option<TypeAnnotation> {
         if !Self::is_type_name_token(&self.peek_token.token_type) {
-            self.errors.push(Diagnostic::error_with_hint(
+            self.errors.push(diag_hint(codes::EXPECTED_TYPE_NAME, 
                 self.peek_token.span,
                 format!(
                     "expected type name after `<`, got {:?}",
@@ -426,7 +368,7 @@ impl Parser {
                         self.next_token(); // consume legacy '<'
                     }
                     if !Self::is_type_name_token(&self.peek_token.token_type) {
-                        self.errors.push(Diagnostic::error_with_hint(
+                        self.errors.push(diag_hint(codes::EXPECTED_TYPE_NAME, 
                             self.peek_token.span,
                             format!(
                                 "expected type name in union, got {:?}",
@@ -444,7 +386,7 @@ impl Parser {
                     break;
                 }
                 _ => {
-                    self.errors.push(Diagnostic::error_with_hint(
+                    self.errors.push(diag_hint(codes::EXPECTED_TYPE_NAME, 
                         self.peek_token.span,
                         format!(
                             "expected `>` or `||` in type annotation, got {:?}",
@@ -493,7 +435,23 @@ impl Parser {
             }
             self.next_token();
         }
+        self.absorb_lexer_diagnostics();
         program
+    }
+
+    /// Folds the lexer's diagnostics in, ordered with the parser's by position.
+    ///
+    /// The lexer reports lexical problems itself now; the parser used to invent
+    /// a message from an `Illegal` token's text, which meant it could not tell
+    /// a smuggled message from a genuinely stray character.
+    fn absorb_lexer_diagnostics(&mut self) {
+        let lexical: Vec<Diagnostic> = self.lexer.diagnostics().to_vec();
+        if lexical.is_empty() {
+            return;
+        }
+        self.errors.extend(lexical);
+        self.errors
+            .sort_by_key(|d| (d.span().line(), d.span().column()));
     }
 
     pub fn parse_statement(&mut self) -> Option<Statement> {
@@ -562,8 +520,8 @@ impl Parser {
             TokenType::Choose => self.parse_choose_statement(),
             TokenType::Unless => self.parse_unless_statement(),
             TokenType::OptionKw => self.parse_expression_statement(),
-            TokenType::Skip => Some(Statement::Skip),
-            TokenType::Stop => Some(Statement::Stop),
+            TokenType::Skip => Some(Statement::Skip { token: self.curr_token.clone() }),
+            TokenType::Stop => Some(Statement::Stop { token: self.curr_token.clone() }),
             TokenType::Function => {
                 if self.peek_token.token_type == TokenType::Ident {
                     self.parse_named_function_statement()
@@ -629,7 +587,7 @@ impl Parser {
             self.next_token(); // consume ','
             self.next_token(); // move to next ident
             if self.curr_token.token_type != TokenType::Ident {
-                self.errors.push(Diagnostic::error_with_hint(
+                self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                     self.curr_token.span,
                     format!(
                         "expected identifier in unpack, got {:?}",
@@ -709,7 +667,7 @@ impl Parser {
             self.next_token(); // consume ','
             self.next_token(); // move to next ident
             if self.curr_token.token_type != TokenType::Ident {
-                self.errors.push(Diagnostic::error_with_hint(
+                self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                     self.curr_token.span,
                     format!(
                         "expected identifier in unpack, got {:?}",
@@ -884,16 +842,15 @@ impl Parser {
         let mut left = match prefix {
             Some(f) => f(self)?,
             None => {
+                // An `Illegal` token means the lexer already recorded a real
+                // diagnostic for it (`?` excepted — that is a live marker, not
+                // an error). Reporting here too would duplicate it.
                 if self.curr_token.token_type == TokenType::Illegal
                     && self.curr_token.literal != "?"
                 {
-                    self.errors.push(Diagnostic::error(
-                        self.curr_token.span,
-                        self.curr_token.literal.clone(),
-                    ));
                     return None;
                 }
-                self.errors.push(Diagnostic::error(
+                self.errors.push(diag(codes::UNEXPECTED_TOKEN, 
                     self.curr_token.span,
                     format!("unexpected token {:?}", self.curr_token.literal),
                 ));
@@ -1021,7 +978,7 @@ impl Parser {
                     self.next_token(); // move past InterpExprEnd
                 }
                 TokenType::Eof => {
-                    self.errors.push(Diagnostic::error_with_hint(
+                    self.errors.push(diag_hint(codes::BAD_STRING_INTERPOLATION, 
                         self.curr_token.span,
                         "unterminated string interpolation",
                         "make sure the string is properly closed with a matching quote",
@@ -1029,7 +986,7 @@ impl Parser {
                     break;
                 }
                 _ => {
-                    self.errors.push(Diagnostic::error(
+                    self.errors.push(diag(codes::BAD_STRING_INTERPOLATION, 
                         self.curr_token.span,
                         format!(
                             "unexpected token in string interpolation: {:?}",
@@ -1079,7 +1036,7 @@ impl Parser {
     fn parse_effect_header(&mut self) -> Option<(Token, String, Option<String>)> {
         self.next_token(); // move to effect name after '<'
         if !Self::is_angle_effect_name_token(&self.curr_token) {
-            self.errors.push(Diagnostic::error_with_hint(
+            self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                 self.curr_token.span,
                 format!(
                     "expected effect name after `<`, got {:?}",
@@ -1100,7 +1057,7 @@ impl Parser {
             if self.curr_token.token_type != TokenType::Ident
                 && self.curr_token.token_type != TokenType::None
             {
-                self.errors.push(Diagnostic::error(
+                self.errors.push(diag(codes::UNSUPPORTED_EFFECT_FILTER, 
                     self.curr_token.span,
                     format!(
                         "expected effect filter name, got {:?}",
@@ -1112,7 +1069,7 @@ impl Parser {
             if self.curr_token.literal == "Error" && self.peek_token.token_type == TokenType::Lt {
                 self.next_token(); // consume tag '<'
                 if self.peek_token.token_type != TokenType::Ident {
-                    self.errors.push(Diagnostic::error_with_hint(
+                    self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                         self.peek_token.span,
                         format!("expected error tag name, got {:?}", self.peek_token.literal),
                         "provide a tag name like Error<MyTag>",
@@ -1132,7 +1089,7 @@ impl Parser {
                 self.expect_peek(TokenType::Gt)?; // close Error<tag>
             } else {
                 if self.curr_token.literal != "Error" {
-                    self.errors.push(Diagnostic::error_with_hint(
+                    self.errors.push(diag_hint(codes::UNSUPPORTED_EFFECT_FILTER, 
                         self.curr_token.span,
                         format!("unsupported effect filter '{}'", self.curr_token.literal),
                         "only `Error` is supported as a filter for guard/fail",
@@ -1186,7 +1143,7 @@ impl Parser {
             self.next_token(); // consume inner '<'
             self.next_token(); // move to tag name
             if self.curr_token.token_type != TokenType::Ident {
-                self.errors.push(Diagnostic::error_with_hint(
+                self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                     self.curr_token.span,
                     format!(
                         "expected tag name after <log<, got {:?}",
@@ -1203,7 +1160,7 @@ impl Parser {
                 self.next_token(); // consume sub '<'
                 self.next_token(); // move to sub_tag name
                 if self.curr_token.token_type != TokenType::Ident {
-                    self.errors.push(Diagnostic::error_with_hint(
+                    self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                         self.curr_token.span,
                         format!("expected sub-tag name, got {:?}", self.curr_token.literal),
                         "use like: <log<Error<network>>>(\"message\")",
@@ -1272,7 +1229,7 @@ impl Parser {
                 if self.peek_token.token_type == TokenType::LParen {
                     let fallback = self.parse_single_parenthesized_expression()?;
                     let Some(value) = value else {
-                        self.errors.push(Diagnostic::error_with_hint(
+                        self.errors.push(diag_hint(codes::UNEXPECTED_TOKEN, 
                             token.span,
                             "<guard>(...) requires a target expression",
                             "use like: value <guard>(fallback)",
@@ -1289,7 +1246,7 @@ impl Parser {
                 } else {
                     self.next_token(); // move to binding identifier
                     if self.curr_token.token_type != TokenType::Ident {
-                        self.errors.push(Diagnostic::error_with_hint(
+                        self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                             self.curr_token.span,
                             format!(
                                 "expected identifier after <guard>, got {:?}",
@@ -1307,7 +1264,7 @@ impl Parser {
                     self.next_token(); // move to fallback
                     let fallback = self.parse_expression(Precedence::Lowest)?;
                     let Some(value) = value else {
-                        self.errors.push(Diagnostic::error_with_hint(
+                        self.errors.push(diag_hint(codes::UNEXPECTED_TOKEN, 
                             token.span,
                             "<guard> err -> ... requires a target expression",
                             "use like: value <guard> err -> fallback",
@@ -1343,7 +1300,7 @@ impl Parser {
                 }
             }
             "log" => {
-                self.errors.push(Diagnostic::error_with_hint(
+                self.errors.push(diag_hint(codes::UNEXPECTED_TOKEN, 
                     token.span,
                     "<log> is no longer a postfix effect",
                     "use <log>(\"message\") or <log<tag>>(\"message\") as a standalone expression",
@@ -1351,7 +1308,7 @@ impl Parser {
                 None
             }
             _ => {
-                self.errors.push(Diagnostic::error_with_hint(
+                self.errors.push(diag_hint(codes::UNKNOWN_ANGLE_EFFECT, 
                     token.span,
                     format!("unknown angle effect '{}'", effect_name),
                     "valid effects: guard, fail, log, type, Error, Value",
@@ -1391,7 +1348,7 @@ impl Parser {
                 let tag = if self.peek_token.token_type == TokenType::Lt {
                     self.next_token(); // consume inner '<'
                     if self.peek_token.token_type != TokenType::Ident {
-                        self.errors.push(Diagnostic::error_with_hint(
+                        self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                             self.peek_token.span,
                             format!("expected error tag name, got {:?}", self.peek_token.literal),
                             "provide a tag name like Error<MyTag>",
@@ -1604,7 +1561,7 @@ impl Parser {
     fn parse_converge_expression(&mut self) -> Option<Expression> {
         let tok = self.curr_token.clone(); // 'converge'
         if self.peek_token.token_type == TokenType::LBrace {
-            self.errors.push(Diagnostic::error(
+            self.errors.push(diag(codes::UNEXPECTED_TOKEN, 
                 tok.span,
                 "structured `converge { ... }` blocks aren't supported yet; use `converge <task>`"
                     .to_string(),
@@ -1686,7 +1643,7 @@ impl Parser {
         // Validate ordering: once we see an optional/default param, all following must be too
         let has_default = optional || default.is_some();
         if *seen_optional && !has_default {
-            self.errors.push(Diagnostic::error_with_hint(
+            self.errors.push(diag_hint(codes::REQUIRED_AFTER_OPTIONAL, 
                 ident.token.span,
                 format!(
                     "required parameter '{}' cannot follow optional/default parameters",
@@ -1819,7 +1776,7 @@ impl Parser {
                     self.next_token(); // consume next ident
                     segments.push(self.curr_token.literal.clone());
                 } else {
-                    self.errors.push(Diagnostic::error(
+                    self.errors.push(diag(codes::EXPECTED_MODULE_PATH, 
                         self.peek_token.span,
                         "expected identifier after `.` in module path",
                     ));
@@ -1827,7 +1784,7 @@ impl Parser {
                 }
             }
         } else {
-            self.errors.push(Diagnostic::error_with_hint(
+            self.errors.push(diag_hint(codes::EXPECTED_MODULE_PATH, 
                 self.peek_token.span,
                 format!("expected module name, got {:?}", self.peek_token.literal),
                 "use like: introduce math or introduce .utils",
@@ -1849,7 +1806,7 @@ impl Parser {
 
         self.next_token(); // move to binding identifier
         if self.curr_token.token_type != TokenType::Ident {
-            self.errors.push(Diagnostic::error_with_hint(
+            self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                 self.curr_token.span,
                 format!(
                     "expected identifier after guard, got {:?}",
@@ -1978,7 +1935,7 @@ impl Parser {
                 in_named = true;
             } else {
                 if in_named {
-                    self.errors.push(Diagnostic::error_with_hint(
+                    self.errors.push(diag_hint(codes::POSITIONAL_AFTER_NAMED, 
                         self.curr_token.span,
                         "positional argument cannot follow named arguments",
                         "put all positional arguments before named ones",
@@ -2629,7 +2586,7 @@ impl Parser {
                 });
             } else if self.peek_token.token_type == TokenType::LBrace {
                 // User likely forgot '->' before the block
-                self.errors.push(Diagnostic::error_with_hint(
+                self.errors.push(diag_hint(codes::MISSING_ARROW_IN_OPTION_ARM, 
                     self.peek_token.span,
                     "missing `->` before block in option arm",
                     "add `->` between the condition and its body: condition -> { ... }",
@@ -2730,8 +2687,8 @@ impl Parser {
             &stmt,
             Statement::Expr(_)
                 | Statement::Give { .. }
-                | Statement::Skip
-                | Statement::Stop
+                | Statement::Skip { .. }
+                | Statement::Stop { .. }
                 | Statement::Assign { .. }
                 | Statement::DotAssign { .. }
                 | Statement::IndexAssign { .. }
@@ -2812,7 +2769,7 @@ impl Parser {
         }
 
         if self.curr_token.token_type == TokenType::Eof {
-            self.errors.push(Diagnostic::error_with_hint(
+            self.errors.push(diag_hint(codes::UNCLOSED_DELIMITER, 
                 open_brace_span,
                 "unclosed block: expected '}' before end of file",
                 "add a closing '}' to match this opening brace",
@@ -3119,7 +3076,7 @@ impl Parser {
             }
 
             if self.curr_token.token_type != TokenType::Function {
-                self.errors.push(Diagnostic::error_with_hint(
+                self.errors.push(diag_hint(codes::EXPECTED_FUN_IN_INCLUDES, 
                     self.curr_token.span,
                     format!(
                         "expected `fun` inside includes block, got {:?}",
@@ -3352,15 +3309,18 @@ impl Parser {
             Some(())
         } else {
             let suggestion = Self::suggest_for_expected(&tt, &self.peek_token);
-            self.errors.push(Diagnostic {
-                span: self.peek_token.span,
-                message: format!(
+            let mut d = diag(
+                codes::UNEXPECTED_TOKEN,
+                self.peek_token.span,
+                format!(
                     "expected {:?}, got {:?} ({:?})",
                     tt, self.peek_token.token_type, self.peek_token.literal
                 ),
-                suggestion,
-                severity: Severity::Error,
-            });
+            );
+            if let Some(hint) = suggestion {
+                d = d.help(hint);
+            }
+            self.errors.push(d);
             None
         }
     }

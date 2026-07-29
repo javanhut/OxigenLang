@@ -137,5 +137,8 @@ fn map_large_is_not_linear() {
             acc += v;
         }
     }
-    assert_eq!(acc, (0..100_000i64).map(|i| i * 2).sum());
+    // `sum::<i64>()` is explicit because `serde_json` (a dependency of the
+    // diagnostics renderer) adds `impl PartialEq<serde_json::Value> for i64`,
+    // which leaves the sum's type ambiguous without it.
+    assert_eq!(acc, (0..100_000i64).map(|i| i * 2).sum::<i64>());
 }

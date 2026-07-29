@@ -183,14 +183,14 @@ impl Formatter {
     fn emit_statement_line(&mut self, stmt: &Statement, next: Option<&Statement>) {
         let span = stmt_span(stmt);
         if let Some(span) = span {
-            self.flush_comments_before(span.line);
+            self.flush_comments_before(span.line());
         }
         self.push_indent();
 
         let (saved_anchor, saved_open) = (self.next_anchor, self.open_column);
         self.next_anchor = next.and_then(stmt_span).or(saved_anchor);
         if let Some(span) = span {
-            self.open_column = span.column;
+            self.open_column = span.column();
         }
 
         self.format_statement(stmt);
@@ -201,8 +201,8 @@ impl Formatter {
         // against its own body's column first; now the enclosing block sees
         // this statement as its latest.
         if let Some(span) = span {
-            self.body_column = span.column;
-            self.push_trailing_comment(span.line);
+            self.body_column = span.column();
+            self.push_trailing_comment(span.line());
         }
         self.newline();
     }
@@ -238,7 +238,7 @@ impl Formatter {
         while let Some(comment) = self.comments.get(self.next_comment) {
             let claimed_by_next = self
                 .next_anchor
-                .is_some_and(|a| comment.line >= a.line || comment.column <= a.column);
+                .is_some_and(|a| comment.line >= a.line() || comment.column <= a.column());
             if claimed_by_next
                 || comment.column < self.body_column
                 || comment.column <= self.open_column
@@ -263,12 +263,12 @@ impl Formatter {
     /// latest, so the block closes against the right column.
     fn before_item(&mut self, span: Option<Span>, next: Option<Span>) -> (Option<Span>, usize) {
         if let Some(span) = span {
-            self.flush_comments_before(span.line);
+            self.flush_comments_before(span.line());
         }
         let saved = (self.next_anchor, self.open_column);
         self.next_anchor = next.or(self.next_anchor);
         if let Some(span) = span {
-            self.open_column = span.column;
+            self.open_column = span.column();
         }
         saved
     }
@@ -276,8 +276,8 @@ impl Formatter {
     fn after_item(&mut self, span: Option<Span>, saved: (Option<Span>, usize)) {
         (self.next_anchor, self.open_column) = saved;
         if let Some(span) = span {
-            self.push_trailing_comment(span.line);
-            self.body_column = span.column;
+            self.push_trailing_comment(span.line());
+            self.body_column = span.column();
         }
     }
 
@@ -353,10 +353,10 @@ impl Formatter {
                 self.push("give ");
                 self.format_expression(value);
             }
-            Statement::Skip => {
+            Statement::Skip { .. } => {
                 self.push("skip");
             }
-            Statement::Stop => {
+            Statement::Stop { .. } => {
                 self.push("stop");
             }
             Statement::If {
@@ -1160,7 +1160,7 @@ fn choose_arm_span(arm: &ChooseArm) -> Option<Span> {
 
 fn stmt_span(stmt: &Statement) -> Option<Span> {
     match stmt {
-        Statement::Skip | Statement::Stop => None,
+        Statement::Skip { token } | Statement::Stop { token } => Some(token.span),
         Statement::Let { name, .. }
         | Statement::TypedLet { name, .. }
         | Statement::TypedDeclare { name, .. }

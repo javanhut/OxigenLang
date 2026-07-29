@@ -825,10 +825,10 @@ fn test_parse_postfix_unless_then_guard() {
 #[test]
 fn test_parse_skip_stop() {
     let program = parse_ok("skip");
-    assert!(matches!(program.statements[0], Statement::Skip));
+    assert!(matches!(program.statements[0], Statement::Skip { .. }));
 
     let program = parse_ok("stop");
-    assert!(matches!(program.statements[0], Statement::Stop));
+    assert!(matches!(program.statements[0], Statement::Stop { .. }));
 }
 
 // ==================== OPERATOR PRECEDENCE TESTS ====================

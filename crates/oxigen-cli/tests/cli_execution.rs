@@ -438,3 +438,56 @@ fn arguments_after_the_path_belong_to_the_script() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output), "--no-jit\nextra\n");
 }
+
+// ── diagnostics reach the editor ────────────────────────────────────────────
+// `check` used to parse and stop, and the LSP is `oxigen check` read back out,
+// so a compile error had never once appeared in an editor.
+
+#[test]
+fn check_reports_compile_errors_not_just_parse_errors() {
+    let dir = temp_dir("check-compile");
+    // Parses fine; fails to compile — `skip` needs an enclosing loop.
+    let script = write_script(&dir, "c.oxi", "main {\n    skip\n}\n");
+    let output = run_args(&["check", script.to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("\"code\""), "diagnostic has no code:\n{out}");
+    assert!(out.contains("skip"), "{out}");
+    // A real location, not the `0:0` a line-only error would give.
+    assert!(!out.contains("\"line\":0"), "compile error has no location:\n{out}");
+}
+
+#[test]
+fn check_json_keeps_the_fields_the_lsp_reads() {
+    let dir = temp_dir("check-shape");
+    let script = write_script(&dir, "s.oxi", "main {\n  y :=\n}\n");
+    let output = run_args(&["check", script.to_str().unwrap()]);
+    let out = stdout(&output);
+    for field in ["\"line\"", "\"column\"", "\"message\"", "\"severity\"", "\"suggestion\""] {
+        assert!(out.contains(field), "missing {field} in:\n{out}");
+    }
+}
+
+#[test]
+fn explain_prints_a_codes_long_form() {
+    let output = run_args(&["explain", "E0003"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("E0003"), "{}", stdout(&output));
+
+    let unknown = run_args(&["explain", "E9999"]);
+    assert_eq!(unknown.status.code(), Some(EXIT_USAGE));
+}
+
+#[test]
+fn compile_errors_render_like_parse_errors() {
+    // They used to print as `[line N] Compile error: ...`, so the same file
+    // produced two visually unrelated kinds of error.
+    let dir = temp_dir("compile-render");
+    let script = write_script(&dir, "c.oxi", "main {\n    skip\n}\n");
+    let output = run_oxigen(&script, &[]);
+    let err = stderr(&output);
+    assert!(err.contains("error[E"), "no code:\n{err}");
+    assert!(err.contains("-->"), "no location line:\n{err}");
+    assert!(!err.contains("Compile error:"), "old format survived:\n{err}");
+}
