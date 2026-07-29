@@ -456,3 +456,86 @@ fn the_error_names_the_unbindable_parameters() {
     assert!(out.contains("`b` never bound"), "{out}");
     assert!(out.contains("value being matched"), "{out}");
 }
+
+// ── binding provenance ──────────────────────────────────────────────────────
+// A local recorded only `mutable: bool`, so the reporting site knew a write was
+// forbidden but not why — and guessed the advice. A loop variable was told to
+// "use `:=` to override", which produces a rebinding discarded at the end of
+// the iteration; the `i++` site had no advice at all; and `:=` bypassed the
+// check entirely. `BindingKind` carries the reason and the span that
+// established it, so one function derives all three.
+
+/// Renders the first compile diagnostic for `src`.
+fn compile_render(src: &str) -> String {
+    let lexer = Lexer::new(src);
+    let mut parser = Parser::with_file(lexer, src, "t.oxi");
+    let program = parser.parse_program();
+    let errs = oxigen_core::compiler::Compiler::new()
+        .compile(&program)
+        .expect_err("expected a compile error");
+    render::render_human(
+        &errs.into_iter().next().unwrap().into_diagnostic(),
+        &SourceFile::named("t.oxi", src),
+    )
+}
+
+#[test]
+fn a_loop_variable_is_not_told_to_use_walrus() {
+    // The original wrong hint: `:=` here lasts one iteration.
+    let out = compile_render("fun f() {\n  each i in range(3) { i = i * 2 }\n}\nf()");
+    assert!(out.contains("loop variable"), "{out}");
+    assert!(
+        !out.contains("use := to override"),
+        "still gives the misleading advice:\n{out}"
+    );
+    assert!(out.contains("does not change which values are iterated"), "{out}");
+}
+
+#[test]
+fn the_loop_header_is_shown_as_a_secondary_label() {
+    // Impossible while spans were points — this is the payoff of widening them.
+    let out = compile_render("fun f() {\n  each i in range(3) { i = 1 }\n}\nf()");
+    assert!(out.contains("rebound on each iteration"), "{out}");
+    assert!(out.contains("---"), "expected a secondary underline:\n{out}");
+}
+
+#[test]
+fn the_increment_site_now_has_advice_too() {
+    // `i++` is the more common mistake and previously carried no hint at all.
+    let out = compile_render("fun f() {\n  each i in range(3) { i++ }\n}\nf()");
+    assert!(out.contains("cannot mutate loop variable `i` with `++`"), "{out}");
+    assert!(out.contains("= help:"), "no advice:\n{out}");
+}
+
+#[test]
+fn a_constant_points_at_its_declaration() {
+    let out = compile_render("fun f() {\n  PI <float> = 3.14\n  PI = 3.0\n  PI\n}\nf()");
+    assert!(out.contains("declared immutable here"), "{out}");
+    assert!(out.contains("`=` binds immutably"), "{out}");
+}
+
+#[test]
+fn walrus_no_longer_bypasses_the_check_on_a_loop_variable() {
+    // `i = 6` errored while `i := 6` silently wrote the same slot.
+    let out = compile_render("fun f() {\n  each i in range(3) { i := i * 10 }\n}\nf()");
+    assert!(out.contains("E0025"), "{out}");
+    assert!(out.contains("lasts one iteration"), "{out}");
+    // The message must not claim the write does nothing: it IS visible for the
+    // rest of the iteration, just discarded before the next one.
+    assert!(
+        !out.contains("no effect"),
+        "claims something untrue about the rebinding:\n{out}"
+    );
+}
+
+#[test]
+fn walrus_still_overrides_a_constant() {
+    // Documented behaviour: `:=` is how you override an immutable binding.
+    assert_eq!(compile_code("fun f() {\n  PI <float> = 3.14\n  PI := 3.0\n  PI\n}\nf()"), "");
+}
+
+#[test]
+fn mutable_locals_are_unaffected() {
+    assert_eq!(compile_code("fun f() {\n  n := 1\n  n = 2\n  n++\n  n\n}\nf()"), "");
+    assert_eq!(compile_code("fun f(p) {\n  p = 2\n  p\n}\nf(1)"), "");
+}

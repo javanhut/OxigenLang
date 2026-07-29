@@ -154,13 +154,38 @@ impl std::fmt::Display for CompileError {
     }
 }
 
+/// Why a binding is (im)mutable, and where that was decided.
+///
+/// This replaced a bare `mutable: bool`. A boolean records *that* a write is
+/// forbidden but not *why*, so the advice had to be guessed at the reporting
+/// site — which is how a loop variable came to be told "use `:=` to override",
+/// advice that produces a rebinding discarded at the end of the iteration.
+/// Carrying the reason (and the span that established it) lets one reporting
+/// function derive the right message and point at the declaration.
+#[derive(Debug, Clone, Copy)]
+enum BindingKind {
+    Mutable,
+    /// `x <int> = 5` — declared immutable.
+    ImmutableConstant { decl: Span },
+    /// The variable of an `each` loop; rebound every iteration.
+    ImmutableLoopVar { header: Span },
+    /// A block-scoped `struct`/`enum` name.
+    ImmutableTypeName { decl: Span },
+}
+
+impl BindingKind {
+    fn is_mutable(self) -> bool {
+        matches!(self, BindingKind::Mutable)
+    }
+}
+
 /// Tracks a local variable during compilation.
 #[derive(Debug, Clone)]
 struct Local {
     name: String,
     depth: i32, // -1 means uninitialized
     is_captured: bool,
-    mutable: bool,
+    kind: BindingKind,
     type_constraint: Option<String>,
 }
 
@@ -221,7 +246,7 @@ impl CompilerFrame {
             name: String::new(),
             depth: scope_depth,
             is_captured: false,
-            mutable: false,
+            kind: BindingKind::ImmutableConstant { decl: Span::default() },
             type_constraint: None,
         }];
         CompilerFrame {
@@ -535,6 +560,64 @@ impl Compiler {
         });
     }
 
+    /// Reports a write to an immutable local.
+    ///
+    /// One function, three outcomes, each derived from the binding's recorded
+    /// provenance rather than guessed here. This is why `BindingKind` exists:
+    /// with only a boolean, the reporting site had no way to know that "use
+    /// `:=` to override" — correct for a constant — is misleading for a loop
+    /// variable, whose rebinding lasts one iteration.
+    fn report_immutable_write(
+        &mut self,
+        name: &str,
+        kind: BindingKind,
+        write: Span,
+        verb: &str,
+        suffix: &str,
+    ) {
+        let d = match kind {
+            BindingKind::ImmutableLoopVar { header } => Diagnostic::error(
+                codes::IMMUTABLE_ASSIGN,
+                write,
+                format!("cannot {verb} loop variable `{name}`{suffix}"),
+            )
+            .label(format!("cannot {verb}{suffix}"))
+            .secondary(header, format!("`{name}` is rebound on each iteration"))
+            .note("assigning to the loop variable does not change which values are iterated")
+            .help("use a separate accumulator, or index into the sequence"),
+
+            BindingKind::ImmutableConstant { decl } => {
+                let d = Diagnostic::error(
+                    codes::IMMUTABLE_ASSIGN,
+                    write,
+                    format!("cannot {verb} immutable variable `{name}`{suffix}"),
+                )
+                .label(format!("cannot {verb}{suffix}"))
+                .note("`=` binds immutably; `:=` binds mutably");
+                // A synthetic declaration span (compiler temporaries, slot 0)
+                // has nothing useful to point at.
+                if decl == Span::default() {
+                    d.help(format!("declare it with `{name} := ...` to allow reassignment"))
+                } else {
+                    d.secondary(decl, "declared immutable here with `=`")
+                        .help(format!("declare it with `{name} := ...` to allow reassignment"))
+                }
+            }
+
+            BindingKind::ImmutableTypeName { decl } => Diagnostic::error(
+                codes::TYPE_NAME_REBIND,
+                write,
+                format!("cannot {verb} type name `{name}`{suffix}"),
+            )
+            .label(format!("cannot {verb}{suffix}"))
+            .secondary(decl, format!("`{name}` is declared here as a type"))
+            .help("choose a different name for the value"),
+
+            BindingKind::Mutable => return,
+        };
+        self.report(d);
+    }
+
     /// Rejects a pattern declared with more than one parameter.
     ///
     /// A pattern is always called with exactly one argument — the value being
@@ -774,15 +857,17 @@ impl Compiler {
     }
 
     /// Declare a local variable and return its stack slot.
-    fn add_local(&mut self, name: &str, mutable: bool, type_constraint: Option<String>) {
+    fn add_local(&mut self, name: &str, kind: BindingKind, type_constraint: Option<String>) {
         let depth = self.current_frame().scope_depth;
         let slot = self.current_frame().locals.len();
-        self.record_local_info(slot, mutable, type_constraint.clone());
+        // `LocalInfo` is the runtime mirror read by the `is_mut` intrinsic; it
+        // only needs the boolean, so provenance stays inside the compiler.
+        self.record_local_info(slot, kind.is_mutable(), type_constraint.clone());
         self.current_frame_mut().locals.push(Local {
             name: name.to_string(),
             depth,
             is_captured: false,
-            mutable,
+            kind,
             type_constraint,
         });
     }
@@ -1036,6 +1121,48 @@ impl Compiler {
             }
 
             Statement::Let { name, value } => {
+                // `:=` on an existing immutable local used to bypass the
+                // mutability check entirely — `resolve_local` found the slot and
+                // a plain `SetLocal` was emitted, so `i = 6` was an error while
+                // `i := 6` silently wrote the same slot.
+                //
+                // A constant is left alone: `:=` is the documented way to
+                // override one. A loop variable and a type name are not
+                // overridable, so those are rejected here.
+                if let Some(slot) = self.resolve_local(&name.value) {
+                    match self.current_frame().locals[slot as usize].kind {
+                        BindingKind::ImmutableLoopVar { header } => {
+                            self.report(
+                                Diagnostic::error(
+                                    codes::LOOP_VAR_REBIND,
+                                    name.token.span,
+                                    format!("`:=` on loop variable `{}` lasts one iteration", name.value),
+                                )
+                                .label("discarded at the end of this iteration")
+                                .secondary(header, format!("`{}` is rebound from the sequence here", name.value))
+                                .note(
+                                    "the rebinding applies to the rest of this iteration only; \
+                                     it does not change which values are iterated",
+                                )
+                                .help("bind a differently-named variable"),
+                            );
+                        }
+                        BindingKind::ImmutableTypeName { decl } => {
+                            self.report(
+                                Diagnostic::error(
+                                    codes::TYPE_NAME_REBIND,
+                                    name.token.span,
+                                    format!("cannot rebind type name `{}`", name.value),
+                                )
+                                .label("cannot rebind")
+                                .secondary(decl, format!("`{}` is declared here as a type", name.value))
+                                .help("choose a different name for the value"),
+                            );
+                        }
+                        BindingKind::Mutable | BindingKind::ImmutableConstant { .. } => {}
+                    }
+                }
+
                 // V3: a NAMED function declared as a new local must bind its own
                 // name in the current scope BEFORE its body is compiled, so a
                 // recursive self-call inside the body can capture itself as an
@@ -1058,7 +1185,7 @@ impl Compiler {
                         let is_global_reassign =
                             self.declared_globals.contains(&name.value);
                         if !is_upvalue && !is_global_reassign {
-                            self.add_local(&name.value, true, None);
+                            self.add_local(&name.value, BindingKind::Mutable, None);
                             predeclared_named_fn = true;
                         }
                     }
@@ -1113,7 +1240,7 @@ impl Compiler {
                         self.emit_op(OpCode::Pop, line);
                     } else if self.current_frame().scope_depth > 0 {
                         // New local variable
-                        self.add_local(&name.value, true, None);
+                        self.add_local(&name.value, BindingKind::Mutable, None);
                     } else {
                         // Global — DefineGlobal overwrites
                         self.declared_globals.insert(name.value.clone());
@@ -1203,7 +1330,14 @@ impl Compiler {
                         // global of that name. Mirrors the tree-walker, where `each`
                         // introduces a fresh per-iteration env that the shadow is
                         // written into.
-                        self.add_local(&name.value, mutable, Some(type_name));
+                        let kind = if mutable {
+                            BindingKind::Mutable
+                        } else {
+                            BindingKind::ImmutableConstant {
+                                decl: name.token.span,
+                            }
+                        };
+                        self.add_local(&name.value, kind, Some(type_name));
                     }
                 } else {
                     self.declared_globals.insert(name.value.clone());
@@ -1261,7 +1395,7 @@ impl Compiler {
                         // block-local (shadowing any typed global, or any local) —
                         // matching the tree-walker, which leaves the outer value
                         // untouched.
-                        self.add_local(&name.value, true, Some(type_name));
+                        self.add_local(&name.value, BindingKind::Mutable, Some(type_name));
                     }
                 } else {
                     self.declared_globals.insert(name.value.clone());
@@ -1279,15 +1413,11 @@ impl Compiler {
             Statement::Assign { name, value } => {
                 // Check immutability for locals at compile time
                 if let Some(slot) = self.resolve_local(&name.value)
-                    && !self.current_frame().locals[slot as usize].mutable {
-                        self.error_coded(codes::IMMUTABLE_ASSIGN,
-                            &format!(
-                                "cannot reassign immutable variable '{}'. use := to override",
-                                name.value
-                            ),
-                            line,
-                        );
-                    }
+                    && !self.current_frame().locals[slot as usize].kind.is_mutable()
+                {
+                    let kind = self.current_frame().locals[slot as usize].kind;
+                    self.report_immutable_write(&name.value, kind, name.token.span, "assign to", "");
+                }
                 // Implicit-self field WRITE: a bare-name assignment inside a
                 // method whose name is NOT a local/param but IS a field of the
                 // enclosing method's struct resolves to `self.field = value` —
@@ -1424,11 +1554,11 @@ impl Compiler {
             }
 
             Statement::Each {
+                token,
                 variable,
                 index_variable,
                 iterable,
                 body,
-                ..
             } => {
                 // `each i in range(a)` / `range(a, b)` / `range(a, b, step)`
                 // with the *builtin* range (not user-shadowed): lower to a
@@ -1475,20 +1605,20 @@ impl Compiler {
                     } else {
                         self.compile_expression(&args[0]);
                     }
-                    self.add_local("__index__", true, None);
+                    self.add_local("__index__", BindingKind::Mutable, None);
                     // end = the bound argument, evaluated once. `range(n)` puts
                     // it first; every other form puts it second (a third
                     // argument is the step, not the bound).
                     self.compile_expression(if args.len() == 1 { &args[0] } else { &args[1] });
-                    self.add_local("__range_end__", false, None);
+                    self.add_local("__range_end__", BindingKind::ImmutableConstant { decl: Span::default() }, None);
                     let i = self.resolve_local("__index__").unwrap();
                     let e = self.resolve_local("__range_end__").unwrap();
                     (i, 0, e)
                 } else {
                     self.compile_expression(iterable);
-                    self.add_local("__iterable__", false, None);
+                    self.add_local("__iterable__", BindingKind::ImmutableConstant { decl: Span::default() }, None);
                     self.emit_constant(Value::Integer(0), line);
-                    self.add_local("__index__", true, None);
+                    self.add_local("__index__", BindingKind::Mutable, None);
                     let it = self.resolve_local("__iterable__").unwrap();
                     let i = self.resolve_local("__index__").unwrap();
                     (i, it, 0)
@@ -1548,10 +1678,21 @@ impl Compiler {
                 self.current_frame_mut().loop_exit_floors.push(exit_floor);
                 // Bind the loop variables. IterEntry pushed key then value, so
                 // the key takes the lower slot.
+                // `token` is the `each` keyword: the header span the diagnostic
+                // points at to explain why the binding is immutable.
+                let header = token.span;
                 if let Some(index) = index_variable {
-                    self.add_local(&index.value, false, None);
+                    self.add_local(
+                        &index.value,
+                        BindingKind::ImmutableLoopVar { header },
+                        None,
+                    );
                 }
-                self.add_local(&variable.value, false, None);
+                self.add_local(
+                    &variable.value,
+                    BindingKind::ImmutableLoopVar { header },
+                    None,
+                );
                 // `skip` cleans body locals back to here (keeping the loop
                 // variable, which the shared pop below closes/pops), then jumps
                 // to the continue target (the index increment).
@@ -1812,7 +1953,11 @@ impl Compiler {
                 self.emit_op_u16(OpCode::Constant, const_idx, line);
 
                 if self.current_frame().scope_depth > 0 {
-                    self.add_local(&name.value, false, None);
+                    self.add_local(
+                        &name.value,
+                        BindingKind::ImmutableTypeName { decl: name.token.span },
+                        None,
+                    );
                 } else {
                     let name_const =
                         self.make_constant(Value::String(rc_str(name.value.as_str())), line);
@@ -1867,7 +2012,11 @@ impl Compiler {
                 let const_idx = self.make_constant(enum_val, line);
                 self.emit_op_u16(OpCode::Constant, const_idx, line);
                 if self.current_frame().scope_depth > 0 {
-                    self.add_local(&name.value, false, None);
+                    self.add_local(
+                        &name.value,
+                        BindingKind::ImmutableTypeName { decl: name.token.span },
+                        None,
+                    );
                 } else {
                     let name_const =
                         self.make_constant(Value::String(rc_str(name.value.as_str())), line);
@@ -2227,15 +2376,17 @@ impl Compiler {
                 if let Expression::Ident(ident) = left.as_ref() {
                     // Check immutability
                     if let Some(slot) = self.resolve_local(&ident.value)
-                        && !self.current_frame().locals[slot as usize].mutable {
-                            self.error_coded(codes::IMMUTABLE_ASSIGN,
-                                &format!(
-                                    "cannot mutate immutable variable '{}' with {}",
-                                    ident.value, operator
-                                ),
-                                line,
-                            );
-                        }
+                        && !self.current_frame().locals[slot as usize].kind.is_mutable()
+                    {
+                        let kind = self.current_frame().locals[slot as usize].kind;
+                        self.report_immutable_write(
+                            &ident.value,
+                            kind,
+                            ident.token.span,
+                            "mutate",
+                            &format!(" with `{operator}`"),
+                        );
+                    }
                     // Load current value (return value is the pre-increment value)
                     self.compile_identifier(ident);
                     // Duplicate for the return value
@@ -2729,7 +2880,7 @@ impl Compiler {
     fn compile_unpack_define(&mut self, name: &crate::ast::Identifier, line: u32) {
         if self.current_frame().scope_depth > 0 {
             // add_local for both "_" and real names — "_" just occupies the slot
-            self.add_local(&name.value, true, None);
+            self.add_local(&name.value, BindingKind::Mutable, None);
         } else if name.value == "_" {
             self.emit_op(OpCode::Pop, line);
         } else {
@@ -2760,7 +2911,7 @@ impl Compiler {
                 }
             }
         } else if self.current_frame().scope_depth > 0 {
-            self.add_local(&name.value, true, None);
+            self.add_local(&name.value, BindingKind::Mutable, None);
         } else {
             let name_const = self.make_constant(Value::String(rc_str(name.value.as_str())), line);
             self.emit_op_u16(OpCode::DefineGlobal, name_const, line);
@@ -2920,7 +3071,7 @@ impl Compiler {
         if let Expression::Ident(ident) = &args[0] {
             // Check if it's a local — resolve at compile time
             if let Some(slot) = self.resolve_local(&ident.value) {
-                let mutable = self.current_frame().locals[slot as usize].mutable;
+                let mutable = self.current_frame().locals[slot as usize].kind.is_mutable();
                 self.emit_op(if mutable { OpCode::True } else { OpCode::False }, line);
             } else {
                 // Global — emit runtime check
@@ -3086,7 +3237,7 @@ impl Compiler {
         for param in parameters {
             self.add_local(
                 &param.ident.value,
-                true,
+                BindingKind::Mutable,
                 param.type_ann.as_ref().map(|t| t.type_name()),
             );
         }

@@ -40,6 +40,8 @@ pub const COMPILE_ERROR: Code = Code("E0021");
 pub const INVALID_CHAR_LITERAL: Code = Code("E0022");
 pub const UNKNOWN_OPERATOR: Code = Code("E0023");
 pub const PATTERN_ARITY: Code = Code("E0024");
+pub const LOOP_VAR_REBIND: Code = Code("E0025");
+pub const TYPE_NAME_REBIND: Code = Code("E0026");
 
 pub struct Entry {
     pub code: Code,
@@ -315,6 +317,35 @@ Referencing one in the condition failed at run time inside the pattern
 
     limit := 3
     pattern big(n) when n > limit
+",
+    },
+    Entry {
+        code: LOOP_VAR_REBIND,
+        title: "rebinding a loop variable with `:=`",
+        explanation: "\
+`:=` on a loop variable applies only to the rest of the current iteration; the
+next iteration rebinds the name from the sequence, discarding it.
+
+    each i in range(3) {
+        i := i * 10     // visible below, gone next iteration
+        println(i)      // 0, 10, 20 — but iteration is still 0, 1, 2
+    }
+
+It reads as though it changes the loop, and it does not. Use a separate name:
+
+    each i in range(3) {
+        scaled := i * 10
+        println(scaled)
+    }
+",
+    },
+    Entry {
+        code: TYPE_NAME_REBIND,
+        title: "rebinding a type name",
+        explanation: "\
+A block-scoped `struct` or `enum` name cannot be reassigned or shadowed in the
+same scope — later code in that block would silently refer to a different
+thing than the declaration suggests. Choose a different name for the value.
 ",
     },
     Entry {
