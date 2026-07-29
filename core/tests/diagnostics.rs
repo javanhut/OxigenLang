@@ -389,3 +389,70 @@ fn the_outside_loop_error_explains_lexical_scoping() {
     assert!(out.contains("cannot control it"), "{out}");
     assert!(out.contains("^^^^"), "should underline the keyword:\n{out}");
 }
+
+// ── pattern arity ───────────────────────────────────────────────────────────
+// A pattern is always invoked with exactly one argument — the value being
+// matched (`Call, 1` at every use site) — so no syntax can supply a second.
+// Declaring more used to parse: unreferenced extras were dead syntax, but
+// referencing one failed at run time inside the synthesized `__pattern__`
+// (`cannot compare INTEGER > NONE`) or, from an arm body, as
+// `undefined variable`. Declaring none only worked because a surplus argument
+// is silently discarded.
+
+#[test]
+fn a_pattern_must_declare_exactly_one_parameter() {
+    assert_eq!(compile_code("pattern cmp(a, b) when a > b\n1"), "E0024");
+    assert_eq!(compile_code("pattern cmp(a, b, c) when a > b\n1"), "E0024");
+    assert_eq!(compile_code("pattern always() when True\n1"), "E0024");
+}
+
+#[test]
+fn the_rule_applies_to_inline_patterns_too() {
+    assert_eq!(
+        compile_code("each i in [1] { choose i { pattern cmp(a, b) when a > b -> 1, else -> 2 } }"),
+        "E0024"
+    );
+    assert_eq!(
+        compile_code("each i in [1] { choose i { pattern p() when True -> 1, else -> 2 } }"),
+        "E0024"
+    );
+}
+
+#[test]
+fn it_is_rejected_even_when_the_pattern_is_never_used() {
+    // The declaration can never work, so waiting for a use site would let a
+    // broken pattern sit in a file indefinitely.
+    assert_eq!(compile_code("pattern cmp(a, b) when a > b\nprintln(\"unused\")"), "E0024");
+}
+
+#[test]
+fn single_parameter_patterns_still_compile() {
+    assert_eq!(compile_code("pattern big(n) when n > 3\n1"), "");
+    assert_eq!(
+        compile_code("pattern big(n) when n > 3\neach i in [1] { choose i { big -> 1, else -> 2 } }"),
+        ""
+    );
+    assert_eq!(
+        compile_code("each i in [1] { choose i { pattern big(n) when n > 3 -> 1, else -> 2 } }"),
+        ""
+    );
+    // Comparing against a captured value is the supported alternative.
+    assert_eq!(compile_code("limit := 3\npattern big(n) when n > limit\n1"), "");
+}
+
+#[test]
+fn the_error_names_the_unbindable_parameters() {
+    let src = "pattern cmp(a, b) when a > b\n1";
+    let lexer = Lexer::new(src);
+    let mut parser = Parser::with_file(lexer, src, "t.oxi");
+    let program = parser.parse_program();
+    let errs = oxigen_core::compiler::Compiler::new()
+        .compile(&program)
+        .expect_err("should not compile");
+    let out = render::render_human(
+        &errs.into_iter().next().unwrap().into_diagnostic(),
+        &SourceFile::named("t.oxi", src),
+    );
+    assert!(out.contains("`b` never bound"), "{out}");
+    assert!(out.contains("value being matched"), "{out}");
+}

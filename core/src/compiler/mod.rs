@@ -535,6 +535,62 @@ impl Compiler {
         });
     }
 
+    /// Rejects a pattern declared with more than one parameter.
+    ///
+    /// A pattern is always called with exactly one argument — the value being
+    /// matched (`Call, 1` at every use site) — so there is no syntax that could
+    /// ever supply a second. The extra parameters are not merely dead: binding
+    /// them to `None` produced a runtime failure inside the synthesized
+    /// `__pattern__` function, at a location the user never wrote.
+    fn check_pattern_arity(&mut self, params: &[Identifier], decl: Span) {
+        if params.len() == 1 {
+            return;
+        }
+
+        if params.is_empty() {
+            // Declaring none currently "works" only because a surplus argument
+            // is silently discarded — one of the silent behaviours being
+            // removed. It would start failing the moment that is tightened, and
+            // a pattern that cannot see what it is matching can only be a
+            // constant, which `else` already expresses.
+            self.report(
+                Diagnostic::error(
+                    codes::PATTERN_ARITY,
+                    decl,
+                    "a pattern takes exactly one parameter",
+                )
+                .label("no parameter to bind the matched value to")
+                .note("a pattern is called with the value being matched")
+                .help("name the value, as in `pattern big(n) when n > 3`"),
+            );
+            return;
+        }
+
+        let first_extra = &params[1];
+        let last = params.last().unwrap_or(first_extra);
+        let span = first_extra.token.span.to(last.token.span);
+        let plural = if params.len() > 2 { "s are" } else { " is" };
+        let names = params[1..]
+            .iter()
+            .map(|p| format!("`{}`", p.value))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.report(
+            Diagnostic::error(
+                codes::PATTERN_ARITY,
+                span,
+                "a pattern takes exactly one parameter",
+            )
+            .label(format!("{names} never bound"))
+            .note(format!(
+                "a pattern is called with the value being matched, so only the \
+                 first parameter is supplied; the extra parameter{plural} bound \
+                 to `None`"
+            ))
+            .help("remove the extra parameters, or compare against a value from the enclosing scope"),
+        );
+    }
+
     /// Reports a misused `skip`/`stop`.
     ///
     /// Which problem this is depends on the *fact*, not on where the keyword
@@ -1870,6 +1926,7 @@ impl Compiler {
                 condition,
                 ..
             } => {
+                self.check_pattern_arity(params, name.token.span);
                 // Compile the condition as a closure, store as __pattern_<name> global
                 let param_names: Vec<String> = params.iter().map(|p| p.value.clone()).collect();
                 self.compile_pattern_function(&param_names, condition, line);
@@ -1906,6 +1963,9 @@ impl Compiler {
                     if let (Some(params), Some(condition)) =
                         (&arm.inline_params, &arm.inline_condition)
                     {
+                        // `ChooseArm::pattern_name` is a bare String with no token, so the
+                        // best location available for an inline arm is its line.
+                        self.check_pattern_arity(params, Span::new(line as usize, 0));
                         let param_names: Vec<String> =
                             params.iter().map(|p| p.value.clone()).collect();
                         self.compile_pattern_function(&param_names, condition, line);

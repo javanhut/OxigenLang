@@ -39,6 +39,7 @@ pub const CHUNK_LIMIT: Code = Code("E0020");
 pub const COMPILE_ERROR: Code = Code("E0021");
 pub const INVALID_CHAR_LITERAL: Code = Code("E0022");
 pub const UNKNOWN_OPERATOR: Code = Code("E0023");
+pub const PATTERN_ARITY: Code = Code("E0024");
 
 pub struct Entry {
     pub code: Code,
@@ -291,6 +292,29 @@ For zero characters or more than one, use a string instead:
 The compiler reached an operator it has no lowering for. This indicates the
 parser accepted something the compiler does not implement — please report it
 with the source that triggered it.
+",
+    },
+    Entry {
+        code: PATTERN_ARITY,
+        title: "a pattern takes exactly one parameter",
+        explanation: "\
+A pattern is invoked with the single value being matched, so only its first
+parameter is ever bound:
+
+    pattern big(n) when n > 3
+
+    choose value {
+        big -> \"large\",
+        else -> \"small\"
+    }
+
+Declaring more parameters used to parse, but nothing could ever supply them.
+Referencing one in the condition failed at run time inside the pattern
+(`cannot compare INTEGER > NONE`); referencing one in an arm body failed with
+`undefined variable`. Compare against a captured value instead:
+
+    limit := 3
+    pattern big(n) when n > limit
 ",
     },
     Entry {

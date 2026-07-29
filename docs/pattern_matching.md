@@ -4,7 +4,7 @@ OxigenLang features a powerful pattern-matching system using the `pattern` and `
 
 ## Defining Patterns
 
-A pattern is a named condition with parameters. Define patterns at the top level of your program using the `pattern` keyword:
+A pattern is a named condition taking a single parameter. Define patterns at the top level of your program using the `pattern` keyword:
 
 ```oxi
 pattern is_even(n) when n % 2 == 0
@@ -15,8 +15,23 @@ pattern is_large(n) when n > 100
 
 A pattern definition has three parts:
 1. **Name**: An identifier for the pattern (e.g., `is_even`).
-2. **Parameters**: One or more parameter names in parentheses (e.g., `(n)`). The first parameter receives the subject value from `choose`.
-3. **Condition**: A `when` clause with a boolean expression that references the parameters.
+2. **Parameter**: Exactly one parameter name in parentheses (e.g., `(n)`), which receives the subject value from `choose`.
+3. **Condition**: A `when` clause with a boolean expression that references the parameter.
+
+A pattern is always invoked with the single value being matched, so declaring
+any other number of parameters is an error:
+
+```oxi
+pattern cmp(a, b) when a > b     // error: a pattern takes exactly one parameter
+pattern always() when True       // error: no parameter to bind the matched value to
+```
+
+To compare against something else, capture it from the enclosing scope:
+
+```oxi
+limit := 3
+pattern big(n) when n > limit
+```
 
 Patterns are registered globally and can be referenced by name in any `choose` block that follows.
 
