@@ -518,6 +518,7 @@ impl Lexer {
         let (span, own_line, start) = self.comment_start();
         self.read_char(); // skip '/'
         self.read_char(); // skip '*'
+        let mut closed = false;
         loop {
             if self.ch == '\0' {
                 break;
@@ -525,9 +526,26 @@ impl Lexer {
             if self.ch == '*' && self.peek_char() == '/' {
                 self.read_char(); // skip '*'
                 self.read_char(); // skip '/'
+                closed = true;
                 break;
             }
             self.read_char();
+        }
+        if !closed {
+            // Running to EOF used to be silent: everything after the `/*` was
+            // swallowed, the program ran whatever preceded it and exited 0, and
+            // `oxigen check` called the file clean. The span points at the
+            // opening delimiter, which is the part that needs fixing.
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::UNTERMINATED_BLOCK_COMMENT,
+                    span,
+                    "unterminated block comment",
+                )
+                .label("this comment is never closed")
+                .note("everything after this point was treated as a comment")
+                .help("close it with `*/`"),
+            );
         }
         self.record_comment(span, own_line, start);
     }
@@ -593,6 +611,26 @@ impl Lexer {
             while self.ch.is_ascii_digit() {
                 self.read_char();
             }
+        }
+
+        // `1.2.3` used to lex as `1.2` then `.3`, so it parsed as field access and
+        // surfaced as `cannot access field '3' on FLOAT`.
+        if is_float && self.ch == '.' && self.peek_char().is_ascii_digit() {
+            while self.ch == '.' || self.ch.is_ascii_digit() {
+                self.read_char();
+            }
+            let literal: String = self.input[start..self.position].iter().collect();
+            let span = Span::range(span.start, self.pos());
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::MALFORMED_NUMBER,
+                    span,
+                    format!("malformed number literal `{literal}`"),
+                )
+                .label("more than one decimal point")
+                .help("a number may contain at most one `.`"),
+            );
+            return self.illegal(&literal, span);
         }
 
         let literal: String = self.input[start..self.position].iter().collect();

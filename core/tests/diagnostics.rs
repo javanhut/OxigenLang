@@ -539,3 +539,85 @@ fn mutable_locals_are_unaffected() {
     assert_eq!(compile_code("fun f() {\n  n := 1\n  n = 2\n  n++\n  n\n}\nf()"), "");
     assert_eq!(compile_code("fun f(p) {\n  p = 2\n  p\n}\nf(1)"), "");
 }
+
+// ── silence is not shippable ────────────────────────────────────────────────
+// A parse function returning `Option` could not distinguish "I reported an
+// error" from "I gave up quietly", and `parse_program` only synchronised when
+// the error count rose — so a quiet `None` dropped the statement and carried
+// on. The file compiled and ran, minus a line nobody was told about.
+
+#[test]
+fn an_out_of_range_integer_is_reported_not_dropped() {
+    // Was: the binding silently never happened and the first symptom was
+    // `undefined variable` on the next, perfectly correct line.
+    let out = render_parse_errors("x := 99999999999999999999999999\nprintln(x)\n");
+    assert!(out.contains("E0027"), "{out}");
+    assert!(out.contains("64-bit"), "{out}");
+    assert!(
+        !out.contains("undefined variable"),
+        "should fail at the literal, not downstream:\n{out}"
+    );
+}
+
+#[test]
+fn an_unterminated_block_comment_is_reported() {
+    // Was: swallowed the rest of the file, exited 0, and `check` said clean.
+    let out = render_parse_errors("println(\"before\")\n/* oops\nprintln(\"after\")\n");
+    assert!(out.contains("E0029"), "{out}");
+    assert!(out.contains("never closed"), "{out}");
+}
+
+#[test]
+fn a_second_decimal_point_is_a_number_error_not_field_access() {
+    // Was: `1.2.3` lexed as `1.2` then `.3`, reported as
+    // `cannot access field '3' on FLOAT`.
+    let out = render_parse_errors("x := 1.2.3\n");
+    assert!(out.contains("E0028"), "{out}");
+    assert!(out.contains("decimal point"), "{out}");
+}
+
+#[test]
+fn a_valid_number_is_still_a_number() {
+    // The malformed-literal check must not catch ordinary floats or the
+    // field access that genuinely follows one.
+    assert_eq!(compile_code("x := 1.25\nx"), "");
+    assert_eq!(compile_code("x := 9223372036854775807\nx"), "");
+    assert_eq!(compile_code("x := 1.0\ny := [x]\ny[0]"), "");
+}
+
+#[test]
+fn the_net_catches_a_parse_failure_that_reports_nothing() {
+    // The guarantee itself: whatever the parser does, it cannot drop a
+    // statement without saying so. Every rejected program must produce at
+    // least one diagnostic — E0030 is the backstop if a path forgets.
+    for src in [
+        "x := 99999999999999999999999999\n",
+        "/* unclosed\n",
+        "x := 1.2.3\n",
+        "enum E {\n 123\n}\n",
+        "x := \"unterminated\n",
+        "x := 1;\n",
+    ] {
+        let out = render_parse_errors(src);
+        assert!(
+            out.contains("error["),
+            "parsed with no diagnostic at all:\n{src}"
+        );
+    }
+}
+
+#[test]
+fn valid_programs_do_not_trip_the_net() {
+    // E0030 means "the parser gave up without saying why" — it must never fire
+    // on code that parses.
+    for src in [
+        "x := 1\nprintln(x)\n",
+        "fun f(a, b) { a + b }\nf(1, 2)\n",
+        "each i in range(3) { println(i) }\n",
+        "m := {\"k\": 1}\nprintln(m.k)\n",
+        "struct P { n <int> }\np := P(1)\np.n\n",
+    ] {
+        let out = render_parse_errors(src);
+        assert!(out.is_empty(), "valid program produced diagnostics:\n{src}\n{out}");
+    }
+}

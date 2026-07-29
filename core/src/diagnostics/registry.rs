@@ -42,6 +42,10 @@ pub const UNKNOWN_OPERATOR: Code = Code("E0023");
 pub const PATTERN_ARITY: Code = Code("E0024");
 pub const LOOP_VAR_REBIND: Code = Code("E0025");
 pub const TYPE_NAME_REBIND: Code = Code("E0026");
+pub const INTEGER_OUT_OF_RANGE: Code = Code("E0027");
+pub const MALFORMED_NUMBER: Code = Code("E0028");
+pub const UNTERMINATED_BLOCK_COMMENT: Code = Code("E0029");
+pub const PARSER_GAVE_UP: Code = Code("E0030");
 
 pub struct Entry {
     pub code: Code,
@@ -346,6 +350,55 @@ It reads as though it changes the loop, and it does not. Use a separate name:
 A block-scoped `struct` or `enum` name cannot be reassigned or shadowed in the
 same scope — later code in that block would silently refer to a different
 thing than the declaration suggests. Choose a different name for the value.
+",
+    },
+    Entry {
+        code: INTEGER_OUT_OF_RANGE,
+        title: "integer literal out of range",
+        explanation: "\
+Integers are signed 64-bit, so a literal must lie between
+-9223372036854775808 and 9223372036854775807.
+
+A literal outside that range used to be dropped silently: the whole statement
+vanished and the first sign of trouble was an `undefined variable` on a later
+line that was perfectly correct. Use a float if you need a larger magnitude.
+",
+    },
+    Entry {
+        code: MALFORMED_NUMBER,
+        title: "malformed number literal",
+        explanation: "\
+A number may contain at most one decimal point.
+
+    x := 1.2.3
+
+used to lex as `1.2` followed by `.3`, so it was read as field access and
+reported as `cannot access field '3' on FLOAT` — a confusing way to describe a
+typo in a number.
+",
+    },
+    Entry {
+        code: UNTERMINATED_BLOCK_COMMENT,
+        title: "unterminated block comment",
+        explanation: "\
+A `/*` comment was never closed with `*/`, so it swallowed the rest of the file.
+
+Nothing after the opening `/*` is compiled. This previously produced no
+diagnostic at all: the program ran whatever came before it, exited 0, and
+`oxigen check` reported the file as clean.
+",
+    },
+    Entry {
+        code: PARSER_GAVE_UP,
+        title: "the parser stopped without reporting why",
+        explanation: "\
+Internal consistency check. A parse function returned \"no result\" without
+recording a diagnostic, which would otherwise make the statement disappear with
+no explanation.
+
+Seeing this is a bug in Oxigen, not in your program — please report it with the
+source that triggered it. It exists so that a silent parse failure is impossible
+to ship: the worst outcome is now a loud, if generic, error.
 ",
     },
     Entry {

@@ -410,17 +410,32 @@ impl Parser {
         let mut program = Program {
             statements: Vec::new(),
         };
+        // Span of the first statement the parser failed to produce, if any.
+        let mut dropped: Option<Span> = None;
         while self.curr_token.token_type != TokenType::Eof {
             if self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
                 continue;
             }
 
-            let err_count = self.errors.len();
+            let stmt_span = self.curr_token.span;
             if let Some(stmt) = self.parse_statement() {
                 program.statements.push(stmt);
-            } else if self.errors.len() > err_count {
-                // A new error was added — synchronize to recover and continue parsing.
+            } else {
+                // Remember that a statement was dropped. Whether anything was
+                // *reported* cannot be judged here: the lexer runs ahead of the
+                // parser, so a lexical diagnostic for this statement's tokens
+                // may already have been recorded before we started. The check
+                // happens once, after parsing, in
+                // `assert_nothing_dropped_silently`.
+                //
+                // Synchronizing unconditionally also matters: this used to run
+                // only when the error count rose, so a statement dropped
+                // without a diagnostic skipped recovery entirely and the parser
+                // carried on from wherever it happened to stop.
+                if dropped.is_none() {
+                    dropped = Some(stmt_span);
+                }
                 let before = self.curr_token.span;
                 self.synchronize();
                 // Guarantee forward progress. `synchronize()` stops *at* a
@@ -436,7 +451,36 @@ impl Parser {
             self.next_token();
         }
         self.absorb_lexer_diagnostics();
+        self.assert_nothing_dropped_silently(dropped);
         program
+    }
+
+    /// Guarantees a dropped statement is never silent.
+    ///
+    /// `Option` cannot distinguish "I reported an error" from "I gave up
+    /// quietly", so a quiet `None` used to drop the statement and carry on —
+    /// the file compiled and ran, minus a line nobody was told about.
+    ///
+    /// A proof-carrying `Result<T, Bailed>` would enforce this at the type
+    /// level, but that is 71 signatures and ~197 `?` sites. This closes the
+    /// same hole for every path, present and future, at the cost of a generic
+    /// message: if anything was dropped and nothing at all was reported, say
+    /// so loudly.
+    fn assert_nothing_dropped_silently(&mut self, dropped: Option<Span>) {
+        let Some(span) = dropped else { return };
+        if !self.errors.is_empty() {
+            return;
+        }
+        self.errors.push(
+            diag(
+                codes::PARSER_GAVE_UP,
+                span,
+                "the parser stopped here without reporting why",
+            )
+            .label("could not parse this statement")
+            .note("this is a bug in Oxigen — the statement would otherwise be dropped silently")
+            .help("please report this with the source that triggered it"),
+        );
     }
 
     /// Folds the lexer's diagnostics in, ordered with the parser's by position.
@@ -932,7 +976,28 @@ impl Parser {
 
     fn parse_integer(&mut self) -> Option<Expression> {
         let tok = self.curr_token.clone();
-        let value = tok.literal.parse::<i64>().ok()?;
+        let value = match tok.literal.parse::<i64>() {
+            Ok(v) => v,
+            Err(_) => {
+                // This used to be `.ok()?` — a `None` with no diagnostic, so the
+                // whole statement silently vanished and the first symptom was an
+                // `undefined variable` on a later, correct line.
+                self.errors.push(
+                    diag(
+                        codes::INTEGER_OUT_OF_RANGE,
+                        tok.span,
+                        "integer literal out of range",
+                    )
+                    .label("does not fit in a 64-bit signed integer")
+                    .note(
+                        "integers range from -9223372036854775808 to \
+                         9223372036854775807",
+                    )
+                    .help("use a float if you need a larger magnitude"),
+                );
+                return None;
+            }
+        };
         Some(Expression::Int { token: tok, value })
     }
 
