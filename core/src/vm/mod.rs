@@ -158,6 +158,10 @@ impl JitFrameView {
 pub struct VMError {
     pub message: String,
     pub line: u32,
+    /// Stable identity for this failure. Defaults to the generic runtime code
+    /// so all 137 existing sites keep working while specific codes are given
+    /// out incrementally.
+    pub code: crate::diagnostics::Code,
     /// Error category tag, if any (e.g. from `<fail>(<Error<network>>(...))`).
     /// Preserved across a `guard`/`option <Error>` recovery so tag filters
     /// (`<guard<Error<tag>>>`) can match.
@@ -731,10 +735,15 @@ impl VM {
         let layout = self.resolve_field_layout(&struct_name_str)?;
         let mut field_vec: Vec<Value> = layout.slots.iter().map(|_| Value::None).collect();
 
+        // Track which slots were actually written. Inferring it from the slot
+        // still holding `Value::None` is wrong: a field explicitly given `None`
+        // is indistinguishable from one that was never supplied.
+        let mut assigned = vec![false; layout.slots.len()];
         for pair in flat.chunks(2) {
             if let Some(fname) = pair[0].as_string() {
                 if let Some(&idx) = layout.indices.get(fname.as_ref()) {
                     field_vec[idx] = pair[1].clone();
+                    assigned[idx] = true;
                 } else {
                     return Err(self.runtime_error_hint(
                         &format!("field '{}' not declared on {}", fname, struct_name_str),
@@ -744,11 +753,34 @@ impl VM {
             }
         }
 
-        // Zero-init any slots that weren't provided in the literal.
+        // Zero-init any slots that weren't provided.
+        //
+        // An EMPTY literal is the zero-value form and legitimately takes every
+        // default. A PARTIAL one is the mistake: the rest were quietly
+        // zero-filled, so the struct looked complete and the missing data
+        // showed up later as a wrong answer.
+        let supplied = flat.len() / 2;
+        let mut missing: Vec<String> = Vec::new();
         for (i, slot) in layout.slots.iter().enumerate() {
-            if matches!(field_vec[i], Value::None) {
+            if !assigned[i] {
+                if supplied > 0 && !Self::field_is_optional(&slot.1) {
+                    missing.push(format!("`{}`", slot.0));
+                }
                 field_vec[i] = Self::zero_value_for_type(&slot.1);
             }
+        }
+        if !missing.is_empty() {
+            let plural = if missing.len() == 1 { "field" } else { "fields" };
+            return Err(self.runtime_error_coded(
+                crate::diagnostics::registry::STRUCT_MISSING_FIELDS,
+                &format!(
+                    "{} is missing {} {}",
+                    struct_name_str,
+                    plural,
+                    missing.join(", ")
+                ),
+                Some("give every field a value, or none at all for zero-value initialization"),
+            ));
         }
 
         self.push(Value::StructInstance(Rc::new(ObjStructInstance::new(
@@ -1520,12 +1552,17 @@ impl VM {
             .unwrap_or(false)
     }
 
-    fn format_error(&self, message: &str, hint: Option<&str>) -> String {
+    fn format_error_coded(
+        &self,
+        code: crate::diagnostics::Code,
+        message: &str,
+        hint: Option<&str>,
+    ) -> String {
         let line_num = self.current_line() as usize;
         let col = self.current_column() as usize;
         let mut out = String::new();
 
-        out.push_str(&format!("error: {}\n", message));
+        out.push_str(&format!("error[{}]: {}\n", code, message));
         let frame_name = self.innermost_frame_name();
         let location = if col > 0 {
             format!("line {}:{}", line_num, col)
@@ -1551,6 +1588,11 @@ impl VM {
 
         if let Some(hint) = hint {
             out.push_str(&format!("\n  = hint: {}", hint));
+        }
+        if crate::diagnostics::registry::lookup(code).is_some() {
+            out.push_str(&format!(
+                "\n  = note: run `oxigen explain {code}` for more information"
+            ));
         }
 
         let trace = self.stack_trace();
@@ -1609,22 +1651,88 @@ impl VM {
         trace
     }
 
+    /// Whether a field's declared type admits `None`, making omission
+    /// deliberate rather than a slip — a linked-list `next <Node> || <None>`
+    /// is meant to be left off at the tail.
+    fn field_is_optional(type_name: &str) -> bool {
+        type_name.split("||").any(|t| t.trim().eq_ignore_ascii_case("none"))
+    }
+
+    /// Reports a call whose argument count the signature cannot accept.
+    fn arity_error(
+        &self,
+        function: &crate::vm::value::Function,
+        got: usize,
+        required: usize,
+        max: usize,
+    ) -> VMError {
+        let name = function
+            .name
+            .as_deref()
+            .map(|n| format!("`{n}`"))
+            .unwrap_or_else(|| "this function".to_string());
+        let plural = |n: usize| if n == 1 { "argument" } else { "arguments" };
+
+        let expectation = if required == max {
+            format!("{required} {}", plural(required))
+        } else {
+            format!("{required} to {max} arguments")
+        };
+        let was = if got == 1 { "was" } else { "were" };
+        let message = format!(
+            "{name} takes {expectation} but {got} {was} supplied"
+        );
+
+        let hint = if got < required {
+            let missing: Vec<String> = function
+                .params
+                .iter()
+                .skip(got)
+                .filter(|p| !p.has_default && !p.optional)
+                .map(|p| format!("`{}`", p.name))
+                .collect();
+            if missing.is_empty() {
+                "supply the missing arguments".to_string()
+            } else {
+                format!("missing {}", missing.join(", "))
+            }
+        } else {
+            format!("remove the extra {}", plural(got - max))
+        };
+
+        self.runtime_error_coded(
+            crate::diagnostics::registry::WRONG_ARGUMENT_COUNT,
+            &message,
+            Some(&hint),
+        )
+    }
+
     pub(crate) fn runtime_error(&self, message: &str) -> VMError {
+        self.runtime_error_coded(crate::diagnostics::registry::RUNTIME_ERROR, message, None)
+    }
+
+    /// A runtime error with a specific code.
+    pub(crate) fn runtime_error_coded(
+        &self,
+        code: crate::diagnostics::Code,
+        message: &str,
+        hint: Option<&str>,
+    ) -> VMError {
         let line = self.current_line();
         VMError {
-            message: self.format_error(message, None),
+            message: self.format_error_coded(code, message, hint),
             line,
+            code,
             tag: None,
         }
     }
 
     pub(crate) fn runtime_error_hint(&self, message: &str, hint: &str) -> VMError {
-        let line = self.current_line();
-        VMError {
-            message: self.format_error(message, Some(hint)),
-            line,
-            tag: None,
-        }
+        self.runtime_error_coded(
+            crate::diagnostics::registry::RUNTIME_ERROR,
+            message,
+            Some(hint),
+        )
     }
 
     // ── Main Execution Loop ────────────────────────────────────────────
@@ -2222,6 +2330,7 @@ impl VM {
                             return Err(VMError {
                                 message: msg,
                                 line: self.current_line(),
+                                code: crate::diagnostics::registry::RUNTIME_ERROR,
                                 tag,
                             });
                         }
@@ -2238,6 +2347,7 @@ impl VM {
                             return Err(VMError {
                                 message: data.msg.to_string(),
                                 line: self.current_line(),
+                                code: crate::diagnostics::registry::RUNTIME_ERROR,
                                 tag: data.tag.as_ref().map(|t| t.to_string()),
                             });
                         }
@@ -2245,6 +2355,7 @@ impl VM {
                             return Err(VMError {
                                 message: format!("{}", value),
                                 line: self.current_line(),
+                                code: crate::diagnostics::registry::RUNTIME_ERROR,
                                 tag: None,
                             });
                         }
@@ -3124,6 +3235,7 @@ impl VM {
                     return Err(VMError {
                         message: msg.to_string(),
                         line: self.current_line(),
+                        code: crate::diagnostics::registry::RUNTIME_ERROR,
                         tag: None,
                     });
                 }
@@ -3139,7 +3251,12 @@ impl VM {
 
                 let def_name = def.name.clone();
                 let layout = self.resolve_field_layout(&def_name)?;
+                // Every field needs a value. Omitted ones used to be filled
+                // with their type's zero, so a half-built struct looked
+                // complete and the missing data surfaced later as a wrong
+                // answer instead of an error.
                 let mut field_vec: Vec<Value> = Vec::with_capacity(layout.slots.len());
+                let mut missing: Vec<String> = Vec::new();
                 for (i, slot) in layout.slots.iter().enumerate() {
                     let val = if i < args.len() {
                         args[i].clone()
@@ -3148,9 +3265,47 @@ impl VM {
                     {
                         v.clone()
                     } else {
+                        if !Self::field_is_optional(&slot.1) {
+                            missing.push(format!("`{}`", slot.0));
+                        }
                         Self::zero_value_for_type(&slot.1)
                     };
                     field_vec.push(val);
+                }
+                // Supplying NOTHING is the documented zero-value form
+                // (`p <Person>`), which routes through here with no arguments —
+                // every field legitimately takes its type's zero. Supplying
+                // SOME is the mistake: the rest were quietly zero-filled, so a
+                // half-built struct looked complete and the missing data
+                // surfaced later as a wrong answer.
+                let supplied = args.len() + named_args.len();
+                if supplied > 0 && !missing.is_empty() {
+                    let plural = if missing.len() == 1 { "field" } else { "fields" };
+                    return Err(self.runtime_error_coded(
+                        crate::diagnostics::registry::STRUCT_MISSING_FIELDS,
+                        &format!(
+                            "{} is missing {} {}",
+                            def_name,
+                            plural,
+                            missing.join(", ")
+                        ),
+                        Some(
+                            "give every field a value, or none at all for zero-value \
+                             initialization",
+                        ),
+                    ));
+                }
+                if args.len() > layout.slots.len() {
+                    return Err(self.runtime_error_coded(
+                        crate::diagnostics::registry::STRUCT_MISSING_FIELDS,
+                        &format!(
+                            "{} takes {} fields but {} were supplied",
+                            def_name,
+                            layout.slots.len(),
+                            args.len()
+                        ),
+                        Some("remove the extra arguments"),
+                    ));
                 }
 
                 self.push(Value::StructInstance(Rc::new(ObjStructInstance::new(
@@ -3592,8 +3747,26 @@ impl VM {
                     self.stack[slot_base + idx] = val.clone();
                 }
             }
-        } else if arg_count < expected {
-            // Fill missing args with None (for optional/default params)
+        } else {
+            // Arity check. Too FEW arguments used to be padded with `None`, so
+            // the failure surfaced deep inside the callee (`type mismatch:
+            // INTEGER + NONE`) at a line the caller wrote correctly. Too MANY
+            // were never checked at all: the surplus stayed on the stack and
+            // left the frame misaligned, producing unrelated errors like
+            // `cannot call INTEGER`.
+            //
+            // Parameters with a default or a `?` marker may be omitted, so the
+            // floor is the count of genuinely required ones.
+            let required = closure
+                .function
+                .params
+                .iter()
+                .filter(|p| !p.has_default && !p.optional)
+                .count();
+            if arg_count < required || arg_count > expected {
+                return Err(self.arity_error(&closure.function, arg_count, required, expected));
+            }
+            // Optional/default params are filled in below by the defaults pass.
             for _ in arg_count..expected {
                 self.push(Value::None);
             }

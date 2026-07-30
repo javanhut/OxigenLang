@@ -416,6 +416,7 @@ impl JitInner {
                 let err = err_opt.unwrap_or_else(|| VMError {
                     message: "JIT runtime error with no stashed detail".to_string(),
                     line: 0,
+                    code: crate::diagnostics::registry::RUNTIME_ERROR,
                     tag: None,
                 });
                 InvokeOutcome::RuntimeError(err)

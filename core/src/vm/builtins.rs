@@ -1741,7 +1741,19 @@ fn builtin_json_parse(args: &[Value]) -> Value {
             let chars: Vec<char> = s.chars().collect();
             let mut pos = 0;
             match json_parse_value(&chars, &mut pos) {
-                Ok(val) => val,
+                Ok(val) => {
+                    // Content after the value used to be ignored, so a
+                    // concatenated or truncated document parsed "successfully"
+                    // as whatever happened to come first.
+                    json_skip_ws(&chars, &mut pos);
+                    if pos < chars.len() {
+                        let rest: String = chars[pos..].iter().take(20).collect();
+                        return Value::Error(rc_str(format!(
+                            "trailing content after JSON value: `{rest}`"
+                        )));
+                    }
+                    val
+                }
                 Err(e) => Value::Error(rc_str(format!("json parse error: {}", e))),
             }
         }

@@ -47,6 +47,12 @@ pub const MALFORMED_NUMBER: Code = Code("E0028");
 pub const UNTERMINATED_BLOCK_COMMENT: Code = Code("E0029");
 pub const PARSER_GAVE_UP: Code = Code("E0030");
 
+// ── Runtime ─────────────────────────────────────────────────────────────────
+pub const RUNTIME_ERROR: Code = Code("E0031");
+pub const WRONG_ARGUMENT_COUNT: Code = Code("E0032");
+pub const STRUCT_MISSING_FIELDS: Code = Code("E0033");
+pub const TRAILING_JSON: Code = Code("E0034");
+
 pub struct Entry {
     pub code: Code,
     pub title: &'static str,
@@ -399,6 +405,67 @@ no explanation.
 Seeing this is a bug in Oxigen, not in your program — please report it with the
 source that triggered it. It exists so that a silent parse failure is impossible
 to ship: the worst outcome is now a loud, if generic, error.
+",
+    },
+    Entry {
+        code: RUNTIME_ERROR,
+        title: "runtime error",
+        explanation: "\
+A general runtime failure that has not yet been given a more specific code.
+",
+    },
+    Entry {
+        code: WRONG_ARGUMENT_COUNT,
+        title: "wrong number of arguments",
+        explanation: "\
+A function was called with a number of arguments its signature cannot accept.
+
+    fun add(a, b) { a + b }
+    add(1)          // error: takes 2 arguments but 1 was supplied
+
+Parameters with a default or a `?` marker may be omitted:
+
+    fun greet(name, greeting = \"hello\") { ... }
+    greet(\"ada\")           // fine
+
+Too FEW arguments used to be padded with `None`, so the failure surfaced deep
+inside the callee as something like `type mismatch: INTEGER + NONE`, on a line
+that was written correctly. Too MANY were worse: the surplus left the frame
+misaligned, producing unrelated errors such as `cannot call INTEGER`.
+",
+    },
+    Entry {
+        code: STRUCT_MISSING_FIELDS,
+        title: "struct construction is missing fields",
+        explanation: "\
+Constructing a struct requires a value for every field, positionally or by name:
+
+    struct Point { x <int> y <int> }
+
+    p := Point(1, 2)
+    p := Point{x: 1, y: 2}
+    p := Point(1)            // error: missing `y`
+
+Supplying no values at all is the separate, documented zero-value form, where
+every field takes its type's zero:
+
+    p <Point>       // x = 0, y = 0
+
+A field whose type admits `None` may always be omitted — a linked-list
+`next <Node> || <None>` is meant to be left off at the tail.
+
+The error is for supplying *some* of the required ones. Those omissions used to be
+zero-filled too, so a half-built struct looked complete and the missing data
+surfaced much later as a wrong answer rather than an error.
+",
+    },
+    Entry {
+        code: TRAILING_JSON,
+        title: "trailing content after a JSON value",
+        explanation: "\
+`json.parse` reads a single JSON value. Anything after it is a sign the input
+is not what was intended — a concatenated document, a stray fragment, or a
+truncated write — so it is an error rather than being ignored.
 ",
     },
     Entry {

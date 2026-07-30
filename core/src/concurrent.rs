@@ -303,10 +303,21 @@ pub fn cancelled() -> bool {
 
 /// `cancel(handle)` — cooperatively stop a spawned task at its next call.
 pub fn builtin_cancel(args: &[Value]) -> Value {
-    if let Some(Value::Task(h)) = args.first() {
-        h.cancel();
+    // Anything that is not a task used to be accepted and ignored, so a
+    // mistaken `cancel(x)` reported success while cancelling nothing.
+    match args.first() {
+        Some(Value::Task(h)) => {
+            h.cancel();
+            Value::None
+        }
+        Some(other) => Value::Error(crate::vm::value::rc_str(format!(
+            "cancel() requires a task, got {}",
+            other.type_name()
+        ))),
+        None => Value::Error(crate::vm::value::rc_str(
+            "cancel() takes exactly 1 argument".to_string(),
+        )),
     }
-    Value::None
 }
 
 /// Block until every task handed to the worker pool has finished. Call once at
