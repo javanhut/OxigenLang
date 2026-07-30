@@ -36,7 +36,10 @@ fun set_in(obj <map>, path <str>, val <generic>) {
     give insert(obj, parts[0], val) when len(parts) == 1
     first := parts[0]
     rest := strings.join(parts[1:], ".")
-    child := option { has(obj, first) and type(obj[first]) == "MAP" -> obj[first], {} }
+    // The parens matter: a bare `{}` in option-arm position parses as an empty
+    // block (yielding None), not an empty map, so the recursive call below
+    // would fail its <map> parameter check.
+    child := option { has(obj, first) and type(obj[first]) == "MAP" -> obj[first], ({}) }
     insert(obj, first, set_in(child, rest, val))
 }
 

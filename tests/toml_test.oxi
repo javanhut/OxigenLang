@@ -1,0 +1,100 @@
+introduce toml
+
+<test>("parse scalars and sections") {
+    t := toml.parse("title = \"x\"\nnum = 5\n\n[server]\nport = 8080\n")
+    expect(type(t)).eq("MAP")
+    expect(t["title"]).eq("x")
+    expect(t["num"]).eq(5)
+    expect(type(t["server"])).eq("MAP")
+    expect(t["server"]["port"]).eq(8080)
+}
+
+<test>("parse booleans, floats and arrays") {
+    t := toml.parse("on = true\noff = false\nratio = 1.5\nlist = [1, 2, 3]\n")
+    expect(t["on"]).truthy()
+    expect(t["off"]).falsy()
+    expect(t["ratio"]).eq(1.5)
+    expect(len(t["list"])).eq(3)
+    expect(t["list"][0]).eq(1)
+}
+
+<test>("stringify emits a parseable document") {
+    doc := toml.stringify({"a": 1})
+    expect(toml.parse(doc)["a"]).eq(1)
+}
+
+<test>("stringify round-trips nested tables") {
+    t := toml.parse("[server]\nport = 8080\nhost = \"local\"\n")
+    back := toml.parse(toml.stringify(t))
+    expect(back["server"]["port"]).eq(8080)
+    expect(back["server"]["host"]).eq("local")
+}
+
+<test>("parse failure is a propagating error") {
+    // Like json.parse, toml.parse raises rather than returning an error value.
+    expect(toml.parse("= = =") <guard>("recovered")).eq("recovered")
+}
+
+<test>("get_in walks dotted paths") {
+    t := toml.parse("[a]\n[a.b]\nc = 3\n")
+    expect(toml.get_in(t, "a.b.c")).eq(3)
+    expect(toml.get_in(t, "a.missing")).eq(None)
+    expect(toml.get_in(t, "a.b.c.toodeep")).eq(None)
+}
+
+<test>("has_key_in reports path presence") {
+    t := toml.parse("[a]\nb = 1\n")
+    expect(toml.has_key_in(t, "a")).truthy()
+    expect(toml.has_key_in(t, "a.b")).truthy()
+    expect(toml.has_key_in(t, "a.c")).falsy()
+    expect(toml.has_key_in(t, "nope.at.all")).falsy()
+}
+
+<test>("set_in writes a top-level key") {
+    expect(toml.get_in(toml.set_in({}, "x", 7), "x")).eq(7)
+}
+
+<test>("set_in writes through an existing parent") {
+    parent := toml.parse("[x]\n")
+    expect(toml.get_in(toml.set_in(parent, "x.y", 7), "x.y")).eq(7)
+}
+
+<test>("set_in creates missing intermediate tables") {
+    expect(toml.get_in(toml.set_in({}, "server.port", 8080), "server.port")).eq(8080)
+    expect(toml.get_in(toml.set_in({}, "a.b.c", 1), "a.b.c")).eq(1)
+}
+
+<test>("set_in keeps siblings and replaces a non-table segment") {
+    grown := toml.set_in(toml.parse("keep = 1\n"), "n.deep", 2)
+    expect(grown["keep"]).eq(1)
+    expect(toml.get_in(grown, "n.deep")).eq(2)
+    expect(toml.get_in(toml.set_in(toml.parse("n = 5\n"), "n.deep", 2), "n.deep")).eq(2)
+}
+
+<test>("del_in removes nested and top-level keys") {
+    t := toml.parse("[x]\ny = 7\nk = 1\n")
+    pruned := toml.del_in(t, "x.y")
+    expect(toml.has_key_in(pruned, "x.y")).falsy()
+    expect(toml.get_in(pruned, "x.k")).eq(1)
+    expect(toml.has_key_in(toml.del_in(toml.parse("a = 1\n"), "a"), "a")).falsy()
+}
+
+<test>("merge is shallow, b wins") {
+    merged := toml.merge({"a": 1}, {"b": 2})
+    expect(merged["a"]).eq(1)
+    expect(merged["b"]).eq(2)
+    expect(toml.merge({"a": 1}, {"a": 9})["a"]).eq(9)
+}
+
+<test>("deep_merge recurses into nested tables") {
+    a := toml.parse("[n]\na = 1\n")
+    b := toml.parse("[n]\nb = 2\n")
+    merged := toml.deep_merge(a, b)
+    expect(toml.get_in(merged, "n.a")).eq(1)
+    expect(toml.get_in(merged, "n.b")).eq(2)
+}
+
+<test>("deep_merge overwrites when b is not a table") {
+    a := toml.parse("[n]\na = 1\n")
+    expect(toml.deep_merge(a, {"n": 5})["n"]).eq(5)
+}

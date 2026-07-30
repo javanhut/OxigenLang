@@ -59,6 +59,10 @@ fn eval_test_name(name: &Expression, source: &str, file_path: &Option<PathBuf>) 
         Ok(func) => {
             let mut vm = VM::new();
             vm.set_source(source);
+            // A test run has no argv, but `os.args()` is `fun args() { __args }`
+            // — without the global it raised `undefined variable: __args`
+            // instead of reading as empty.
+            vm.set_script_args(&[]);
             if let Some(p) = file_path {
                 vm.set_file(p.clone());
             }
@@ -114,6 +118,8 @@ pub fn run_vm_tests(
             Ok(func) => {
                 let mut vm = VM::new();
                 vm.set_source(source);
+                // See above: `os.args()` needs `__args` to exist even with no argv.
+                vm.set_script_args(&[]);
                 if let Some(ref p) = file_path {
                     vm.set_file(p.clone());
                 }

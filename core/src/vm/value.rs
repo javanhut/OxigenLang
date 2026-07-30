@@ -444,6 +444,20 @@ pub fn rc_str(s: impl Into<String>) -> Rc<String> {
     Rc::new(s.into())
 }
 
+/// The file a function's code was compiled from.
+///
+/// A frame's line number only means something alongside the source it indexes
+/// into. Without this, every frame rendered against whichever file the VM
+/// happened to be started with, so an error raised inside an imported function
+/// underlined an unrelated line of the entry script.
+///
+/// One instance is shared by every function compiled from the same file.
+#[derive(Debug)]
+pub struct ModuleOrigin {
+    pub file: String,
+    pub source: String,
+}
+
 /// A compiled function (not yet a closure — no captured upvalues).
 #[derive(Debug, Clone)]
 pub struct Function {
@@ -461,6 +475,11 @@ pub struct Function {
     /// closure's code across threads — a worker rebuilds the same id→Function
     /// table by compiling the same source (ids are deterministic per source).
     pub id: u32,
+    /// Which file this was compiled from. Stamped after compilation by
+    /// `set_module_origin` — the same post-hoc wiring `module_globals` uses,
+    /// since the compiler itself has no notion of files. `None` means the
+    /// entry script, whose source the VM already holds.
+    pub origin: RefCell<Option<Rc<ModuleOrigin>>>,
 }
 
 impl Function {
@@ -474,6 +493,25 @@ impl Function {
             locals: Vec::new(),
             has_loop: false,
             id: 0,
+            origin: RefCell::new(None),
+        }
+    }
+}
+
+/// Stamp `origin` onto a function and every function nested inside it.
+///
+/// Nested functions live in the constant pool as template closures, so the
+/// walk has to recurse through constants rather than just the top level —
+/// otherwise a helper defined inside an imported function still renders
+/// against the wrong file.
+pub fn set_module_origin(function: &Function, origin: &Rc<ModuleOrigin>) {
+    if function.origin.borrow().is_some() {
+        return; // already stamped — also stops cycles through shared constants
+    }
+    *function.origin.borrow_mut() = Some(Rc::clone(origin));
+    for constant in &function.chunk.constants {
+        if let ValueRepr::Closure(closure) = constant.repr() {
+            set_module_origin(&closure.function, origin);
         }
     }
 }
