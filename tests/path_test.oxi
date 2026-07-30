@@ -5,3 +5,38 @@ introduce path
     expect(path.is_relative("/home/user")).falsy()
     expect(path.is_relative("docs/readme.md")).truthy()
 }
+
+<test>("join builds a path from components") {
+    expect(path.join(["a", "b", "c.txt"])).eq("a/b/c.txt")
+    expect(path.join(["one"])).eq("one")
+}
+
+<test>("ext returns the extension without the dot") {
+    expect(path.ext("file.txt")).eq("txt")
+    expect(path.ext("/home/u/archive.tar.gz")).eq("gz")
+    expect(path.ext("README")).eq("")
+}
+
+<test>("filename strips the directory") {
+    expect(path.filename("/home/u/file.txt")).eq("file.txt")
+    expect(path.filename("file.txt")).eq("file.txt")
+}
+
+<test>("parent strips the final component") {
+    expect(path.parent("/home/u/file.txt")).eq("/home/u")
+    expect(path.parent("a/b")).eq("a")
+}
+
+<test>("stem is the filename without its extension") {
+    expect(path.stem("file.txt")).eq("file")
+    expect(path.stem("/home/u/file.txt")).eq("file")
+    expect(path.stem("README")).eq("README")
+}
+
+<test>("join output decomposes back into its parts") {
+    p := path.join(["home", "u", "notes.md"])
+    expect(path.filename(p)).eq("notes.md")
+    expect(path.stem(p)).eq("notes")
+    expect(path.ext(p)).eq("md")
+    expect(path.parent(p)).eq("home/u")
+}

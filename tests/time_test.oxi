@@ -1,0 +1,42 @@
+introduce time
+
+<test>("elapsed_ms converts nanoseconds to whole milliseconds") {
+    expect(time.elapsed_ms(0, 2000000)).eq(2)
+    expect(time.elapsed_ms(1000000, 3000000)).eq(2)
+    expect(time.elapsed_ms(0, 0)).eq(0)
+    expect(type(time.elapsed_ms(0, 2000000))).eq("INTEGER")
+}
+
+<test>("elapsed_ms truncates a sub-millisecond span to zero") {
+    expect(time.elapsed_ms(0, 999999)).eq(0)
+}
+
+<test>("elapsed_s converts nanoseconds to fractional seconds") {
+    expect(time.elapsed_s(0, 1500000000)).eq(1.5)
+    expect(time.elapsed_s(0, 1000000000)).eq(1.0)
+    expect(time.elapsed_s(0, 0)).eq(0.0)
+    expect(type(time.elapsed_s(0, 1500000000))).eq("FLOAT")
+}
+
+<test>("clock types") {
+    expect(type(time.now())).eq("FLOAT")
+    expect(type(time.now_ms())).eq("INTEGER")
+    expect(type(time.monotonic())).eq("INTEGER")
+}
+
+<test>("clocks are past the unix epoch") {
+    expect(time.now()).gt(1700000000.0)
+    expect(time.now_ms()).gt(1700000000000)
+}
+
+<test>("monotonic does not run backwards") {
+    a := time.monotonic()
+    b := time.monotonic()
+    expect(b).gte(a)
+}
+
+<test>("sleep advances the monotonic clock") {
+    start := time.monotonic()
+    time.sleep(15)
+    expect(time.elapsed_ms(start, time.monotonic())).gte(10)
+}

@@ -9,7 +9,7 @@ use crate::jit::JitEngine;
 use crate::vm::value::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 pub(crate) const STACK_MAX: usize = 262144; // 256K stack slots
@@ -29,6 +29,27 @@ pub(crate) fn type_matches(expected: &str, actual: &str) -> bool {
     } else {
         expected == actual
     }
+}
+
+/// How a file is named in a diagnostic.
+///
+/// Paths under the working directory are shown relative to it — `src/app.oxi`
+/// reads better than an absolute path and is still clickable in a terminal
+/// launched from that directory. Anything outside (an installed stdlib module
+/// under `/usr/local`) stays absolute rather than becoming a `../../..` chain.
+///
+/// `cwd` is a parameter rather than read here so this stays testable without
+/// mutating the process-global working directory.
+fn display_path(path: &Path, cwd: Option<&Path>) -> String {
+    cwd.and_then(|c| path.strip_prefix(c).ok())
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+/// `display_path` against the real working directory.
+fn display_path_cwd(path: &Path) -> String {
+    display_path(path, std::env::current_dir().ok().as_deref())
 }
 
 /// Locate the stdlib directory: next to the executable (dev or system install),
@@ -1527,18 +1548,28 @@ impl VM {
 
         out.push_str(&format!("error: {}\n", message));
         let frame_name = self.innermost_frame_name();
-        let location = if col > 0 {
-            format!("line {}:{}", line_num, col)
-        } else {
-            format!("line {}", line_num)
+        // A line number is only meaningful against the file it indexes into, so
+        // resolve the innermost frame's own source before rendering anything.
+        let origin = self.innermost_frame_origin();
+        let file = origin
+            .as_ref()
+            .map(|o| o.file.clone())
+            .or_else(|| self.current_file.as_deref().map(display_path_cwd));
+        let source = origin.as_ref().map(|o| o.source.as_str()).unwrap_or(&self.source);
+
+        let location = match (&file, col > 0) {
+            (Some(f), true) => format!("{}:{}:{}", f, line_num, col),
+            (Some(f), false) => format!("{}:{}", f, line_num),
+            (None, true) => format!("line {}:{}", line_num, col),
+            (None, false) => format!("line {}", line_num),
         };
         match &frame_name {
             Some(name) => out.push_str(&format!("  --> {} (in `{}`)\n", location, name)),
             None => out.push_str(&format!("  --> {}\n", location)),
         }
 
-        if !self.source.is_empty()
-            && let Some(source_line) = self.source.lines().nth(line_num.saturating_sub(1)) {
+        if !source.is_empty()
+            && let Some(source_line) = source.lines().nth(line_num.saturating_sub(1)) {
                 let line_str = format!("{}", line_num);
                 let padding = " ".repeat(line_str.len());
                 out.push_str(&format!("{} |\n", padding));
@@ -1556,13 +1587,31 @@ impl VM {
         let trace = self.stack_trace();
         if trace.len() >= 2 {
             out.push_str("\nstack trace (innermost first):");
-            for (name, line) in &trace {
+            for (name, line, frame_file) in &trace {
                 let label = name.as_deref().unwrap_or("<top-level>");
-                out.push_str(&format!("\n   at `{}` (line {})", label, line));
+                // Frames from different files are the whole reason this was
+                // confusing, so name the file whenever we know it.
+                match frame_file {
+                    Some(f) => out.push_str(&format!("\n   at `{}` ({}:{})", label, f, line)),
+                    None => out.push_str(&format!("\n   at `{}` (line {})", label, line)),
+                }
             }
         }
 
         out
+    }
+
+    /// Source and file of the function active at the innermost frame.
+    /// `None` means the entry script, whose source the VM holds directly.
+    fn innermost_frame_origin(&self) -> Option<Rc<crate::vm::value::ModuleOrigin>> {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top() {
+                let closure = unsafe { &*frame.closure_raw };
+                return closure.function.origin.borrow().clone();
+            }
+        self.frames
+            .last()
+            .and_then(|f| f.closure.function.origin.borrow().clone())
     }
 
     /// Name of the function active at the innermost frame. `None` means
@@ -1584,14 +1633,32 @@ impl VM {
     /// `(function_name, line)` per frame. The top-level script body has
     /// `name == None`. When the JIT is executing, all of its frames are
     /// included innermost-first, ahead of any interpreter frames below.
-    fn stack_trace(&self) -> Vec<(Option<String>, u32)> {
-        let mut trace: Vec<(Option<String>, u32)> = Vec::new();
+    fn stack_trace(&self) -> Vec<(Option<String>, u32, Option<String>)> {
+        // Each frame carries the file its line belongs to; `None` is the entry
+        // script. Mixing files without saying so is what made a cross-module
+        // trace unreadable.
+        let entry_file = self.current_file.as_deref().map(display_path_cwd);
+        let frame_file = |closure: &ObjClosure| -> Option<String> {
+            closure
+                .function
+                .origin
+                .borrow()
+                .as_ref()
+                .map(|o| o.file.clone())
+                .or_else(|| entry_file.clone())
+        };
+
+        let mut trace: Vec<(Option<String>, u32, Option<String>)> = Vec::new();
         if self.jit_executing.get() {
             let len = self.jit_frame_view.len;
             for i in (0..len).rev() {
                 let frame = unsafe { &*self.jit_frame_view.ptr.add(i) };
                 let closure = unsafe { &*frame.closure_raw };
-                trace.push((closure.function.name.clone(), frame.line));
+                trace.push((
+                    closure.function.name.clone(),
+                    frame.line,
+                    frame_file(closure),
+                ));
             }
         }
         for frame in self.frames.iter().rev() {
@@ -1604,7 +1671,11 @@ impl VM {
                 .get(ip)
                 .copied()
                 .unwrap_or(0);
-            trace.push((frame.closure.function.name.clone(), line));
+            trace.push((
+                frame.closure.function.name.clone(),
+                line,
+                frame_file(&frame.closure),
+            ));
         }
         trace
     }
@@ -4140,6 +4211,15 @@ impl VM {
             ))
         })?;
 
+        // Tag every function from this module with the file it came from, so a
+        // failure inside one renders against *this* source rather than the
+        // entry script's line of the same number.
+        let origin = Rc::new(crate::vm::value::ModuleOrigin {
+            file: display_path_cwd(&module_path),
+            source: source.clone(),
+        });
+        crate::vm::value::set_module_origin(&function, &origin);
+
         // Execute in a sub-VM
         let mut sub_vm = VM::new();
         sub_vm.set_source(&source);
@@ -4544,6 +4624,32 @@ mod tests {
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use std::path::PathBuf;
+
+    #[test]
+    fn diagnostic_paths_are_relative_only_inside_the_working_directory() {
+        let cwd = PathBuf::from("/home/u/proj");
+
+        // Under cwd: shortened, so a trace reads `src/app.oxi:8`.
+        assert_eq!(
+            display_path(Path::new("/home/u/proj/src/app.oxi"), Some(&cwd)),
+            "src/app.oxi"
+        );
+        // Outside cwd: left absolute rather than turned into `../../..`.
+        assert_eq!(
+            display_path(Path::new("/usr/local/lib/oxigen/stdlib/os.oxi"), Some(&cwd)),
+            "/usr/local/lib/oxigen/stdlib/os.oxi"
+        );
+        // A sibling directory sharing a name prefix must not be mistaken for a child.
+        assert_eq!(
+            display_path(Path::new("/home/u/proj-other/a.oxi"), Some(&cwd)),
+            "/home/u/proj-other/a.oxi"
+        );
+        // No cwd available: fall back to whatever we were given.
+        assert_eq!(
+            display_path(Path::new("/home/u/proj/src/app.oxi"), None),
+            "/home/u/proj/src/app.oxi"
+        );
+    }
 
     #[test]
     fn execution_mode_constructors_are_explicit() {

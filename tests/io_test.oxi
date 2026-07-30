@@ -1,0 +1,76 @@
+introduce io
+introduce os
+introduce path
+
+// Tests write under the system temp dir, never the repo. TMPDIR is set on
+// macOS; Linux CI generally leaves it unset, hence the /tmp fallback.
+fun tmp_dir(leaf <str>) {
+    env_tmp := os.env_get("TMPDIR")
+    base := option { env_tmp != None and env_tmp != "" -> env_tmp, "/tmp" }
+    path.join([base, leaf])
+}
+
+<test>("write then read round-trips") {
+    dir := tmp_dir("oxi_io_rw")
+    os.mkdir(dir)
+    f := path.join([dir, "a.txt"])
+    io.write_file(f, "hello")
+    expect(io.read_file(f)).eq("hello")
+    os.rmdir(dir)
+}
+
+<test>("write replaces existing content") {
+    dir := tmp_dir("oxi_io_replace")
+    os.mkdir(dir)
+    f := path.join([dir, "a.txt"])
+    io.write_file(f, "first")
+    io.write_file(f, "second")
+    expect(io.read_file(f)).eq("second")
+    os.rmdir(dir)
+}
+
+<test>("append adds to the end") {
+    dir := tmp_dir("oxi_io_append")
+    os.mkdir(dir)
+    f := path.join([dir, "a.txt"])
+    io.write_file(f, "hello")
+    io.append_file(f, " world")
+    expect(io.read_file(f)).eq("hello world")
+    os.rmdir(dir)
+}
+
+<test>("append creates a missing file") {
+    dir := tmp_dir("oxi_io_append_new")
+    os.mkdir(dir)
+    f := path.join([dir, "fresh.txt"])
+    io.append_file(f, "x")
+    expect(io.read_file(f)).eq("x")
+    os.rmdir(dir)
+}
+
+<test>("file_exists tracks creation and removal") {
+    dir := tmp_dir("oxi_io_exists")
+    os.mkdir(dir)
+    f := path.join([dir, "a.txt"])
+    expect(io.file_exists(f)).falsy()
+    io.write_file(f, "x")
+    expect(io.file_exists(f)).truthy()
+    os.remove_file(f)
+    expect(io.file_exists(f)).falsy()
+    os.rmdir(dir)
+}
+
+<test>("empty content round-trips") {
+    dir := tmp_dir("oxi_io_empty")
+    os.mkdir(dir)
+    f := path.join([dir, "a.txt"])
+    io.write_file(f, "")
+    expect(io.file_exists(f)).truthy()
+    expect(io.read_file(f)).eq("")
+    os.rmdir(dir)
+}
+
+<test>("reading a missing file is a propagating error") {
+    missing := tmp_dir("oxi_io_definitely_missing.txt")
+    expect(io.read_file(missing) <guard>("recovered")).eq("recovered")
+}

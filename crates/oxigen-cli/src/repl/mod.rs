@@ -27,6 +27,9 @@ fn repl_loop() {
     // One persistent VM for the whole session. Top-level `var`/`fun`/`struct`/
     // `enum` declarations compile to globals, so they carry across lines.
     let mut vm = VM::new();
+    // The REPL has no argv, but `os.args()` still has to resolve rather than
+    // raise `undefined variable: __args`.
+    vm.set_script_args(&[]);
 
     println!("Oxigen REPL");
     crate::print_version();
