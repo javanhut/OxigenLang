@@ -75,11 +75,17 @@ fn fold_constant_expression(expr: &Expression) -> Option<Value> {
                 ("*", Value::Integer(a), Value::Integer(b)) => {
                     Some(Value::Integer(a.wrapping_mul(*b)))
                 }
+                // `checked_*`, not `wrapping_*`: int_min / -1 has no int result, and
+                // wrapping it here folded to int_min while the same expression written
+                // with variables raised E0031 at runtime — one expression, two answers,
+                // decided by whether the operands happened to be literals. `None` drops
+                // the fold so the runtime reports it, exactly as a zero divisor already
+                // does via the guard above.
                 ("/", Value::Integer(a), Value::Integer(b)) if *b != 0 => {
-                    Some(Value::Integer(a.wrapping_div(*b)))
+                    a.checked_div(*b).map(Value::Integer)
                 }
                 ("%", Value::Integer(a), Value::Integer(b)) if *b != 0 => {
-                    Some(Value::Integer(a.wrapping_rem(*b)))
+                    a.checked_rem(*b).map(Value::Integer)
                 }
                 // Integer bitwise / shift (same semantics as vm::binary_b*)
                 ("&", Value::Integer(a), Value::Integer(b)) => Some(Value::Integer(a & b)),

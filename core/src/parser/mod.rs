@@ -410,8 +410,8 @@ impl Parser {
         let mut program = Program {
             statements: Vec::new(),
         };
-        // Span of the first statement the parser failed to produce, if any.
-        let mut dropped: Option<Span> = None;
+        // Extents of statements the parser dropped without emitting anything.
+        let mut dropped: Vec<Span> = Vec::new();
         while self.curr_token.token_type != TokenType::Eof {
             if self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
@@ -419,22 +419,31 @@ impl Parser {
             }
 
             let stmt_span = self.curr_token.span;
+            let errors_before = self.errors.len();
             if let Some(stmt) = self.parse_statement() {
                 program.statements.push(stmt);
             } else {
-                // Remember that a statement was dropped. Whether anything was
-                // *reported* cannot be judged here: the lexer runs ahead of the
-                // parser, so a lexical diagnostic for this statement's tokens
-                // may already have been recorded before we started. The check
-                // happens once, after parsing, in
-                // `assert_nothing_dropped_silently`.
+                // A statement was dropped. If the parser's own error count rose
+                // while parsing it, it was reported and there is nothing to do.
+                // Otherwise it is only a *candidate* for the gave-up note: the
+                // lexer runs ahead of the parser, so a lexical diagnostic for
+                // this statement's tokens may already have been recorded before
+                // we started, and those are only folded in at the end by
+                // `absorb_lexer_diagnostics`. Record the statement's extent —
+                // start through the lookahead token, the furthest token that
+                // could have caused the failure — so the final check can ask
+                // whether any diagnostic actually lands inside it.
+                //
+                // The count is per-statement on purpose: a global "are there any
+                // errors at all" check passed as soon as *some other* statement
+                // had failed, which let a quietly-dropped statement vanish.
                 //
                 // Synchronizing unconditionally also matters: this used to run
                 // only when the error count rose, so a statement dropped
                 // without a diagnostic skipped recovery entirely and the parser
                 // carried on from wherever it happened to stop.
-                if dropped.is_none() {
-                    dropped = Some(stmt_span);
+                if self.errors.len() == errors_before {
+                    dropped.push(stmt_span.to(self.peek_token.span));
                 }
                 let before = self.curr_token.span;
                 self.synchronize();
@@ -464,13 +473,32 @@ impl Parser {
     /// A proof-carrying `Result<T, Bailed>` would enforce this at the type
     /// level, but that is 71 signatures and ~197 `?` sites. This closes the
     /// same hole for every path, present and future, at the cost of a generic
-    /// message: if anything was dropped and nothing at all was reported, say
-    /// so loudly.
-    fn assert_nothing_dropped_silently(&mut self, dropped: Option<Span>) {
-        let Some(span) = dropped else { return };
-        if !self.errors.is_empty() {
+    /// message.
+    ///
+    /// The property enforced is per-statement, not per-file: for each dropped
+    /// statement, either the parser's error count rose while parsing it (the
+    /// caller only passes on the ones where it did not), or some diagnostic —
+    /// including the lexical ones folded in just beforehand — lands inside its
+    /// extent. This used to check only that `self.errors` was non-empty at the
+    /// end, which is the much weaker "something, somewhere, was reported": a
+    /// statement dropped quietly after any earlier statement had failed
+    /// vanished unmentioned. Only the first survivor is reported; one "this is
+    /// a bug in Oxigen" note per file is enough.
+    fn assert_nothing_dropped_silently(&mut self, dropped: Vec<Span>) {
+        let Some(span) = dropped.into_iter().find(|extent| {
+            // Compared by (line, column) — the same ordering `absorb_lexer_diagnostics`
+            // sorts by, and the only part of a `Pos` synthetic spans fill in.
+            let (lo, hi) = (
+                (extent.start.line, extent.start.column),
+                (extent.end.line, extent.end.column),
+            );
+            !self.errors.iter().any(|d| {
+                let at = (d.span().line(), d.span().column());
+                at >= lo && at <= hi
+            })
+        }) else {
             return;
-        }
+        };
         self.errors.push(
             diag(
                 codes::PARSER_GAVE_UP,

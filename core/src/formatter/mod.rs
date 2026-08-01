@@ -621,6 +621,21 @@ impl Formatter {
             Statement::Introduce {
                 path, selective, ..
             } => {
+                // The leading dots are part of the path, not decoration: dropping
+                // them turned `introduce .json` into `introduce json`, which still
+                // parses but resolves to the stdlib module instead of the local
+                // one — a silent rewrite of what the program runs. Mirrors
+                // `Parser::parse_module_path`: one dot for the current directory,
+                // one more per parent level.
+                let rendered = if path.is_relative {
+                    format!(
+                        "{}{}",
+                        ".".repeat(path.parent_levels + 1),
+                        path.segments.join(".")
+                    )
+                } else {
+                    path.segments.join(".")
+                };
                 if let Some(names) = selective {
                     self.push("introduce {");
                     for (i, name) in names.iter().enumerate() {
@@ -630,10 +645,10 @@ impl Formatter {
                         self.push(&name.value);
                     }
                     self.push("} from ");
-                    self.push(&path.segments.join("."));
+                    self.push(&rendered);
                 } else {
                     self.push("introduce ");
-                    self.push(&path.segments.join("."));
+                    self.push(&rendered);
                 }
             }
             Statement::Unpack {

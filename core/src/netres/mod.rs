@@ -375,6 +375,10 @@ pub fn http_upload(
     let resp = req.send(file).map_err(|e| format!("http error: {}", e))?;
     let status = resp.status().as_u16();
     let (_, mut body) = resp.into_parts();
-    let body_str = body.read_to_string().unwrap_or_default();
+    // Same as `__http_request`: a failed read must not masquerade as an empty
+    // body, or a truncated upload response reads as a clean one.
+    let body_str = body
+        .read_to_string()
+        .map_err(|e| format!("http error: reading response body: {}", e))?;
     Ok((status as i64, body_str))
 }

@@ -31,6 +31,10 @@ use std::rc::Rc;
 pub enum Sendable {
     Unit,
     Int(i64),
+    /// Uints get their own variant: routing them through `Int` wrapped every
+    /// value above `i64::MAX` (18446744073709551615 came back as -1) and
+    /// returned the wrong type besides.
+    Uint(u64),
     Float(f64),
     Bool(bool),
     Str(String),
@@ -56,7 +60,7 @@ fn detach(v: &Value) -> Result<Sendable, String> {
         ValueRepr::Integer(n) => Ok(Sendable::Int(n)),
         ValueRepr::Float(f) => Ok(Sendable::Float(f)),
         ValueRepr::Boolean(b) => Ok(Sendable::Bool(b)),
-        ValueRepr::Uint(u) => Ok(Sendable::Int(u as i64)),
+        ValueRepr::Uint(u) => Ok(Sendable::Uint(u)),
         ValueRepr::String(s) => Ok(Sendable::Str(s.as_ref().clone())),
         ValueRepr::Array(a) => {
             let mut out = Vec::new();
@@ -109,6 +113,7 @@ fn attach(s: Sendable, vm: &VM) -> Value {
     match s {
         Sendable::Unit => Value::None,
         Sendable::Int(n) => Value::Integer(n),
+        Sendable::Uint(u) => Value::Uint(u),
         Sendable::Float(f) => Value::Float(f),
         Sendable::Bool(b) => Value::Boolean(b),
         Sendable::Str(s) => Value::String(Rc::new(s)),
@@ -585,6 +590,20 @@ fn spawn_inner(args: &[Value], globals: Vec<(String, Sendable)>) -> Value {
         if pending > workers && workers < MAX_WORKERS {
             spawn_worker(Arc::clone(&pool.rx), pool.src.clone());
         }
+        // A `thread::Builder::spawn` failure used to be swallowed (spawn_worker
+        // only rolled back WORKERS), and the task went into the channel anyway:
+        // with nobody left to drain it, join() blocked forever and drain() spun
+        // forever at exit. Not theoretical — STACK_SIZE is 256 MB and
+        // MAX_WORKERS is 256, so a full fan-out reserves 64 GB of stack and
+        // thread creation really does fail. Refuse the spawn instead of hanging,
+        // and undo the OUTSTANDING bump so exit isn't blocked either.
+        if WORKERS.load(Ordering::SeqCst) == 0 {
+            OUTSTANDING.fetch_sub(1, Ordering::SeqCst);
+            return Value::Error(Rc::new(
+                "spawn(): could not create worker threads (out of memory or thread limit reached)"
+                    .to_string(),
+            ));
+        }
         if pool.tx.send(task).is_err() {
             OUTSTANDING.fetch_sub(1, Ordering::SeqCst);
             return Value::Error(Rc::new("spawn(): worker pool unavailable".to_string()));
@@ -617,12 +636,31 @@ pub fn join_with_vm(vm: &VM, args: &[Value]) -> Value {
         // join a list of tasks in order — so `converge [t1, t2]` works and no
         // `array` import is needed for batch joins. Non-task elements pass through.
         Some(Value::Array(arr)) => {
+            // The timeout used to be accepted and ignored here, so
+            // `converge [t] within 50` blocked for the task's full runtime —
+            // a silently-dropped argument in the release whose theme is that
+            // nothing fails silently.
+            //
+            // `within N` on a list is ONE deadline for the whole batch, not N
+            // per task: "converge these within 50ms" reads as a single budget,
+            // and per-task would let k tasks legitimately block for k*N ms —
+            // exactly the unbounded wait the timeout exists to prevent.
+            // Tasks past the deadline yield the same catchable
+            // Error{tag: timeout} the single-task form produces, so the array
+            // keeps its length and callers can branch per element.
+            let deadline = args.get(1).and_then(|v| v.as_integer()).map(|ms| {
+                std::time::Instant::now() + std::time::Duration::from_millis(ms.max(0) as u64)
+            });
             let joined: Vec<Value> = arr
                 .borrow()
                 .iter()
-                .map(|v| match v {
-                    Value::Task(h) => h.join(vm),
-                    other => other.clone(),
+                .map(|v| match (v, deadline) {
+                    (Value::Task(h), Some(end)) => {
+                        let left = end.saturating_duration_since(std::time::Instant::now());
+                        h.join_timeout(vm, left.as_millis() as u64)
+                    }
+                    (Value::Task(h), None) => h.join(vm),
+                    (other, _) => other.clone(),
                 })
                 .collect();
             Value::Array(Rc::new(RefCell::new(joined)))

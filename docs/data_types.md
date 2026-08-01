@@ -16,6 +16,10 @@ z := 0
 
 Type keyword: `int`. Zero value: `0`.
 
+Range is `-9223372036854775808` to `9223372036854775807`. `+`, `-`, and `*` wrap
+around on overflow; `/` and `%` raise an error instead. See
+[Integer Overflow](operators.md#integer-overflow) for the exact rules.
+
 ### Float
 
 64-bit floating-point numbers. Supports arithmetic and comparison operations.
@@ -493,6 +497,10 @@ uint(byte(255))
 ```
 
 Negative values produce an error.
+
+Range is `0` to `18446744073709551615`. `+` and `*` wrap around on overflow, but
+a subtraction that would go below zero is an error rather than a wrap. See
+[Unsigned Integer Overflow](operators.md#unsigned-integer-overflow).
 
 ## Enums
 

@@ -1946,11 +1946,19 @@ impl VM {
                 OpCode::Add => int_fast_binop!(l, r, true, Value::Integer(l + r), binary_add),
                 OpCode::Subtract => int_fast_binop!(l, r, true, Value::Integer(l - r), binary_sub),
                 OpCode::Multiply => int_fast_binop!(l, r, true, Value::Integer(l * r), binary_mul),
+                // The guard excludes `-1` as well as `0`: Rust traps signed
+                // division overflow (`i64::MIN / -1`) unconditionally, and
+                // this workspace builds with `panic = "abort"`, so an
+                // unguarded `/` here kills the process with a raw Rust panic
+                // instead of an Oxigen diagnostic. `r != 0 && r != -1` folds
+                // to a single unsigned compare, so the hot path keeps its one
+                // predictable branch; the rare `x / -1` now takes the slow
+                // helper, which reports the overflow properly.
                 OpCode::Divide => {
-                    int_fast_binop!(l, r, r != 0, Value::Integer(l / r), binary_div)
+                    int_fast_binop!(l, r, r != 0 && r != -1, Value::Integer(l / r), binary_div)
                 }
                 OpCode::Modulo => {
-                    int_fast_binop!(l, r, r != 0, Value::Integer(l % r), binary_mod)
+                    int_fast_binop!(l, r, r != 0 && r != -1, Value::Integer(l % r), binary_mod)
                 }
 
                 // ── Comparison ──────────────────────────────────────
@@ -2987,6 +2995,19 @@ impl VM {
         )
     }
 
+    /// `i64::MIN / -1` (and `%`) has no representable result. Rust traps
+    /// signed division overflow regardless of `overflow-checks`, and this
+    /// workspace sets `panic = "abort"`, so without this the process dies
+    /// with a raw Rust panic pointing into the compiler's own source. Same
+    /// shape (and code) as `division_by_zero` so `oxigen explain E0031`
+    /// already covers it.
+    fn division_overflow(&self, op: char) -> VMError {
+        self.runtime_error_hint(
+            &format!("integer overflow: int_min {op} -1 has no int result"),
+            "the smallest int has no positive counterpart; special-case this divisor",
+        )
+    }
+
     pub(crate) fn binary_div(&self, a: Value, b: Value) -> Result<Value, VMError> {
         let (a, b) = (self.force(a), self.force(b));
         // Float division by zero is an error too, not `inf`/`NaN`. Integers
@@ -2999,7 +3020,10 @@ impl VM {
                 if *r == 0 {
                     Err(self.division_by_zero())
                 } else {
-                    Ok(Value::Integer(l / r))
+                    // `checked_div`, not `/`: see `division_overflow`.
+                    l.checked_div(*r)
+                        .map(Value::Integer)
+                        .ok_or_else(|| self.division_overflow('/'))
                 }
             }
             (Value::Float(l), Value::Float(r)) => {
@@ -3044,7 +3068,10 @@ impl VM {
                 if *r == 0 {
                     Err(self.modulo_by_zero())
                 } else {
-                    Ok(Value::Integer(l % r))
+                    // `checked_rem`, not `%`: see `division_overflow`.
+                    l.checked_rem(*r)
+                        .map(Value::Integer)
+                        .ok_or_else(|| self.division_overflow('%'))
                 }
             }
             (Value::Float(l), Value::Float(r)) => {

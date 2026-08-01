@@ -86,6 +86,90 @@ The `+` operator concatenates tuples:
 (1, 2) + (3, 4)
 ```
 
+### Integer Overflow
+
+`int` is a 64-bit signed integer. Its range is `-9223372036854775808` to
+`9223372036854775807`.
+
+`+`, `-`, and `*` **wrap** when a result leaves that range. This is defined
+behaviour, not an error and not undefined: the true result is reduced modulo
+2<sup>64</sup> and reinterpreted as two's complement, so the answer is the same
+on every platform and under every backend — interpreter, VM, and JIT all agree.
+
+```oxi
+9223372036854775807 + 1     // -9223372036854775808 — wraps to the minimum
+9223372036854775807 * 2     // -2
+
+min := 9223372036854775807 + 1
+min - 1                     // 9223372036854775807 — wraps back to the maximum
+min * -1                    // -9223372036854775808 — negating the minimum wraps to itself
+```
+
+Note that the minimum cannot be written as a literal. `-9223372036854775808` is
+parsed as a negation applied to the literal `9223372036854775808`, which is one
+past the maximum and so is rejected as out of range. Reach the minimum by
+arithmetic, as above.
+
+Wrapping never raises an error, so it cannot be caught after the fact. If a
+computation might exceed the range and you need to know, test the operands
+before the operation:
+
+```oxi
+option {
+    a > 9223372036854775807 - b -> <fail>("would overflow"),
+    a + b
+}
+```
+
+Division is the exception: `/` and `%` do **not** wrap. Dividing the minimum by
+`-1` is the only overflow division can produce — the true answer
+`9223372036854775808` is one past the top of the range — and it is a runtime
+error rather than a wrap:
+
+```oxi
+min := 9223372036854775807 + 1
+min / -1     // error: integer overflow: int_min / -1 has no int result
+min % -1     // error: integer overflow: int_min % -1 has no int result
+```
+
+The asymmetry is deliberate. `+`, `-`, and `*` sit on the hot path of every
+loop and index computation, and wrapping keeps them branch-free — one machine
+instruction with no overflow check to predict. `/` and `%` already have to
+branch on the divisor to reject zero, so range-checking the same operand costs
+nothing that was not being paid anyway.
+
+### Unsigned Integer Overflow
+
+`uint` is a 64-bit unsigned integer, range `0` to `18446744073709551615`.
+
+`+` and `*` wrap exactly as their signed counterparts do, modulo
+2<sup>64</sup>. The maximum is likewise past the reach of an `int` literal, so
+build it by arithmetic:
+
+```oxi
+umax := uint(9223372036854775807) * uint(2) + uint(1)    // 18446744073709551615
+
+umax + uint(1)    // 0 — wraps back to zero
+umax * uint(2)    // 18446744073709551614
+```
+
+Subtraction is the exception. A `uint` subtraction that would drop below zero
+is a runtime error rather than a wrap to a very large positive number, because
+that particular wrap is nearly always a bug — a length or index calculation
+that went one step too far — and a silent `18446744073709551615` propagates far
+from where it started:
+
+```oxi
+uint(0) - uint(1)    // error: unsigned integer underflow
+```
+
+Unsigned division has no overflow case, so there is no `uint` counterpart to
+the most-negative-over-`-1` error above. Division and modulo by zero are still
+errors, as below.
+
+Mixing a `uint` with an `int` produces an `int`, and is therefore subject to
+the signed range and the signed wrapping rules.
+
 ### Division by Zero
 
 Division `/` and modulo `%` by zero produce an error, for every numeric type —

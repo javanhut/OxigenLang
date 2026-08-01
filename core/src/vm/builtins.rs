@@ -2197,7 +2197,19 @@ fn builtin_http_request(args: &[Value]) -> Value {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     let (_, mut resp_body) = resp.into_parts();
-                    let body_str = resp_body.read_to_string().unwrap_or_default();
+                    // A failed body read used to default to "", so a connection
+                    // reset mid-body or a non-UTF-8 payload was indistinguishable
+                    // from a server that legitimately answered with no body.
+                    // Surface it the way a transport failure already surfaces.
+                    let body_str = match resp_body.read_to_string() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return Value::Error(rc_str(format!(
+                                "http error: reading response body: {}",
+                                e
+                            )));
+                        }
+                    };
                     let entries: Vec<(Value, Value)> = vec![
                         (
                             Value::String(rc_str("status")),
