@@ -250,8 +250,7 @@ impl TaskHandle {
         v
     }
 
-    /// ponytail: timeout stops *waiting*, not the task; don't memoize, so a
-    /// later join can still collect.
+    /// Stops waiting, not the task; deliberately unmemoized so a later join still collects.
     pub fn join_timeout(&self, vm: &VM, ms: u64) -> Value {
         if let Some(v) = &*self.memo.borrow() {
             return v.clone();
@@ -308,8 +307,7 @@ pub fn cancelled() -> bool {
 
 /// `cancel(handle)` — cooperatively stop a spawned task at its next call.
 pub fn builtin_cancel(args: &[Value]) -> Value {
-    // Anything that is not a task used to be accepted and ignored, so a
-    // mistaken `cancel(x)` reported success while cancelling nothing.
+    // A non-task used to be accepted and ignored, reporting success.
     match args.first() {
         Some(Value::Task(h)) => {
             h.cancel();
@@ -377,9 +375,7 @@ fn build_worker_vm(src: &str) -> Result<VM, String> {
     if !parser.errors().is_empty() {
         return Err(format!("worker parse error: {}", parser.format_errors()));
     }
-    // Compile the FULL program (not run) to harvest the id->function table —
-    // lambdas live in `main`, which the declarations filter below drops. Same
-    // source + compiler as the main thread, so the ids match.
+    // Compile the full program for the id->fn table; lambdas live in `main`.
     let full = Rc::new(
         Compiler::new()
             .compile(&program)
@@ -389,8 +385,7 @@ fn build_worker_vm(src: &str) -> Result<VM, String> {
     collect_fns(&full, &mut table);
     WORKER_FNS.with(|t| *t.borrow_mut() = table);
 
-    // Workers load declarations only — drop all executable top-level statements
-    // so no top-level `spawn`/`join`/side effect ever runs at worker init.
+    // Declarations only, so no top-level side effect runs at worker init.
     program.statements.retain(is_declaration);
     let function = Compiler::new()
         .compile(&program)
@@ -413,9 +408,7 @@ fn run_task(
     args: Vec<Sendable>,
     globals: Vec<(String, Sendable)>,
 ) -> Result<Sendable, String> {
-    // Seed the worker with the main thread's user globals so a spawned closure
-    // that reads a top-level `main` binding (a GLOBAL, not an upvalue) resolves
-    // it here. Last-writer-wins per task; each spawn ships the full snapshot.
+    // Seed main's globals: a spawned closure reads them as globals, not upvalues.
     for (name, s) in globals {
         let v = attach(s, vm);
         vm.define_global(name, v);
@@ -448,9 +441,7 @@ fn spawn_worker(rx: Arc<Mutex<mpsc::Receiver<Task>>>, src: String) {
         .stack_size(STACK_SIZE)
         .spawn(move || {
             IS_WORKER.with(|w| w.set(true));
-            // Build can fail (e.g. a module that errors at init). Keep the
-            // result and reply with the error per task rather than dying — a
-            // dead worker orphans queued tasks, deadlocking their join().
+            // Reply with the build error per task; a dead worker deadlocks join().
             let mut built = build_worker_vm(&src);
             loop {
                 let task = {
@@ -505,8 +496,7 @@ pub fn builtin_spawn(args: &[Value]) -> Value {
 /// closure can resolve top-level `main` bindings (GLOBALS, not upvalues) on the
 /// worker, which otherwise loads only declarations. Builtins/closures/tasks
 /// aren't Sendable -> skipped (the worker already has declarations).
-/// ponytail: ships the full user-global snapshot per spawn — O(globals) detach.
-/// Cheap for typical programs; narrow to GetGlobal-referenced names if it bites.
+/// Ships the whole global snapshot per spawn; narrow to referenced names if it bites.
 pub fn spawn_with_vm(vm: &VM, args: &[Value]) -> Value {
     let globals: Vec<(String, Sendable)> = vm
         .globals_iter()
@@ -521,9 +511,7 @@ fn spawn_inner(args: &[Value], globals: Vec<(String, Sendable)>) -> Value {
     }
     let callee = match args[0].repr() {
         ValueRepr::Closure(c) => {
-            // Named top-level function with no captures: resolve by name on the
-            // worker (preserves module context). Otherwise ship the function id
-            // plus a snapshot of its (already-closed) upvalues.
+            // By name when uncaptured (keeps module context), else by id + upvalues.
             if c.upvalues.is_empty() && c.function.name.is_some() {
                 Callee::Named(c.function.name.clone().unwrap())
             } else {
@@ -565,9 +553,7 @@ fn spawn_inner(args: &[Value], globals: Vec<(String, Sendable)>) -> Value {
 
     // Inside a worker: run inline so workers can't enqueue more tasks.
     if is_worker() {
-        // Workers don't have access to their own VM here, so we build a
-        // throwaway one. This path is rare (nested spawn) and intentionally
-        // simple — correctness over speed.
+        // No VM reachable here, so build a throwaway one; nested spawn is rare.
         let src = SRC.get().cloned().unwrap_or_default();
         let result = match build_worker_vm(&src) {
             Ok(mut vm) => run_task(&mut vm, callee, sendable_args, globals),
@@ -584,19 +570,12 @@ fn spawn_inner(args: &[Value], globals: Vec<(String, Sendable)>) -> Value {
             cancel: cancel.clone(),
         };
         let pending = OUTSTANDING.fetch_add(1, Ordering::SeqCst) + 1;
-        // Grow the pool when every worker is busy so I/O-bound fan-out isn't
-        // capped at core count. Blocked threads park for free.
+        // Grow when all workers are busy; blocked threads park for free.
         let workers = WORKERS.load(Ordering::SeqCst);
         if pending > workers && workers < MAX_WORKERS {
             spawn_worker(Arc::clone(&pool.rx), pool.src.clone());
         }
-        // A `thread::Builder::spawn` failure used to be swallowed (spawn_worker
-        // only rolled back WORKERS), and the task went into the channel anyway:
-        // with nobody left to drain it, join() blocked forever and drain() spun
-        // forever at exit. Not theoretical — STACK_SIZE is 256 MB and
-        // MAX_WORKERS is 256, so a full fan-out reserves 64 GB of stack and
-        // thread creation really does fail. Refuse the spawn instead of hanging,
-        // and undo the OUTSTANDING bump so exit isn't blocked either.
+        // With no workers the task would never drain: join() and drain() hang forever.
         if WORKERS.load(Ordering::SeqCst) == 0 {
             OUTSTANDING.fetch_sub(1, Ordering::SeqCst);
             return Value::Error(Rc::new(
@@ -633,21 +612,9 @@ pub fn join_with_vm(vm: &VM, args: &[Value]) -> Value {
             Some(ms) => h.join_timeout(vm, ms.max(0) as u64),
             None => h.join(vm),
         },
-        // join a list of tasks in order — so `converge [t1, t2]` works and no
-        // `array` import is needed for batch joins. Non-task elements pass through.
+        // Join in order so `converge [t1, t2]` works; non-tasks pass through.
         Some(Value::Array(arr)) => {
-            // The timeout used to be accepted and ignored here, so
-            // `converge [t] within 50` blocked for the task's full runtime —
-            // a silently-dropped argument in the release whose theme is that
-            // nothing fails silently.
-            //
-            // `within N` on a list is ONE deadline for the whole batch, not N
-            // per task: "converge these within 50ms" reads as a single budget,
-            // and per-task would let k tasks legitimately block for k*N ms —
-            // exactly the unbounded wait the timeout exists to prevent.
-            // Tasks past the deadline yield the same catchable
-            // Error{tag: timeout} the single-task form produces, so the array
-            // keeps its length and callers can branch per element.
+            // One deadline for the whole batch; per-task would allow k*N ms.
             let deadline = args.get(1).and_then(|v| v.as_integer()).map(|ms| {
                 std::time::Instant::now() + std::time::Duration::from_millis(ms.max(0) as u64)
             });

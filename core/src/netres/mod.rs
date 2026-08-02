@@ -26,10 +26,7 @@ enum Resource {
     Tcp(TcpStream),
     Listener(TcpListener),
     Udp(UdpSocket),
-    // A streaming HTTP response body, drained on a background thread into a
-    // channel so reads can be polled with a timeout (a live spinner) instead of
-    // blocking the interpreter. Behind its own Arc<Mutex<…>> so the registry
-    // lock is released before the (possibly slow) channel wait.
+    // Own Arc<Mutex> so the registry lock is dropped before the channel wait.
     HttpBody(Arc<Mutex<HttpStream>>),
 }
 
@@ -48,9 +45,7 @@ struct HttpStream {
 /// `spawn_body_reader`.
 const BODY_QUEUE_CHUNKS: usize = 8;
 
-// ponytail: one global lock on the socket table so ids cross threads (enables
-// spawn handle(conn)). I/O runs on a cloned fd *outside* the lock, so a blocking
-// recv never stalls other sockets. Shard the map only if the lock ever contends.
+// One lock so handles cross threads; I/O runs on a cloned fd outside it.
 static REGISTRY: LazyLock<Mutex<HashMap<u64, Resource>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -113,8 +108,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn tcp_connect(host: &str, port: i64) -> Result<u64, String> {
     let port = port_u16(port, false)?;
-    // `connect_timeout` takes a resolved address, so resolve first and try each
-    // candidate (a host can have both A and AAAA records) as `connect` does.
+    // connect_timeout needs a resolved address; try each A/AAAA candidate.
     let addrs: Vec<_> = (host, port)
         .to_socket_addrs()
         .map_err(|e| e.to_string())?
@@ -139,8 +133,7 @@ pub fn tcp_listen(host: &str, port: i64) -> Result<u64, String> {
 }
 
 pub fn tcp_accept(id: u64) -> Result<u64, String> {
-    // Clone the listener so the registry borrow is released before the
-    // (potentially long) blocking accept.
+    // Clone so the registry lock is released before the blocking accept.
     let listener = match REGISTRY.lock().unwrap().get(&id) {
         Some(Resource::Listener(l)) => l.try_clone().map_err(|e| e.to_string())?,
         Some(_) => return Err(format!("handle {} is not a TCP server", id)),
@@ -172,13 +165,7 @@ pub fn tcp_receive(id: u64, max: i64) -> Result<String, String> {
         return Err("receive: max bytes must be positive".to_string());
     }
     with_tcp(id, |s| {
-        // Allocate the read chunk, not the caller's number. This is one read of
-        // a byte stream returning *up to* `max`, so a buffer capped at 64 KiB
-        // gives identical results for any realistic socket read while making
-        // the allocation independent of `max`: `receive(c, i64::MAX)` used to
-        // ask for 9.2 exabytes, and an allocation failure is a process *abort*
-        // — no panic to catch, no diagnostic. It also stops a plausible
-        // `receive(c, 1000000000)` burning 1 GB to return a few bytes.
+        // Cap the buffer: a caller's i64::MAX asked for 9.2EB and aborted.
         let mut buf = vec![0u8; (max as usize).min(TCP_READ_CHUNK)];
         let n = s.read(&mut buf).map_err(|e| e.to_string())?;
         buf.truncate(n);
@@ -216,21 +203,7 @@ pub fn udp_receive(id: u64, max: i64) -> Result<(String, String), String> {
         return Err("udp_receive: max bytes must be positive".to_string());
     }
     with_udp(id, |s| {
-        // UDP is *not* TCP here: the OS truncates and discards any part of a
-        // datagram that does not fit the buffer, so shrinking it would silently
-        // lose data rather than just return less. Two consequences:
-        //
-        //  - The allocation is capped at the largest datagram that can exist
-        //    (65507 bytes of payload for IPv4, less for IPv6), rounded to
-        //    64 KiB, so it never depends on the caller's `max` — that is what
-        //    stopped `udp_receive(h, i64::MAX)` aborting the process.
-        //  - Read into one byte MORE than the caller asked for. That extra byte
-        //    is the only portable way to distinguish "the datagram exactly
-        //    filled the request" from "the datagram was larger and got cut":
-        //    both look like `n == max` otherwise. `n > max` therefore means
-        //    truncation, precisely. Above UDP_MAX_DATAGRAM the buffer already
-        //    exceeds any deliverable datagram, so `n > max` cannot fire there
-        //    and a large `max` never sees a spurious error.
+        // Read one byte past max: an exact fit also gives n == max, so only n > max proves truncation.
         let want = max as usize;
         let mut buf = vec![0u8; want.saturating_add(1).min(UDP_MAX_DATAGRAM)];
         let (n, addr) = s.recv_from(&mut buf).map_err(|e| e.to_string())?;
@@ -316,9 +289,8 @@ pub fn http_open(
 
 /// Drains a response body on a background thread into a channel so reads can be
 /// polled with a timeout instead of blocking the interpreter. The thread ends at
-/// EOF, on error, or when the consumer drops the stream (`close`). ponytail: a
-/// thread blocked in `read` at close lingers until the next byte/EOF — fine for
-/// bodies that terminate; revisit if long idle streams pile up.
+/// EOF, on error, or when the consumer drops the stream (`close`). A thread blocked in
+/// `read` at close lingers until the next byte or EOF.
 ///
 /// The channel is *bounded*, which is what makes the "never buffered whole in
 /// memory" promise true: on an unbounded channel the reader drained the socket
@@ -445,8 +417,7 @@ pub fn http_read(id: u64, max: i64, timeout_ms: i64) -> Result<Option<String>, S
         Err(e) => e.valid_up_to(),
     };
     if end == 0 {
-        // The next char is wider than `max`, or only a truncated tail remains at
-        // EOF. Emit it (lossily for the truncated case) so we always progress.
+        // Char wider than `max`, or a truncated tail at EOF: emit to progress.
         let out = String::from_utf8_lossy(&st.carry).into_owned();
         st.carry.clear();
         return Ok(Some(out));
@@ -485,8 +456,7 @@ pub fn http_upload(
     let resp = req.send(file).map_err(|e| format!("http error: {}", e))?;
     let status = resp.status().as_u16();
     let (_, mut body) = resp.into_parts();
-    // Same as `__http_request`: a failed read must not masquerade as an empty
-    // body, or a truncated upload response reads as a clean one.
+    // A failed read must not masquerade as an empty body.
     let body_str = body
         .read_to_string()
         .map_err(|e| format!("http error: reading response body: {}", e))?;

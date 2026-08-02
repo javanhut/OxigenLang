@@ -170,9 +170,7 @@ impl OxMap {
 
 impl PartialEq for OxMap {
     fn eq(&self, other: &Self) -> bool {
-        // Order-insensitive, key-based — the correct map semantics. The old
-        // `Vec` equality was order-sensitive; see the migration note in
-        // docs/PERF_PLAN_LUAJIT.md for the (intentional) behavior delta.
+        // Key-based and order-insensitive; the old Vec equality was order-sensitive.
         if self.entries.len() != other.entries.len() {
             return false;
         }

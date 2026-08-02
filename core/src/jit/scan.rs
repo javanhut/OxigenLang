@@ -69,8 +69,7 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
             return Err(ScanError::UnsupportedOpcode { offset: ip, byte });
         }
 
-        // Branch targets: jumps use u16 offsets right after the opcode
-        // byte.
+        // Jumps use u16 offsets immediately after the opcode byte.
         match op_info.control_flow {
             ControlFlow::ForwardJump | ControlFlow::ConditionalJump => {
                 let off =
@@ -92,11 +91,7 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
             ControlFlow::Fallthrough | ControlFlow::Return | ControlFlow::ErrorHandler => {}
         }
 
-        // Heap-value detection. Conservative: any opcode that can put a
-        // heap-backed (Rc-bearing) Value on the stack sets the flag.
-        // Also any Constant pointing to an Rc-backed constant. Opcodes
-        // that only touch primitives (arithmetic, comparison, jumps,
-        // local/global primitive ops) don't set the flag.
+        // Conservative: any opcode that can put an Rc-bearing Value on the stack sets the flag.
         if op_info.properties.touches_heap {
             info.touches_heap_values = true;
         } else if matches!(op, OpCode::Constant) {
@@ -117,16 +112,12 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
                 }
         }
 
-        // Advance using the canonical bytecode-width decoder. It also
-        // validates fixed operands and Closure descriptors.
+        // The canonical width decoder also validates fixed operands and Closure descriptors.
         let instruction_len = chunk
             .instruction_len(ip)
             .map_err(|_| ScanError::InvalidBytecode { offset: ip })?;
         if op_info.properties.captures {
-            // Closure opcode means this function may capture locals into
-            // upvalues of the inner closure; Return must therefore call
-            // close_upvalues. Record that fact so the JIT can NOT inline
-            // op_return for this function.
+            // A Closure op means Return must call close_upvalues, so op_return cannot be inlined.
             info.may_capture_upvalues = true;
         }
         ip += instruction_len;

@@ -7,10 +7,7 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
 pub fn run_repl() {
-    // Run the session on a large-stack thread so a function that tiers up to
-    // the JIT has room for its native frames (mirrors run_file_vm). rustyline
-    // reads stdin fine from a spawned thread, and the Rc-backed VM is created
-    // inside the closure so nothing non-Send crosses the boundary.
+    // Large-stack thread so a tiered-up function has room for its native frames.
     const STACK_SIZE: usize = 256 << 20; // 256 MB
     std::thread::Builder::new()
         .stack_size(STACK_SIZE)
@@ -24,11 +21,9 @@ fn repl_loop() {
     let prompt = ">> ";
     let mut rl = DefaultEditor::new().expect("Failed to initialize line editor");
 
-    // One persistent VM for the whole session. Top-level `var`/`fun`/`struct`/
-    // `enum` declarations compile to globals, so they carry across lines.
+    // One persistent VM per session, so top-level declarations carry across lines.
     let mut vm = VM::new();
-    // The REPL has no argv, but `os.args()` still has to resolve rather than
-    // raise `undefined variable: __args`.
+    // The REPL has no argv, but os.args() must resolve rather than raise.
     vm.set_script_args(&[]);
 
     println!("Oxigen REPL");

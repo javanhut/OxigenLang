@@ -83,11 +83,7 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
         .canonicalize()
         .expect("Could not resolve file path");
 
-    // Run parse/compile/VM execution on a large-stack thread so all FRAMES_MAX
-    // (16384) native JIT frames fit on the native stack and the V7 recursion
-    // guard is the graceful limit (instead of the native stack overflowing
-    // first -> rc=134). Parse/compile run inside the thread too so no non-Send
-    // (Rc-backed) value is captured across the thread boundary.
+    // Large stack so all 16384 JIT frames fit natively and the V7 guard is the graceful limit.
     const STACK_SIZE: usize = 256 << 20; // 256 MB
     let run = {
         let script_args: Vec<String> = script_args.to_vec();
@@ -109,11 +105,7 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
             let function = match compiler.compile(&program) {
                 Ok(f) => f,
                 Err(errors) => {
-                    // Render through the shared renderer so a compile error
-                    // looks like every other diagnostic. It used to print as
-                    // `[line N] Compile error: ...`, so the same file produced
-                    // two visually unrelated kinds of error depending on which
-                    // stage caught it.
+                    // Render through the shared renderer so a compile error looks like every other diagnostic.
                     let source = SourceFile::named(
                         file_path_buf.display().to_string(),
                         contents.clone(),
@@ -279,9 +271,7 @@ fn run_test_file(path: &std::path::Path, color: bool) -> FileResult {
         }
     };
 
-    // `oxigen test` runs each `<test>` block on the bytecode VM, so tests
-    // observe the same semantics as `oxigen file.oxi` — notably in-place
-    // `push`/`insert`.
+    // `oxigen test` runs on the bytecode VM so tests see the same semantics as running the file.
     let outcomes = oxigen_core::test_runner::run_vm_tests(&program, &contents, Some(file_path_buf));
 
     if outcomes.is_empty() {
@@ -403,13 +393,7 @@ fn check_file(file_path: &str) {
     let mut sink = DiagnosticSink::new();
     sink.extend(parser.errors().iter().cloned());
 
-    // Compile too, so compile errors reach the editor. `check` used to parse
-    // and stop, and the LSP is `oxigen check` read back out — which meant a
-    // compile error had never once been shown in an editor, and every
-    // improvement to compiler messages was invisible where users read errors.
-    //
-    // Only worth attempting on a clean parse: compiling a broken tree produces
-    // cascades from the syntax error rather than real findings.
+    // check used to parse and stop, so a compile error never reached an editor.
     if !sink.has_errors()
         && let Err(errors) = Compiler::new().compile(&program)
     {
@@ -424,10 +408,7 @@ fn check_file(file_path: &str) {
         .collect();
     println!("{}", serde_json::to_string(&payload).unwrap());
 
-    // Non-zero when the file actually failed, so `check` is usable as a CI
-    // gate. Warnings alone still exit 0. The JSON goes to stdout either way —
-    // the LSP parses stdout regardless of exit status (see
-    // `lsp-go/diagnostics.go`), so this stays compatible with it.
+    // Non-zero only on real failure, so check works as a CI gate; warnings still exit 0.
     if sink.has_errors() {
         std::process::exit(1);
     }
@@ -459,8 +440,7 @@ fn fmt_files(paths: &[String]) {
             std::process::exit(1);
         }
 
-        // `restore_header` puts `#[indent]` back, so the body has to be emitted
-        // in indent style or the reformatted file no longer parses.
+        // restore_header puts #[indent] back, so the body must be emitted in indent style.
         let indent_style = header_prefix(&contents)
             .lines()
             .any(|l| l.trim() == "#[indent]");
@@ -516,13 +496,11 @@ fn usage_error(message: &str, hint: Option<&str>) -> ! {
 /// Rejects a leading argument that is neither a subcommand nor a `.oxi` script,
 /// instead of silently falling through to the REPL.
 fn reject_leading_arg(arg: &str) -> ! {
-    // A `.oxi` path is handled by the caller, so anything with an extension
-    // here is the wrong kind of file.
+    // A .oxi path is handled by the caller, so any other extension is the wrong kind of file.
     let looks_like_path = arg.contains('/') || arg.contains('.');
 
     if !looks_like_path {
-        // `oxigen run app.oxi` — there is no `run` subcommand; scripts are
-        // passed directly. Older docs suggested otherwise, so name the fix.
+        // There is no `run` subcommand; scripts are passed directly.
         let hint = if arg == "run" {
             "run a script with `oxigen <file.oxi>` — there is no `run` subcommand".to_string()
         } else {
@@ -543,12 +521,7 @@ fn reject_leading_arg(arg: &str) -> ! {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // The bytecode VM is the only backend. `--jit` compiles eagerly (threshold
-    // 1), `--no-jit` disables compilation; default is lazy tiering.
-    //
-    // These are only recognised BEFORE the subcommand or script path. Scanning
-    // all of argv would swallow a script's own `--no-jit` argument, so once a
-    // non-option argument appears everything after it belongs to the script.
+    // Recognised only before the subcommand or script path, or a script's own --no-jit is swallowed.
     let mut no_jit = false;
     let mut want_eager = false;
     let mut cursor = 1;

@@ -95,8 +95,7 @@ impl Formatter {
         self.flush_comments_inside_block();
         self.indent -= 1;
         if self.indent_style {
-            // A dedent closes the block, so there is no `}` to write; drop the
-            // body's trailing newline to match brace style's cursor position.
+            // Dedent closes the block, so drop the body's trailing newline.
             while self.output.ends_with('\n') {
                 self.output.pop();
             }
@@ -163,8 +162,7 @@ impl Formatter {
                 self.newline();
             }
         }
-        // Anything after the last statement — a trailing comment block, or the
-        // whole file when it has no statements at all.
+        // Trailing comments, or the whole file when it has no statements.
         self.flush_comments_before(usize::MAX);
     }
 
@@ -197,9 +195,7 @@ impl Formatter {
 
         self.next_anchor = saved_anchor;
         self.open_column = saved_open;
-        // Set after formatting, so any block this statement opened closed
-        // against its own body's column first; now the enclosing block sees
-        // this statement as its latest.
+        // Set after formatting so an opened block closes on its own column first.
         if let Some(span) = span {
             self.body_column = span.column();
             self.push_trailing_comment(span.line());
@@ -213,9 +209,7 @@ impl Formatter {
             if comment.line >= line {
                 break;
             }
-            // A comment that trailed code whose statement we already passed
-            // would duplicate that code's position; emit it on its own line
-            // rather than dropping it.
+            // Emit on its own line rather than duplicating the passed statement's position.
             let text = comment.text.clone();
             self.next_comment += 1;
             self.push_indent();
@@ -298,8 +292,7 @@ impl Formatter {
     fn format_statement(&mut self, stmt: &Statement) {
         match stmt {
             Statement::Let { name, value } => {
-                // Named functions: `fun name(params) { body }`
-                // The parser stores them as Let { name, FunctionLiteral { token: Function } }
+                // Named `fun`s are stored as Let { name, FunctionLiteral }.
                 if let Expression::FunctionLiteral {
                     token,
                     parameters,
@@ -621,12 +614,7 @@ impl Formatter {
             Statement::Introduce {
                 path, selective, ..
             } => {
-                // The leading dots are part of the path, not decoration: dropping
-                // them turned `introduce .json` into `introduce json`, which still
-                // parses but resolves to the stdlib module instead of the local
-                // one — a silent rewrite of what the program runs. Mirrors
-                // `Parser::parse_module_path`: one dot for the current directory,
-                // one more per parent level.
+                // Dots are path, not decoration: dropping them resolves `.json` to the stdlib.
                 let rendered = if path.is_relative {
                     format!(
                         "{}{}",
@@ -911,8 +899,7 @@ impl Formatter {
             }
             Expression::MapLiteral { entries, .. } => {
                 if entries.is_empty() {
-                    // `{}` is the only empty-map form the parser accepts; `{:}`
-                    // is rejected in every position.
+                    // `{}` is the only empty-map form; `{:}` is always rejected.
                     self.push("{}");
                     return;
                 }
@@ -1116,8 +1103,7 @@ impl Formatter {
     }
 
     fn format_function_body(&mut self, body: &[Statement]) {
-        // Single expression body: inline on the same line. Indent style has no
-        // inline block form — the body must go on its own indented line.
+        // Inline only for brace style; indent style has no inline block form.
         if !self.indent_style
             && body.len() == 1
             && let Statement::Expr(expr) = &body[0]
@@ -1197,8 +1183,7 @@ fn stmt_span(stmt: &Statement) -> Option<Span> {
         | Statement::Introduce { token, .. }
         | Statement::Main { token, .. }
         | Statement::Test { token, .. } => Some(token.span),
-        // Assignment targets are expressions; the statement starts where the
-        // target does, not at the `=` the token points to.
+        // The statement starts at the target, not the `=` the token points to.
         Statement::DotAssign { token, object, .. } => {
             expr_span(object).or(Some(token.span))
         }

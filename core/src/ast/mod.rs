@@ -415,11 +415,7 @@ pub enum Expression {
         parts: Vec<StringInterpPart>,
     },
 
-    // Concurrency surface syntax. Kept as first-class nodes (rather than
-    // desugared at parse time) so tooling — the formatter especially — can
-    // round-trip `diverge`/`converge` instead of seeing the lowered builtins.
-    // The compiler and evaluator lower them via `desugar_*` below; there is no
-    // new runtime concept.
+    // First-class nodes so the formatter can round-trip diverge/converge instead of the lowered call.
     Diverge {
         token: Token,
         body: Vec<Statement>,
@@ -443,16 +439,7 @@ pub enum StringInterpPart {
     Expr(Expression),
 }
 
-// ── diverge / converge lowering ─────────────────────────────────────────────
-// `diverge`/`converge` are surface syntax for fork-join. They lower to the
-// `__spawn`/`__join_task` builtins — the compiler and VM never need a new
-// concept. The lowering lives here (not in the parser) so the parser can keep
-// the high-level node for the formatter while the compiler and evaluator share
-// one desugaring:
-//   diverge { B }              -> __spawn(fun() { B })
-//   diverge each X in XS { B } -> (fun(){ spawn each, then join each in order })()
-//   converge T                 -> __join_task(T)
-//   converge T within ms       -> __join_task(T, ms)
+// diverge/converge lower to the __spawn/__join_task builtins.
 
 fn syn_ident(tok: &Token, name: &str) -> Expression {
     Expression::Ident(Identifier {

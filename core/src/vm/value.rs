@@ -229,8 +229,7 @@ mod layout_tests {
             upvalue_int_kinds: kinds,
             upvalue_int_values: values,
         });
-        // Read the RcBox pointer the same way the JIT does: raw bit
-        // pattern of the `Rc`, which is `NonNull<RcBox<T>>`.
+        // Read the raw Rc bit pattern the way the JIT does: NonNull<RcBox<T>>.
         let rcbox_ptr: *const usize =
             unsafe { *(&obj as *const Rc<ObjClosure> as *const *const usize) };
         let before = unsafe { *rcbox_ptr };
@@ -341,9 +340,7 @@ pub enum Value {
     Uint(u64),
     None,
 
-    // Heap-allocated. `String` holds `Rc<String>` (not `Rc<str>`) so the
-    // pointer stays thin (8 B); the fat variant wasted 8 B per Value
-    // across every stack slot. See roadmap A1.1b.
+    // Rc<String> not Rc<str>, so the pointer stays thin; the fat variant cost 8 B per Value.
     String(Rc<String>),
     Array(Rc<RefCell<Vec<Value>>>),
     Tuple(Rc<Vec<Value>>),
@@ -790,8 +787,7 @@ impl ObjStructInstance {
 impl Drop for ObjStructInstance {
     fn drop(&mut self) {
         if !self.fields.ptr.is_null() {
-            // Reconstitute the original `Vec<Value>` so its allocator
-            // frees the buffer and Drops each contained `Value`.
+            // Reconstitute the Vec so its allocator frees the buffer and Drops each Value.
             unsafe {
                 let _ = Vec::from_raw_parts(
                     self.fields.ptr,
@@ -847,10 +843,7 @@ pub struct ObjModule {
 // ── Value methods ──────────────────────────────────────────────────────
 
 impl Value {
-    // ── Variant accessors (A1.2.5 flag-day prep) ─────────────────────
-    // Mirror NanValue's accessor surface so call sites can stop relying
-    // on the enum's pattern shape. Primitives return by value; Rc
-    // variants borrow the existing Rc to stay allocation-free.
+    // Mirror NanValue's accessors so call sites stop relying on the enum's pattern shape.
 
     #[inline] pub fn as_integer(&self) -> Option<i64> {
         if let Value::Integer(n) = self { Some(*n) } else { None }
@@ -985,12 +978,7 @@ impl Value {
                 }
                 Value::Set(Rc::new(RefCell::new(fresh)))
             }
-            // Tuples are immutable (`Rc<Vec<Value>>` with no interior
-            // mutability) so sharing the Rc is observationally identical to a
-            // deep copy — a plain clone is correct and cheaper. Strings,
-            // closures, struct/enum instances, etc. are likewise either
-            // immutable at this default-materialization point or intentionally
-            // shared by identity.
+            // Tuples are immutable, so sharing the Rc is observationally identical to a deep copy.
             other => other.clone(),
         }
     }
@@ -1205,10 +1193,7 @@ impl PartialEq for Value {
             (Value::Integer(a), Value::Integer(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Char(a), Value::Char(b)) => a == b,
-            // Pointer-equal ⇒ content-equal (always correct). With
-            // interned constant-pool strings (see vm::intern) the common
-            // case — comparing two identifiers / literals / map keys — is
-            // a single pointer compare instead of a byte-wise memcmp.
+            // Interned constant-pool strings make the common comparison a single pointer check.
             (Value::String(a), Value::String(b)) => Rc::ptr_eq(a, b) || a == b,
             (Value::Boolean(a), Value::Boolean(b)) => a == b,
             (Value::None, Value::None) => true,

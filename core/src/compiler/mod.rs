@@ -75,12 +75,7 @@ fn fold_constant_expression(expr: &Expression) -> Option<Value> {
                 ("*", Value::Integer(a), Value::Integer(b)) => {
                     Some(Value::Integer(a.wrapping_mul(*b)))
                 }
-                // `checked_*`, not `wrapping_*`: int_min / -1 has no int result, and
-                // wrapping it here folded to int_min while the same expression written
-                // with variables raised E0031 at runtime — one expression, two answers,
-                // decided by whether the operands happened to be literals. `None` drops
-                // the fold so the runtime reports it, exactly as a zero divisor already
-                // does via the guard above.
+                // checked, not wrapping: folding int_min / -1 gave a different answer than the same expression via variables.
                 ("/", Value::Integer(a), Value::Integer(b)) if *b != 0 => {
                     a.checked_div(*b).map(Value::Integer)
                 }
@@ -362,8 +357,7 @@ impl Compiler {
 
     /// Compile a program and return the top-level function.
     pub fn compile(mut self, program: &Program) -> Result<Function, Vec<CompileError>> {
-        // Compile all statements. The last expression statement's value is
-        // kept as the program's return value (implicit return, like functions).
+        // The last expression statement's value is the program's return value.
         if program.statements.is_empty() {
             self.emit_op(OpCode::None, 0);
             self.emit_op(OpCode::Return, 0);
@@ -376,8 +370,7 @@ impl Compiler {
                             self.compile_expression(expr);
                             self.emit_op(OpCode::Return, 0);
                         }
-                        // Named function definitions should not be implicitly
-                        // returned — treat them like other statements.
+                        // Named function definitions are not implicitly returned.
                         Statement::Let {
                             value: Expression::FunctionLiteral { .. },
                             ..
@@ -433,10 +426,7 @@ impl Compiler {
     }
 
     fn emit_byte(&mut self, byte: u8, line: u32) {
-        // Re-establish the column from the active scope's top, in case a
-        // recursive child compile updated the chunk's `cur_column` to its
-        // own and then returned. Without this the parent's emit_op-after-
-        // child-compile would inherit the child's column.
+        // A recursive child compile leaves its own cur_column behind, so re-establish the parent's.
         if let Some(&col) = self.loc_column_stack.last() {
             self.current_chunk().set_loc_column(col);
         }
@@ -462,10 +452,7 @@ impl Compiler {
     }
 
     fn make_constant(&mut self, value: Value, line: u32) -> u16 {
-        // Intern constant-pool strings so equal literals / identifiers /
-        // field names share one canonical `Rc<String>`. This is bounded
-        // by the program text (see vm::intern) and lets the `Rc::ptr_eq`
-        // fast path in `Value::eq` short-circuit their comparisons.
+        // Interning lets Value::eq short-circuit on Rc::ptr_eq; bounded by the program text.
         let value = match value {
             Value::String(s) => Value::String(crate::vm::intern::intern(&s)),
             other => other,
@@ -600,8 +587,7 @@ impl Compiler {
                 )
                 .label(format!("cannot {verb}{suffix}"))
                 .note("`=` binds immutably; `:=` binds mutably");
-                // A synthetic declaration span (compiler temporaries, slot 0)
-                // has nothing useful to point at.
+                // A synthetic declaration span has nothing useful to point at.
                 if decl == Span::default() {
                     d.help(format!("declare it with `{name} := ...` to allow reassignment"))
                 } else {
@@ -637,11 +623,7 @@ impl Compiler {
         }
 
         if params.is_empty() {
-            // Declaring none currently "works" only because a surplus argument
-            // is silently discarded — one of the silent behaviours being
-            // removed. It would start failing the moment that is tightened, and
-            // a pattern that cannot see what it is matching can only be a
-            // constant, which `else` already expresses.
+            // Declaring none only works because a surplus argument is silently discarded.
             self.report(
                 Diagnostic::error(
                     codes::PATTERN_ARITY,
@@ -818,8 +800,7 @@ impl Compiler {
         };
         let n = self.current_frame().locals.len();
 
-        // Capture flags for the locals being removed, then drop them from the
-        // compile-time scope.
+        // Capture the capture-flags before dropping the locals from compile-time scope.
         let mut captured: Vec<bool> = Vec::with_capacity(n - floor);
         for i in floor..n {
             captured.push(self.current_frame().locals[i].is_captured);
@@ -831,23 +812,12 @@ impl Compiler {
             return;
         }
 
-        // Captured floor local: the value-preserving stash below overwrites the
-        // floor slot with the block's result, so the floor local's open upvalue
-        // must be closed (snapshotted from its live slot value) BEFORE the stash.
-        // `CloseUpvalueAt floor` does exactly that — it closes the upvalue at the
-        // buried floor slot in place, without requiring the value on top and
-        // without popping. After this the slot is free to be repurposed, and the
-        // remaining body locals (floor+1..n) are closed/popped top-down below.
+        // The floor local's open upvalue must be closed before the stash overwrites its slot.
         if captured[0] {
             self.emit_op_u16(OpCode::CloseUpvalueAt, floor as u16, line);
         }
 
-        // Value-preserving cleanup. Stash the result into the floor slot, drop
-        // the duplicate, then close/pop the remaining body locals top-down.
-        // The floor slot is being repurposed to hold the block's RESULT, whose
-        // type is unrelated to the (now-removed) floor local's declared type, so
-        // clear that slot's type lock first — otherwise the SetLocal below would
-        // enforce the stale constraint against the result value.
+        // Stash the result into the floor slot, drop the duplicate, then close/pop body locals top-down.
         if let Some(info) = self.current_frame_mut().function.locals.get_mut(floor) {
             info.type_constraint = None;
         }
@@ -866,8 +836,7 @@ impl Compiler {
     fn add_local(&mut self, name: &str, kind: BindingKind, type_constraint: Option<String>) {
         let depth = self.current_frame().scope_depth;
         let slot = self.current_frame().locals.len();
-        // `LocalInfo` is the runtime mirror read by the `is_mut` intrinsic; it
-        // only needs the boolean, so provenance stays inside the compiler.
+        // LocalInfo is the runtime mirror for `is_mut`, so provenance stays inside the compiler.
         self.record_local_info(slot, kind.is_mutable(), type_constraint.clone());
         self.current_frame_mut().locals.push(Local {
             name: name.to_string(),
@@ -891,9 +860,7 @@ impl Compiler {
             (Some(current), Some(next)) if current == &next => {}
             (Some(_), None) => {}
             (Some(_), Some(_)) => {
-                // The same stack slot can be reused by disjoint lexical
-                // scopes. If those scopes disagree on the type lock, keep
-                // the slot conservative for whole-function JIT decisions.
+                // Disjoint scopes can reuse a slot; if they disagree on the type lock, stay conservative.
                 info.type_constraint = None;
             }
         }
@@ -1116,9 +1083,7 @@ impl Compiler {
     fn compile_statement_inner(&mut self, stmt: &Statement, line: u32) {
         match stmt {
             Statement::Expr(expr) => {
-                // The value of an expression-statement's top expression is
-                // DISCARDED (Pop). A `skip`/`stop` tail in an `option`/`choose`
-                // here is legitimate loop control flow, so mark it not-consumed.
+                // An expression statement's value is discarded, so a skip/stop tail is legitimate loop control flow.
                 let prev = self.value_consumed;
                 self.value_consumed = false;
                 self.compile_expression(expr);
@@ -1127,14 +1092,7 @@ impl Compiler {
             }
 
             Statement::Let { name, value } => {
-                // `:=` on an existing immutable local used to bypass the
-                // mutability check entirely — `resolve_local` found the slot and
-                // a plain `SetLocal` was emitted, so `i = 6` was an error while
-                // `i := 6` silently wrote the same slot.
-                //
-                // A constant is left alone: `:=` is the documented way to
-                // override one. A loop variable and a type name are not
-                // overridable, so those are rejected here.
+                // `:=` on an existing immutable local used to bypass the mutability check entirely.
                 if let Some(slot) = self.resolve_local(&name.value) {
                     match self.current_frame().locals[slot as usize].kind {
                         BindingKind::ImmutableLoopVar { header } => {
@@ -1169,18 +1127,7 @@ impl Compiler {
                     }
                 }
 
-                // V3: a NAMED function declared as a new local must bind its own
-                // name in the current scope BEFORE its body is compiled, so a
-                // recursive self-call inside the body can capture itself as an
-                // upvalue — mirroring the tree-walker, where the closure shares
-                // the same env Rc into which the name is later inserted.
-                //
-                // Only do this for a genuinely-new local (not a reassignment of
-                // an existing local/upvalue, and not the global/top-level path,
-                // which already resolves self-recursion via a global lookup).
-                // We reserve the slot first; `compile_function`'s `Closure` op
-                // pushes the closure into exactly that slot (the next free stack
-                // position), and the body's open upvalue captures that live slot.
+                // A named fn must bind its own name before its body compiles so a self-call captures itself.
                 let mut predeclared_named_fn = false;
                 if let Expression::FunctionLiteral { .. } = value
                     && self.current_frame().scope_depth > 0
@@ -1195,21 +1142,14 @@ impl Compiler {
                             predeclared_named_fn = true;
                         }
                     }
-                // If the value is a function literal, pass the name so the
-                // closure carries it (instead of showing as "anonymous").
+                // Pass the name so a function literal's closure carries it instead of showing as anonymous.
                 if let Expression::FunctionLiteral {
                     parameters, body, ..
                 } = value
                 {
                     self.compile_function(Some(&name.value), parameters, body, line);
                 } else if let Some(folded) = fold_constant_expression(value) {
-                    // Tier 2.1 (iii): pure-literal init RHS folds to a
-                    // single Constant. Matches Oxigen's design intent —
-                    // each init is specific so the JIT can fold and
-                    // virtualize cleanly. Side effect: the multi-op-init
-                    // mishap (`c := 1 + 5; c + 1` returning 2 in JIT)
-                    // disappears for foldable RHS because the init-slot
-                    // path now sees a single Constant.
+                    // Pure-literal init folds to one Constant so the JIT can virtualize cleanly.
                     self.emit_constant(folded, line);
                 } else {
                     self.compile_expression(value);
@@ -1217,15 +1157,11 @@ impl Compiler {
                 if self.dup_next_define {
                     self.emit_op(OpCode::Dup, line);
                 }
-                // A pre-declared named-fn local (V3) already owns the slot the
-                // `Closure` op just pushed into; the binding is complete, so do
-                // not re-store/pop it. `dup_next_define` (block-value use) still
-                // leaves a copy on the stack for the surrounding expression.
+                // A pre-declared named-fn local already owns the slot, so do not re-store or pop it.
                 if predeclared_named_fn {
                     return;
                 }
-                // Walrus := : if the variable already exists in any scope, update it.
-                // Otherwise, create a new binding.
+                // Walrus updates the variable if it exists in any scope, else creates a new binding.
                 if let Some(slot) = self.resolve_local(&name.value) {
                     self.emit_op_u16(OpCode::SetLocal, slot, line);
                     self.emit_op(OpCode::Pop, line);
@@ -1237,9 +1173,7 @@ impl Compiler {
                     } else if self.current_frame().scope_depth > 0
                         && self.declared_globals.contains(&name.value)
                     {
-                        // `:=` of an existing global from a nested scope updates
-                        // the global (matches the tree-walker's update-up-chain),
-                        // instead of creating a shadowing local that never stores.
+                        // `:=` on an existing global from a nested scope updates it rather than shadowing.
                         let name_const =
                             self.make_constant(Value::String(rc_str(name.value.as_str())), line);
                         self.emit_op_u16(OpCode::SetGlobal, name_const, line);
@@ -1273,13 +1207,7 @@ impl Compiler {
                         line,
                     );
                 }
-                // Tier 2.1 (iii): same fold as Statement::Let. The
-                // subsequent TypeWrap still fires (runtime contract) for
-                // non-Generic/None annotations, so the conversion
-                // semantics for Form 3 (e.g., `x <int> := 3.9` → 3) are
-                // preserved when the RHS is non-foldable. For pure-
-                // literal RHS that already matches the target type the
-                // wrap is a no-op.
+                // Same fold as Statement::Let; the TypeWrap still fires so `x <int> := 3.9` still truncates.
                 if let Some(folded) = fold_constant_expression(value) {
                     self.emit_constant(folded, line);
                 } else {
@@ -1287,8 +1215,7 @@ impl Compiler {
                 }
                 let type_name = type_ann.type_name();
                 let mutable = *walrus; // walrus (:=) means mutable
-                // Walrus := converts the value to the target type.
-                // Non-walrus = does strict type checking (no conversion).
+                // Walrus converts to the target type; plain `=` type-checks strictly without converting.
                 if !matches!(type_ann, TypeAnnotation::Generic | TypeAnnotation::NoneType) {
                     let tc = self.make_constant(Value::String(rc_str(type_name.as_str())), line);
                     self.emit_op_u16(OpCode::TypeWrap, tc, line);
@@ -1297,8 +1224,7 @@ impl Compiler {
                     self.emit_op(OpCode::Dup, line);
                 }
                 if self.current_frame().scope_depth > 0 {
-                    // If a local with the same name already exists at the current or
-                    // enclosing scope, update it (same as Let behavior for := re-declarations)
+                    // An existing local at this or an enclosing scope is updated, matching Let.
                     if let Some(slot) = self.resolve_local(&name.value) {
                         self.emit_op_u16(OpCode::SetLocal, slot, line);
                         self.emit_op(OpCode::Pop, line);
@@ -1306,20 +1232,7 @@ impl Compiler {
                         && !self.typed_globals.contains(&name.value)
                         && self.current_frame().each_body_depth == 0
                     {
-                        // V1-typed UPDATE: a typed re-declaration of an existing
-                        // UNTYPED global from a nested block updates the global
-                        // (re-binding it WITH the new type) rather than creating a
-                        // shadowing local that never stores. Mirrors the tree-
-                        // walker, where `repeat` shares the enclosing env so
-                        // `set_typed` overwrites the existing untyped binding.
-                        // Without this, `x := 0; repeat when x <= 5 { x <int> := x + 1 }`
-                        // shadows and hangs. The value on the stack was already
-                        // TypeWrapped above, so DefineGlobalTyped re-binds with the
-                        // type lock (matching `set_typed`).
-                        // Inside an `each` body (each_body_depth > 0) the tree-walker
-                        // uses a fresh per-iteration env, so we fall through to the
-                        // SHADOW branch instead — `x := 0; each i in [1,2,3] { x <int>
-                        // := x + 1 }` leaves the outer `x` at 0.
+                        // A typed re-declaration of an untyped global from a nested block re-binds the global with the new type.
                         self.typed_globals.insert(name.value.clone());
                         let name_const =
                             self.make_constant(Value::String(rc_str(name.value.as_str())), line);
@@ -1329,13 +1242,7 @@ impl Compiler {
                         self.emit_byte(if mutable { 1 } else { 0 }, line);
                         self.current_chunk().write_u16(type_const, line);
                     } else {
-                        // A typed re-declaration in an inner scope SHADOWS when the
-                        // outer binding is ALSO typed (documented behavior — the
-                        // "Shadowing" example `x <int> = 10; each { x <str> = "hi" }`
-                        // leaves the outer `x` untouched), or when there is no outer
-                        // global of that name. Mirrors the tree-walker, where `each`
-                        // introduces a fresh per-iteration env that the shadow is
-                        // written into.
+                        // Shadows instead when the outer binding is also typed, or when there is no outer binding.
                         let kind = if mutable {
                             BindingKind::Mutable
                         } else {
@@ -1381,12 +1288,7 @@ impl Compiler {
                         && !self.typed_globals.contains(&name.value)
                         && self.current_frame().each_body_depth == 0
                     {
-                        // V1-typed UPDATE (zero-init form): a typed re-declaration
-                        // of an existing UNTYPED global from a nested block updates
-                        // the global (re-binding with the new type) instead of
-                        // shadowing. See the matching note on `TypedLet`. Inside an
-                        // `each` body we fall through to SHADOW (fresh per-iteration
-                        // env in the tree-walker).
+                        // Zero-init form of the same rule; see the note on TypedLet.
                         self.typed_globals.insert(name.value.clone());
                         let name_const =
                             self.make_constant(Value::String(rc_str(name.value.as_str())), line);
@@ -1396,11 +1298,7 @@ impl Compiler {
                         self.emit_byte(1, line); // TypedDeclare is mutable
                         self.current_chunk().write_u16(type_const, line);
                     } else {
-                        // Zero-init `x <int>` is a declaration, not a
-                        // reassignment, so inside a block it introduces a fresh
-                        // block-local (shadowing any typed global, or any local) —
-                        // matching the tree-walker, which leaves the outer value
-                        // untouched.
+                        // `x <int>` is a declaration, so inside a block it introduces a fresh block-local.
                         self.add_local(&name.value, BindingKind::Mutable, Some(type_name));
                     }
                 } else {
@@ -1424,16 +1322,7 @@ impl Compiler {
                     let kind = self.current_frame().locals[slot as usize].kind;
                     self.report_immutable_write(&name.value, kind, name.token.span, "assign to", "");
                 }
-                // Implicit-self field WRITE: a bare-name assignment inside a
-                // method whose name is NOT a local/param but IS a field of the
-                // enclosing method's struct resolves to `self.field = value` —
-                // mirroring the tree-walker and the implicit-self READ in
-                // compile_identifier_inner. The read path resolves a bare name
-                // as local -> field -> upvalue -> global (field BEFORE upvalue
-                // and global, with NO global short-circuit), so the write must
-                // use the SAME order: only a local/param of the same name
-                // shadows the field (handled by the SetLocal branch below); a
-                // same-named upvalue OR global does NOT win over the field.
+                // A bare name that is not a local but is a field of the enclosing struct resolves to self.field.
                 if self.resolve_local(&name.value).is_none() {
                     let is_field = self
                         .method_field_stack
@@ -1441,9 +1330,7 @@ impl Compiler {
                         .is_some_and(|f| f.contains(&name.value));
                     if is_field
                         && let Some(self_slot) = self.resolve_local("self") {
-                            // self.field = value : GetLocal self, RHS, SetField.
-                            // SetField pops both object and value (net -2), so
-                            // no trailing Pop is needed (mirrors DotAssign).
+                            // SetField pops both object and value, so no trailing Pop is needed.
                             self.emit_op_u16(OpCode::GetLocal, self_slot, line);
                             self.compile_expression(value);
                             let field_const = self.make_constant(
@@ -1509,14 +1396,12 @@ impl Compiler {
                 self.current_frame_mut().loop_starts.push(loop_start);
                 self.current_frame_mut().loop_exits.push(Vec::new());
                 self.current_frame_mut().loop_continues.push(Vec::new());
-                // `skip` cleans body locals back to the pre-body height, then
-                // re-checks the condition via the back-edge below.
+                // `skip` cleans body locals to the pre-body height, then re-checks via the back-edge.
                 let continue_floor = self.current_frame().locals.len();
                 self.current_frame_mut()
                     .loop_continue_floors
                     .push(continue_floor);
-                // `repeat` has no loop variable, so `stop` exits to the same
-                // pre-body height that `skip` continues to.
+                // `repeat` has no loop variable, so `stop` exits to the same height `skip` continues to.
                 self.current_frame_mut().loop_exit_floors.push(continue_floor);
                 let handler_floor = self.current_frame().handler_depth;
                 self.current_frame_mut()
@@ -1566,16 +1451,7 @@ impl Compiler {
                 iterable,
                 body,
             } => {
-                // `each i in range(a)` / `range(a, b)` / `range(a, b, step)`
-                // with the *builtin* range (not user-shadowed): lower to a
-                // counting loop. No array is materialised, and with
-                // IterLen/IterGet gone the body is JIT-eligible.
-                //
-                // The step has to be a literal because it picks the loop's
-                // comparison direction at compile time; a computed step falls
-                // back to the builtin, which materialises the array. The
-                // two-name form falls back too, so its first name is a real
-                // ordinal index rather than a copy of the counter.
+                // Lower builtin `range` to a counting loop: no array is materialised and the body stays JIT-eligible.
                 let range_args: Option<(&[Expression], i64)> = match iterable {
                     Expression::Call {
                         function,
@@ -1602,8 +1478,7 @@ impl Compiler {
 
                 self.begin_scope();
 
-                // `iter_slot` holds the iterable (array path); unused for range.
-                // `index_slot` is the counter; `end_slot` the exclusive bound.
+                // iter_slot is the array path only; index_slot is the counter, end_slot the exclusive bound.
                 let (index_slot, iter_slot, end_slot) = if let Some((args, _)) = range_args {
                     // counter = start (0 for 1-arg form), evaluated once
                     if args.len() == 1 {
@@ -1612,9 +1487,7 @@ impl Compiler {
                         self.compile_expression(&args[0]);
                     }
                     self.add_local("__index__", BindingKind::Mutable, None);
-                    // end = the bound argument, evaluated once. `range(n)` puts
-                    // it first; every other form puts it second (a third
-                    // argument is the step, not the bound).
+                    // range(n) puts the bound first; every other form puts it second, since a third argument is the step.
                     self.compile_expression(if args.len() == 1 { &args[0] } else { &args[1] });
                     self.add_local("__range_end__", BindingKind::ImmutableConstant { decl: Span::default() }, None);
                     let i = self.resolve_local("__index__").unwrap();
@@ -1638,8 +1511,7 @@ impl Compiler {
 
                 // Loop condition (leaves a bool both branches Pop).
                 if is_range {
-                    // Counting up stops at `index < end`; counting down stops
-                    // at `index > end`, so the bound stays exclusive either way.
+                    // Counting up stops at index < end, down at index > end, so the bound stays exclusive either way.
                     self.emit_op_u16(OpCode::GetLocal, index_slot, line);
                     self.emit_op_u16(OpCode::GetLocal, end_slot, line);
                     self.emit_op(
@@ -1660,8 +1532,7 @@ impl Compiler {
                 let exit_jump = self.emit_jump(OpCode::JumpIfFalse, line);
                 self.emit_op(OpCode::Pop, line);
 
-                // Push the loop value: the counter (range) or iterable[index].
-                // The two-name form pushes key and value together instead.
+                // Push the counter (range) or iterable[index]; the two-name form pushes key and value.
                 if is_range {
                     self.emit_op_u16(OpCode::GetLocal, index_slot, line);
                 } else {
@@ -1677,15 +1548,10 @@ impl Compiler {
                     );
                 }
 
-                // `stop` exits to the loop's outer scope, which does NOT include
-                // the loop variable (the exit path never bound it that
-                // iteration), so its floor is the height before binding it.
+                // `stop` exits to a scope that never bound the loop variable, so its floor is the pre-binding height.
                 let exit_floor = self.current_frame().locals.len();
                 self.current_frame_mut().loop_exit_floors.push(exit_floor);
-                // Bind the loop variables. IterEntry pushed key then value, so
-                // the key takes the lower slot.
-                // `token` is the `each` keyword: the header span the diagnostic
-                // points at to explain why the binding is immutable.
+                // IterEntry pushes key then value, so the key takes the lower slot.
                 let header = token.span;
                 if let Some(index) = index_variable {
                     self.add_local(
@@ -1699,9 +1565,7 @@ impl Compiler {
                     BindingKind::ImmutableLoopVar { header },
                     None,
                 );
-                // `skip` cleans body locals back to here (keeping the loop
-                // variable, which the shared pop below closes/pops), then jumps
-                // to the continue target (the index increment).
+                // `skip` cleans to here, keeping the loop variable, then jumps to the index increment.
                 let continue_floor = self.current_frame().locals.len();
                 self.current_frame_mut()
                     .loop_continue_floors
@@ -1713,9 +1577,7 @@ impl Compiler {
 
                 // Compile body in its own scope (so TypedLet locals are cleaned up per iteration)
                 self.begin_scope();
-                // Mark that we're inside an `each` body: the tree-walker runs each
-                // iteration in a fresh enclosed env, so a typed re-declaration of an
-                // untyped outer global must SHADOW here (not update the global).
+                // The tree-walker runs each iteration in a fresh env, so a typed re-declaration must shadow here.
                 self.current_frame_mut().each_body_depth += 1;
                 for s in body {
                     self.compile_statement(s);
@@ -1723,8 +1585,7 @@ impl Compiler {
                 self.current_frame_mut().each_body_depth -= 1;
                 self.end_scope(line);
 
-                // Continue target: `skip` lands here, with the loop variable
-                // still on top, then runs the shared pop + increment below.
+                // `skip` lands here with the loop variable still on top.
                 let continues = self.current_frame_mut().loop_continues.pop().unwrap();
                 for c in continues {
                     self.patch_jump(c);
@@ -1733,9 +1594,7 @@ impl Compiler {
                 self.current_frame_mut().loop_exit_floors.pop();
                 self.current_frame_mut().loop_handler_depths.pop();
 
-                // Pop (or close, when captured by a closure) the loop
-                // variables. Closing per iteration gives each closure its own
-                // value. The two-name form bound two, popped value-first.
+                // Closing per iteration gives each closure its own value; the two-name form popped value-first.
                 for _ in 0..(1 + usize::from(index_variable.is_some())) {
                     let captured = self
                         .current_frame()
@@ -1779,10 +1638,7 @@ impl Compiler {
             }
 
             Statement::Skip { token } => {
-                // Continue: clean up every local above the innermost loop's
-                // continue floor (without removing them from compile-time scope,
-                // since code after the `skip` still references them), then jump
-                // to that loop's continue target.
+                // Clean locals above the continue floor without removing them from scope: later code still references them.
                 if self.current_frame().loop_continue_floors.is_empty() {
                     self.report_skip_stop_misuse(true, token.span, false);
                 } else {
@@ -1810,11 +1666,7 @@ impl Compiler {
             }
 
             Statement::Stop { token } => {
-                // Break: clean up every local above the loop's exit floor
-                // (loop variable + body locals — without removing them from
-                // compile-time scope), then jump to the loop's exit target.
-                // Leaving them on the operand stack would corrupt an enclosing
-                // loop's iterator.
+                // Same for break; leaving them on the operand stack would corrupt an enclosing expression.
                 if self.current_frame().loop_exit_floors.is_empty() {
                     self.report_skip_stop_misuse(false, token.span, false);
                 } else {
@@ -1863,23 +1715,17 @@ impl Compiler {
                     self.compile_expression(value);
                     self.emit_op_u8(OpCode::Unpack, names.len() as u8, line);
                     if *reassign {
-                        // Reassign pops from top of stack, so iterate in reverse
-                        // so that name[last] gets element[last] (top), etc.
+                        // Reassign pops from the top, so iterate in reverse to pair name[last] with element[last].
                         for name in names.iter().rev() {
                             self.compile_unpack_bind(name, true, line);
                         }
                     } else if self.current_frame().scope_depth > 0 {
-                        // Local define path: add_local assigns sequential stack slots
-                        // matching the Unpack push order, so iterate forward. Use
-                        // add_local even for "_" to occupy the slot correctly.
+                        // add_local assigns sequential slots matching push order, so iterate forward, even for `_`.
                         for name in names {
                             self.compile_unpack_define(name, line);
                         }
                     } else {
-                        // Global define path: DefineGlobal pops from the top of the
-                        // stack and Unpack pushes elements in order (last element on
-                        // top), so bind the last name first to preserve positional
-                        // order (a, b, c := [1, 2, 3] => a=1, b=2, c=3).
+                        // DefineGlobal pops from the top, so bind the last name first to preserve positional order.
                         for name in names.iter().rev() {
                             self.compile_unpack_define(name, line);
                         }
@@ -1920,8 +1766,7 @@ impl Compiler {
                 self.patch_jump(skip_jump);
             }
 
-            // `<test>` blocks are only executed by `oxigen test` (via the
-            // tree-walking runner). Under normal compilation/`run`, skip them.
+            // <test> blocks run only under `oxigen test`, via the tree-walking runner.
             Statement::Test { .. } => {}
 
             Statement::StructDef {
@@ -1936,9 +1781,7 @@ impl Compiler {
                     .map(|f| (f.name.value.clone(), f.type_ann.type_name(), f.hidden))
                     .collect();
 
-                // Record field names + parent so method bodies can resolve a
-                // bare identifier to `self.field` (implicit self). Hidden
-                // fields are included — they're accessible within methods.
+                // Record fields and parent so a bare identifier in a method body resolves to self.field.
                 self.struct_fields.insert(
                     name.value.clone(),
                     fields.iter().map(|f| f.name.value.clone()).collect(),
@@ -1982,8 +1825,7 @@ impl Compiler {
                             VmEnumVariantKind::Unit(Some(Value::Integer(disc)))
                         }
                         VariantKind::Unit(Some(expr)) => {
-                            // Simple literal folding for discriminants. Non-literal
-                            // expressions produce a variant with no value.
+                            // Non-literal discriminants produce a variant with no value.
                             let val = match expr {
                                 Expression::Int { value, .. } => {
                                     next_auto = *value + 1;
@@ -2035,8 +1877,7 @@ impl Compiler {
                 methods,
                 ..
             } => {
-                // Make the struct's fields resolvable as implicit-self while
-                // compiling the method bodies.
+                // Make the struct's fields resolvable as implicit-self while compiling method bodies.
                 let self_fields = self.collect_self_fields(&struct_name.value);
                 self.method_field_stack.push(self_fields);
                 // Compile each method with an implicit `self` first parameter
@@ -2092,13 +1933,9 @@ impl Compiler {
             }
 
             Statement::Choose { subject, arms, .. } => {
-                // A `choose` statement's value is consumed only when an
-                // enclosing block needs it (`suppress_statement_pop`); otherwise
-                // it is discarded, so a `skip`/`stop` arm tail is legit control
-                // flow. Capture before compiling the subject (which clears it).
+                // Capture before compiling the subject, which resets the flag.
                 let choose_consumed = self.suppress_statement_pop;
-                // Store subject as a temporary global so pattern functions can access it
-                // without affecting the local stack layout
+                // Store the subject as a temporary global so pattern functions see it without touching stack layout.
                 self.compile_expression(subject);
                 let temp_name = "__choose_tmp__";
                 let temp_const = self.make_constant(Value::String(rc_str(temp_name)), line);
@@ -2118,8 +1955,7 @@ impl Compiler {
                     if let (Some(params), Some(condition)) =
                         (&arm.inline_params, &arm.inline_condition)
                     {
-                        // `ChooseArm::pattern_name` is a bare String with no token, so the
-                        // best location available for an inline arm is its line.
+                        // ChooseArm::pattern_name has no token, so an inline arm can only be located by line.
                         self.check_pattern_arity(params, Span::new(line as usize, 0));
                         let param_names: Vec<String> =
                             params.iter().map(|p| p.value.clone()).collect();
@@ -2214,17 +2050,11 @@ impl Compiler {
     }
 
     fn compile_expression_inner(&mut self, expr: &Expression, line: u32) {
-        // Capture whether THIS expression's value is consumed, then default
-        // nested sub-expressions to consumed=true: any operand/argument/RHS a
-        // node recurses into has its value used by the current operation. Only
-        // a transparent wrapper (`Grouped`) and `option`/`choose` forward the
-        // captured context; everything else descends as consumed.
+        // Sub-expressions default to consumed: only a transparent wrapper forwards the captured context.
         let consumed = self.value_consumed;
         self.value_consumed = true;
 
-        // Fold pure-literal arithmetic/comparison/bitwise subtrees to a single
-        // constant (e.g. `60*60*24`, `2 < 3`). Leaves keep their existing fast
-        // paths (True/False/None opcodes), so only fold compound nodes.
+        // Fold pure-literal compound nodes; leaves keep their True/False/None fast-path opcodes.
         if matches!(expr, Expression::Prefix { .. } | Expression::Infix { .. })
             && let Some(folded) = fold_constant_expression(expr) {
                 self.emit_constant(folded, line);
@@ -2252,16 +2082,12 @@ impl Compiler {
             }
 
             Expression::Grouped(inner) => {
-                // A parenthesised group is transparent: it neither consumes nor
-                // discards its inner value, so forward the captured context so a
-                // discarded `(option{... -> {stop}})` stays legitimate.
+                // A group is transparent: forward the context so a discarded option with a `stop` tail stays legal.
                 self.value_consumed = consumed;
                 self.compile_expression(inner);
             }
 
-            // diverge/converge lower to __spawn/__join_task. The lowered call's
-            // value IS this node's value, so forward the captured context the
-            // same way Grouped does.
+            // diverge/converge lower to __spawn/__join_task, whose value is this node's value.
             Expression::Diverge { token, body } => {
                 self.value_consumed = consumed;
                 self.compile_expression(&crate::ast::desugar_diverge(token, body));
@@ -2595,8 +2421,7 @@ impl Compiler {
                 kind,
                 ..
             } => {
-                // Push the EnumDef (looked up by name) then the payload pieces,
-                // then emit the Make opcode.
+                // Push the EnumDef then the payload pieces, then emit Make.
                 self.compile_expression(&Expression::Ident(Identifier {
                     token: crate::token::Token {
                         token_type: crate::token::TokenType::Ident,
@@ -2632,8 +2457,7 @@ impl Compiler {
                 alternative,
                 ..
             } => {
-                // unless is: consequence unless condition then alternative
-                // If condition is true, use alternative; else use consequence
+                // `unless` is: consequence unless condition, else alternative.
                 self.compile_expression(condition);
                 let then_jump = self.emit_jump(OpCode::JumpIfFalse, line);
                 self.emit_op(OpCode::Pop, line);
@@ -2655,10 +2479,7 @@ impl Compiler {
             } => {
                 let mut end_jumps = Vec::new();
 
-                // An `<Error>` arm runs only when evaluating an arm (condition,
-                // body, or default) raises a runtime error — NOT on no-match.
-                // Install a handler covering the arm evaluation; its catch target
-                // is the error body emitted after the normal path.
+                // An <Error> arm fires only when evaluating an arm raises, never on no-match.
                 let err_handler = if error_default.is_some() {
                     Some(self.emit_push_handler(line))
                 } else {
@@ -2669,10 +2490,7 @@ impl Compiler {
                     self.compile_expression(&arm.condition);
                     let skip = self.emit_jump(OpCode::JumpIfFalse, line);
                     self.emit_op(OpCode::Pop, line);
-                    // Condition true → compile body (last expr is the value).
-                    // `consumed` (captured before the reset above) says whether
-                    // this whole `option` value is consumed by an enclosing
-                    // operation; a `skip`/`stop` tail is only rejected then.
+                    // `consumed` was captured before the reset; a skip/stop tail is only rejected when true.
                     self.compile_block_as_expression(&arm.body, line, consumed);
                     let end = self.emit_jump(OpCode::Jump, line);
                     end_jumps.push(end);
@@ -2680,8 +2498,7 @@ impl Compiler {
                     self.emit_op(OpCode::Pop, line);
                 }
 
-                // No-match default (the `<Error>` arm is never the no-match
-                // default — it only fires on error, handled below).
+                // The <Error> arm is never the no-match default.
                 if let Some(default_body) = default {
                     self.compile_block_as_expression(default_body, line, consumed);
                 } else {
@@ -2697,8 +2514,7 @@ impl Compiler {
                     // Normal path: remove the handler and skip the catch code.
                     self.emit_pop_handler(line);
                     let skip_catch = self.emit_jump(OpCode::Jump, line);
-                    // Catch target: the handler unwinds here with the error value
-                    // on top. Discard it, then run the `<Error>` body.
+                    // The handler unwinds here with the error value on top; discard it before the <Error> body.
                     self.patch_jump(handler);
                     self.emit_op(OpCode::Pop, line);
                     self.compile_block_as_expression(error_body, line, consumed);
@@ -2713,9 +2529,7 @@ impl Compiler {
                 fallback,
                 ..
             } => {
-                // Install a handler so a runtime error / `<fail>` raised while
-                // evaluating `value` lands at the Guard opcode as an in-band
-                // error value, rather than unwinding past it.
+                // The handler makes a raise during `value` land at Guard as an in-band error rather than unwinding past it.
                 let handler = self.emit_push_handler(line);
                 self.compile_expression(value);
                 self.emit_pop_handler(line);
@@ -2723,8 +2537,7 @@ impl Compiler {
 
                 let binding_const =
                     self.make_constant(Value::String(rc_str(binding.value.as_str())), line);
-                // Tag filter (`<guard<Error<tag>>>`): 0xFFFF = no filter (catch
-                // any error); otherwise the constant index of the tag string.
+                // 0xFFFF means no tag filter; otherwise it is the constant index of the tag string.
                 let tag_const = match error_tag {
                     Some(t) => self.make_constant(Value::String(rc_str(t.as_str())), line),
                     None => 0xFFFF,
@@ -2744,8 +2557,7 @@ impl Compiler {
                 // If not error, value stays on stack → jump over fallback
                 let end_jump = self.emit_jump(OpCode::Jump, line);
 
-                // Patch guard jump: VM IP is after all 6 operand bytes
-                // (2 jump + 2 binding + 2 tag), so offset = fallback_start - (pos + 6)
+                // VM IP is past all 6 operand bytes, so offset = fallback_start - (pos + 6).
                 let fallback_start = self.current_chunk().len();
                 let offset = fallback_start - guard_jump_pos - 6;
                 self.current_chunk()
@@ -2778,11 +2590,7 @@ impl Compiler {
 
             Expression::TypeWrap { target, value, .. } => {
                 let type_str = target.type_name();
-                // `<type<Error || Value>>(expr)` normalizes a failure into an
-                // Error value instead of propagating: install a handler whose
-                // catch target is the TypeWrap opcode (which turns the in-band
-                // error value into the Error side of the union). Plain casts
-                // (e.g. `<int>(...)`) get no handler — their errors propagate.
+                // Catch target is the TypeWrap, which turns the in-band error into the Error side of the union.
                 let is_error_union = type_str.contains(" || ") && {
                     let parts: Vec<&str> = type_str.split(" || ").collect();
                     parts.contains(&"VALUE")
@@ -2847,12 +2655,7 @@ impl Compiler {
                 self.report_skip_stop_misuse(is_skip, token.span, true);
             }
             Statement::Expr(expr) => {
-                // Propagate the consumed/discarded context into the inner
-                // expression. Without this, a nested option/choose whose tail is
-                // `skip`/`stop` captures the stale `value_consumed = true` and is
-                // wrongly rejected even when the OUTER construct is discarded
-                // (legitimate loop control flow), e.g.
-                //   each i in range(2){ choose i { else -> { option { True -> { skip } } } } }
+                // Forward the context, or a nested option with a skip/stop tail is wrongly rejected.
                 let prev = self.value_consumed;
                 self.value_consumed = consumed;
                 self.compile_expression(expr);
@@ -2868,8 +2671,7 @@ impl Compiler {
                 alternative: Some(_),
                 ..
             } => {
-                // If/else with both branches produces a value.
-                // One-armed if (guard) does not.
+                // Both branches produce a value; a one-armed guard does not.
                 self.suppress_statement_pop = true;
                 self.compile_statement(stmt);
                 self.suppress_statement_pop = false;
@@ -2941,18 +2743,14 @@ impl Compiler {
         for (i, stmt) in stmts.iter().enumerate() {
             let is_last = i == stmts.len() - 1;
             if is_last {
-                // For the last statement, we need its value on the stack.
-                // Compile within the scope so the expression can reference
-                // block locals, then clean up.
+                // Compile the last statement inside the scope so it can reference block locals.
                 match stmt {
                     Statement::Expr(_) => {
                         self.compile_last_statement_as_value(stmt, line, consumed);
                         self.end_scope_keeping_value(line);
                     }
                     Statement::Skip { .. } | Statement::Stop { .. } if consumed => {
-                        // A `skip`/`stop` whose value is consumed by an enclosing
-                        // expression (e.g. `1 + option{... -> {skip}}`) is the
-                        // same error the tree-walker raises on `INTEGER + SKIP`.
+                        // Matches the tree-walker's error on `INTEGER + SKIP`.
                         self.compile_last_statement_as_value(stmt, line, consumed);
                         self.end_scope_keeping_value(line);
                     }
@@ -2963,15 +2761,7 @@ impl Compiler {
                     }
                 }
             } else if consumed && matches!(stmt, Statement::Skip { .. } | Statement::Stop { .. }) {
-                // A NON-tail bare `skip`/`stop` in a block whose value is CONSUMED
-                // makes the block's value ill-defined: the `skip`/`stop` jumps
-                // before the tail value is produced, so the enclosing expression
-                // never receives a value. Reject it like the tail case (the
-                // tree-walker surfaces the same error via the eval_program gate).
-                // Discarded blocks (`consumed == false`) keep legitimate loop
-                // control flow, and a `skip`/`stop` nested inside an inner loop is
-                // a Statement::Each/Repeat here, not a bare Skip/Stop, so it is
-                // unaffected.
+                // A non-tail skip/stop jumps before the tail value exists, so the block's value is ill-defined.
                 let is_skip = matches!(stmt, Statement::Skip { .. });
                 let span = match stmt {
                     Statement::Skip { token } | Statement::Stop { token } => token.span,
@@ -3189,10 +2979,7 @@ impl Compiler {
             self.emit_op_u16(OpCode::GetLocal, slot, line);
             return;
         }
-        // Implicit self: a bare identifier matching a field of the enclosing
-        // method's struct resolves to `self.field`, mirroring the interpreter.
-        // Gated on `self` being a local of the current frame, so nested
-        // closures (where `self` is not a direct local) fall through instead.
+        // Gated on `self` being a local of the current frame, so nested closures do not resolve fields.
         if self
             .method_field_stack
             .last()
@@ -3276,8 +3063,7 @@ impl Compiler {
             for (i, stmt) in body.iter().enumerate() {
                 let is_last = i == body.len() - 1;
                 if is_last {
-                    // A function's tail value is returned to (consumed by) the
-                    // caller, so a bare `skip`/`stop` tail is a value error.
+                    // A function's tail value is consumed by the caller, so a bare skip/stop tail is a value error.
                     self.compile_last_statement_as_value(stmt, line, true);
                     self.emit_op(OpCode::Return, line);
                 } else {

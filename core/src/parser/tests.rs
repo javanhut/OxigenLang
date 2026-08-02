@@ -841,8 +841,7 @@ fn test_operator_precedence() {
         ("a + b * c + d / e - f", "(((a + (b * c)) + (d / e)) - f)"),
     ];
 
-    // Just verify these parse without errors
-    // A full precedence test would need expression stringification
+    // A full precedence test would need expression stringification.
     for (input, _expected) in tests {
         let _ = parse_ok(input);
     }
@@ -1350,8 +1349,7 @@ fn test_parse_test_block() {
 
 #[test]
 fn test_parse_test_block_does_not_break_comparisons() {
-    // A bare `<` at statement start that is not `<test` must still parse as a
-    // normal prefix/angle expression rather than a test block.
+    // A bare `<` that is not `<test` must parse as a normal prefix expression.
     let program = parse_ok("x := 1\nx < 2");
     assert_eq!(program.statements.len(), 2);
     assert!(!matches!(program.statements[1], Statement::Test { .. }));
@@ -1361,8 +1359,7 @@ fn test_parse_test_block_does_not_break_comparisons() {
 
 #[test]
 fn test_includes_as_function_name() {
-    // `includes` must be usable as a normal function name, not only as the
-    // `StructName includes { }` block keyword.
+    // `includes` must work as a normal function name, not only as the block keyword.
     let program = parse_ok("fun includes(arr <array>, val <generic>) {\n    val\n}");
     assert_eq!(program.statements.len(), 1);
     match &program.statements[0] {
@@ -1396,10 +1393,7 @@ fn test_includes_block_still_parses() {
 
 #[test]
 fn test_fun_followed_by_keyword_does_not_hang() {
-    // Regression: `fun <keyword>` used to make the recovery loop spin forever
-    // because `synchronize()` stopped at the `fun` token without consuming it.
-    // It must now terminate with a diagnostic. (If this regresses, the test
-    // hangs rather than fails.)
+    // `fun <keyword>` used to spin forever because synchronize() stopped without consuming.
     let (_program, errors) = parse("fun struct {\n}");
     assert!(!errors.is_empty(), "expected a parse error, got none");
 }

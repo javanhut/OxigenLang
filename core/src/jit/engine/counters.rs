@@ -313,9 +313,7 @@ pub(crate) struct JitCounters {
 
 impl JitCounters {
     pub(super) fn new() -> Self {
-        // [Cell<u64>; N] doesn't impl Default in older toolchains;
-        // build it explicitly with std::array::from_fn so
-        // HelperCounter::COUNT can grow without touching this site.
+        // [Cell<u64>; N] has no Default on older toolchains, so build it with std::array::from_fn.
         let helper_calls: [std::cell::Cell<u64>; HelperCounter::COUNT] =
             std::array::from_fn(|_| std::cell::Cell::new(0));
         Self {
@@ -510,9 +508,7 @@ impl JitCounters {
             self.spec_entry_rejected_return_unreachable.get()
         );
 
-        // Step 0 helper-call counts. Print only non-zero entries to
-        // keep the dump signal-dense; widths are aligned with the
-        // longest helper name in HELPER_NAMES.
+        // Print only non-zero entries; widths align with the longest name in HELPER_NAMES.
         eprintln!("[jit stats] helper FFI calls (non-zero)");
         for (i, &name) in HELPER_NAMES.iter().enumerate() {
             let n = self.helper_calls[i].get();

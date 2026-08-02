@@ -59,8 +59,7 @@ impl Lexer {
     pub fn new(input: &str) -> Self {
         let (effective_input, start_line, indent_mode) = Self::preprocess_input(input);
 
-        // `preprocess_input` returns a suffix of `input`, so the difference in
-        // byte length is exactly what it stripped.
+        // preprocess_input returns a suffix, so the byte-length delta is exactly what it stripped.
         let base_offset = input.len() - effective_input.len();
         let mut char_byte_offsets = Vec::with_capacity(effective_input.len() + 1);
         let mut running = 0usize;
@@ -203,9 +202,7 @@ impl Lexer {
 
         let span = self.span();
         let mut token = self.lex_token_at(span);
-        // Widen to the text actually consumed. `start` is left as the arm set
-        // it — `read_string` deliberately anchors an unterminated string at its
-        // opening quote — so only the end moves.
+        // read_string anchors an unterminated string at its opening quote, so only the end moves.
         token.span.end = self.pos();
         token
     }
@@ -395,9 +392,7 @@ impl Lexer {
                 }
                 _ => self.single_with_span(TokenType::Pipe, span),
             },
-            // Oxigen has no statement terminator — a newline ends a statement.
-            // Lexed as Illegal carrying its own message so the parser reports
-            // the fix instead of a bare "unexpected token".
+            // Oxigen has no statement terminator; Illegal carries its own message so the parser reports the fix.
             ';' => {
                 self.read_char();
                 let span = Span::range(span.start, self.pos());
@@ -448,8 +443,7 @@ impl Lexer {
                 let lit = self.ch.to_string();
                 self.read_char();
                 let span = Span::range(span.start, self.pos());
-                // `?` is a real marker (optional parameters) that the parser
-                // consumes from the token stream, so it is not an error.
+                // `?` marks optional parameters and is consumed by the parser, so it is not an error.
                 if lit != "?" {
                     self.diagnostics.push(Diagnostic::error(
                         codes::ILLEGAL_TOKEN,
@@ -532,10 +526,7 @@ impl Lexer {
             self.read_char();
         }
         if !closed {
-            // Running to EOF used to be silent: everything after the `/*` was
-            // swallowed, the program ran whatever preceded it and exited 0, and
-            // `oxigen check` called the file clean. The span points at the
-            // opening delimiter, which is the part that needs fixing.
+            // Running to EOF used to be silent: everything after `/*` was swallowed and the file exited 0.
             self.diagnostics.push(
                 Diagnostic::error(
                     codes::UNTERMINATED_BLOCK_COMMENT,
@@ -613,8 +604,7 @@ impl Lexer {
             }
         }
 
-        // `1.2.3` used to lex as `1.2` then `.3`, so it parsed as field access and
-        // surfaced as `cannot access field '3' on FLOAT`.
+        // `1.2.3` used to lex as `1.2` then `.3`, surfacing as a field access on FLOAT.
         if is_float && self.ch == '.' && self.peek_char().is_ascii_digit() {
             while self.ch == '.' || self.ch.is_ascii_digit() {
                 self.read_char();
@@ -691,12 +681,7 @@ impl Lexer {
         let has_interp = self.string_has_interpolation(delimiter, triple);
 
         if !has_interp {
-            // Simple string, no interpolation — process escape sequences.
-            // A single-line string stops at the closing delimiter, EOF, or a
-            // raw newline (newlines are written with the `\n` escape, so a raw
-            // newline before the closing quote means the string is
-            // unterminated). A triple-quoted string spans raw newlines and
-            // only ends at its closing fence or EOF.
+            // A single-line string stops at the delimiter, EOF, or a raw newline.
             let mut literal = std::string::String::new();
             while !self.at_string_body_end(delimiter, triple) {
                 if self.ch == '\\' {
@@ -707,9 +692,7 @@ impl Lexer {
                 }
             }
             if !self.at_closing_delimiter(delimiter, triple) {
-                // Unterminated: do NOT consume the newline/EOF sentinel so the
-                // lexer keeps making forward progress and the rest of the line
-                // is still tokenized (avoiding a misleading cascade).
+                // Do not consume the sentinel, so the rest of the line still tokenizes without a cascade.
                 return self.unterminated_string_token(span);
             }
             self.consume_quote_fence(triple); // closing quote(s)
@@ -724,15 +707,11 @@ impl Lexer {
             };
         }
 
-        // String has interpolation — emit InterpStart, then queue all parts
-        // Collect literal parts and expression tokens. Remember how many
-        // pending tokens existed before so we can roll back cleanly if the
-        // string turns out to be unterminated.
+        // Remember the pending-token count so the queue can roll back cleanly.
         let pending_mark = self.pending_tokens.len();
         let mut literal_buf = std::string::String::new();
 
-        // Stop at the closing fence, EOF, or — for single-line strings — a raw
-        // newline (see the non-interpolation branch above).
+        // Stop at the closing fence, EOF, or a raw newline for single-line strings.
         while !self.at_string_body_end(delimiter, triple) {
             if self.ch == '{' {
                 // Emit any accumulated literal as a String token
@@ -758,10 +737,7 @@ impl Lexer {
                 // Lex tokens inside {} using a brace depth counter
                 let mut brace_depth = 1;
                 loop {
-                    // Skip whitespace inside the interpolation expression.
-                    // Newlines are only valid here inside a triple-quoted
-                    // string, where `{ ... }` may span lines; single-line
-                    // strings keep their existing behavior.
+                    // Newlines are only valid here inside a triple-quoted string.
                     loop {
                         self.skip_whitespace_except_newline();
                         if triple && self.ch == '\n' {
@@ -775,11 +751,7 @@ impl Lexer {
                         break;
                     }
 
-                    // Depth is counted from the first significant character,
-                    // AFTER whitespace: `"{ {"k": 1}["k"] }"` opens a nested
-                    // brace that must not be read as the end of the
-                    // interpolation. (Before the expression inside `{ ... }`
-                    // was lexed properly, no nested brace could occur here.)
+                    // Depth counts from the first significant character so a nested map brace is not read as the end.
                     if self.ch == '}' {
                         brace_depth -= 1;
                         if brace_depth == 0 {
@@ -789,10 +761,7 @@ impl Lexer {
                         brace_depth += 1;
                     }
 
-                    // A comment inside an interpolation is pathological, but
-                    // `lex_token_at`'s comment arms restart via `next_token`,
-                    // which would pop the interpolation tokens already queued
-                    // below. Consume them here so that path is unreachable.
+                    // The comment arms restart via next_token, which would pop the interpolation tokens queued below.
                     if self.ch == '/' && matches!(self.peek_char(), '/' | '*') {
                         if self.peek_char() == '/' {
                             self.skip_line_comment();
@@ -802,9 +771,7 @@ impl Lexer {
                         continue;
                     }
 
-                    // Lex one token with the real lexer, so the expression
-                    // inside `{ ... }` supports the whole language rather than
-                    // a hand-maintained subset of it.
+                    // Use the real lexer so `{ ... }` supports the whole language, not a hand-maintained subset.
                     let inner_span = self.span();
                     let inner_tok = self.lex_token_at(inner_span);
                     self.pending_tokens.push_back(inner_tok);
@@ -828,9 +795,7 @@ impl Lexer {
         }
 
         if !self.at_closing_delimiter(delimiter, triple) {
-            // Unterminated interpolated string: discard the partial part tokens
-            // we queued and report a single error anchored at the opening quote.
-            // Leave the newline/EOF sentinel unconsumed for forward progress.
+            // Discard the queued part tokens and report one error at the opening quote.
             self.pending_tokens.truncate(pending_mark);
             return self.unterminated_string_token(span);
         }
@@ -853,8 +818,7 @@ impl Lexer {
 
         self.consume_quote_fence(triple); // closing quote(s)
 
-        // Return InterpStart as the first token (a multi-line variant when the
-        // string was triple-quoted, so the formatter can round-trip it).
+        // A multi-line variant when triple-quoted, so the formatter can round-trip it.
         Token {
             token_type: if triple {
                 TokenType::MultilineInterpStart
@@ -934,12 +898,7 @@ impl Lexer {
                 literal.push(c);
                 self.read_char();
             }
-            // `\{` / `\}` are the only way to put a literal brace in a string —
-            // a bare `{` starts an interpolation. They yield the brace alone,
-            // so `"\{x\}"` prints `{x}`; keeping the backslash in the value
-            // would also make the string impossible to format back out (the
-            // formatter would have to escape the backslash, and `\\{` re-parses
-            // as a backslash followed by a live interpolation).
+            // `\{` and `\}` are the only way to write a literal brace; a bare `{` starts an interpolation.
             '{' | '}' => {
                 literal.push(self.ch);
                 self.read_char();

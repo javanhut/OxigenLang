@@ -173,10 +173,7 @@ impl Parser {
         p.register_infix(TokenType::FSlash, Parser::parse_infix_expression);
         p.register_infix(TokenType::Mod, Parser::parse_infix_expression);
 
-        // Bitwise (precedence: | < ^ < & < equality, shifts between < and +
-        // — matches C/Rust). The compiler/interpreter already handle these
-        // (vm/mod.rs binary_b{and,or,xor,shl,shr} + unary_bnot); we only
-        // had to wire them through the parser.
+        // Precedence | < ^ < & < equality, shifts between < and + — matches C and Rust.
         p.register_infix(TokenType::Pipe, Parser::parse_infix_expression);
         p.register_infix(TokenType::Caret, Parser::parse_infix_expression);
         p.register_infix(TokenType::Ampersand, Parser::parse_infix_expression);
@@ -423,35 +420,13 @@ impl Parser {
             if let Some(stmt) = self.parse_statement() {
                 program.statements.push(stmt);
             } else {
-                // A statement was dropped. If the parser's own error count rose
-                // while parsing it, it was reported and there is nothing to do.
-                // Otherwise it is only a *candidate* for the gave-up note: the
-                // lexer runs ahead of the parser, so a lexical diagnostic for
-                // this statement's tokens may already have been recorded before
-                // we started, and those are only folded in at the end by
-                // `absorb_lexer_diagnostics`. Record the statement's extent —
-                // start through the lookahead token, the furthest token that
-                // could have caused the failure — so the final check can ask
-                // whether any diagnostic actually lands inside it.
-                //
-                // The count is per-statement on purpose: a global "are there any
-                // errors at all" check passed as soon as *some other* statement
-                // had failed, which let a quietly-dropped statement vanish.
-                //
-                // Synchronizing unconditionally also matters: this used to run
-                // only when the error count rose, so a statement dropped
-                // without a diagnostic skipped recovery entirely and the parser
-                // carried on from wherever it happened to stop.
+                // A rise in the error count means it was reported; otherwise it is only a candidate for the gave-up note.
                 if self.errors.len() == errors_before {
                     dropped.push(stmt_span.to(self.peek_token.span));
                 }
                 let before = self.curr_token.span;
                 self.synchronize();
-                // Guarantee forward progress. `synchronize()` stops *at* a
-                // statement-starting keyword without consuming it, so if the
-                // error occurred on such a keyword (e.g. `fun <keyword>`) the
-                // position would not move and the outer loop would spin
-                // forever. Force-consume one token in that case.
+                // synchronize() stops at a statement keyword without consuming it, so force progress or the loop spins.
                 if self.curr_token.span == before && self.curr_token.token_type != TokenType::Eof {
                     self.next_token();
                 }
@@ -486,8 +461,7 @@ impl Parser {
     /// a bug in Oxigen" note per file is enough.
     fn assert_nothing_dropped_silently(&mut self, dropped: Vec<Span>) {
         let Some(span) = dropped.into_iter().find(|extent| {
-            // Compared by (line, column) — the same ordering `absorb_lexer_diagnostics`
-            // sorts by, and the only part of a `Pos` synthetic spans fill in.
+            // Compared by (line, column), the same ordering absorb_lexer_diagnostics sorts by.
             let (lo, hi) = (
                 (extent.start.line, extent.start.column),
                 (extent.end.line, extent.end.column),
@@ -556,9 +530,7 @@ impl Parser {
             if self.peek_token.token_type == TokenType::Assign {
                 return self.parse_assign_statement();
             }
-            // `includes` is a contextual keyword: `StructName includes { ... }`.
-            // It only introduces a method block when the identifier `includes`
-            // is immediately followed by `{`; otherwise it is a normal name.
+            // `includes` is contextual: it opens a method block only when immediately followed by `{`.
             if self.peek_token.token_type == TokenType::Ident
                 && self.peek_token.literal == "includes"
                 && self.peek_nth(1).token_type == TokenType::LBrace
@@ -573,9 +545,7 @@ impl Parser {
             return self.parse_main_block();
         }
 
-        // `<test>("name") { ... }` test-case block. Recognized at statement
-        // start before the generic angle-form/expression machinery so the
-        // trailing `{ ... }` is parsed as a statement block, not a map literal.
+        // Recognized before the angle-form machinery so the trailing block is not parsed as a map literal.
         if self.curr_token.token_type == TokenType::Lt
             && self.peek_token.token_type == TokenType::Ident
             && self.peek_token.literal == "test"
@@ -914,9 +884,7 @@ impl Parser {
         let mut left = match prefix {
             Some(f) => f(self)?,
             None => {
-                // An `Illegal` token means the lexer already recorded a real
-                // diagnostic for it (`?` excepted — that is a live marker, not
-                // an error). Reporting here too would duplicate it.
+                // The lexer already recorded a diagnostic for an Illegal token; `?` is a live marker, not an error.
                 if self.curr_token.token_type == TokenType::Illegal
                     && self.curr_token.literal != "?"
                 {
@@ -1007,9 +975,7 @@ impl Parser {
         let value = match tok.literal.parse::<i64>() {
             Ok(v) => v,
             Err(_) => {
-                // This used to be `.ok()?` — a `None` with no diagnostic, so the
-                // whole statement silently vanished and the first symptom was an
-                // `undefined variable` on a later, correct line.
+                // This was `.ok()?`: a None with no diagnostic, so the statement silently vanished.
                 self.errors.push(
                     diag(
                         codes::INTEGER_OUT_OF_RANGE,
@@ -1615,11 +1581,7 @@ impl Parser {
         })
     }
 
-    // ── diverge / converge ──────────────────────────────────────────────
-    // Surface syntax for fork-join. `diverge` splits work off the current flow;
-    // `converge` rejoins it. These parse into first-class AST nodes so the
-    // formatter can round-trip them; the compiler and evaluator lower them to
-    // the `__spawn`/`__join_task` builtins via `ast::desugar_*`.
+    // Surface syntax for fork-join; these parse into first-class AST nodes.
 
     fn parse_diverge_expression(&mut self) -> Option<Expression> {
         let tok = self.curr_token.clone(); // 'diverge'
@@ -1840,15 +1802,12 @@ impl Parser {
         // Count leading dots
         if self.peek_token.token_type == TokenType::FullStop {
             is_relative = true;
-            // Count dots: first dot means current dir (parent_levels=0)
-            // additional dots increment parent_levels
+            // First dot means the current directory; each additional dot adds a parent level.
             let mut dot_count = 0;
             while self.peek_token.token_type == TokenType::FullStop {
                 self.next_token(); // consume '.'
                 dot_count += 1;
-                // Check if next is also a dot (consecutive dots)
-                // But we need to distinguish ".name" from "..name"
-                // After consuming a dot, if peek is Ident, we stop counting dots
+                // Stop counting dots once peek is an Ident, so `.name` and `..name` are distinguishable.
                 if self.peek_token.token_type == TokenType::Ident {
                     break;
                 }
@@ -1968,10 +1927,7 @@ impl Parser {
         })
     }
 
-    // Postfix: x++
-    //
-    // Pratt trick: register it as an "infix" function with high precedence,
-    // but it doesn't parse a right-hand expression.
+    // Registered as a high-precedence infix that parses no right-hand expression.
     fn parse_postfix_expression(&mut self, left: Expression) -> Option<Expression> {
         let tok = self.curr_token.clone(); // '++'
         Some(Expression::Postfix {
@@ -1981,8 +1937,7 @@ impl Parser {
         })
     }
 
-    // Call: f(arg1, arg2, ...) or f(name=val, ...)
-    // Trigger token is '(' *after* the function expression.
+    // Trigger token is `(` after the function expression.
     fn parse_call_expression(&mut self, function: Expression) -> Option<Expression> {
         let tok = self.curr_token.clone(); // '('
         let (args, named_args) = self.parse_call_args()?;
@@ -2132,10 +2087,7 @@ impl Parser {
             value: self.curr_token.literal.clone(),
         };
 
-        // Struct-variant construction: `EnumName.Variant { field: value, ... }`.
-        // Only recognized when LHS is a plain Ident and the braces contain a
-        // struct-literal shape (Ident Colon ... or empty). Prevents grabbing
-        // any `{` that happens to follow an expression-level dot access.
+        // Only when the LHS is a plain Ident and the braces hold a struct-literal shape.
         if let Expression::Ident(ref ident) = left
             && self.peek_token.token_type == TokenType::LBrace {
                 let mut idx = 1;
@@ -2364,8 +2316,7 @@ impl Parser {
             value: self.curr_token.literal.clone(),
         };
 
-        // `each k, v in coll`: the leading name binds the map key / sequence
-        // index, the second binds the element.
+        // The leading name binds the map key or sequence index, the second the element.
         let mut index_variable = None;
         if self.peek_token.token_type == TokenType::Comma {
             self.next_token(); // curr is ','
@@ -2644,8 +2595,7 @@ impl Parser {
                 continue;
             }
 
-            // If current token is '{', treat as a block default arm
-            // (not a map literal) since bare '{' in option position is a block.
+            // A bare `{` in option position is a block, not a map literal.
             if self.curr_token.token_type == TokenType::LBrace {
                 default = Some(self.parse_block()?);
                 // Skip comma if present
@@ -2884,13 +2834,7 @@ impl Parser {
             value: self.curr_token.literal.clone(),
         };
 
-        // Optional parent (struct inheritance). Two surface forms are accepted:
-        //   struct American(Person) { ... }          parenthesized form
-        //   struct Dog includes Animal { ... }        `includes ParentName` form
-        // The `includes` here is the same CONTEXTUAL keyword used for method
-        // blocks (`Name includes { ... }`), but in the struct-declaration
-        // position it is followed by the parent's NAME (an identifier) rather
-        // than `{`, which keeps the two unambiguous.
+        // Two forms: `struct American(Person)` and `struct Dog includes Animal`.
         let parent = if self.peek_token.token_type == TokenType::LParen {
             self.next_token(); // consume '('
             self.next_token(); // move to parent name
@@ -2944,12 +2888,7 @@ impl Parser {
                 });
             }
 
-            // A field may be marked private with a leading visibility modifier:
-            //   hide secret <int>      (the `hide` keyword)
-            //   hidden secret <int>    (`hidden`, a contextual keyword)
-            // `hidden` lexes as a plain identifier, so it is only treated as a
-            // modifier when it is followed by another identifier (the real field
-            // name); `hidden <int>` is still a field literally named `hidden`.
+            // `hide` is a keyword; `hidden` is contextual and lexes as a plain identifier.
             let hidden = if self.curr_token.token_type == TokenType::Hide {
                 self.next_token(); // consume 'hide', now at field name
                 true

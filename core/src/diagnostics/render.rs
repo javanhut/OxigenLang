@@ -18,8 +18,7 @@ fn underline(label: &Label, src: &SourceFile) -> Option<String> {
     }
     let line_text = src.line(line_no)?;
 
-    // Width in *characters* of the covered text, clamped to this line so a
-    // multi-line span underlines only its first line.
+    // Width in characters, clamped so a multi-line span underlines only its first line.
     let start_byte = label.span.start.offset;
     let end_byte = label.span.end.offset;
     let width = if end_byte > start_byte {
@@ -58,8 +57,7 @@ pub fn render_human(d: &Diagnostic, src: &SourceFile) -> String {
     // Location. Naming the file is what makes editor terminals linkify it.
     let line_no = d.primary.span.line();
     let col = d.primary.span.column();
-    // Line 0 means the reporting site had no location to give. Print what we
-    // know rather than an invented `0:0` pointing at the first line.
+    // Line 0 means no location was given; print what we know rather than an invented 0:0.
     match (&src.name, line_no) {
         (Some(name), 0) => out.push_str(&format!("  --> {name}\n")),
         (Some(name), _) => out.push_str(&format!("  --> {name}:{line_no}:{col}\n")),
@@ -69,8 +67,7 @@ pub fn render_human(d: &Diagnostic, src: &SourceFile) -> String {
 
     let gutter = " ".repeat(format!("{line_no}").len());
 
-    // Secondary labels first, in source order, so the primary reads last and
-    // stays next to the notes that explain it.
+    // Secondary labels first so the primary reads last, next to the notes explaining it.
     let mut secondaries: Vec<&Label> = d.secondary.iter().collect();
     secondaries.sort_by_key(|l| (l.span.line(), l.span.column()));
     for label in secondaries {
@@ -113,8 +110,7 @@ pub fn render_human(d: &Diagnostic, src: &SourceFile) -> String {
                     if let Some(line_text) = src.line(n) {
                         let start = edit.span.start.offset;
                         let end = edit.span.end.offset;
-                        // Rebuild the line with the replacement spliced in, so
-                        // the reader sees the fixed line rather than a diff.
+                        // Splice the replacement in so the reader sees the fixed line, not a diff.
                         if let (Some(before), Some(after)) =
                             (src.text.get(..start), src.text.get(end..))
                         {

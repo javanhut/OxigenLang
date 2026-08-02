@@ -208,9 +208,7 @@ pub struct NanValue {
 
 impl std::fmt::Debug for NanValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Hex dump of the raw bits plus a decoded kind tag. Detailed
-        // per-variant pretty-printing will be added once the type is
-        // actually wired into the VM.
+        // Per-variant pretty-printing lands once the type is wired into the VM.
         let tag = self.raw & TAG_MASK;
         let kind = match tag {
             _ if self.is_f64() => "f64",
@@ -314,33 +312,11 @@ impl NanValue {
     // ── Pointer-kind constructors ─────────────────────────────────────
 
     pub fn from_string(s: Rc<str>) -> Self {
-        // Rc<str> is a fat pointer — Rc::into_raw returns a *const str.
-        // The raw pointer's data part is what we want to NaN-box; the
-        // length lives in the RcBox header (Rc<str> stores the slice
-        // metadata there). We use Rc::into_raw to get the thin
-        // *const u8 to the start of the T area inside RcBox.
-        //
-        // For NaN-boxing we need the NonNull<RcBox<str>> bit pattern to
-        // round-trip Rc::from_raw correctly. We obtain it via
-        // Rc::into_raw, which returns a *const T pointing at T inside
-        // the box.
+        // Rc<str> is a fat pointer, but a NaN-box payload holds only 48 bits.
         let raw = Rc::into_raw(s);
-        // `Rc<str>` has a data-and-length raw pointer (fat). We can
-        // round-trip it through Rc::from_raw because Rc preserves the
-        // fat-pointer shape. But NaN-box only has 48 bits of payload —
-        // we can't fit a fat pointer in 48 bits.
-        //
-        // Resolution: store as Rc<String> instead of Rc<str>. The
-        // migration will need to change all String construction sites.
-        // For A1.0 we store Rc<str> by wrapping it in a thin pointer
-        // via Box::into_raw + Box::leak.
-        //
-        // See `from_rc_str_via_box` below for the full dance. We
-        // chose to use Rc<String> as the canonical heap string from
-        // here on; `Rc<str>` consumers convert at the boundary.
+        // Rebox as Rc<String> so the pointer is thin enough to fit the payload.
         unsafe {
-            // Safety: we just got `raw` from `Rc::into_raw`. To go to a
-            // thin-pointer form, reconstruct and rebox as Rc<String>.
+            // Safety: raw came from Rc::into_raw immediately above.
             let s_back: Rc<str> = Rc::from_raw(raw);
             let s_owned: String = (*s_back).to_owned();
             let rc_string: Rc<String> = Rc::new(s_owned);
@@ -501,16 +477,14 @@ impl NanValue {
         if masked == TAG_SMI {
             // Sign-extend the 48-bit payload back to i64.
             let payload = self.raw & PAYLOAD_MASK;
-            // Shift left 16 to put the sign bit of i48 into the i64 sign
-            // position, then arithmetic-shift right 16 to sign-extend.
+            // Shift left 16 then arithmetic-shift right 16 to sign-extend the i48.
             let v = ((payload as i64) << 16) >> 16;
             Some(v)
         } else if masked == TAG_POINTER_B {
             let kind = (self.raw & 0x7) as u8;
             if kind == PointerKindB::BoxedInt as u8 {
                 let ptr = ((self.raw & PAYLOAD_MASK) & !0x7) as *const i64;
-                // SAFETY: we created this via Rc<i64>::into_raw; the
-                // pointer is live as long as the NanValue is live.
+                // SAFETY: created via Rc<i64>::into_raw; live as long as the NanValue.
                 Some(unsafe { *ptr })
             } else {
                 None
@@ -609,15 +583,13 @@ pub enum PointerGroup {
 
 impl Clone for NanValue {
     fn clone(&self) -> Self {
-        // Primitives / SMIs / f64 / Builtin are bitwise copies — no Rc
-        // to bump.
+        // Primitives, SMIs, f64 and Builtin are bitwise copies with no Rc to bump.
         let masked = self.raw & TAG_MASK;
         if masked != TAG_POINTER_A && masked != TAG_POINTER_B {
             return NanValue { raw: self.raw };
         }
 
-        // Pointer: reconstruct the typed Rc, bump via Rc::clone, drop
-        // the temporary so the original Rc we're cloning isn't touched.
+        // Reconstruct the typed Rc, bump via clone, drop the temporary.
         let addr = self.decode_pointer_addr();
         let sub = (self.raw & 0x7) as u8;
         unsafe {
@@ -717,10 +689,7 @@ impl Drop for NanValue {
 #[inline]
 unsafe fn clone_and_forget<T>(addr: *const ()) {
     let typed = addr as *const T;
-    // Reconstitute the Rc, clone it (bumping strong), forget the
-    // original, and convert the clone back to a raw pointer which we
-    // discard — the strong count has been bumped and the original Rc we
-    // were cloning is still held by the NanValue caller.
+    // Bump the strong count, then discard the raw clone; the original is untouched.
     unsafe {
         let rc = Rc::<T>::from_raw(typed);
         let bumped = Rc::clone(&rc);
@@ -743,26 +712,10 @@ fn unreachable_subkind(sub: u8) -> ! {
     panic!("NanValue: unexpected pointer subkind {}", sub)
 }
 
-// ── Suppress unused-import warnings for types that the rest of the ────
-// ── VM will consume once A1.1 migrates callers. These are part of the
-// ── public contract of this module and will be used then.
+// Unused-import suppression for types A1.1 callers will consume.
 const _: Option<&HashMap<String, OldValue>> = None;
 
-// ──────────────────────────────────────────────────────────────────────
-// Display + PartialEq (A1.2.2)
-//
-// Routes through the bridge to leverage `Value`'s existing impls
-// verbatim — both for behavioral parity (e.g., `Value::PartialEq`'s
-// fall-through-to-false on Closure / StructDef / Builtin) and to keep
-// this layer minimal until the flag-day migration writes the parallel
-// implementations directly.
-//
-// Cost: a `clone() + into_value()` per call — allocating for container
-// kinds (Array, Map, Set, Tuple, Wrapped). Acceptable for diagnostic
-// paths (errors, REPL display, panic formatting) where Display/PartialEq
-// already aren't hot. Will be replaced with non-allocating parallel
-// implementations as part of A1.2's flag-day swap.
-// ──────────────────────────────────────────────────────────────────────
+// Display and PartialEq route through the bridge to reuse Value's impls verbatim.
 
 impl std::fmt::Display for NanValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -772,10 +725,7 @@ impl std::fmt::Display for NanValue {
 
 impl PartialEq for NanValue {
     fn eq(&self, other: &Self) -> bool {
-        // f64 must follow IEEE semantics (NaN ≠ NaN). The canonical-
-        // NaN normalization in `from_f64` would otherwise make every
-        // pair of NaNs bit-equal — diverging from `Value::Float(a) ==
-        // Value::Float(b)`.
+        // f64 must keep IEEE semantics: canonical-NaN normalization would make every NaN pair bit-equal.
         let a_is_f64 = self.is_f64();
         let b_is_f64 = other.is_f64();
         if a_is_f64 || b_is_f64 {
@@ -784,40 +734,18 @@ impl PartialEq for NanValue {
             }
             return f64::from_bits(self.raw) == f64::from_bits(other.raw);
         }
-        // Fast path: identical encoded payload. Catches primitives,
-        // SMIs, and any heap value cloned from the same source (since
-        // `Clone` keeps the encoded pointer identical).
+        // Fast path: identical encoded payload, since Clone keeps the pointer identical.
         if self.raw == other.raw {
             return true;
         }
-        // Slow path: bridge both into the legacy enum and use its
-        // PartialEq. Mirrors `Value::eq` — including the intentional
-        // `_ => false` arm for Closure / StructDef / Builtin.
+        // Slow path bridges into the legacy enum, including its intentional `_ => false` arm.
         let a = self.clone().into_value();
         let b = other.clone().into_value();
         a == b
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────
-// Bridge layer: `Value` ↔ `NanValue` (A1.2.1)
-//
-// Until the flag-day migration replaces `Value` with `NanValue`
-// throughout the VM, the two representations coexist. This bridge lets
-// us:
-//   1. Verify the encoding round-trips faithfully (conformance test).
-//   2. Migrate consumers incrementally — a subsystem can switch its
-//      internal representation while still exchanging `Value`s at its
-//      boundary.
-//
-// Limitations: container variants (`Array`, `Tuple`, `Map`, `Set`)
-// store `NanValue` interiors in NaN-box land but `Value` interiors in
-// the legacy enum. Bridging therefore allocates a fresh container with
-// converted elements — aliasing is **not** preserved across the bridge
-// for containers. This is acceptable for testing the encoding; the
-// real migration changes the inner storage uniformly so the bridge
-// goes away.
-// ──────────────────────────────────────────────────────────────────────
+// Bridge layer between Value and NanValue until the flag-day migration.
 
 impl From<&OldValue> for NanValue {
     fn from(v: &OldValue) -> Self {
@@ -860,8 +788,7 @@ impl From<&OldValue> for NanValue {
                 NanValue::from_set(Rc::new(RefCell::new(nans)))
             }
             OldValue::ErrorValue(data) => {
-                // ErrorValueStorage uses Rc<str>; ErrorValueData uses
-                // Rc<String> (post-A1.1b). Convert each component.
+                // ErrorValueStorage uses Rc<str> and ErrorValueData uses Rc<String>, so convert per component.
                 let storage = ErrorValueStorage {
                     msg: Rc::from(data.msg.as_str()),
                     tag: data.tag.as_ref().map(|t| Rc::from(t.as_str())),
@@ -918,9 +845,7 @@ impl NanValue {
             }
             TAG_BUILTIN => {
                 let addr = (self.raw & PAYLOAD_MASK) as usize;
-                // SAFETY: addr was produced by `from_builtin` from a live
-                // `BuiltinFn`; the function pointer is reproducible from
-                // the same address bits.
+                // SAFETY: addr came from from_builtin on a live BuiltinFn.
                 let f: BuiltinFn = unsafe { std::mem::transmute(addr) };
                 std::mem::forget(self);
                 OldValue::Builtin(f)
@@ -934,9 +859,7 @@ impl NanValue {
         let masked = self.raw & TAG_MASK;
         let sub = (self.raw & 0x7) as u8;
         let addr = self.decode_pointer_addr();
-        // SAFETY: addr/subkind pairs are produced exclusively by the
-        // matching `from_*` constructors in this module, so each pointer
-        // type is recovered through `Rc::from_raw` of the same `T`.
+        // SAFETY: addr/subkind pairs come only from the matching from_* constructors.
         let v = unsafe {
             if masked == TAG_POINTER_A {
                 if sub == PointerKindA::String as u8 {
@@ -1052,9 +975,7 @@ impl NanValue {
     }
 }
 
-// ──────────────────────────────────────────────────────────────────────
 // Tests
-// ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1151,9 +1072,7 @@ mod tests {
         assert_eq!(neg.as_i64(), Some(-1));
 
         let smi_min = NanValue::from_i64(SMI_MIN);
-        // SMI_MIN payload sets only bit 47 (the sign bit position
-        // within the 48-bit payload). `(payload << 16) >> 16` recovers
-        // the original i64.
+        // SMI_MIN sets only bit 47, so (payload << 16) >> 16 recovers the original.
         let recovered = ((smi_min.raw_bits() & PAYLOAD_MASK) as i64) << 16 >> 16;
         assert_eq!(recovered, SMI_MIN);
     }
@@ -1183,10 +1102,7 @@ mod tests {
             layout,
             def,
         ));
-        // The NaN-box stores `Rc::into_raw(rc)` — a pointer to T inside
-        // the RcBox, not the RcBox header. The eventual JIT loads the
-        // payload bits and casts directly to `*const T`, so the pin
-        // checks that exact value (via the non-consuming `Rc::as_ptr`).
+        // The payload points at T inside the RcBox, not the header; the JIT casts it directly.
         let expected_raw = Rc::as_ptr(&inst) as usize;
         // Sanity: alignment lets us repurpose the low 3 bits.
         assert_eq!(expected_raw & 0x7, 0, "Rc::into_raw target must be 8-aligned");
@@ -1368,8 +1284,7 @@ mod tests {
         ));
         let before = Rc::strong_count(&inst);
 
-        // Store in a NanValue (bumps to before+1 because from_struct_instance
-        // consumes one Rc via into_raw but we still hold the original).
+        // from_struct_instance consumes one Rc via into_raw while we still hold the original.
         let v = NanValue::from_struct_instance(Rc::clone(&inst));
         assert_eq!(
             Rc::strong_count(&inst),
@@ -1637,9 +1552,7 @@ mod tests {
 
     fn values_equivalent(a: &OldValue, b: &OldValue) -> bool {
         match (a, b) {
-            // PartialEq covers most variants. Variants below either lack a
-            // PartialEq case on the legacy enum or carry function pointers
-            // we want to compare by identity.
+            // These variants lack a legacy PartialEq case or carry fn pointers compared by identity.
             (OldValue::Closure(x), OldValue::Closure(y)) => Rc::ptr_eq(x, y),
             (OldValue::StructDef(x), OldValue::StructDef(y)) => Rc::ptr_eq(x, y),
             (OldValue::EnumDef(x), OldValue::EnumDef(y)) => Rc::ptr_eq(x, y),
@@ -1687,8 +1600,7 @@ mod tests {
         assert_eq!(Rc::strong_count(&inst), baseline + 2);
 
         let v2 = nan.into_value();
-        // into_value transfers the Rc from NanValue to the new OldValue.
-        // Total live Rcs unchanged from the NanValue state.
+        // into_value transfers the Rc, so total live Rcs are unchanged.
         assert_eq!(Rc::strong_count(&inst), baseline + 2);
 
         drop(v);
@@ -1696,13 +1608,7 @@ mod tests {
         assert_eq!(Rc::strong_count(&inst), baseline);
     }
 
-    // ── Refcount conformance for every pointer kind (A1.2.4) ──────────
-    //
-    // The existing struct_instance_clone_drop_preserves_refcount test
-    // pinned StructInstance specifically. These tests extend coverage
-    // to every PointerKindA / PointerKindB variant so a future tweak to
-    // the dispatch tables in `Clone for NanValue` / `Drop for NanValue`
-    // (e.g. adding a kind, reordering subkinds) is caught immediately.
+    // Refcount conformance across every pointer kind.
 
     /// Generic helper: build a `Rc<T>` once, wrap it via `wrap`, then
     /// clone the NanValue and drop both — refcount must round-trip
@@ -1736,8 +1642,7 @@ mod tests {
         );
     }
 
-    // PointerKindA — already-covered: StructInstance and String. Add
-    // the rest: Array, Tuple, Map, Set, Closure, StructDef.
+    // StructInstance and String are already covered; add the rest.
 
     #[test]
     fn refcount_array_round_trip() {
@@ -1804,8 +1709,7 @@ mod tests {
         check_rc_refcount_round_trip(rc, NanValue::from_struct_def);
     }
 
-    // PointerKindB — EnumDef, EnumInstance, Module, ErrorValue, Wrapped
-    // (special), Error, BoxedInt, BoxedUint.
+    // PointerKindB: EnumDef, EnumInstance, Module, ErrorValue, Wrapped, Error, BoxedInt, BoxedUint.
 
     #[test]
     fn refcount_enum_def_round_trip() {
@@ -1855,15 +1759,10 @@ mod tests {
 
     #[test]
     fn refcount_boxed_i64_round_trip() {
-        // The boxed-int path is reached implicitly via from_i64 when the
-        // value is outside SMI range — there's no `Rc<i64>` constructor.
-        // We can still verify clone/drop preserve count by going through
-        // the public API.
+        // Reached implicitly via from_i64 outside SMI range; there is no Rc<i64> constructor.
         let big = SMI_MAX + 1;
         let v = NanValue::from_i64(big);
-        // The boxed Rc<i64> is hidden inside; we can't observe its count
-        // directly, but clone+drop must not panic and the value must
-        // round-trip.
+        // The count is unobservable, but clone+drop must not panic and must round-trip.
         let v2 = v.clone();
         assert_eq!(v.as_i64(), Some(big));
         assert_eq!(v2.as_i64(), Some(big));
@@ -1898,22 +1797,18 @@ mod tests {
         assert_eq!(Rc::strong_count(&inner_rc), baseline + 1);
 
         let wrapped = NanValue::from_wrapped(inner_nan);
-        // wrapped owns inner_nan via Rc<WrappedStorage>; inner Module
-        // refcount stays at +1 (the from_module strong didn't move).
+        // The inner Module strong stays at +1: from_module's strong did not move.
         assert_eq!(Rc::strong_count(&inner_rc), baseline + 1);
 
         let wrapped2 = wrapped.clone();
-        // Cloning Wrapped bumps Rc<WrappedStorage> only — the inner
-        // Module's strong is unchanged because the WrappedStorage holds
-        // it once.
+        // Cloning bumps Rc<WrappedStorage> only; the storage holds the Module once.
         assert_eq!(Rc::strong_count(&inner_rc), baseline + 1);
 
         drop(wrapped);
         assert_eq!(Rc::strong_count(&inner_rc), baseline + 1);
 
         drop(wrapped2);
-        // Last Wrapped drop frees the WrappedStorage, which drops its
-        // inner NanValue, which decrements the Module strong.
+        // The last drop frees the storage, dropping its NanValue and decrementing Module.
         assert_eq!(Rc::strong_count(&inner_rc), baseline);
     }
 

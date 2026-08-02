@@ -9,9 +9,7 @@ use std::rc::Rc;
 pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("print".to_string(), Value::Builtin(builtin_print));
     globals.insert("println".to_string(), Value::Builtin(builtin_println));
-    // Concurrency primitives are internal: the public surface is the
-    // `diverge` / `converge` keywords, which desugar to these. `cancel` stays
-    // public — it has no keyword form.
+    // Internal: the public surface is the diverge/converge keywords. `cancel` has no keyword form.
     globals.insert("__spawn".to_string(), Value::Builtin(crate::concurrent::builtin_spawn));
     globals.insert("__join_task".to_string(), Value::Builtin(crate::concurrent::builtin_join));
     globals.insert("cancel".to_string(), Value::Builtin(crate::concurrent::builtin_cancel));
@@ -244,8 +242,7 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
 fn builtin_print(args: &[Value]) -> Value {
     use std::io::Write;
     let parts: Vec<String> = args.iter().map(|a| format!("{}", a)).collect();
-    // Flush so `print` (no trailing newline) shows immediately — needed for
-    // token-by-token streaming output, where nothing else triggers a flush.
+    // print has no trailing newline, so flush or streaming output never appears.
     let mut out = std::io::stdout().lock();
     let _ = write!(out, "{}", parts.join(" "));
     let _ = out.flush();
@@ -350,8 +347,7 @@ fn builtin_int(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Integer(n) => Value::Integer(n),
         ValueRepr::Float(f) => Value::Integer(f as i64),
-        // Trim surrounding whitespace before parsing, matching the
-        // tree-walker (int(" 5 ") == 5).
+        // Trim first, matching the tree-walker's int(" 5 ") == 5.
         ValueRepr::String(s) => match s.trim().parse::<i64>() {
             Ok(n) => Value::Integer(n),
             Err(_) => match s.trim().parse::<f64>() {
@@ -377,8 +373,7 @@ fn builtin_float(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Float(f) => Value::Float(f),
         ValueRepr::Integer(n) => Value::Float(n as f64),
-        // Trim surrounding whitespace before parsing, matching the
-        // tree-walker (float(" 1.5 ") == 1.5).
+        // Trim first, matching the tree-walker's float(" 1.5 ") == 1.5.
         ValueRepr::String(s) => match s.trim().parse::<f64>() {
             Ok(f) => Value::Float(f),
             Err(_) => Value::Error(rc_str(format!("cannot convert '{}' to float", s))),
@@ -402,9 +397,7 @@ fn builtin_range(args: &[Value]) -> Value {
             _ => return Value::Error(rc_str("range() requires integer arguments")),
         }
     }
-    // range(end) / range(start, end) / range(start, end, step). A negative step
-    // counts down, so the bound is exclusive from whichever side it is
-    // approached.
+    // A negative step counts down, so the bound is exclusive from whichever side it is approached.
     let (start, end, step) = match ints[..] {
         [end] => (0, end, 1),
         [start, end] => (start, end, 1),
@@ -421,8 +414,7 @@ fn builtin_range(args: &[Value]) -> Value {
         arr.push(Value::Integer(i));
         match i.checked_add(step) {
             Some(next) => i = next,
-            // A step that runs past i64 bounds ends the range rather than
-            // wrapping back around into it.
+            // A step past i64 bounds ends the range rather than wrapping back into it.
             None => break,
         }
     }
@@ -586,7 +578,18 @@ fn builtin_byte(args: &[Value]) -> Value {
                 Value::Byte(n as u8)
             }
         }
-        ValueRepr::Char(c) => Value::Byte(c as u8),
+        // Range-checked like the Integer and Uint arms: `c as u8` made byte(`€`) 172.
+        ValueRepr::Char(c) => {
+            let code = c as u32;
+            if code > 255 {
+                Value::Error(rc_str(format!(
+                    "byte() argument out of range (0-255): {} (U+{:04X})",
+                    code, code
+                )))
+            } else {
+                Value::Byte(code as u8)
+            }
+        }
         _ => Value::Error(rc_str(format!(
             "cannot convert {} to byte",
             args[0].type_name()
@@ -631,7 +634,8 @@ fn builtin_chr(args: &[Value]) -> Value {
         return Value::Error(rc_str("chr() takes exactly 1 argument"));
     }
     match args[0].repr() {
-        ValueRepr::Integer(n) => match char::from_u32(n as u32) {
+        // try_from, not `as u32`: the cast wraps back into valid range and chr(4294967393) returned `a`.
+        ValueRepr::Integer(n) => match u32::try_from(n).ok().and_then(char::from_u32) {
             Some(c) => Value::Char(c),
             None => Value::Error(rc_str(format!("invalid char code: {}", n))),
         },
@@ -674,8 +678,7 @@ fn builtin_join(args: &[Value]) -> Value {
     match (&args[0], &args[1]) {
         (Value::Array(arr), Value::String(sep)) => {
             use std::fmt::Write as _;
-            // Accumulate into one buffer instead of building a Vec<String>
-            // of N throwaway `format!` allocations and then joining.
+            // One buffer instead of N throwaway format! allocations joined at the end.
             let arr = arr.borrow();
             let mut result = String::new();
             for (i, v) in arr.iter().enumerate() {
@@ -1311,19 +1314,7 @@ fn process_output_map(output: std::process::Output) -> Value {
     )))
 }
 
-// __exec() runs its argument THROUGH A SHELL (`sh -c` / `cmd /C`), so every
-// shell metacharacter in it — `;`, `|`, `$(...)`, backticks — is live. That is
-// the point of the builtin (it is how you get pipelines and redirection), but
-// it means any caller interpolating untrusted data into the string is handing
-// that data command-execution. Those callers want __exec_argv(), which passes
-// an argument vector straight to the OS with no shell in between.
-//
-// The old signature was variadic and space-joined the extra arguments into the
-// command string. That read like argv (`__exec("cat", user_file)`) while
-// actually being shell concatenation, which is exactly the trap above, so the
-// extra arguments are now rejected outright rather than silently pasted in:
-// a hard error naming the replacement beats a quiet injection. The only
-// in-tree caller, os.exec(), always passed a single argument.
+// Runs through a shell, so every metacharacter is live; use __exec_argv with untrusted input.
 fn builtin_exec(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str(
@@ -1357,10 +1348,7 @@ fn builtin_exec(args: &[Value]) -> Value {
     }
 }
 
-// The shell-free counterpart to __exec(): the program is executed directly and
-// each element of `argv` becomes one argument verbatim, so a value like
-// "x; rm -rf /" is a filename, not a command. This is the only way to run a
-// subprocess with untrusted data in it.
+// Shell-free: each argv element is one verbatim argument, so "x; rm -rf /" is a filename.
 fn builtin_exec_argv(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("__exec_argv() takes 2 arguments (program, array)"));
@@ -1376,8 +1364,7 @@ fn builtin_exec_argv(args: &[Value]) -> Value {
 
     match std::process::Command::new(&program).args(&argv).output() {
         Ok(output) => process_output_map(output),
-        // A missing program fails here rather than as a nonzero exit code — the
-        // shell form reports that as code 127, so callers must check both.
+        // A missing program fails here; the shell form reports that as exit code 127 instead.
         Err(e) => Value::Error(rc_str(format!("__exec_argv({}): {}", program, e))),
     }
 }
@@ -1453,7 +1440,16 @@ fn builtin_exit(args: &[Value]) -> Value {
         0
     } else {
         match args[0].repr() {
-            ValueRepr::Integer(n) => n as i32,
+            // Reject out of range: `n as i32` plus the OS's 8-bit truncation made os.exit(256) exit 0.
+            ValueRepr::Integer(n) if (0..=255).contains(&n) => n as i32,
+            ValueRepr::Integer(n) => {
+                return Value::Error(rc_str(format!(
+                    "exit() code out of range (0-255): {} — the OS keeps only \
+                     the low 8 bits, so this would have exited {}",
+                    n,
+                    (n as u8) as i64
+                )));
+            }
             _ => 1,
         }
     };
@@ -1688,12 +1684,7 @@ fn builtin_rand_float(_args: &[Value]) -> Value {
 
 // ── Path builtins ──────────────────────────────────────────────────────
 
-// Deliberately keeps `PathBuf::push` semantics: an absolute component discards
-// everything joined before it, and `..` is left in place. That matches every
-// other language's join and callers rely on it, but it means join is NOT a
-// sandbox — `join(["/srv/uploads", user_input])` can land anywhere on disk.
-// Code that must keep a path inside a directory has to check it with
-// __path_is_within() below; joining alone proves nothing.
+// Deliberate PathBuf::push semantics; use __path_is_within for containment.
 fn builtin_path_join(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__path_join() takes 1 argument (array)"));
@@ -1807,8 +1798,7 @@ fn normalize_lexical(p: &std::path::Path) -> std::path::PathBuf {
                 if pops_a_name {
                     out.pop();
                 } else if !rooted {
-                    // Nothing to cancel and no root to clamp against, so the
-                    // `..` is meaningful and has to survive: `../../a`.
+                    // Nothing to clamp against, so the `..` is meaningful and must survive.
                     out.push("..");
                 }
             }
@@ -1836,8 +1826,7 @@ fn resolve_for_containment(p: &std::path::Path) -> std::path::PathBuf {
             Err(_) => p.to_path_buf(),
         }
     };
-    // Canonicalise the whole thing first: on an existing path it resolves
-    // symlinks and `..` together, which lexical normalisation cannot do.
+    // Canonicalise first: on an existing path that resolves symlinks and `..` together.
     if let Ok(real) = absolute.canonicalize() {
         return real;
     }
@@ -1857,8 +1846,7 @@ fn resolve_for_containment(p: &std::path::Path) -> std::path::PathBuf {
                 trailing.push(name.to_os_string());
                 probe = parent.to_path_buf();
             }
-            // Ran out of ancestors (or hit the root, which either exists and
-            // canonicalised above or is unreadable): lexical is all we have.
+            // Out of ancestors, so lexical is all we have.
             _ => return lexical,
         }
     }
@@ -1920,9 +1908,7 @@ fn builtin_json_parse(args: &[Value]) -> Value {
             let mut pos = 0;
             match json_parse_value(&chars, &mut pos) {
                 Ok(val) => {
-                    // Content after the value used to be ignored, so a
-                    // concatenated or truncated document parsed "successfully"
-                    // as whatever happened to come first.
+                    // Trailing content used to be ignored, so a truncated document parsed successfully.
                     json_skip_ws(&chars, &mut pos);
                     if pos < chars.len() {
                         let rest: String = chars[pos..].iter().take(20).collect();
@@ -2375,10 +2361,7 @@ fn builtin_http_request(args: &[Value]) -> Value {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     let (_, mut resp_body) = resp.into_parts();
-                    // A failed body read used to default to "", so a connection
-                    // reset mid-body or a non-UTF-8 payload was indistinguishable
-                    // from a server that legitimately answered with no body.
-                    // Surface it the way a transport failure already surfaces.
+                    // A failed read used to default to "", indistinguishable from a legitimately empty body.
                     let body_str = match resp_body.read_to_string() {
                         Ok(s) => s,
                         Err(e) => {
@@ -2558,8 +2541,7 @@ fn builtin_net_http_read(args: &[Value]) -> Value {
     let max = net_try!(net_int(&args[1], "read_chunk max"));
     let timeout = net_try!(net_int(&args[2], "read_chunk timeout_ms"));
     match crate::netres::http_read(id as u64, max, timeout) {
-        // None = timed out with no data yet (only when timeout_ms > 0); the
-        // caller distinguishes this from "" (EOF) and an error value.
+        // None means timed out with no data yet; distinct from "" (EOF) and an error value.
         Ok(Some(s)) => Value::String(rc_str(s)),
         Ok(None) => Value::None,
         Err(e) => Value::Error(rc_str(e)),

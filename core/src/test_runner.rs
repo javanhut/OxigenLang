@@ -59,9 +59,7 @@ fn eval_test_name(name: &Expression, source: &str, file_path: &Option<PathBuf>) 
         Ok(func) => {
             let mut vm = VM::new();
             vm.set_source(source);
-            // A test run has no argv, but `os.args()` is `fun args() { __args }`
-            // — without the global it raised `undefined variable: __args`
-            // instead of reading as empty.
+            // A test run has no argv, but os.args() reads __args, which must exist or it raises.
             vm.set_script_args(&[]);
             if let Some(p) = file_path {
                 vm.set_file(p.clone());
@@ -90,8 +88,7 @@ pub fn run_vm_tests(
         return Vec::new();
     }
 
-    // Top-level setup: everything except `<test>` blocks and a `main { }` block
-    // (suppressed during `oxigen test`).
+    // Everything except <test> blocks and main, which is suppressed during `oxigen test`.
     let setup: Vec<Statement> = program
         .statements
         .iter()

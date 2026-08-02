@@ -200,10 +200,7 @@ pub(super) struct HelperRefs {
     #[allow(dead_code)]
     pub op_method_call: FuncRef,
     pub op_method_call_ic: FuncRef,
-    // `stack_as_mut_ptr` and `stack_len` are still registered as
-    // runtime helpers for backwards compatibility, but the hot JIT
-    // paths now read `vm.stack_view.{ptr, len}` directly via
-    // `emit_load_stack_*` — no FFI crossing.
+    // Still registered for compatibility, but hot paths read vm.stack_view directly.
     #[allow(dead_code)]
     pub stack_as_mut_ptr: FuncRef,
     #[allow(dead_code)]
@@ -332,8 +329,7 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
     sig_vm_u32.params.push(AbiParam::new(ptr_ty));
     sig_vm_u32.params.push(AbiParam::new(types::I32));
 
-    // Signature for inline primitive pushes: fn(*mut VM, i64).
-    // Floats are passed as their u64 bit pattern reinterpreted as i64.
+    // fn(*mut VM, i64); floats pass as their u64 bit pattern reinterpreted as i64.
     let mut sig_vm_i64 = module.make_signature();
     sig_vm_i64.params.push(AbiParam::new(ptr_ty));
     sig_vm_i64.params.push(AbiParam::new(types::I64));
@@ -347,9 +343,7 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
     sig_vm_u32_to_u32.params.push(AbiParam::new(types::I32));
     sig_vm_u32_to_u32.returns.push(AbiParam::new(types::I32));
 
-    // B2.2.f debug helper: (vm, cache_ptr, closure_ptr, phase: u32,
-    // expected_slot_offset: i64, expected_jit_frame_len: i64,
-    // arg_count: u32) -> u32
+    // (vm, cache_ptr, closure_ptr, phase, expected_slot_offset, expected_jit_frame_len, arg_count) -> u32
     let mut sig_dbg_spec_call = module.make_signature();
     sig_dbg_spec_call.params.push(AbiParam::new(ptr_ty));
     sig_dbg_spec_call.params.push(AbiParam::new(ptr_ty));

@@ -183,8 +183,7 @@ fn executable_script_runs_via_shebang() {
     perms.set_mode(0o755);
     fs::set_permissions(&script, perms).unwrap();
 
-    // ponytail: sibling tests fork while we hold a writable fd to the script, so exec
-    // can hit ETXTBSY. Retry until that fd is gone.
+    // Sibling tests fork while we hold a writable fd, so exec can hit ETXTBSY; retry.
     let output = loop {
         match Command::new(&script)
             .current_dir(workspace_root())
