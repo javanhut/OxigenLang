@@ -181,7 +181,8 @@ introduce os
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `exec` | `exec(cmd)` | Run shell command, returns map with `stdout`, `stderr`, `code` |
+| `exec` | `exec(cmd)` | Run a command **through a shell**, returns map with `stdout`, `stderr`, `code` |
+| `exec_argv` | `exec_argv(prog, argv)` | Run a program directly with **no shell**; same return shape as `exec` |
 | `name` | `name()` | OS name ("linux", "macos", "windows") |
 | `arch` | `arch()` | CPU architecture ("x86_64", "aarch64") |
 | `args` | `args()` | Arguments passed to the current script |
@@ -208,6 +209,55 @@ println(os.name())         // linux
 println(os.cwd())          // /current/directory
 println(os.args())         // [Alice, --flag=value]
 ```
+
+### Running commands: `exec` vs `exec_argv`
+
+`os.exec` hands its string to a shell (`sh -c` on Unix, `cmd /C` on Windows).
+That is what makes pipelines, globs and redirection work — and it also means
+every shell metacharacter in the string is live: `;`, `|`, `&`, `$(...)`,
+backticks, `>`, `*`. Build the string out of untrusted input and you have handed
+that input command execution on your machine.
+
+`os.exec_argv(prog, argv)` runs the program directly. No shell is involved, and
+each element of `argv` arrives at the program as exactly one argument, so a
+value containing `;` is a filename with a semicolon in it, not a new command.
+
+**Before** — a filename from a form, a config file, or `os.args()`:
+
+```oxi
+introduce os
+
+name := "notes.txt; echo PWNED"   // untrusted
+print(os.exec("echo " + name)["stdout"])
+// notes.txt
+// PWNED          <- the shell ran a second command
+```
+
+**After** — same value, passed as data:
+
+```oxi
+print(os.exec_argv("echo", [name])["stdout"])
+// notes.txt; echo PWNED     <- one literal argument
+```
+
+**Which to reach for.** Use `exec_argv` whenever any part of the command comes
+from outside your program — arguments, user input, filenames, network data, the
+environment. Use `exec` only for a command you wrote out in full yourself, or
+when you actually want shell features (`"ls | wc -l"`); if you need both a
+pipeline *and* untrusted data, quote it yourself or restructure the work so the
+untrusted part goes through `exec_argv`.
+
+Both return the same `{stdout, stderr, code}` map, but they report a **missing
+program differently**: the shell form comes back normally with `code` 127 and a
+"command not found" message in `stderr`, while `exec_argv` fails to spawn at all
+and returns a terminal `Error` (`__exec_argv(prog): No such file or directory`).
+Wrap it with `<type<Error || Value>>(...)` if a missing program is something you
+want to handle rather than abort on.
+
+`exec` takes exactly one argument. The older variadic form —
+`os.exec("cat", user_file)` — space-joined the extra arguments into the shell
+string, which looked like an argument vector while being shell concatenation;
+passing extra arguments is now an error pointing at `exec_argv`.
 
 ## time
 
@@ -272,6 +322,8 @@ introduce path
 | `stem` | `stem(p)` | Filename without extension |
 | `is_absolute` | `is_absolute(p)` | Check if path is absolute |
 | `is_relative` | `is_relative(p)` | Check if path is relative |
+| `normalize` | `normalize(p)` | Resolve `.` and `..` lexically, without touching the filesystem |
+| `is_within` | `is_within(base, candidate)` | True if `candidate` is `base` itself or something inside it |
 
 ```oxi
 introduce path
@@ -281,6 +333,111 @@ println(path.filename("/a/b/c.txt")) // c.txt
 println(path.parent("/a/b/c.txt"))   // /a/b
 println(path.stem("data.csv"))       // data
 ```
+
+### `join` is not a security boundary
+
+`join` follows the same rule as every other language's path join, and that rule
+is surprising the first time it bites you: **an absolute component throws away
+everything joined before it**, and `..` is left in the string untouched.
+
+```oxi
+println(path.join(["/srv/uploads", "/etc/passwd"]))
+// /etc/passwd            <- the base is simply gone
+
+println(path.join(["/srv/uploads", "../../etc/passwd"]))
+// /srv/uploads/../../etc/passwd   <- still points at /etc/passwd once opened
+```
+
+So `path.join([upload_dir, filename])` proves nothing about where the result
+lands if `filename` came from a user. The function that makes that decision is
+`is_within`.
+
+### `normalize`
+
+`normalize` collapses `.` and `..` **lexically** — it never touches the
+filesystem, so it also works on paths that do not exist yet:
+
+```oxi
+println(path.normalize("/srv/uploads/../../etc/passwd")) // /etc/passwd
+println(path.normalize("a/./b/../c"))                    // a/c
+println(path.normalize("../../a"))                       // ../../a
+println(path.normalize("/../x"))                         // /x
+println(path.normalize(""))                              // .
+```
+
+Note the last three. In a relative path a leading `..` has nothing to cancel and
+genuinely names a sibling, so it survives. Above the root there is no parent to
+climb to, so `..` is dropped. An empty path normalizes to `"."`.
+
+Because it is lexical, `normalize` does **not** follow symlinks: if `a` is a
+symlink to `/etc`, `a/../x` normalizes to `x` but opening it reaches `/x`. Use
+it to tidy a path for display or comparison, not to decide whether a path is
+safe.
+
+### `is_within` — the containment check
+
+The pattern is: join, then check, then open — never join then open.
+
+```oxi
+introduce path
+
+fun safe_target(base <str>, user_name <str>) {
+    target := path.join([base, user_name])
+    option {
+        path.is_within(base, target) -> target,
+        None
+    }
+}
+
+println(safe_target("/srv/uploads", "report.pdf"))       // /srv/uploads/report.pdf
+println(safe_target("/srv/uploads", "../../etc/passwd")) // None
+println(safe_target("/srv/uploads", "/etc/passwd"))      // None
+```
+
+Behaviour in detail:
+
+```oxi
+println(path.is_within("/srv/uploads", "/srv/uploads/report.pdf")) // True
+println(path.is_within("/srv/uploads", "/srv/uploads"))            // True  (base itself counts)
+println(path.is_within("/srv/uploads", "/etc/passwd"))             // False
+println(path.is_within("/srv/up", "/srv/uploaded/x"))              // False (component-wise, not string prefix)
+println(path.is_within("/srv/uploads",
+                       path.join(["/srv/uploads", "../../etc/passwd"]))) // False
+```
+
+The sibling case matters: a naive string-prefix check would call
+`/srv/uploaded/x` "inside" `/srv/up`. `is_within` compares whole path
+components, so it does not.
+
+Both arguments are made absolute (relative paths resolve against the current
+working directory) and then resolved as far as the filesystem allows: the part
+of each path that already exists is canonicalised, which **does** follow
+symlinks, and any trailing components that do not exist yet are resolved
+lexically. So an existing symlink inside `base` that points outside it is
+correctly rejected:
+
+```oxi
+// /srv/uploads/link.txt exists and is a symlink to ../secret.txt
+println(path.is_within("/srv/uploads", "/srv/uploads/link.txt"))  // False
+```
+
+**Honest limits — read these before relying on it.** The symlink guarantee is
+partial, and the check is only as good as the filesystem at the instant it runs:
+
+- **Components that do not exist yet are only checked lexically.**
+  `is_within(base, base + "/newdir/f.txt")` is `True` while `newdir` does not
+  exist. If something then creates `newdir` as a symlink pointing elsewhere,
+  your later open leaves `base` and `is_within` never saw it.
+- **TOCTOU.** Between `is_within` returning `True` and your program opening the
+  file, anything with write access to `base` can swap a component for a symlink.
+  There is no atomic "check and open" here.
+- It is a **lexical/canonical** answer, not a kernel-enforced one. It does not
+  consider mount points, hard links, bind mounts, or permissions.
+
+Treat `is_within` as the thing that rejects traversal input — `../../etc/passwd`
+and friends — which is what most programs actually need. If you are guarding
+real secrets against a hostile local process, you still want an OS-level sandbox
+(a container, a chroot, `openat`-style resolved handles), not this function.
 
 ## json
 
@@ -458,7 +615,9 @@ The HTTP request functions return a map with `"status"` (integer) and `"body"` (
 `download`/`upload` stream their payloads so large transfers never buffer the
 whole body in memory. `open_stream` exposes a response body incrementally
 instead (LLM token streams, SSE, chunked, long-poll). It takes a method, so you
-can POST a prompt and read the tokens back; `close` frees the handle.
+can POST a prompt and read the tokens back; `close` frees the handle. A stream
+applies back-pressure: the reader stays at most ~72 KiB ahead of you, so a
+consumer slower than the network cannot accumulate the whole body in memory.
 
 `read_line` is the easy way to consume the stream: each call returns one
 complete line, so you just parse it. It returns whole UTF-8 characters (emoji,
@@ -502,12 +661,75 @@ res := <type<Error || Value>>(net.connect("127.0.0.1", 9999))
 print("connect failed\n") when result.is_err(res)
 ```
 
-**Blocking.** All socket calls are synchronous and block the (single-threaded)
-interpreter until the OS operation completes: `connect` waits for the handshake,
-`accept` waits for a client, `receive`/`udp_receive` wait for data. There is no
-timeout — a `connect` to an unreachable host blocks until the OS gives up. One
-slow peer stalls the whole program; non-blocking/timeout support is not yet
-available.
+**Ports.** `connect`, `listen`, `udp_bind` and `udp_send` validate the port
+before use. The accepted range is **1–65535**, plus **0 for the two binding
+calls** (`listen` and `udp_bind`), where 0 has a real meaning: "let the OS pick a
+free ephemeral port". Connecting or sending *to* port 0 is never meaningful and
+is rejected. Anything outside the range is an `Error`:
+
+```oxi
+net.connect("127.0.0.1", 74626)  // Error: port 74626 out of range: must be 1-65535
+net.connect("127.0.0.1", 0)      // Error: port 0 out of range: must be 1-65535
+net.listen("127.0.0.1", 65536)   // Error: port 65536 out of range: must be 0-65535
+net.udp_bind("127.0.0.1", -1)    // Error: port -1 out of range: must be 0-65535
+```
+
+> **This changed.** An out-of-range port used to be truncated to its low 16 bits
+> and silently used. `net.connect(host, 74626)` connected to **port 9090**,
+> `65616` reached **port 80**, `-1` reached **65535**, and `net.listen(host,
+> 65536)` masked to 0 and bound a *random* ephemeral port while reporting
+> success — a server that believed it was listening on the port you asked for.
+> If you have code that computed a port arithmetically and relied on the
+> wrap-around, it now errors instead; apply the `% 65536` yourself if that was
+> deliberate.
+
+**Blocking and timeouts.** All socket calls are synchronous and block the
+calling VM until the OS operation completes: `connect` waits for the handshake,
+`accept` waits for a client, `receive`/`udp_receive` wait for data. Run them
+under `diverge` (see [concurrency.md](concurrency.md)) so a slow peer stalls one
+thread instead of your program.
+
+Only one of them is bounded:
+
+| Call | Timeout | Default |
+|------|---------|---------|
+| `connect` | TCP handshake | **30 seconds**, then `Error: connection timed out`. Not configurable. |
+| `accept`, `receive`, `udp_receive`, `send` | none | block until the OS returns |
+| `read_line`, `read_chunk` | `timeout_ms` argument | `0` = block forever; `> 0` returns `None` when nothing has arrived yet |
+
+The connect bound exists because a blackholed SYN otherwise hangs forever, and
+program exit waits for spawned tasks to finish — one stuck `connect` wedged the
+whole process. Name resolution happens before the timer starts and is still
+bounded only by the OS resolver.
+
+**Receive buffers.** `receive`/`udp_receive` take `max` as an upper bound, not
+an allocation request: a single TCP `receive` returns at most 64 KiB however
+large `max` is (it is one read of a byte stream, so it already returned "up to
+`max`" — loop if you want more), and a UDP datagram cannot exceed 64 KiB in the
+first place, so the internal cap never truncates. `max` must be positive.
+Previously the buffer was allocated at exactly `max`, so `receive(c, 10000000000)`
+tried to allocate 10 GB up front and an allocation failure aborts the process
+outright — no catchable error.
+
+**A datagram bigger than your `max` is an error.** The two protocols differ here
+and the difference matters. TCP is a byte stream, so a `receive` that returns
+less than you asked for is normal — the rest is still queued and the next call
+gets it. UDP has nothing to resume from: the OS keeps what fits your buffer and
+throws the remainder away. So `udp_receive` raises rather than handing back a
+quietly incomplete message:
+
+```oxi
+// a 16-byte datagram arrives
+net.udp_receive(sock, 4)
+// error: udp_receive: datagram is larger than max (4 bytes); the rest was
+//        discarded by the OS and cannot be recovered — retry with a larger max
+//        (up to 65536)
+```
+
+> **This changed.** That call used to return `"0123"` and drop 12 bytes with no
+> indication anything was missing — a partial message that looks exactly like a
+> complete one. If you want whatever arrives regardless of size, pass a `max` of
+> `65536`; no datagram can exceed it, so the error can never fire.
 
 ```oxi
 introduce net

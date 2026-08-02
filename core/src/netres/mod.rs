@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -43,6 +43,10 @@ struct HttpStream {
     carry: Vec<u8>,
     done: bool,
 }
+
+/// How many 8 KiB chunks may sit unread before the reader thread blocks; see
+/// `spawn_body_reader`.
+const BODY_QUEUE_CHUNKS: usize = 8;
 
 // ponytail: one global lock on the socket table so ids cross threads (enables
 // spawn handle(conn)). I/O runs on a cloned fd *outside* the lock, so a blocking
@@ -74,15 +78,63 @@ fn with_udp<T>(id: u64, f: impl FnOnce(&UdpSocket) -> Result<T, String>) -> Resu
     f(&s)
 }
 
+// ── Ports ───────────────────────────────────────────────────────────────
+
+/// Validates a caller-supplied port before the `u16` cast. A bare `port as u16`
+/// silently keeps the low 16 bits, so 74626 quietly connected to 9090, 65616
+/// hit port 80, -1 hit 65535, and 65536 masked to 0 and bound a *random*
+/// ephemeral port while reporting success — a server believing it listens on a
+/// port it does not.
+///
+/// Judgement call: port 0 is accepted only when `allow_ephemeral` (the bind
+/// paths, `tcp_listen`/`udp_bind`), where "let the OS pick a free port" is a
+/// real and documented use of 0. Connecting or sending *to* port 0 is never
+/// meaningful — it is a reserved number no service can listen on — so those
+/// paths reject it instead of handing the OS a request that can only fail (or,
+/// worse, be reinterpreted). Allowing it everywhere would re-open exactly the
+/// masking bug above for the 65536 case.
+fn port_u16(port: i64, allow_ephemeral: bool) -> Result<u16, String> {
+    let low = if allow_ephemeral { 0 } else { 1 };
+    if port < low || port > 65535 {
+        return Err(format!("port {} out of range: must be {}-65535", port, low));
+    }
+    Ok(port as u16)
+}
+
+/// A TCP connect that hangs forever is never what anyone wants: the peer is
+/// down or a firewall is blackholing the SYN, and `crate::concurrent::drain()`
+/// spins at exit until every spawned task finishes, so one stuck connect wedges
+/// process exit until SIGKILL. Only the handshake is bounded — `accept` and
+/// `receive` block on purpose and keep today's behaviour. Name resolution is
+/// still bounded only by the OS resolver.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 // ── TCP ─────────────────────────────────────────────────────────────────
 
 pub fn tcp_connect(host: &str, port: i64) -> Result<u64, String> {
-    let stream = TcpStream::connect((host, port as u16)).map_err(|e| e.to_string())?;
-    Ok(insert(Resource::Tcp(stream)))
+    let port = port_u16(port, false)?;
+    // `connect_timeout` takes a resolved address, so resolve first and try each
+    // candidate (a host can have both A and AAAA records) as `connect` does.
+    let addrs: Vec<_> = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| e.to_string())?
+        .collect();
+    let mut last_err = None;
+    for addr in &addrs {
+        match TcpStream::connect_timeout(addr, CONNECT_TIMEOUT) {
+            Ok(stream) => return Ok(insert(Resource::Tcp(stream))),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(match last_err {
+        Some(e) => e.to_string(),
+        None => format!("could not resolve {}:{}", host, port),
+    })
 }
 
 pub fn tcp_listen(host: &str, port: i64) -> Result<u64, String> {
-    let listener = TcpListener::bind((host, port as u16)).map_err(|e| e.to_string())?;
+    let port = port_u16(port, true)?;
+    let listener = TcpListener::bind((host, port)).map_err(|e| e.to_string())?;
     Ok(insert(Resource::Listener(listener)))
 }
 
@@ -106,13 +158,28 @@ pub fn tcp_send(id: u64, data: &str) -> Result<i64, String> {
     })
 }
 
+/// One socket read never usefully needs a buffer larger than this; see
+/// `tcp_receive`.
+const TCP_READ_CHUNK: usize = 64 * 1024;
+
+/// Larger than any datagram that can be delivered, so a UDP read is never
+/// truncated by the buffer; see `udp_receive`.
+const UDP_MAX_DATAGRAM: usize = 64 * 1024;
+
 /// Reads up to `max` bytes. Returns `""` on a clean EOF (peer closed).
 pub fn tcp_receive(id: u64, max: i64) -> Result<String, String> {
     if max <= 0 {
         return Err("receive: max bytes must be positive".to_string());
     }
     with_tcp(id, |s| {
-        let mut buf = vec![0u8; max as usize];
+        // Allocate the read chunk, not the caller's number. This is one read of
+        // a byte stream returning *up to* `max`, so a buffer capped at 64 KiB
+        // gives identical results for any realistic socket read while making
+        // the allocation independent of `max`: `receive(c, i64::MAX)` used to
+        // ask for 9.2 exabytes, and an allocation failure is a process *abort*
+        // — no panic to catch, no diagnostic. It also stops a plausible
+        // `receive(c, 1000000000)` burning 1 GB to return a few bytes.
+        let mut buf = vec![0u8; (max as usize).min(TCP_READ_CHUNK)];
         let n = s.read(&mut buf).map_err(|e| e.to_string())?;
         buf.truncate(n);
         Ok(String::from_utf8_lossy(&buf).into_owned())
@@ -122,26 +189,59 @@ pub fn tcp_receive(id: u64, max: i64) -> Result<String, String> {
 // ── UDP ─────────────────────────────────────────────────────────────────
 
 pub fn udp_bind(host: &str, port: i64) -> Result<u64, String> {
-    let sock = UdpSocket::bind((host, port as u16)).map_err(|e| e.to_string())?;
+    let port = port_u16(port, true)?;
+    let sock = UdpSocket::bind((host, port)).map_err(|e| e.to_string())?;
     Ok(insert(Resource::Udp(sock)))
 }
 
 pub fn udp_send(id: u64, data: &str, host: &str, port: i64) -> Result<i64, String> {
+    let port = port_u16(port, false)?;
     with_udp(id, |s| {
-        s.send_to(data.as_bytes(), (host, port as u16))
+        s.send_to(data.as_bytes(), (host, port))
             .map(|n| n as i64)
             .map_err(|e| e.to_string())
     })
 }
 
-/// Reads up to `max` bytes. Returns `(data, sender_address)`.
+/// Reads one datagram of up to `max` bytes. Returns `(data, sender_address)`.
+///
+/// A datagram larger than `max` is an **error**, not a short read. UDP has no
+/// stream to resume from: the OS discards the part that does not fit, so the
+/// lost bytes are unrecoverable and the caller cannot even tell it happened —
+/// `udp_receive(h, 4)` on a 16-byte datagram used to return `"0123"` and drop
+/// 12 bytes silently. Erroring is the only honest option; a caller who wants
+/// whatever fits can ask for `UDP_MAX_DATAGRAM` and never see this.
 pub fn udp_receive(id: u64, max: i64) -> Result<(String, String), String> {
     if max <= 0 {
         return Err("udp_receive: max bytes must be positive".to_string());
     }
     with_udp(id, |s| {
-        let mut buf = vec![0u8; max as usize];
+        // UDP is *not* TCP here: the OS truncates and discards any part of a
+        // datagram that does not fit the buffer, so shrinking it would silently
+        // lose data rather than just return less. Two consequences:
+        //
+        //  - The allocation is capped at the largest datagram that can exist
+        //    (65507 bytes of payload for IPv4, less for IPv6), rounded to
+        //    64 KiB, so it never depends on the caller's `max` — that is what
+        //    stopped `udp_receive(h, i64::MAX)` aborting the process.
+        //  - Read into one byte MORE than the caller asked for. That extra byte
+        //    is the only portable way to distinguish "the datagram exactly
+        //    filled the request" from "the datagram was larger and got cut":
+        //    both look like `n == max` otherwise. `n > max` therefore means
+        //    truncation, precisely. Above UDP_MAX_DATAGRAM the buffer already
+        //    exceeds any deliverable datagram, so `n > max` cannot fire there
+        //    and a large `max` never sees a spurious error.
+        let want = max as usize;
+        let mut buf = vec![0u8; want.saturating_add(1).min(UDP_MAX_DATAGRAM)];
         let (n, addr) = s.recv_from(&mut buf).map_err(|e| e.to_string())?;
+        if n > want {
+            return Err(format!(
+                "udp_receive: datagram is larger than max ({} bytes); \
+                 the rest was discarded by the OS and cannot be recovered — \
+                 retry with a larger max (up to {})",
+                want, UDP_MAX_DATAGRAM
+            ));
+        }
         buf.truncate(n);
         Ok((String::from_utf8_lossy(&buf).into_owned(), addr.to_string()))
     })
@@ -219,8 +319,18 @@ pub fn http_open(
 /// EOF, on error, or when the consumer drops the stream (`close`). ponytail: a
 /// thread blocked in `read` at close lingers until the next byte/EOF — fine for
 /// bodies that terminate; revisit if long idle streams pile up.
+///
+/// The channel is *bounded*, which is what makes the "never buffered whole in
+/// memory" promise true: on an unbounded channel the reader drained the socket
+/// as fast as the network delivered it, so a slow consumer on a fast stream
+/// accumulated the entire body in the queue. With a bound the reader blocks in
+/// `send` and back-pressure reaches the TCP window. Ceiling is
+/// `(BODY_QUEUE_CHUNKS + 1) * 8 KiB` ≈ 72 KiB per open stream. A consumer that
+/// drops the stream while the reader is parked in `send` wakes it with a
+/// disconnect error, so the close path terminates the thread as before (it now
+/// terminates in strictly more cases than the unbounded version did).
 fn spawn_body_reader(mut reader: Box<dyn Read + Send>) -> u64 {
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(BODY_QUEUE_CHUNKS);
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
         loop {

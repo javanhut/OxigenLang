@@ -132,5 +132,10 @@ fun udp_send(sock <int>, data <str>, host <str>, port <int>) {
     __net_udp_send(sock, data, host, port)
 }
 
-// Receive a datagram (up to `max` bytes). Returns a (data, sender_address) tuple.
+// Receive one datagram (up to `max` bytes). Returns a (data, sender_address) tuple.
+//
+// A datagram LARGER than `max` is an error, not a short read: UDP has no stream
+// to resume from, so the overflow is discarded by the OS and gone for good.
+// Raise `max` (up to 65536, which no datagram can exceed) if you would rather
+// always take whatever arrives.
 fun udp_receive(sock <int>, max <int> = 4096) { __net_udp_receive(sock, max) }

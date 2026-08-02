@@ -131,6 +131,7 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
 
     // OS builtins
     globals.insert("__exec".to_string(), Value::Builtin(builtin_exec));
+    globals.insert("__exec_argv".to_string(), Value::Builtin(builtin_exec_argv));
     globals.insert("__os_name".to_string(), Value::Builtin(builtin_os_name));
     globals.insert("__os_arch".to_string(), Value::Builtin(builtin_os_arch));
     globals.insert("__env_get".to_string(), Value::Builtin(builtin_env_get));
@@ -186,6 +187,14 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert(
         "__path_is_absolute".to_string(),
         Value::Builtin(builtin_path_is_absolute),
+    );
+    globals.insert(
+        "__path_normalize".to_string(),
+        Value::Builtin(builtin_path_normalize),
+    );
+    globals.insert(
+        "__path_is_within".to_string(),
+        Value::Builtin(builtin_path_is_within),
     );
 
     // JSON / TOML
@@ -1279,19 +1288,52 @@ fn builtin_file_exists(args: &[Value]) -> Value {
 
 // ── OS builtins ────────────────────────────────────────────────────────
 
+/// Turns a finished process into the `{stdout, stderr, code}` map both exec
+/// builtins return, so the shell and argv forms stay drop-in comparable.
+fn process_output_map(output: std::process::Output) -> Value {
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    // A signal-killed process has no exit code; -1 stands in for "died".
+    let code = output.status.code().unwrap_or(-1);
+    let entries: Vec<(Value, Value)> = vec![
+        (
+            Value::String(rc_str("stdout")),
+            Value::String(rc_str(stdout)),
+        ),
+        (
+            Value::String(rc_str("stderr")),
+            Value::String(rc_str(stderr)),
+        ),
+        (Value::String(rc_str("code")), Value::Integer(code as i64)),
+    ];
+    Value::Map(Rc::new(RefCell::new(
+        crate::vm::collections::OxMap::from_pairs(entries),
+    )))
+}
+
+// __exec() runs its argument THROUGH A SHELL (`sh -c` / `cmd /C`), so every
+// shell metacharacter in it — `;`, `|`, `$(...)`, backticks — is live. That is
+// the point of the builtin (it is how you get pipelines and redirection), but
+// it means any caller interpolating untrusted data into the string is handing
+// that data command-execution. Those callers want __exec_argv(), which passes
+// an argument vector straight to the OS with no shell in between.
+//
+// The old signature was variadic and space-joined the extra arguments into the
+// command string. That read like argv (`__exec("cat", user_file)`) while
+// actually being shell concatenation, which is exactly the trap above, so the
+// extra arguments are now rejected outright rather than silently pasted in:
+// a hard error naming the replacement beats a quiet injection. The only
+// in-tree caller, os.exec(), always passed a single argument.
 fn builtin_exec(args: &[Value]) -> Value {
-    if args.is_empty() {
-        return Value::Error(rc_str("__exec() takes at least 1 argument"));
+    if args.len() != 1 {
+        return Value::Error(rc_str(
+            "__exec() takes 1 argument (a shell command string); \
+             to pass arguments safely use __exec_argv(program, [args])",
+        ));
     }
-    let cmd = match args[0].repr() {
+    let full_cmd = match args[0].repr() {
         ValueRepr::String(s) => s.to_string(),
         _ => return Value::Error(rc_str("__exec() requires a string command")),
-    };
-    let extra_args: Vec<String> = args[1..].iter().map(|a| format!("{}", a)).collect();
-    let full_cmd = if extra_args.is_empty() {
-        cmd
-    } else {
-        format!("{} {}", cmd, extra_args.join(" "))
     };
 
     let shell = if cfg!(target_os = "windows") {
@@ -1310,26 +1352,33 @@ fn builtin_exec(args: &[Value]) -> Value {
         .arg(&full_cmd)
         .output()
     {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let code = output.status.code().unwrap_or(-1);
-            let entries: Vec<(Value, Value)> = vec![
-                (
-                    Value::String(rc_str("stdout")),
-                    Value::String(rc_str(stdout)),
-                ),
-                (
-                    Value::String(rc_str("stderr")),
-                    Value::String(rc_str(stderr)),
-                ),
-                (Value::String(rc_str("code")), Value::Integer(code as i64)),
-            ];
-            Value::Map(Rc::new(RefCell::new(
-                crate::vm::collections::OxMap::from_pairs(entries),
-            )))
-        }
+        Ok(output) => process_output_map(output),
         Err(e) => Value::Error(rc_str(format!("__exec: {}", e))),
+    }
+}
+
+// The shell-free counterpart to __exec(): the program is executed directly and
+// each element of `argv` becomes one argument verbatim, so a value like
+// "x; rm -rf /" is a filename, not a command. This is the only way to run a
+// subprocess with untrusted data in it.
+fn builtin_exec_argv(args: &[Value]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(rc_str("__exec_argv() takes 2 arguments (program, array)"));
+    }
+    let program = match args[0].repr() {
+        ValueRepr::String(s) => s.to_string(),
+        _ => return Value::Error(rc_str("__exec_argv() requires a string program")),
+    };
+    let argv: Vec<String> = match args[1].repr() {
+        ValueRepr::Array(arr) => arr.borrow().iter().map(|a| format!("{}", a)).collect(),
+        _ => return Value::Error(rc_str("__exec_argv() requires an array of arguments")),
+    };
+
+    match std::process::Command::new(&program).args(&argv).output() {
+        Ok(output) => process_output_map(output),
+        // A missing program fails here rather than as a nonzero exit code — the
+        // shell form reports that as code 127, so callers must check both.
+        Err(e) => Value::Error(rc_str(format!("__exec_argv({}): {}", program, e))),
     }
 }
 
@@ -1639,6 +1688,12 @@ fn builtin_rand_float(_args: &[Value]) -> Value {
 
 // ── Path builtins ──────────────────────────────────────────────────────
 
+// Deliberately keeps `PathBuf::push` semantics: an absolute component discards
+// everything joined before it, and `..` is left in place. That matches every
+// other language's join and callers rely on it, but it means join is NOT a
+// sandbox — `join(["/srv/uploads", user_input])` can land anywhere on disk.
+// Code that must keep a path inside a directory has to check it with
+// __path_is_within() below; joining alone proves nothing.
 fn builtin_path_join(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__path_join() takes 1 argument (array)"));
@@ -1727,6 +1782,129 @@ fn builtin_path_is_absolute(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).is_absolute()),
         _ => Value::Error(rc_str("__path_is_absolute() requires a string")),
+    }
+}
+
+/// Resolves `.` and `..` purely lexically — no filesystem access, so it works
+/// on paths that do not exist yet. `..` pops the preceding name; above the root
+/// it is dropped (the root has no parent), and in a relative path with nothing
+/// left to pop it is kept, because `../x` genuinely names a sibling.
+fn normalize_lexical(p: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    let mut rooted = false;
+    for component in p.components() {
+        match component {
+            Component::Prefix(_) => out.push(component.as_os_str()),
+            Component::RootDir => {
+                rooted = true;
+                out.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let pops_a_name =
+                    matches!(out.components().next_back(), Some(Component::Normal(_)));
+                if pops_a_name {
+                    out.pop();
+                } else if !rooted {
+                    // Nothing to cancel and no root to clamp against, so the
+                    // `..` is meaningful and has to survive: `../../a`.
+                    out.push("..");
+                }
+            }
+            Component::Normal(s) => out.push(s),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    out
+}
+
+/// Best-effort absolute resolution used for containment checks.
+///
+/// Canonicalises when the path exists (which is the only way to see through a
+/// symlink); when it does not, canonicalises the longest existing ancestor and
+/// appends the remaining components lexically, so a path that has not been
+/// created yet still resolves against the real parents it will live under.
+fn resolve_for_containment(p: &std::path::Path) -> std::path::PathBuf {
+    let absolute = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(p),
+            Err(_) => p.to_path_buf(),
+        }
+    };
+    // Canonicalise the whole thing first: on an existing path it resolves
+    // symlinks and `..` together, which lexical normalisation cannot do.
+    if let Ok(real) = absolute.canonicalize() {
+        return real;
+    }
+    let lexical = normalize_lexical(&absolute);
+    let mut trailing = Vec::new();
+    let mut probe = lexical.clone();
+    loop {
+        if let Ok(real) = probe.canonicalize() {
+            let mut resolved = real;
+            for name in trailing.iter().rev() {
+                resolved.push(name);
+            }
+            return resolved;
+        }
+        match (probe.file_name(), probe.parent()) {
+            (Some(name), Some(parent)) => {
+                trailing.push(name.to_os_string());
+                probe = parent.to_path_buf();
+            }
+            // Ran out of ancestors (or hit the root, which either exists and
+            // canonicalised above or is unreadable): lexical is all we have.
+            _ => return lexical,
+        }
+    }
+}
+
+fn builtin_path_normalize(args: &[Value]) -> Value {
+    if args.len() != 1 {
+        return Value::Error(rc_str("__path_normalize() takes 1 argument"));
+    }
+    match args[0].repr() {
+        ValueRepr::String(path) => Value::String(rc_str(
+            normalize_lexical(std::path::Path::new(path.as_ref()))
+                .display()
+                .to_string(),
+        )),
+        _ => Value::Error(rc_str("__path_normalize() requires a string")),
+    }
+}
+
+/// Is `candidate` the same as, or inside, `base`?
+///
+/// Both sides go through resolve_for_containment(), then the comparison is
+/// component-wise (`Path::starts_with`) rather than string-prefix, so the
+/// sibling case — base `/srv/up` vs candidate `/srv/uploaded/x` — is correctly
+/// rejected instead of passing on a shared character prefix.
+///
+/// CAVEAT, and it is a real one: this is only as strong as the filesystem state
+/// at the moment of the call. Symlinks are followed for the part of the path
+/// that already exists; components that do not exist yet are resolved lexically
+/// only, so a symlink created there afterwards escapes, as does any symlink
+/// swapped in between this check and the eventual open (TOCTOU). Use it to
+/// reject obvious traversal, not as the sole barrier around secrets — for that
+/// you still want an OS-level sandbox or an openat-style resolved handle.
+fn builtin_path_is_within(args: &[Value]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(rc_str(
+            "__path_is_within() takes 2 arguments (base, candidate)",
+        ));
+    }
+    match (args[0].repr(), args[1].repr()) {
+        (ValueRepr::String(base), ValueRepr::String(candidate)) => {
+            let base = resolve_for_containment(std::path::Path::new(base.as_ref()));
+            let candidate = resolve_for_containment(std::path::Path::new(candidate.as_ref()));
+            Value::Boolean(candidate.starts_with(&base))
+        }
+        _ => Value::Error(rc_str("__path_is_within() requires two strings")),
     }
 }
 

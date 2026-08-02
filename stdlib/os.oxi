@@ -1,5 +1,12 @@
-// Execute a shell command. Returns a map with "stdout", "stderr", and "code".
+// Execute a command THROUGH A SHELL. Returns a map with "stdout", "stderr",
+// and "code". Shell metacharacters (; | $() `` > &) are interpreted, so never
+// build this string out of untrusted input — use exec_argv for that.
 fun exec(cmd <str>) { __exec(cmd) }
+
+// Execute a program directly, with no shell. Each element of argv is passed as
+// one literal argument, so untrusted values cannot inject commands.
+// Returns the same map shape as exec.
+fun exec_argv(prog <str>, argv) { __exec_argv(prog, argv) }
 
 // Get the operating system name (e.g. "linux", "macos", "windows")
 fun name() { __os_name() }
