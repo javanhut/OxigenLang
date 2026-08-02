@@ -5,7 +5,8 @@
 //
 // Note: md5 and sha1 are provided for checksums and compatibility, not for
 // security-sensitive use.
-
 fun sha256(s <str>) { __sha256(s) }
+
 fun sha1(s <str>) { __sha1(s) }
+
 fun md5(s <str>) { __md5(s) }

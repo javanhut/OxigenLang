@@ -1,10 +1,10 @@
 pattern is_even(x) when x % 2 == 0
+
 pattern is_odd(x) when x % 2 != 0
 
 main {
     name <str> := "Javan"
     println("Hello, {name}")
-
     nums <array> := range(10)
     each num in nums {
         choose num {

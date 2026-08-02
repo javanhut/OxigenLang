@@ -2,7 +2,6 @@ introduce os
 
 main {
     println("arg count:", len(os.args()))
-
     each arg in os.args() {
         println("arg:", arg)
     }

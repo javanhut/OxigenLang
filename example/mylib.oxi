@@ -1,9 +1,5 @@
-fun greet(name <str>) {
-    "Hello, {name}!"
-}
+fun greet(name <str>) { "Hello, {name}!" }
 
-fun add(a <int>, b <int>) {
-    a + b
-}
+fun add(a <int>, b <int>) { a + b }
 
 PI <float> = 3.14159

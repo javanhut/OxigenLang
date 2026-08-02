@@ -4,7 +4,6 @@
 //     now <int> := datetime.now()
 //     datetime.format(now, "%Y-%m-%d")     // "2026-06-20"
 //     datetime.parse("2026-06-20", "%Y-%m-%d")  // unix seconds
-
 // Current time as unix seconds.
 fun now() { __dt_now() }
 
@@ -16,12 +15,16 @@ fun format(ts <int>, fmt <str>) { __dt_format(ts, fmt) }
 fun parse(text <str>, fmt <str>) { __dt_parse(text, fmt) }
 
 // ── Components (UTC) ──
-
 fun year(ts <int>) { int(__dt_format(ts, "%Y")) }
+
 fun month(ts <int>) { int(__dt_format(ts, "%m")) }
+
 fun day(ts <int>) { int(__dt_format(ts, "%d")) }
+
 fun hour(ts <int>) { int(__dt_format(ts, "%H")) }
+
 fun minute(ts <int>) { int(__dt_format(ts, "%M")) }
+
 fun second(ts <int>) { int(__dt_format(ts, "%S")) }
 
 // Full weekday name, e.g. "Saturday".

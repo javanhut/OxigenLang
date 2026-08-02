@@ -1,19 +1,40 @@
 fun abs(x <int> || <float>) {
-    option { x >= 0 -> x, -x }
+    option {
+        x >= 0 -> {
+            x
+        }
+        {
+            -x
+        }
+    }
 }
 
 fun min(a <int> || <float>, b <int> || <float>) {
-    option { a <= b -> a, b }
+    option {
+        a <= b -> {
+            a
+        }
+        {
+            b
+        }
+    }
 }
 
 fun max(a <int> || <float>, b <int> || <float>) {
-    option { a >= b -> a, b }
+    option {
+        a >= b -> {
+            a
+        }
+        {
+            b
+        }
+    }
 }
 
 fun pow(base <int>, exp <int>) {
     result <int> := 1
     i <int>
-    repeat unless i >= exp {
+    repeat when i < exp {
         result = result * base
         i++
     }
@@ -22,57 +43,77 @@ fun pow(base <int>, exp <int>) {
 
 fun clamp(x <int> || <float>, lo <int> || <float>, hi <int> || <float>) {
     option {
-        x < lo -> lo
-        x > hi -> hi
-        x
+        x < lo -> {
+            lo
+        }
+        x > hi -> {
+            hi
+        }
+        {
+            x
+        }
     }
 }
 
 fun sign(x <int> || <float>) {
     option {
-        x > 0 -> 1
-        x < 0 -> -1
-        0
+        x > 0 -> {
+            1
+        }
+        x < 0 -> {
+            -1
+        }
+        {
+            0
+        }
     }
 }
 
 fun sqrt(x <int> || <float>) { __sqrt(x) }
+
 fun floor(x <int> || <float>) { __floor(x) }
+
 fun ceil(x <int> || <float>) { __ceil(x) }
+
 fun round(x <int> || <float>) { __round(x) }
 
 // ── Trigonometry (radians) ──
-
 fun sin(x <int> || <float>) { __sin(x) }
+
 fun cos(x <int> || <float>) { __cos(x) }
+
 fun tan(x <int> || <float>) { __tan(x) }
+
 fun asin(x <int> || <float>) { __asin(x) }
+
 fun acos(x <int> || <float>) { __acos(x) }
+
 fun atan(x <int> || <float>) { __atan(x) }
+
 fun atan2(y <int> || <float>, x <int> || <float>) { __atan2(y, x) }
 
 // ── Exponential & logarithmic ──
-
 fun exp(x <int> || <float>) { __exp(x) }
+
 fun ln(x <int> || <float>) { __ln(x) }
+
 fun log2(x <int> || <float>) { __log2(x) }
+
 fun log10(x <int> || <float>) { __log10(x) }
 
 // Floating-point exponentiation (handles fractional/negative exponents).
 fun powf(base <int> || <float>, exp <int> || <float>) { __powf(base, exp) }
 
 // ── Constants ──
-
 PI <float> = 3.141592653589793
 E <float> = 2.718281828459045
 TAU <float> = 6.283185307179586
 
 // ── Integer helpers ──
-
 fun gcd(a <int>, b <int>) {
     x <int> := abs(a)
     y <int> := abs(b)
-    repeat unless y == 0 {
+    repeat when y != 0 {
         t <int> := y
         y = x % y
         x = t
@@ -82,38 +123,55 @@ fun gcd(a <int>, b <int>) {
 
 fun lcm(a <int>, b <int>) {
     option {
-        a == 0 -> 0,
-        b == 0 -> 0,
-        abs(a * b) / gcd(a, b)
+        a == 0 -> {
+            0
+        }
+        b == 0 -> {
+            0
+        }
+        {
+            abs(a * b) / gcd(a, b)
+        }
     }
 }
 
 fun factorial(n <int>) {
     result <int> := 1
     i <int> := 2
-    repeat unless i > n {
+    repeat when i <= n {
         result = result * i
         i = i + 1
     }
-    option { n < 0 -> <Error<negative>>("factorial of a negative number"), result }
+    option {
+        n < 0 -> {
+            <Error<negative>>("factorial of a negative number")
+        }
+        {
+            result
+        }
+    }
 }
 
 fun is_even(n <int>) { n % 2 == 0 }
+
 fun is_odd(n <int>) { n % 2 != 0 }
 
 // ── Float helpers ──
-
 fun trunc(x <int> || <float>) {
-    option { x < 0 -> ceil(x), floor(x) }
+    option {
+        x < 0 -> {
+            ceil(x)
+        }
+        {
+            floor(x)
+        }
+    }
 }
 
-fun hypot(a <int> || <float>, b <int> || <float>) {
-    sqrt(a * a + b * b)
-}
+fun hypot(a <int> || <float>, b <int> || <float>) { sqrt(a * a + b * b) }
 
-fun fmod(a <int> || <float>, b <int> || <float>) {
-    a - trunc(a / b) * b
-}
+fun fmod(a <int> || <float>, b <int> || <float>) { a - trunc(a / b) * b }
 
 fun degrees(rad <int> || <float>) { rad * 180.0 / PI }
+
 fun radians(deg <int> || <float>) { deg * PI / 180.0 }

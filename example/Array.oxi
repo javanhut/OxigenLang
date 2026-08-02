@@ -6,10 +6,11 @@ Array includes {
     fun append(value <generic>) {
         self.data = push(self.data, value)
     }
+
     fun pop() {
         temp <array>
         pos <int>
-        repeat unless pos >= len(self.data) - 1 {
+        repeat when pos < len(self.data) - 1 {
             temp = push(temp, self.data[pos])
             pos++
         }
@@ -17,9 +18,8 @@ Array includes {
         self.data = temp
         popped_val
     }
-    fun print() {
-        println(self.data)
-    }
+
+    fun print() { println(self.data) }
 }
 
 arr <Array>

@@ -1,6 +1,5 @@
 // Tests for the toml stdlib module.
 // Run with:  oxigen test example/toml_test.oxi
-
 introduce toml
 
 <test>("toml parsing") {

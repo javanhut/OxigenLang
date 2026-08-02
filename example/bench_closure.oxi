@@ -14,5 +14,4 @@ fun run(n <int>) {
     }
     total
 }
-
 run(500000)

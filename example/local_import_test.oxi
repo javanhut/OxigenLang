@@ -1,6 +1,5 @@
 // Tests for local (relative) module imports. Imports `mylib.oxi` from this
 // same directory. Run with:  oxigen test example/local_import_test.oxi
-
 introduce .mylib
 introduce {greet, PI} from .mylib
 

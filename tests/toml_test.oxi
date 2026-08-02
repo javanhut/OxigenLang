@@ -32,7 +32,7 @@ introduce toml
 
 <test>("parse failure is a propagating error") {
     // Like json.parse, toml.parse raises rather than returning an error value.
-    expect(toml.parse("= = =") <guard>("recovered")).eq("recovered")
+    expect(toml.parse("= = =") guard _err -> "recovered").eq("recovered")
 }
 
 <test>("get_in walks dotted paths") {

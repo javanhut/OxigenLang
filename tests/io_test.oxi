@@ -6,7 +6,14 @@ introduce path
 // macOS; Linux CI generally leaves it unset, hence the /tmp fallback.
 fun tmp_dir(leaf <str>) {
     env_tmp := os.env_get("TMPDIR")
-    base := option { env_tmp != None and env_tmp != "" -> env_tmp, "/tmp" }
+    base := option {
+        env_tmp != None and env_tmp != "" -> {
+            env_tmp
+        }
+        {
+            "/tmp"
+        }
+    }
     path.join([base, leaf])
 }
 
@@ -72,5 +79,5 @@ fun tmp_dir(leaf <str>) {
 
 <test>("reading a missing file is a propagating error") {
     missing := tmp_dir("oxi_io_definitely_missing.txt")
-    expect(io.read_file(missing) <guard>("recovered")).eq("recovered")
+    expect(io.read_file(missing) guard _err -> "recovered").eq("recovered")
 }

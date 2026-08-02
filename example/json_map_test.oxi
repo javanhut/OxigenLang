@@ -1,6 +1,5 @@
 // Tests for the json stdlib module (object <-> map roundtrips through a file).
 // Run with:  oxigen test example/json_map_test.oxi
-
 introduce json
 introduce io
 introduce os
@@ -15,7 +14,11 @@ introduce os
 }
 
 <test>("nested json objects and arrays") {
-    nested_json <str> := json.stringify({"user": {"name": "Javan", "age": 25}, "scores": [90, 85, 100]})
+    nested_json <str> := json.stringify({"user": {"name": "Javan", "age": 25}, "scores": [
+        90,
+        85,
+        100,
+    ]})
     io.write_file("/tmp/oxi_test2.json", nested_json)
     nested <map> := json.parse(io.read_file("/tmp/oxi_test2.json"))
     expect(nested["user"]["name"]).eq("Javan")

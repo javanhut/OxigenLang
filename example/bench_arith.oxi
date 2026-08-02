@@ -3,9 +3,12 @@
 // stays well under FRAMES_MAX while still doing a lot of math.
 fun work(n) {
     option {
-        n < 2 -> n,
-        work(n - 1) + work(n - 2) * 3 - n
+        n < 2 -> {
+            n
+        }
+        {
+            work(n - 1) + work(n - 2) * 3 - n
+        }
     }
 }
-
 work(28)

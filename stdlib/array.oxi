@@ -9,7 +9,11 @@ fun map(arr <array>, f <generic>) {
 fun filter(arr <array>, f <generic>) {
     result <array>
     each item in arr {
-        option { f(item) -> result = push(result, item) }
+        option {
+            f(item) -> {
+                result = push(result, item)
+            }
+        }
     }
     result
 }
@@ -25,7 +29,7 @@ fun reduce(arr <array>, initial <generic>, f <generic>) {
 fun reverse(arr <array>) {
     result <array>
     i <int> := len(arr) - 1
-    repeat unless i < 0 {
+    repeat when i >= 0 {
         result = push(result, arr[i])
         i--
     }
@@ -35,8 +39,15 @@ fun reverse(arr <array>) {
 fun zip(a <array>, b <array>) {
     result <array>
     i <int>
-    size <int> := option { len(a) <= len(b) -> len(a), len(b) }
-    repeat unless i >= size {
+    size <int> := option {
+        len(a) <= len(b) -> {
+            len(a)
+        }
+        {
+            len(b)
+        }
+    }
+    repeat when i < size {
         result = push(result, tuple(a[i], b[i]))
         i++
     }
@@ -52,7 +63,9 @@ fun flatten(arr <array>) {
                     result = push(result, sub)
                 }
             }
-            { result = push(result, item) }
+            {
+                result = push(result, item)
+            }
         }
     }
     result
@@ -60,7 +73,11 @@ fun flatten(arr <array>) {
 
 fun includes(arr <array>, val <generic>) {
     each item in arr {
-        option { item == val -> give True }
+        option {
+            item == val -> {
+                give True
+            }
+        }
     }
     False
 }
@@ -68,7 +85,6 @@ fun includes(arr <array>, val <generic>) {
 fun sort(arr <array>) { __sort(arr) }
 
 // ── Folds ──
-
 fun sum(arr <array>) {
     total <generic> := 0
     each x in arr {
@@ -87,31 +103,54 @@ fun product(arr <array>) {
 
 fun min(arr <array>) {
     option {
-        len(arr) == 0 -> <Error<empty>>("min of empty array"),
-        reduce(arr, arr[0], fun(a <generic>, b <generic>) {
-            option { b < a -> b, a }
-        })
+        len(arr) == 0 -> {
+            <Error<empty>>("min of empty array")
+        }
+        {
+            reduce(arr, arr[0], fun(a <generic>, b <generic>) {
+                option {
+                    b < a -> {
+                        b
+                    }
+                    {
+                        a
+                    }
+                }
+            })
+        }
     }
 }
 
 fun max(arr <array>) {
     option {
-        len(arr) == 0 -> <Error<empty>>("max of empty array"),
-        reduce(arr, arr[0], fun(a <generic>, b <generic>) {
-            option { b > a -> b, a }
-        })
+        len(arr) == 0 -> {
+            <Error<empty>>("max of empty array")
+        }
+        {
+            reduce(arr, arr[0], fun(a <generic>, b <generic>) {
+                option {
+                    b > a -> {
+                        b
+                    }
+                    {
+                        a
+                    }
+                }
+            })
+        }
     }
 }
 
 // ── Predicates & search ──
-
 fun any(arr <array>, pred <generic>) {
     found <bool> := False
     each x in arr {
-        option { pred(x) -> {
-            found = True
-            stop
-        }}
+        option {
+            pred(x) -> {
+                found = True
+                stop
+            }
+        }
     }
     found
 }
@@ -119,10 +158,12 @@ fun any(arr <array>, pred <generic>) {
 fun all(arr <array>, pred <generic>) {
     ok <bool> := True
     each x in arr {
-        option { pred(x) == False -> {
-            ok = False
-            stop
-        }}
+        option {
+            pred(x) == False -> {
+                ok = False
+                stop
+            }
+        }
     }
     ok
 }
@@ -130,7 +171,11 @@ fun all(arr <array>, pred <generic>) {
 fun count(arr <array>, pred <generic>) {
     n <int>
     each x in arr {
-        option { pred(x) -> n = n + 1 }
+        option {
+            pred(x) -> {
+                n = n + 1
+            }
+        }
     }
     n
 }
@@ -138,8 +183,12 @@ fun count(arr <array>, pred <generic>) {
 fun find(arr <array>, pred <generic>) {
     matches <array> := filter(arr, pred)
     option {
-        len(matches) == 0 -> <Error<not_found>>("no element matched"),
-        matches[0]
+        len(matches) == 0 -> {
+            <Error<not_found>>("no element matched")
+        }
+        {
+            matches[0]
+        }
     }
 }
 
@@ -147,10 +196,12 @@ fun find_index(arr <array>, pred <generic>) {
     idx <int> := -1
     i <int>
     each x in arr {
-        option { pred(x) -> {
-            idx = i
-            stop
-        }}
+        option {
+            pred(x) -> {
+                idx = i
+                stop
+            }
+        }
         i = i + 1
     }
     idx
@@ -160,21 +211,26 @@ fun index_of(arr <array>, val <generic>) {
     idx <int> := -1
     i <int>
     each x in arr {
-        option { x == val -> {
-            idx = i
-            stop
-        }}
+        option {
+            x == val -> {
+                idx = i
+                stop
+            }
+        }
         i = i + 1
     }
     idx
 }
 
 // ── Transforms ──
-
 fun unique(arr <array>) {
     result <array>
     each x in arr {
-        option { has(result, x) == False -> result = push(result, x) }
+        option {
+            has(result, x) == False -> {
+                result = push(result, x)
+            }
+        }
     }
     result
 }
@@ -198,7 +254,7 @@ fun drop(arr <array>, n <int>) { arr[n:] }
 fun chunk(arr <array>, size <int>) {
     result <array>
     i <int>
-    repeat unless i >= len(arr) {
+    repeat when i < len(arr) {
         result = push(result, arr[i:i + size])
         i = i + size
     }
@@ -241,12 +297,15 @@ fun group_by(arr <array>, key_fn <generic>) {
 }
 
 // ── Sorting by key (selection sort; stable for equal keys) ──
-
 fun _min_index_by(arr <array>, key_fn <generic>) {
     best <int>
     i <int> := 1
-    repeat unless i >= len(arr) {
-        option { key_fn(arr[i]) < key_fn(arr[best]) -> best = i }
+    repeat when i < len(arr) {
+        option {
+            key_fn(arr[i]) < key_fn(arr[best]) -> {
+                best = i
+            }
+        }
         i = i + 1
     }
     best
@@ -256,7 +315,11 @@ fun _remove_at(arr <array>, idx <int>) {
     result <array>
     i <int>
     each x in arr {
-        option { i != idx -> result = push(result, x) }
+        option {
+            i != idx -> {
+                result = push(result, x)
+            }
+        }
         i = i + 1
     }
     result
@@ -265,7 +328,7 @@ fun _remove_at(arr <array>, idx <int>) {
 fun sort_by(arr <array>, key_fn <generic>) {
     remaining <array> := arr
     result <array>
-    repeat unless len(remaining) == 0 {
+    repeat when len(remaining) != 0 {
         mi <int> := _min_index_by(remaining, key_fn)
         result = push(result, remaining[mi])
         remaining = _remove_at(remaining, mi)
@@ -274,13 +337,10 @@ fun sort_by(arr <array>, key_fn <generic>) {
 }
 
 // ── Parallel ──
-
 // Parallel map: spawn `f` on every element, then join the results in order.
 // Spawns ALL tasks before joining any, so the work overlaps on the worker
 // pool. `f` must be a named top-level function — lambdas can't cross the
 // spawn boundary yet (closure transfer is a later step).
 // Prefer the `diverge each` keyword form — these stay as thin wrappers over the
 // internal spawn/join primitives for back-compat.
-fun pmap(arr <array>, f <generic>) {
-    map(map(arr, fun(x <generic>) { __spawn(f, x) }), fun(h <generic>) { __join_task(h) })
-}
+fun pmap(arr <array>, f <generic>) { map(map(arr, fun(x <generic>) { __spawn(f, x) }), fun(h <generic>) { __join_task(h) }) }

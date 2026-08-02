@@ -4,7 +4,14 @@ introduce strings
 
 fun tmp_dir(leaf <str>) {
     env_tmp := os.env_get("TMPDIR")
-    base := option { env_tmp != None and env_tmp != "" -> env_tmp, "/tmp" }
+    base := option {
+        env_tmp != None and env_tmp != "" -> {
+            env_tmp
+        }
+        {
+            "/tmp"
+        }
+    }
     path.join([base, leaf])
 }
 

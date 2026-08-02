@@ -23,7 +23,14 @@ fun is_absolute(p <str>) { __path_is_absolute(p) }
 
 // Check if path is relative
 fun is_relative(p <str>) {
-    option { is_absolute(p) -> False, True }
+    option {
+        is_absolute(p) -> {
+            False
+        }
+        {
+            True
+        }
+    }
 }
 
 // Resolve "." and ".." lexically, without touching the filesystem, so it also

@@ -8,7 +8,6 @@
 // Change the url / model / body for any other NDJSON streaming API.
 //
 // Run:  oxigen example/llm_stream.oxi
-
 introduce net
 introduce json
 introduce strings
@@ -16,17 +15,18 @@ introduce strings
 main {
     payload := json.stringify({"model": "llama3", "prompt": "Say hello in five words."})
     s := net.stream_post("http://localhost:11434/api/generate", payload)
-
     text <str> := ""
     done := False
     repeat unless done {
-        line := strings.trim(net.read_line(s))   // one whole JSON object, or "" at EOF
+        line := strings.trim(net.read_line(s))  // one whole JSON object, or "" at EOF
         option {
-            line == "" -> { done = True },
+            line == "" -> {
+                done = True
+            }
             {
                 obj := json.parse(line)
                 text = text + obj["response"]
-                print(obj["response"])           // live, no newline
+                print(obj["response"])  // live, no newline
                 done = obj["done"]
             }
         }

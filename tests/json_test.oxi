@@ -1,7 +1,7 @@
 introduce json
 
 <test>("parse scalars and nesting") {
-    m := json.parse('\{"i": 1, "f": 1.5, "s": "x", "t": true, "n": null\}')
+    m := json.parse("\{\"i\": 1, \"f\": 1.5, \"s\": \"x\", \"t\": true, \"n\": null}")
     expect(type(m)).eq("MAP")
     expect(m["i"]).eq(1)
     expect(m["f"]).eq(1.5)
@@ -11,7 +11,7 @@ introduce json
 }
 
 <test>("parse arrays and nested objects") {
-    m := json.parse('\{"a": [1, 2, 3], "o": \{"deep": "yes"\}\}')
+    m := json.parse("\{\"a\": [1, 2, 3], \"o\": \{\"deep\": \"yes\"}}")
     expect(len(m["a"])).eq(3)
     expect(m["a"][2]).eq(3)
     expect(m["o"]["deep"]).eq("yes")
@@ -27,8 +27,8 @@ introduce json
 
 <test>("stringify round-trips through parse") {
     // stringify emits compact form: parse tolerates the spaces, output drops them.
-    compact := '\{"z":[1,\{"q":false\}]\}'
-    expect(json.stringify(json.parse('\{"z": [1, \{"q": false\}]\}'))).eq(compact)
+    compact := "\{\"z\":[1,\{\"q\":false}]}"
+    expect(json.stringify(json.parse("\{\"z\": [1, \{\"q\": false}]}"))).eq(compact)
     expect(json.stringify(json.parse(compact))).eq(compact)
 }
 
@@ -36,11 +36,11 @@ introduce json
     // json.parse raises rather than returning an error value, so it needs
     // <guard> to be observed — unlike encoding.base64_decode, which is
     // catchable with is_error().
-    expect(json.parse('\{nope') <guard>("recovered")).eq("recovered")
+    expect(json.parse("\{nope") guard _err -> "recovered").eq("recovered")
 }
 
 <test>("get_in walks dotted paths") {
-    m := json.parse('\{"user": \{"addr": \{"city": "Boise"\}\}\}')
+    m := json.parse("\{\"user\": \{\"addr\": \{\"city\": \"Boise\"}}}")
     expect(json.get_in(m, "user.addr.city")).eq("Boise")
     expect(json.get_in(m, "user.addr")).ne(None)
     expect(json.get_in(m, "user.missing")).eq(None)
@@ -48,7 +48,7 @@ introduce json
 }
 
 <test>("has_key_in reports path presence") {
-    m := json.parse('\{"a": \{"b": 1\}\}')
+    m := json.parse("\{\"a\": \{\"b\": 1}}")
     expect(json.has_key_in(m, "a")).truthy()
     expect(json.has_key_in(m, "a.b")).truthy()
     expect(json.has_key_in(m, "a.c")).falsy()
@@ -56,45 +56,45 @@ introduce json
 }
 
 <test>("set_in writes a top-level key") {
-    expect(json.stringify(json.set_in({}, "x", 7))).eq("\{\"x\":7\}")
+    expect(json.stringify(json.set_in({}, "x", 7))).eq("\{\"x\":7}")
 }
 
 <test>("set_in writes through an existing parent") {
-    parent := json.parse('\{"x": \{\}\}')
-    expect(json.stringify(json.set_in(parent, "x.y", 7))).eq("\{\"x\":\{\"y\":7\}\}")
+    parent := json.parse("\{\"x\": \{}}")
+    expect(json.stringify(json.set_in(parent, "x.y", 7))).eq("\{\"x\":\{\"y\":7}}")
 }
 
 <test>("set_in creates missing intermediate objects") {
-    expect(json.stringify(json.set_in({}, "x.y", 7))).eq("\{\"x\":\{\"y\":7\}\}")
-    expect(json.stringify(json.set_in({}, "a.b.c", 1))).eq("\{\"a\":\{\"b\":\{\"c\":1\}\}\}")
+    expect(json.stringify(json.set_in({}, "x.y", 7))).eq("\{\"x\":\{\"y\":7}}")
+    expect(json.stringify(json.set_in({}, "a.b.c", 1))).eq("\{\"a\":\{\"b\":\{\"c\":1}}}")
 }
 
 <test>("set_in keeps siblings and replaces a non-object segment") {
-    grown := json.stringify(json.set_in(json.parse('\{"keep": 1\}'), "n.deep", 2))
-    expect(grown).eq("\{\"keep\":1,\"n\":\{\"deep\":2\}\}")
-    replaced := json.stringify(json.set_in(json.parse('\{"n": 5\}'), "n.deep", 2))
-    expect(replaced).eq("\{\"n\":\{\"deep\":2\}\}")
+    grown := json.stringify(json.set_in(json.parse("\{\"keep\": 1}"), "n.deep", 2))
+    expect(grown).eq("\{\"keep\":1,\"n\":\{\"deep\":2}}")
+    replaced := json.stringify(json.set_in(json.parse("\{\"n\": 5}"), "n.deep", 2))
+    expect(replaced).eq("\{\"n\":\{\"deep\":2}}")
 }
 
 <test>("del_in removes nested and top-level keys") {
-    m := json.parse('\{"x": \{"y": 7, "k": 1\}\}')
-    expect(json.stringify(json.del_in(m, "x.y"))).eq("\{\"x\":\{\"k\":1\}\}")
-    expect(json.stringify(json.del_in(json.parse('\{"a": 1\}'), "a"))).eq("\{\}")
+    m := json.parse("\{\"x\": \{\"y\": 7, \"k\": 1}}")
+    expect(json.stringify(json.del_in(m, "x.y"))).eq("\{\"x\":\{\"k\":1}}")
+    expect(json.stringify(json.del_in(json.parse("\{\"a\": 1}"), "a"))).eq("\{}")
 }
 
 <test>("merge is shallow, b wins") {
-    expect(json.stringify(json.merge({"a": 1}, {"b": 2}))).eq("\{\"a\":1,\"b\":2\}")
-    expect(json.stringify(json.merge({"a": 1}, {"a": 9}))).eq("\{\"a\":9\}")
+    expect(json.stringify(json.merge({"a": 1}, {"b": 2}))).eq("\{\"a\":1,\"b\":2}")
+    expect(json.stringify(json.merge({"a": 1}, {"a": 9}))).eq("\{\"a\":9}")
 }
 
 <test>("deep_merge recurses into nested objects") {
-    a := json.parse('\{"n": \{"a": 1\}\}')
-    b := json.parse('\{"n": \{"b": 2\}\}')
-    expect(json.stringify(json.deep_merge(a, b))).eq("\{\"n\":\{\"a\":1,\"b\":2\}\}")
+    a := json.parse("\{\"n\": \{\"a\": 1}}")
+    b := json.parse("\{\"n\": \{\"b\": 2}}")
+    expect(json.stringify(json.deep_merge(a, b))).eq("\{\"n\":\{\"a\":1,\"b\":2}}")
 }
 
 <test>("deep_merge overwrites when b is not an object") {
-    a := json.parse('\{"n": \{"a": 1\}\}')
-    b := json.parse('\{"n": 5\}')
-    expect(json.stringify(json.deep_merge(a, b))).eq("\{\"n\":5\}")
+    a := json.parse("\{\"n\": \{\"a\": 1}}")
+    b := json.parse("\{\"n\": 5}")
+    expect(json.stringify(json.deep_merge(a, b))).eq("\{\"n\":5}")
 }
