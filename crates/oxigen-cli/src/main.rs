@@ -190,10 +190,10 @@ fn status_marker(passed: bool, color: bool) -> String {
     format!("{}{}", paint(text, code, color), pad)
 }
 
-/// Recursively collect `*_test.oxi` files under `dir`, skipping hidden
+/// Recursively collect files ending in `suffix` under `dir`, skipping hidden
 /// directories and common build/vendor folders. Results are sorted for
-/// deterministic ordering.
-fn discover_test_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+/// deterministic ordering. `test` passes `_test.oxi`; `fmt` passes `.oxi`.
+fn discover_files(dir: &std::path::Path, suffix: &str, out: &mut Vec<PathBuf>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -211,11 +211,11 @@ fn discover_test_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
             if name.starts_with('.') || name == "target" || name == "node_modules" {
                 continue;
             }
-            discover_test_files(&path, out);
+            discover_files(&path, suffix, out);
         } else if path
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.ends_with("_test.oxi"))
+            .map(|n| n.ends_with(suffix))
             .unwrap_or(false)
         {
             out.push(path);
@@ -320,12 +320,12 @@ fn run_tests_command(paths: &[String]) {
 
     if paths.is_empty() {
         let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        discover_test_files(&cwd, &mut files);
+        discover_files(&cwd, "_test.oxi", &mut files);
     } else {
         for arg in paths {
             let p = PathBuf::from(arg);
             if p.is_dir() {
-                discover_test_files(&p, &mut files);
+                discover_files(&p, "_test.oxi", &mut files);
             } else if p.is_file() {
                 files.push(p);
             } else {
@@ -414,13 +414,39 @@ fn check_file(file_path: &str) {
     }
 }
 
-fn fmt_files(paths: &[String]) {
-    for path in paths {
-        if !path.ends_with(".oxi") {
-            eprintln!("Skipping non-.oxi file: {}", path);
-            continue;
+fn fmt_files(args: &[String]) {
+    // A directory used to fall into the non-.oxi branch below, print "Skipping"
+    // and exit 0 — so `oxigen fmt .` formatted nothing and reported success.
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for arg in args {
+        let p = PathBuf::from(arg);
+        if p.is_dir() {
+            discover_files(&p, ".oxi", &mut paths);
+        } else if p.is_file() {
+            if !arg.ends_with(".oxi") {
+                usage_error(
+                    &format!("not an Oxigen source file: {arg}"),
+                    Some("fmt only formats .oxi files"),
+                );
+            }
+            paths.push(p);
+        } else {
+            usage_error(
+                &format!("no such file or directory: {arg}"),
+                Some("fmt takes .oxi files or directories; `oxigen fmt .` walks the tree"),
+            );
         }
+    }
 
+    if paths.is_empty() {
+        println!("No .oxi files found.");
+        return;
+    }
+
+    let mut changed = 0;
+    for path in &paths {
+        let path = path.display().to_string();
+        let path = &path;
         let contents = match fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => {
@@ -453,7 +479,14 @@ fn fmt_files(paths: &[String]) {
                 std::process::exit(1);
             }
             println!("Formatted {}", path);
+            changed += 1;
         }
+    }
+
+    // Say how many files were considered: silence after walking a tree is
+    // ambiguous between "already formatted" and "found nothing".
+    if changed == 0 {
+        println!("{} file(s) already formatted.", paths.len());
     }
 }
 
