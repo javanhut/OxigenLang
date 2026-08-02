@@ -414,7 +414,9 @@ fn check_file(file_path: &str) {
     }
 }
 
-fn fmt_files(args: &[String]) {
+/// `check` reports what would change and exits 1 without writing, so CI can
+/// gate on formatting. Without it a formatted tree silently drifts back out.
+fn fmt_files(args: &[String], check: bool) {
     // A directory used to fall into the non-.oxi branch below, print "Skipping"
     // and exit 0 — so `oxigen fmt .` formatted nothing and reported success.
     let mut paths: Vec<PathBuf> = Vec::new();
@@ -474,12 +476,16 @@ fn fmt_files(args: &[String]) {
         let formatted = restore_header(&contents, body);
 
         if formatted != contents {
+            changed += 1;
+            if check {
+                println!("Would reformat {}", path);
+                continue;
+            }
             if let Err(e) = fs::write(path, &formatted) {
                 eprintln!("Error writing {}: {}", path, e);
                 std::process::exit(1);
             }
             println!("Formatted {}", path);
-            changed += 1;
         }
     }
 
@@ -487,6 +493,15 @@ fn fmt_files(args: &[String]) {
     // ambiguous between "already formatted" and "found nothing".
     if changed == 0 {
         println!("{} file(s) already formatted.", paths.len());
+        return;
+    }
+
+    if check {
+        eprintln!(
+            "\n{changed} of {} file(s) need formatting. Run `oxigen fmt` to fix.",
+            paths.len()
+        );
+        std::process::exit(1);
     }
 }
 
@@ -503,7 +518,8 @@ fn print_usage() {
     println!("  oxigen [options] <file.oxi> [script args...]   Run a script");
     println!("  oxigen [options]                               Start the REPL");
     println!("  oxigen check <file.oxi>                        Report syntax errors as JSON");
-    println!("  oxigen fmt <file.oxi|dir>...                   Format files in place");
+    println!("  oxigen fmt [--check] <file.oxi|dir>...         Format files in place");
+    println!("                                                 --check: report and exit 1 instead");
     println!("  oxigen test [file.oxi|dir]                     Run *_test.oxi suites");
     println!("  oxigen explain <CODE>                          Explain an error code");
     println!();
@@ -589,10 +605,15 @@ fn main() {
             None => usage_error("`check` needs a file", Some("oxigen check <file.oxi>")),
         },
         Some("fmt") => {
-            if tail.is_empty() {
-                usage_error("`fmt` needs a file or directory", Some("oxigen fmt <file.oxi>"));
+            let check = tail.first().is_some_and(|a| a == "--check");
+            let paths = if check { &tail[1..] } else { tail };
+            if paths.is_empty() {
+                usage_error(
+                    "`fmt` needs a file or directory",
+                    Some("oxigen fmt <file.oxi|dir>... (add --check to report instead of write)"),
+                );
             }
-            fmt_files(tail);
+            fmt_files(paths, check);
         }
         Some("test") => run_tests_command(tail),
         Some("explain") => match rest.get(1) {

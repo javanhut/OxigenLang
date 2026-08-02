@@ -42,3 +42,7 @@ jobs:
       # self-asserting program directly; it exits non-zero on any mismatch.
       - name: Run concurrency smoke test
         run: ./target/debug/oxigen tests/concurrency.oxi
+      # Formatting is only enforced if something checks it. `--check` writes
+      # nothing and exits 1 listing the files that would change.
+      - name: Check formatting
+        run: ./target/debug/oxigen fmt --check example tests stdlib update
