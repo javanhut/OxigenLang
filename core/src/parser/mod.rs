@@ -2485,7 +2485,11 @@ impl Parser {
                 self.next_token(); // move to body expression
 
                 let body = if self.curr_token.token_type == TokenType::LBrace {
-                    self.parse_block()?
+                    if self.brace_opens_map_literal() {
+                        vec![Statement::Expr(self.parse_expression(Precedence::Lowest)?)]
+                    } else {
+                        self.parse_block()?
+                    }
                 } else {
                     let stmt = self.parse_statement()?;
                     vec![stmt]
@@ -2505,7 +2509,11 @@ impl Parser {
                 self.next_token(); // move to body expression
 
                 let body = if self.curr_token.token_type == TokenType::LBrace {
-                    self.parse_block()?
+                    if self.brace_opens_map_literal() {
+                        vec![Statement::Expr(self.parse_expression(Precedence::Lowest)?)]
+                    } else {
+                        self.parse_block()?
+                    }
                 } else {
                     let stmt = self.parse_statement()?;
                     vec![stmt]
@@ -2578,7 +2586,11 @@ impl Parser {
                 self.next_token(); // move to body
 
                 let body = if self.curr_token.token_type == TokenType::LBrace {
-                    self.parse_block()?
+                    if self.brace_opens_map_literal() {
+                        vec![Statement::Expr(self.parse_expression(Precedence::Lowest)?)]
+                    } else {
+                        self.parse_block()?
+                    }
                 } else {
                     let stmt = self.parse_statement()?;
                     vec![stmt]
@@ -2595,8 +2607,10 @@ impl Parser {
                 continue;
             }
 
-            // A bare `{` in option position is a block, not a map literal.
-            if self.curr_token.token_type == TokenType::LBrace {
+            // A `{` default arm is a block unless it opens a map literal, which falls through to the expression path below.
+            if self.curr_token.token_type == TokenType::LBrace
+                && !self.brace_opens_map_literal()
+            {
                 default = Some(self.parse_block()?);
                 // Skip comma if present
                 if self.peek_token.token_type == TokenType::Comma {
@@ -2617,7 +2631,11 @@ impl Parser {
                 self.next_token(); // move to body
 
                 let body = if self.curr_token.token_type == TokenType::LBrace {
-                    self.parse_block()?
+                    if self.brace_opens_map_literal() {
+                        vec![Statement::Expr(self.parse_expression(Precedence::Lowest)?)]
+                    } else {
+                        self.parse_block()?
+                    }
                 } else {
                     let stmt = self.parse_statement()?;
                     vec![stmt]
@@ -3220,6 +3238,25 @@ impl Parser {
         } else {
             self.peek_token = self.lexer.next_token();
         }
+    }
+
+    /// With the current token on `{` in arm or default-arm position, does it open a map literal rather than a block?
+    ///
+    /// A brace there had always meant "block", which made map literals unreachable and, worse, turned a bare `{}` into an
+    /// empty block yielding `None` instead of an empty map — the bug behind `json.set_in`/`toml.set_in`. The two forms are
+    /// separable by lookahead, the same way struct-literal-vs-block already is: `{}` is the empty map (an empty block arm is
+    /// indistinguishable from omitting the arm, so the reading that carries information wins), and `{ <key> :` is a map entry
+    /// (`:=` is its own token, so `{ x := 1 }` is not mistaken for one). Anything else stays a block, so every existing arm
+    /// keeps its meaning. A compound key (`{a + b: 1}`) still reads as a block and still needs parenthesising.
+    fn brace_opens_map_literal(&mut self) -> bool {
+        let mut idx = 0;
+        while self.peek_nth(idx).token_type == TokenType::Newline {
+            idx += 1;
+        }
+        if self.peek_nth(idx).token_type == TokenType::RBrace {
+            return true;
+        }
+        self.peek_nth(idx + 1).token_type == TokenType::Colon
     }
 
     fn peek_nth(&mut self, n: usize) -> &Token {

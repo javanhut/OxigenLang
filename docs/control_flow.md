@@ -49,6 +49,32 @@ option {
 
 The last expression in a block is the value of that arm.
 
+### Blocks vs Map Literals
+
+Braces in an arm mean a block, except when they open a map literal — `{}` or
+`{ key: value }`. Both readings are available:
+
+```oxi
+option {
+    has(cfg, "opts") -> cfg["opts"],
+    {}                              // an empty map, not an empty block
+}
+
+option {
+    ok -> {"status": "fine"},       // a map literal arm value
+    { println("checking")           // a block: no `key:` after the brace
+      fallback() }
+}
+```
+
+`:=` is distinct from `:`, so `{ x := 1 }` is always a block. A map literal
+with a compound key needs parentheses — `({a + b: 1})` — since only a simple
+`key:` is recognised without them.
+
+Note that a bare `{}` default arm is now an empty map rather than a do-nothing
+block. To express "no default", omit the arm — an `option` with no match and no
+default yields `None`, which is what an empty block arm used to do.
+
 ### Ternary Form
 
 For a simple two-way conditional, you can use the ternary shorthand with comma-separated values:

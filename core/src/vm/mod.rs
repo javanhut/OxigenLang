@@ -1764,6 +1764,22 @@ impl VM {
         )
     }
 
+    /// Map keys and set elements must have a hashable projection.
+    ///
+    /// A non-hashable key used to be accepted and fall back to a linear scan, so a program that
+    /// keyed a map by an array got silent O(n) lookups and a key it could mutate out from under
+    /// its own entry. Both are refused here instead.
+    pub(crate) fn require_hashable_key(&self, key: &Value, what: &str) -> Result<(), VMError> {
+        if key.try_hash_key().is_some() {
+            return Ok(());
+        }
+        Err(self.runtime_error_coded(
+            crate::diagnostics::registry::NON_HASHABLE_KEY,
+            &format!("{} is not hashable and cannot be used as a {what}", key.type_name()),
+            Some("hashable kinds are int, uint, float, bool, char, byte, str, None, and tuples of those"),
+        ))
+    }
+
     // ── Main Execution Loop ────────────────────────────────────────────
 
     /// Drive the interpreter until the current frame's depth returns to
@@ -2168,6 +2184,7 @@ impl VM {
                     let flat: Vec<Value> = self.stack_drain_from(start);
                     let mut map = crate::vm::collections::OxMap::new();
                     for pair in flat.chunks(2) {
+                        self.require_hashable_key(&pair[0], "map key")?;
                         map.insert(pair[0].clone(), pair[1].clone());
                     }
                     self.push(Value::Map(Rc::new(RefCell::new(map))));
@@ -2176,6 +2193,9 @@ impl VM {
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count;
                     let elements: Vec<Value> = self.stack_drain_from(start);
+                    for e in &elements {
+                        self.require_hashable_key(e, "set element")?;
+                    }
                     let set = crate::vm::collections::OxSet::from_iter_dedup(elements);
                     self.push(Value::Set(Rc::new(RefCell::new(set))));
                 }
@@ -4063,6 +4083,7 @@ impl VM {
                 Ok(())
             }
             (Value::Map(m), _) => {
+                self.require_hashable_key(&index, "map key")?;
                 m.borrow_mut().insert(index, value);
                 Ok(())
             }

@@ -354,17 +354,29 @@ Note: A single-element tuple requires a trailing comma to distinguish it from a 
 
 ### Map
 
-Key-value pairs, enclosed in curly braces. Keys and values can be any type:
+Key-value pairs, enclosed in curly braces. A value can be any type; a key must
+be **hashable**:
 
 ```oxi
 person := {"name": "Alice", "age": 30}
 mixed := {1: "one", "two": 2}
+tuple_key := {(1, 2): "point"}
 empty := {}
+```
+
+The hashable kinds are `int`, `uint`, `float`, `bool`, `char`, `byte`, `str`,
+`None`, and tuples whose elements are all hashable. Arrays, maps, sets, struct
+instances, and functions are not — they are mutable, so a key could be changed
+after insertion and no longer match its own entry. Using one is an error
+(`E0035`), not a silent fallback:
+
+```oxi
+m := {[1, 2]: "v"}   // error[E0035]: ARRAY is not hashable
 ```
 
 Type keyword: `map`. Zero value: `{}`.
 
-Note: An empty map `{}` and an empty block `{}` use the same syntax. The parser distinguishes them by context — at the expression level, `{}` is a map literal.
+Note: An empty map `{}` and an empty block `{}` use the same syntax. The parser distinguishes them by context — at the expression level, and in an `option`/`choose` arm, `{}` is a map literal.
 
 #### Map Operations
 
@@ -450,6 +462,9 @@ empty := set()
 Type keyword: `set`. Zero value: `set()`.
 
 Duplicates are automatically removed on creation.
+
+Set elements must be hashable, by the same rule and for the same reason as map
+keys — see [Map](#map) above.
 
 #### Set Operations
 

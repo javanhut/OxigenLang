@@ -15,16 +15,12 @@ fun count_primes(limit <int>) {
                 n % d == 0 -> {
                     is_p = 0
                 }
-                {
-                }
             }
             d = d + 1
         }
         option {
             is_p == 1 -> {
                 count = count + 1
-            }
-            {
             }
         }
         n = n + 1

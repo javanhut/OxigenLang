@@ -37,15 +37,12 @@ fun set_in(tbl <map>, path <str>, val <generic>) {
     give insert(tbl, parts[0], val) when len(parts) == 1
     first := parts[0]
     rest := strings.join(parts[1:], ".")
-    // The parens matter: a bare `{}` in option-arm position parses as an empty
-    // block (yielding None), not an empty map, so the recursive call below
-    // would fail its <map> parameter check.
     child := option {
         has(tbl, first) and type(tbl[first]) == "MAP" -> {
             tbl[first]
         }
         {
-            ({})
+            {}
         }
     }
     insert(tbl, first, set_in(child, rest, val))

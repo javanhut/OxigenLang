@@ -501,15 +501,34 @@ fn builtin_insert(args: &[Value]) -> Value {
     }
     match args[0].repr() {
         ValueRepr::Map(m) => {
+            if let Some(e) = non_hashable_key_error(&args[1], "map key") {
+                return e;
+            }
             m.borrow_mut().insert(args[1].clone(), args[2].clone());
             args[0].clone()
         }
         ValueRepr::Set(s) => {
+            if let Some(e) = non_hashable_key_error(&args[1], "set element") {
+                return e;
+            }
             s.borrow_mut().insert(args[1].clone());
             args[0].clone()
         }
         _ => Value::Error(rc_str("insert() requires a map or set")),
     }
+}
+
+/// `Some(error)` when `v` cannot be a map key or set element. Mirrors
+/// `VM::require_hashable_key` for the builtin path, which reports through
+/// `Value::Error` rather than `VMError`.
+fn non_hashable_key_error(v: &Value, what: &str) -> Option<Value> {
+    if v.try_hash_key().is_some() {
+        return None;
+    }
+    Some(Value::Error(rc_str(&format!(
+        "{} is not hashable and cannot be used as a {what}; hashable kinds are int, uint, float, bool, char, byte, str, None, and tuples of those",
+        v.type_name()
+    ))))
 }
 
 fn builtin_remove(args: &[Value]) -> Value {
@@ -547,6 +566,11 @@ fn builtin_tuple(args: &[Value]) -> Value {
 }
 
 fn builtin_set(args: &[Value]) -> Value {
+    for a in args {
+        if let Some(e) = non_hashable_key_error(a, "set element") {
+            return e;
+        }
+    }
     Value::Set(Rc::new(RefCell::new(
         crate::vm::collections::OxSet::from_iter_dedup(args.iter().cloned()),
     )))

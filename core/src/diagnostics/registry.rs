@@ -52,6 +52,7 @@ pub const RUNTIME_ERROR: Code = Code("E0031");
 pub const WRONG_ARGUMENT_COUNT: Code = Code("E0032");
 pub const STRUCT_MISSING_FIELDS: Code = Code("E0033");
 pub const TRAILING_JSON: Code = Code("E0034");
+pub const NON_HASHABLE_KEY: Code = Code("E0035");
 
 pub struct Entry {
     pub code: Code,
@@ -466,6 +467,28 @@ surfaced much later as a wrong answer rather than an error.
 `json.parse` reads a single JSON value. Anything after it is a sign the input
 is not what was intended — a concatenated document, a stray fragment, or a
 truncated write — so it is an error rather than being ignored.
+",
+    },
+    Entry {
+        code: NON_HASHABLE_KEY,
+        title: "map key is not hashable",
+        explanation: "\
+Map keys and set elements must be hashable. The hashable kinds are `int`,
+`uint`, `float`, `bool`, `char`, `byte`, `str`, `None`, and tuples of those.
+
+Arrays, maps, sets, struct instances, and functions are not hashable, so they
+cannot be used as a key:
+
+    m := {[1, 2]: \"v\"}   // error: ARRAY is not hashable
+
+Two things make these unusable as keys. They are mutable, so a key could be
+changed after insertion and no longer find its own entry; and they have no hash
+projection, so every lookup would degrade to a linear scan of the whole map.
+
+Use a hashable projection of the value instead — a tuple of its parts, or a
+string built from them:
+
+    m := {(1, 2): \"v\"}
 ",
     },
     Entry {
