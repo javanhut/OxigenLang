@@ -235,7 +235,7 @@ App includes {
         }
         option {
             handler == None -> {
-                fail_with(404, "not found")
+                miss(self.routes, self.dynamic, req["path"])
             }
             {
                 req["params"] = params
@@ -256,33 +256,74 @@ App includes {
     }
 }
 
+// Match one compiled route against a request's segments. Returns the captured
+// params, or None when the shapes differ.
+fun match_segments(segments <array>, segs <array>) {
+    count := len(segs)
+    option {
+        len(segments) != count -> {
+            give None
+        }
+    }
+    params <map> := {}
+    each i in range(count) {
+        is_param, name := segments[i]
+        option {
+            is_param -> {
+                params[name] = decode(segs[i])
+            }
+            name != segs[i] -> {
+                give None
+            }
+        }
+    }
+    params
+}
+
 // Scan the parameterized routes for one matching this method and path. Returns
 // a (handler, params) pair, or (None, {}) when nothing matches.
 fun match_dynamic(dynamic <array>, method <str>, segs <array>) {
-    count := len(segs)
     each entry in dynamic {
         route_method, segments, handler := entry
         option {
-            route_method == method and len(segments) == count -> {
-                params <map> := {}
-                matched <bool> := True
-                each i in range(count) {
-                    is_param, name := segments[i]
-                    option {
-                        is_param -> {
-                            params[name] = decode(segs[i])
-                        }
-                        name != segs[i] -> {
-                            matched = False
-                            stop
-                        }
-                    }
-                }
-                give (handler, params) when matched
+            route_method == method -> {
+                params := match_segments(segments, segs)
+                give (handler, params) when params != None
             }
         }
     }
     (None, {})
+}
+
+// Every method registered for this path, whatever the request asked for.
+fun allowed_methods(routes <map>, dynamic <array>, path <str>) {
+    segs := __split(path, "/")
+    out <array> := []
+    each key in keys(routes) {
+        parts := __split(key, " ")
+        out = push(out, parts[0]) when __join(rest(parts), " ") == path
+    }
+    each entry in dynamic {
+        route_method, segments, handler := entry
+        out = push(out, route_method) when match_segments(segments, segs) != None
+    }
+    out
+}
+
+// Nothing matched. A path that exists under other methods is 405, not 404 —
+// answering 404 sends the caller hunting for a typo in a URL that is correct,
+// which is exactly the wrong place to look. RFC 9110 requires the `Allow`
+// header on a 405, so the reply names the methods that would have worked.
+fun miss(routes <map>, dynamic <array>, path <str>) {
+    allowed := allowed_methods(routes, dynamic, path)
+    option {
+        len(allowed) == 0 -> {
+            fail_with(404, "not found")
+        }
+        {
+            Res(405, {"Content-Type": "application/json", "Allow": __join(allowed, ", ")}, __json_stringify({"error": "method not allowed", "allow": allowed}))
+        }
+    }
 }
 
 // Normalize whatever a handler returned into a response.

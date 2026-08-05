@@ -24,7 +24,24 @@ fun explode(req) { <fail>("handler is broken") }
     expect(app.dispatch(request("GET", "/health")).body).eq("hi")
     expect(app.dispatch(request("GET", "/health")).status).eq(200)
     expect(app.dispatch(request("GET", "/missing")).status).eq(404)
-    expect(app.dispatch(request("DELETE", "/health")).status).eq(404)
+    // The path exists, just not for DELETE — 404 would send the caller looking
+    // for a typo in a URL that is correct.
+    expect(app.dispatch(request("DELETE", "/health")).status).eq(405)
+}
+
+<test>("a known path under the wrong method is 405 with an Allow header") {
+    app := router()
+    app.post("/echo", greet)
+    app.put("/users/:id", greet)
+    missed := app.dispatch(request("GET", "/echo"))
+    expect(missed.status).eq(405)
+    expect(missed.headers["Allow"]).eq("POST")
+    // Parameterized routes report their methods too.
+    dynamic_missed := app.dispatch(request("GET", "/users/42"))
+    expect(dynamic_missed.status).eq(405)
+    expect(dynamic_missed.headers["Allow"]).eq("PUT")
+    // A path registered nowhere stays a 404.
+    expect(app.dispatch(request("GET", "/absent")).status).eq(404)
 }
 
 <test>("path params are captured and percent-decoded") {

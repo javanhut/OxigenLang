@@ -848,7 +848,29 @@ A handler takes the request and returns whatever it wants to send:
 
 A handler that raises answers **500** and logs the real message server-side; the
 client is told only `{"error": "internal server error"}`, and the worker keeps
-serving. An unmatched route answers **404**.
+serving.
+
+A request that matches no route answers **404** — unless the *path* is
+registered under some other method, which answers **405** with an `Allow` header
+naming the methods that would have worked:
+
+```
+$ curl -i localhost:8000/echo        # /echo is registered as POST
+HTTP/1.1 405 Method Not Allowed
+Allow: POST
+
+{"error":"method not allowed","allow":["POST"]}
+```
+
+The distinction matters when calling your own server: a 404 on a URL you know is
+correct sends you hunting for a typo, when the real answer is that you used the
+wrong verb. Note that `net.get` and friends raise on any non-2xx, so a client
+halts before it can read that body — normalize the call to see it:
+
+```oxi
+resp := <type<Error || Value>>(net.get("{url}/echo"))
+println(resp.msg) when is_error(resp)     // http error: http status: 405
+```
 
 The request is a map, so `req.params` and `req["params"]` both work:
 
