@@ -108,8 +108,60 @@ When a value is passed into a task or returned from one, it is **copied** across
 - Strings
 - Arrays, tuples, maps, sets (including nested)
 - Structs and enums
-- Closures, including captured variables
 - Open TCP/UDP sockets (so a server can `diverge` each connection to a handler)
+
+### Functions do not cross
+
+A function is data everywhere else in Oxigen, but it is the one thing a task
+cannot carry across the boundary. The block you hand to `diverge` is not copied —
+the worker rebuilds it from the program source — so a *value* that happens to be
+a function has nothing to rebuild from.
+
+Three ways to try it, and what each does:
+
+```oxi
+fun handler(x) { x * 2 }
+
+// 1. Captured by the block — raises immediately.
+t := diverge { handler_local(3) }
+// spawn(): capture cannot send value of type FUNCTION across threads
+
+// 2. Passed as an argument — raises immediately.
+t := __spawn(run_it, handler)
+// spawn(): cannot send value of type FUNCTION across threads
+
+// 3. Inside a map or array the block reads — the quiet one.
+table := {"a": handler}
+t := diverge { keys(table) }
+converge t     // error: undefined variable: table
+```
+
+The third is the one to watch for. A collection holding a function is dropped
+from the snapshot the worker receives rather than refused, so the failure
+surfaces later as an *undefined variable* naming a variable you can plainly see
+defined above.
+
+**What to do instead: send names, not functions.** A worker VM registers every
+top-level declaration in your program, so top-level functions — including
+`name := fun(x) { ... }` bindings — already exist on it. Build the table that
+holds them *inside* the task:
+
+```oxi
+handler_a := fun(req) { "A" }
+handler_b := fun(req) { "B" }
+
+fun dispatch(which, req) {
+    table := {"a": handler_a, "b": handler_b}   // built on the worker
+    table[which](req)
+}
+
+results := diverge each name in ["a", "b"] {
+    dispatch(name, "req")                       // only strings cross
+}
+```
+
+This is why [`api`](stdlib.md#api) has you register routes inside a function
+that each worker calls, instead of configuring one app and handing it over.
 
 ## Limitations
 

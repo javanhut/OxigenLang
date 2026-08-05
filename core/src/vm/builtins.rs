@@ -231,6 +231,10 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("__net_tcp_accept".to_string(), Value::Builtin(builtin_net_tcp_accept));
     globals.insert("__net_send".to_string(), Value::Builtin(builtin_net_send));
     globals.insert("__net_receive".to_string(), Value::Builtin(builtin_net_receive));
+    globals.insert(
+        "__net_set_timeout".to_string(),
+        Value::Builtin(builtin_net_set_timeout),
+    );
     globals.insert("__net_close".to_string(), Value::Builtin(builtin_net_close));
     globals.insert("__net_udp_bind".to_string(), Value::Builtin(builtin_net_udp_bind));
     globals.insert("__net_udp_send".to_string(), Value::Builtin(builtin_net_udp_send));
@@ -2627,6 +2631,18 @@ fn builtin_net_receive(args: &[Value]) -> Value {
     let max = net_try!(net_int(&args[1], "receive max"));
     match crate::netres::tcp_receive(id as u64, max) {
         Ok(s) => Value::String(rc_str(s)),
+        Err(e) => Value::Error(rc_str(e)),
+    }
+}
+
+fn builtin_net_set_timeout(args: &[Value]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(rc_str("set_timeout: expected (conn, ms)"));
+    }
+    let id = net_try!(net_int(&args[0], "set_timeout conn"));
+    let ms = net_try!(net_int(&args[1], "set_timeout ms"));
+    match crate::netres::tcp_set_read_timeout(id as u64, ms) {
+        Ok(()) => Value::None,
         Err(e) => Value::Error(rc_str(e)),
     }
 }

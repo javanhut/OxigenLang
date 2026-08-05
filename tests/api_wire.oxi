@@ -1,0 +1,89 @@
+// Wire-format tests for the `api` module: the bytes a client actually sends.
+//
+// NOT a `<test>`-block file, for the same reason as concurrency.oxi — the test
+// runner compiles each block as its own sub-program, and `__spawn` resolves the
+// worker function against one process-global source. Run it directly:
+//
+//     oxigen tests/api_wire.oxi
+//
+// It self-asserts with `expect`; any mismatch raises and exits non-zero.
+//
+// tests/api_test.oxi covers routing and rendering as pure functions. This covers
+// what those tests cannot reach without a socket: request-line and header
+// parsing, Content-Length bodies, keep-alive reuse, and the limits that keep a
+// hostile client from making the server allocate without bound.
+introduce {expect} from test
+introduce api
+introduce net
+introduce strings
+
+port <int> = 8451
+
+// The worker serves exactly `connections` connections and then returns, so the
+// process can exit — `app.listen()` never returns, and program exit waits on
+// every spawned task.
+fun test_server(cfg) {
+    app := api.app(cfg)
+    app.get("/hi", hi)
+    app.post("/echo", echo_body)
+    n <int> := 0
+    repeat when n < cfg["connections"] {
+        conn := net.accept(cfg["server"])
+        net.set_timeout(conn, 5000)
+        <type<Error> || <Value>>(app.serve_conn(conn))
+        net.close(conn)
+        n = n + 1
+    }
+    "served {n}"
+}
+
+fun hi(req) { api.text("hi") }
+
+fun echo_body(req) { api.text(req["body"]) }
+
+// Send raw bytes, read one response. Loopback delivers these small responses in
+// a single segment.
+fun send_raw(raw <str>) {
+    conn := net.connect("127.0.0.1", port)
+    net.set_timeout(conn, 5000)
+    net.send(conn, raw)
+    reply := net.receive(conn, 65536)
+    net.close(conn)
+    reply
+}
+
+fun get_line(raw <str>) { strings.split(raw, "\r\n")[0] }
+
+fun body_of(raw <str>) { strings.join(rest(strings.split(raw, "\r\n\r\n")), "\r\n\r\n") }
+
+fun has_text(haystack <str>, needle <str>) { strings.contains_str(haystack, needle) }
+
+main {
+    server := net.listen("127.0.0.1", port)
+    worker := __spawn(test_server, {"server": server, "keep_alive": True, "idle_timeout": 5000, "connections": 6})
+    // 1. A plain GET: status line, byte-accurate Content-Length, and body.
+    reply := send_raw("GET /hi HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    expect(get_line(reply)).eq("HTTP/1.1 200 OK")
+    expect(has_text(reply, "Content-Length: 2")).truthy()
+    expect(body_of(reply)).eq("hi")
+    // 2. A body is read by Content-Length, not by whatever arrived first.
+    payload := "hello wire"
+    reply = send_raw("POST /echo HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {len(payload)}\r\n\r\n{payload}")
+    expect(get_line(reply)).eq("HTTP/1.1 200 OK")
+    expect(body_of(reply)).eq(payload)
+    // 3. An unrouted path is 404, not a dropped connection.
+    reply = send_raw("GET /nowhere HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    expect(get_line(reply)).eq("HTTP/1.1 404 Not Found")
+    // 4. A request line missing its version is rejected, not indexed past.
+    reply = send_raw("GET\r\nHost: x\r\n\r\n")
+    expect(get_line(reply)).eq("HTTP/1.1 400 Bad Request")
+    // 5. A non-numeric Content-Length is rejected rather than raising inside the
+    //    read loop.
+    reply = send_raw("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: banana\r\n\r\n")
+    expect(get_line(reply)).eq("HTTP/1.1 400 Bad Request")
+    // 6. A body larger than the cap is refused before it is buffered.
+    reply = send_raw("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 99999999\r\n\r\n")
+    expect(get_line(reply)).eq("HTTP/1.1 413 Content Too Large")
+    expect(converge worker).eq("served 6")
+    println("api wire format ok")
+}

@@ -143,6 +143,21 @@ pub fn tcp_accept(id: u64) -> Result<u64, String> {
     Ok(insert(Resource::Tcp(stream)))
 }
 
+/// Bound how long a `tcp_receive` on this connection waits for data. `ms == 0`
+/// restores the default of waiting forever.
+///
+/// Without this an idle peer holds its reader indefinitely, which is fatal to a
+/// thread-per-connection server: a keep-alive client that stops sending pins one
+/// worker for good, and enough of them wedge the whole server. A timed-out read
+/// reports EOF (see `tcp_receive`), so the reader just sees the connection end.
+pub fn tcp_set_read_timeout(id: u64, ms: i64) -> Result<(), String> {
+    if ms < 0 {
+        return Err("set_read_timeout: milliseconds must not be negative".to_string());
+    }
+    let timeout = (ms > 0).then(|| Duration::from_millis(ms as u64));
+    with_tcp(id, |s| s.set_read_timeout(timeout).map_err(|e| e.to_string()))
+}
+
 pub fn tcp_send(id: u64, data: &str) -> Result<i64, String> {
     with_tcp(id, |s| {
         s.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
@@ -159,7 +174,11 @@ const TCP_READ_CHUNK: usize = 64 * 1024;
 /// truncated by the buffer; see `udp_receive`.
 const UDP_MAX_DATAGRAM: usize = 64 * 1024;
 
-/// Reads up to `max` bytes. Returns `""` on a clean EOF (peer closed).
+/// Reads up to `max` bytes. Returns `""` on a clean EOF (peer closed), and also
+/// when a `tcp_set_read_timeout` deadline passes with nothing to read — an idle
+/// peer is indistinguishable from a departed one to a caller that asked to stop
+/// waiting, and reporting it as an error would turn every timeout into a raised
+/// failure the caller has to unwrap.
 pub fn tcp_receive(id: u64, max: i64) -> Result<String, String> {
     if max <= 0 {
         return Err("receive: max bytes must be positive".to_string());
@@ -167,7 +186,19 @@ pub fn tcp_receive(id: u64, max: i64) -> Result<String, String> {
     with_tcp(id, |s| {
         // Cap the buffer: a caller's i64::MAX asked for 9.2EB and aborted.
         let mut buf = vec![0u8; (max as usize).min(TCP_READ_CHUNK)];
-        let n = s.read(&mut buf).map_err(|e| e.to_string())?;
+        let n = match s.read(&mut buf) {
+            Ok(n) => n,
+            // Both kinds appear here: WouldBlock on Unix, TimedOut on Windows.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                0
+            }
+            Err(e) => return Err(e.to_string()),
+        };
         buf.truncate(n);
         Ok(String::from_utf8_lossy(&buf).into_owned())
     })

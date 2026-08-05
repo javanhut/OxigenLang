@@ -42,6 +42,11 @@ jobs:
       # self-asserting program directly; it exits non-zero on any mismatch.
       - name: Run concurrency smoke test
         run: ./target/debug/oxigen tests/concurrency.oxi
+      # Same constraint, plus it needs a real socket: the api module's wire
+      # format (request parsing, Content-Length bodies, the request limits) is
+      # only reachable over a connection, not from a <test> block.
+      - name: Run api wire-format test
+        run: ./target/debug/oxigen tests/api_wire.oxi
       # Formatting is only enforced if something checks it. `--check` writes
       # nothing and exits 1 listing the files that would change.
       - name: Check formatting

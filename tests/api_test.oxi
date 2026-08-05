@@ -1,0 +1,79 @@
+introduce api
+introduce strings
+
+// A router with no live socket: handle 0 is never accepted on, so every routing
+// and rendering check runs without opening a port.
+fun router() { api.app({"server": 0, "keep_alive": False, "idle_timeout": 0}) }
+
+fun request(method <str>, path <str>) {
+    {"method": method, "path": path, "params": {}, "query": {}, "headers": {}, "body": "", "version": "HTTP/1.1"}
+}
+
+fun echo_id(req) {
+    {"id": req.params["id"]}
+}
+
+fun greet(req) { api.text("hi") }
+
+fun explode(req) { <fail>("handler is broken") }
+
+<test>("static routes dispatch by method and path") {
+    app := router()
+    app.get("/health", greet)
+    app.post("/health", echo_id)
+    expect(app.dispatch(request("GET", "/health")).body).eq("hi")
+    expect(app.dispatch(request("GET", "/health")).status).eq(200)
+    expect(app.dispatch(request("GET", "/missing")).status).eq(404)
+    expect(app.dispatch(request("DELETE", "/health")).status).eq(404)
+}
+
+<test>("path params are captured and percent-decoded") {
+    app := router()
+    app.get("/users/:id/posts", echo_id)
+    expect(app.dispatch(request("GET", "/users/42/posts")).body).eq("\{\"id\":\"42\"}")
+    expect(app.dispatch(request("GET", "/users/a%20b/posts")).body).eq("\{\"id\":\"a b\"}")
+    // Wrong segment count and wrong literal segment both miss.
+    expect(app.dispatch(request("GET", "/users/42")).status).eq(404)
+    expect(app.dispatch(request("GET", "/users/42/comments")).status).eq(404)
+}
+
+<test>("a raising handler answers 500 instead of propagating") {
+    app := router()
+    app.get("/boom", explode)
+    result := app.dispatch(request("GET", "/boom"))
+    expect(result.status).eq(500)
+    // The internal message must not reach the client.
+    expect(result.body).eq("\{\"error\":\"internal server error\"}")
+}
+
+<test>("handler return values become responses") {
+    expect(api.to_res("plain").headers["Content-Type"]).eq("text/plain; charset=utf-8")
+    expect(api.to_res({"a": 1}).body).eq("\{\"a\":1}")
+    expect(api.to_res({"a": 1}).status).eq(200)
+    expect(api.to_res(api.respond(204, "")).status).eq(204)
+}
+
+<test>("query strings decode keys and values") {
+    parsed := api.parse_query("page=2&q=hello%20world&flag&empty=")
+    expect(parsed["page"]).eq("2")
+    expect(parsed["q"]).eq("hello world")
+    expect(parsed["flag"]).eq("")
+    expect(parsed["empty"]).eq("")
+    expect(len(api.parse_query(""))).eq(0)
+}
+
+<test>("responses render a well-formed HTTP message") {
+    rendered := api.render(api.text("hi"), False)
+    expect(rendered).eq("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi")
+    // Content-Length counts bytes, not characters — a wrong count desyncs the
+    // connection for every request after it.
+    expect(strings.contains_str(api.render(api.text("é"), False), "Content-Length: 2")).truthy()
+    expect(strings.contains_str(api.render(api.text("hi"), True), "Connection: keep-alive")).truthy()
+}
+
+<test>("keep-alive follows the version and the Connection header") {
+    expect(api.wants_keep_alive({"version": "HTTP/1.1", "headers": {}})).truthy()
+    expect(api.wants_keep_alive({"version": "HTTP/1.0", "headers": {}})).falsy()
+    expect(api.wants_keep_alive({"version": "HTTP/1.1", "headers": {"connection": "close"}})).falsy()
+    expect(api.wants_keep_alive({"version": "HTTP/1.0", "headers": {"connection": "keep-alive"}})).truthy()
+}

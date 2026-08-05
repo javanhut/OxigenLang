@@ -1,0 +1,44 @@
+// A small JSON API. Run it with `oxigen example/api_server.oxi`, then:
+//
+//     curl localhost:8000/
+//     curl 'localhost:8000/users/42?verbose=1'
+//     curl -X POST localhost:8000/echo -d '{"hello":"world"}'
+introduce api
+introduce json
+
+users <map> = {"1": "ada", "42": "grace"}
+
+fun index(req) {
+    {"service": "oxigen api", "routes": ["/", "/users/:id", "/echo"]}
+}
+
+fun show_user(req) {
+    id := req.params["id"]
+    option {
+        has(users, id) -> {
+            {"id": id, "name": users[id], "query": req.query}
+        }
+        {
+            api.fail_with(404, "no user {id}")
+        }
+    }
+}
+
+fun echo(req) {
+    {"you_sent": api.body_json(req), "bytes": len(req.body)}
+}
+
+fun boom(req) { <fail>("this handler is broken on purpose") }
+
+fun routes(cfg) {
+    app := api.app(cfg)
+    app.get("/", index)
+    app.get("/users/:id", show_user)
+    app.post("/echo", echo)
+    app.get("/boom", boom)
+    app.listen()
+}
+
+main {
+    api.serve(routes, port=8000)
+}

@@ -1010,11 +1010,15 @@ impl Formatter {
                 self.format_expression(value);
                 self.push(")");
             }
+            // `<type<T>>(expr)` is the only form the parser knows. This used to
+            // emit `expr as <T>`, a syntax that has never existed, so formatting
+            // any file using an angle-form conversion left it unparseable.
             Expression::TypeWrap { target, value, .. } => {
-                self.format_expression(value);
-                self.push(" as <");
+                self.push("<type<");
                 self.push(&format_type_annotation(target));
-                self.push(">");
+                self.push(">>(");
+                self.format_expression(value);
+                self.push(")");
             }
             Expression::Fail { value, .. } => {
                 self.push("<fail>(");
@@ -1259,6 +1263,8 @@ fn format_type_annotation(ann: &TypeAnnotation) -> String {
             None => "Error".to_string(),
         },
         TypeAnnotation::ValueType => "Value".to_string(),
+        // Every caller wraps this in `<`...`>`, so the join closes and reopens
+        // the brackets: `<int> || <float>`, which is how the stdlib writes it.
         TypeAnnotation::Union(types) => types
             .iter()
             .map(format_type_annotation)

@@ -90,8 +90,15 @@ fun accept(server <int>) { __net_tcp_accept(server) }
 // Send text on a connection. Returns the number of bytes written.
 fun send(conn <int>, data <str>) { __net_send(conn, data) }
 
-// Receive up to `max` bytes from a connection. Returns "" on a clean close.
+// Receive up to `max` bytes from a connection. Returns "" on a clean close, and
+// also when a set_timeout deadline passes with nothing to read.
 fun receive(conn <int>, max <int> = 4096) { __net_receive(conn, max) }
+
+// Bound how long `receive` waits on this connection; 0 restores waiting forever.
+// A timed-out read returns "", the same as a closed peer. Set this on any
+// connection a remote peer can hold open — otherwise one idle client keeps its
+// reader parked for the life of the process.
+fun set_timeout(conn <int>, ms <int>) { __net_set_timeout(conn, ms) }
 
 // Close a socket handle (connection or server). Idempotent.
 fun close(handle <int>) { __net_close(handle) }

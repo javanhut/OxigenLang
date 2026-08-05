@@ -604,7 +604,8 @@ introduce net
 | `listen` | `listen(host, port)` | Bind a TCP server; returns a server handle |
 | `accept` | `accept(server)` | Block until a client connects; returns a connection handle |
 | `send` | `send(conn, data)` | Send text on a connection; returns bytes written |
-| `receive` | `receive(conn, max = 4096)` | Read up to `max` bytes; returns `""` on a clean close |
+| `receive` | `receive(conn, max = 4096)` | Read up to `max` bytes; returns `""` on a clean close or an expired `set_timeout` |
+| `set_timeout` | `set_timeout(conn, ms)` | Bound how long `receive` waits on this connection; `0` restores waiting forever |
 | `close` | `close(handle)` | Close a socket handle (connection or server); idempotent |
 | `udp_bind` | `udp_bind(host, port)` | Bind a UDP socket; returns a socket handle |
 | `udp_send` | `udp_send(sock, data, host, port)` | Send a datagram; returns bytes sent |
@@ -694,8 +695,17 @@ Only one of them is bounded:
 | Call | Timeout | Default |
 |------|---------|---------|
 | `connect` | TCP handshake | **30 seconds**, then `Error: connection timed out`. Not configurable. |
-| `accept`, `receive`, `udp_receive`, `send` | none | block until the OS returns |
+| `receive` | `set_timeout(conn, ms)` | none until you set one; then an expired read returns `""` |
+| `accept`, `udp_receive`, `send` | none | block until the OS returns |
 | `read_line`, `read_chunk` | `timeout_ms` argument | `0` = block forever; `> 0` returns `None` when nothing has arrived yet |
+
+Set a `receive` timeout on any connection a **remote peer** can hold open. A
+server that accepts a connection and reads from it has handed a stranger the
+power to park that thread indefinitely by connecting and saying nothing; with a
+timeout the read ends and the thread moves on. An expired read reports `""`, the
+same as a closed peer — to a caller that asked to stop waiting, a silent client
+and a departed one are the same thing, and reporting it as an error would make
+every timeout something to unwrap.
 
 The connect bound exists because a blackholed SYN otherwise hangs forever, and
 program exit waits for spawned tasks to finish — one stuck `connect` wedged the
@@ -765,6 +775,128 @@ net.close(sock)
 ```
 
 Supports HTTP and HTTPS.
+
+## api
+
+```oxi
+introduce api
+```
+
+`net` gives you sockets; `api` gives you an HTTP server built on them — routing,
+JSON, and the accept loop in one module. It plays the part of a web framework
+and its server at once, so there is nothing to install alongside it.
+
+```oxi
+introduce api
+
+fun index(req) { {"service": "oxigen"} }
+
+fun show_user(req) { {"id": req.params["id"], "page": req.query["page"]} }
+
+fun create_user(req) { api.json(api.body_json(req), 201) }
+
+fun routes(cfg) {
+    app := api.app(cfg)
+    app.get("/", index)
+    app.get("/users/:id", show_user)
+    app.post("/users", create_user)
+    app.listen()
+}
+
+main { api.serve(routes, port=8000) }
+```
+
+### Writing a server
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `serve` | `serve(worker, host = "0.0.0.0", port = 8000, workers = 64, keep_alive = True, idle_timeout = 5000)` | Bind the port and run `worker` on `workers` threads; blocks |
+| `app` | `app(cfg)` | Build this worker's router from the config `serve` passed it |
+
+`serve` takes a **top-level function**, not a configured app. Oxigen's
+concurrency is share-nothing — a handler closure cannot be copied to another
+thread — so `serve` hands each worker only the listening socket, and each worker
+calls your function to build its own routing table from the module's top-level
+functions. The table is built once per worker, not once per request, and no
+handler ever crosses a thread boundary.
+
+That is why the routes live inside a function and why it ends with
+`app.listen()`.
+
+### Routes
+
+| Method | Signature |
+|--------|-----------|
+| `app.get` / `post` / `put` / `patch` / `delete` | `app.get(path, handler)` |
+| `app.route` | `app.route(method, path, handler)` — any other verb |
+
+Paths take parameters as `:name` — `"/users/:id/posts"`. (Not `{name}`: a bare
+`{` inside an Oxigen string opens an interpolation, so that form would need
+escaping at every call site.) Registration sorts routes by shape: a path with no
+parameter is an O(1) map lookup, and only parameterized paths are compared
+segment by segment.
+
+### Handlers
+
+A handler takes the request and returns whatever it wants to send:
+
+| Returned | Sent as |
+|----------|---------|
+| a `Res` from `json`/`text`/`html`/`redirect`/`respond`/`fail_with` | that response |
+| a string | `200 text/plain` |
+| anything else (map, array, number, struct) | `200 application/json` |
+
+A handler that raises answers **500** and logs the real message server-side; the
+client is told only `{"error": "internal server error"}`, and the worker keeps
+serving. An unmatched route answers **404**.
+
+The request is a map, so `req.params` and `req["params"]` both work:
+
+| Key | Contents |
+|-----|----------|
+| `method` | `"GET"` |
+| `path` | `"/users/42"` (no query string) |
+| `version` | `"HTTP/1.1"` |
+| `params` | path parameters, percent-decoded — `{"id": "42"}` |
+| `query` | query string, percent-decoded — `{"page": "2"}` |
+| `headers` | header names lowercased — `{"content-type": "application/json"}` |
+| `body` | the raw body string |
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `json` | `json(data, status = 200)` | JSON response from any Oxigen value |
+| `text` | `text(body, status = 200)` | `text/plain` response |
+| `html` | `html(body, status = 200)` | `text/html` response |
+| `redirect` | `redirect(location, status = 302)` | Redirect response |
+| `respond` | `respond(status, body, headers = {})` | Explicit status, body, and headers |
+| `fail_with` | `fail_with(status, message)` | `{"error": message}` under `status` |
+| `body_json` | `body_json(req)` | Parse the request body as JSON |
+| `form` | `form(req)` | Parse the request body as an HTML form |
+| `parse_query` | `parse_query(s)` | Parse a query string into a map |
+
+### Concurrency and limits
+
+This is a **thread-per-connection** server: `serve` runs `workers` accept loops
+on real OS threads over one shared listening socket, and a connection holds its
+worker until it closes. So `workers` is the number of connections served at
+once — size it for the clients you expect connected simultaneously, not for core
+count.
+
+Keeping connections alive is worth roughly double the throughput and is the
+default. Two limits keep that from turning into a stuck server when clients
+outnumber workers: `idle_timeout` (5s) reclaims a worker whose client went
+quiet, and a connection is closed after 100 requests so a busy client's worker
+returns to the queue. Over capacity the server slows down; it does not stop
+accepting. Pass `keep_alive=False` to answer one request per connection instead.
+
+A client cannot make the server allocate without bound: headers are capped at
+64 KiB (**431** past that), bodies at 8 MiB (**413**), and a `Content-Length`
+that is not a number is a **400**. Because `idle_timeout` bounds each individual
+read, a slowloris client loses its connection while a genuinely slow upload,
+which keeps sending, does not.
+
+Not implemented: request pipelining, TLS (terminate it at a proxy), and
+multipart uploads. Binary request bodies are read as UTF-8 text.
 
 ## result
 

@@ -1,0 +1,556 @@
+// api — HTTP API servers: routing, JSON, and the server itself in one module.
+//
+// The FastAPI half is the routing and the response helpers; the uvicorn half is
+// `serve`, which binds the socket and runs N accept loops on real threads.
+//
+//     introduce api
+//
+//     fun hello(req) { {"message": "hello"} }
+//     fun show_user(req) { {"id": req.params["id"], "page": req.query["page"]} }
+//
+//     fun routes(cfg) {
+//         app := api.app(cfg)
+//         app.get("/", hello)
+//         app.get("/users/:id", show_user)
+//         app.listen()
+//     }
+//
+//     main { api.serve(routes, port=8000) }
+//
+// Why the routes live inside a function instead of at the top level: Oxigen's
+// concurrency is share-nothing, so a handler *closure* cannot be copied to a
+// worker thread. `serve` therefore hands each worker nothing but the listening
+// socket, and every worker calls your function to build its own routing table
+// from the module's top-level functions. One function per server, and the table
+// is built once per worker rather than once per request.
+introduce net
+
+// Hot-path string and JSON work calls the builtins directly rather than the
+// `strings`/`json` wrappers: one less VM frame per operation on a path that runs
+// several times per request, and `__json_stringify` sidesteps the name clash
+// with this module's own `json` helper.
+// Caps on what a single client can make the server allocate. A request that
+// exceeds either is answered and dropped rather than buffered.
+head_limit <int> = 65536
+body_limit <int> = 8388608
+read_size <int> = 65536
+// How many consecutive accept failures end an acceptor loop. One failure is
+// routine (the peer vanished mid-handshake); a hundred in a row means the
+// listener is broken, and retrying forever would spin a core.
+accept_retry_limit <int> = 100
+// Requests one kept-alive connection may serve before it is closed and its
+// worker returns to the accept queue. `idle_timeout` only reclaims a worker
+// whose client went quiet; a client that keeps sending would otherwise hold its
+// worker for as long as it liked, and once every worker is held that way, new
+// clients wait forever instead of merely waiting their turn. Same purpose, and
+// same default, as Apache's MaxKeepAliveRequests.
+keep_alive_max <int> = 100
+
+// An HTTP response. Build one with json/text/html/redirect/respond — or return
+// any other value from a handler and it is JSON-encoded with status 200.
+struct Res {
+    status <int>
+    headers <map>
+    body <str>
+}
+
+// A router plus the socket it serves. Each worker thread gets its own.
+struct App {
+    server <int>
+    routes <map>
+    dynamic <array>
+    keep_alive <bool>
+    idle_timeout <int>
+}
+
+// Build this worker's router from the config `serve` handed it. A struct cannot
+// be rebuilt on a thread that did not declare it, so what crosses is this plain
+// map and the App is constructed here, on the worker.
+fun app(cfg <map>) { App(cfg["server"], {}, [], cfg["keep_alive"], cfg["idle_timeout"]) }
+
+// ── Responses ─────────────────────────────────────────────────────────────
+// JSON response. Any Oxigen value works — maps, arrays, structs, primitives.
+fun json(data <generic>, status <int> = 200) { Res(status, {"Content-Type": "application/json"}, __json_stringify(data)) }
+
+// Plain-text response.
+fun text(body <str>, status <int> = 200) { Res(status, {"Content-Type": "text/plain; charset=utf-8"}, body) }
+
+// HTML response.
+fun html(body <str>, status <int> = 200) { Res(status, {"Content-Type": "text/html; charset=utf-8"}, body) }
+
+// Redirect to another location. 302 by default; pass 301 for a permanent move.
+fun redirect(location <str>, status <int> = 302) { Res(status, {"Location": location}, "") }
+
+// Response with an explicit status, body, and headers — the escape hatch when
+// the helpers above don't fit.
+fun respond(status <int>, body <str>, headers <map> = {}) { Res(status, headers, body) }
+
+// A JSON error body under the given status, matching what unmatched routes and
+// failed handlers return.
+fun fail_with(status <int>, message <str>) { json({"error": message}, status) }
+
+// ── Request helpers ───────────────────────────────────────────────────────
+// Parse the request body as JSON.
+fun body_json(req <map>) { __json_parse(req["body"]) }
+
+// Parse the request body as an HTML form (application/x-www-form-urlencoded).
+fun form(req <map>) { parse_query(req["body"]) }
+
+// Percent-decode, falling back to the raw text on a malformed escape. A client
+// controls this string, so a bad `%ZZ` must not put an error value where the
+// handler expects a string.
+fun decode(s <str>) {
+    decoded := __url_decode(s)
+    option {
+        is_error(decoded) -> {
+            s
+        }
+        {
+            decoded
+        }
+    }
+}
+
+// Parse a query string ("a=1&b=hello%20world") into a map. Keys and values are
+// percent-decoded.
+fun parse_query(s <str>) {
+    out <map> := {}
+    each pair in __split(s, "&") {
+        option {
+            pair != "" -> {
+                kv := __split(pair, "=")
+                out[decode(kv[0])] = option {
+                    len(kv) > 1 -> {
+                        decode(__join(rest(kv), "="))
+                    }
+                    {
+                        ""
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+// ── Routing ───────────────────────────────────────────────────────────────
+// Split a route path into (is_param, name) segments once at registration, so
+// matching a request is a comparison per segment and no parsing.
+//
+// Params are `:name`, not `{name}`, because a bare `{` inside an Oxigen string
+// opens an interpolation — `"/users/{id}"` would need escaping at every call
+// site.
+fun compile_path(path <str>) {
+    out <array> := []
+    each seg in __split(path, "/") {
+        out = push(out, (__starts_with(seg, ":"), __strip(seg, ":")))
+    }
+    out
+}
+
+App includes {
+    // Register a handler. Paths with no `:param` go in a map for an O(1)
+    // lookup; only parameterized paths are scanned segment by segment.
+    fun route(method <str>, path <str>, handler <generic>) {
+        option {
+            __contains_str(path, "/:") -> {
+                self.dynamic = push(self.dynamic, (method, compile_path(path), handler))
+            }
+            {
+                self.routes[method + " " + path] = handler
+            }
+        }
+        self
+    }
+
+    fun get(path <str>, handler <generic>) { self.route("GET", path, handler) }
+
+    fun post(path <str>, handler <generic>) { self.route("POST", path, handler) }
+
+    fun put(path <str>, handler <generic>) { self.route("PUT", path, handler) }
+
+    fun patch(path <str>, handler <generic>) { self.route("PATCH", path, handler) }
+
+    fun delete(path <str>, handler <generic>) { self.route("DELETE", path, handler) }
+
+    // Accept connections forever. Call this last in your worker function.
+    fun listen() {
+        failures <int> := 0
+        repeat when failures < accept_retry_limit {
+            conn := <type<Error> || <Value>>(net.accept(self.server))
+            option {
+                is_error(conn) -> {
+                    failures = failures + 1
+                    <log<Error>>("api: accept failed: {conn.msg}")
+                }
+                {
+                    failures = 0
+                    // Without this a client that opens a connection and never
+                    // sends holds this worker forever.
+                    net.set_timeout(conn.value, self.idle_timeout)
+                    // A broken connection must not take the acceptor down with it.
+                    outcome := <type<Error> || <Value>>(self.serve_conn(conn.value))
+                    <log<Error>>("api: connection dropped: {outcome.msg}") when is_error(outcome)
+                    net.close(conn.value)
+                }
+            }
+        }
+        <log<Error>>("api: giving up after {accept_retry_limit} consecutive accept failures")
+    }
+
+    // Serve one connection: read, route, respond, repeat while kept alive.
+    fun serve_conn(conn <int>) {
+        live <bool> := True
+        served <int> := 0
+        repeat when live {
+            req := read_request(conn)
+            option {
+                req == None -> {
+                    live = False
+                }
+                type(req) == "Res" -> {
+                    net.send(conn, render(req, False))
+                    live = False
+                }
+                {
+                    served = served + 1
+                    live = self.keep_alive and served < keep_alive_max and wants_keep_alive(req)
+                    net.send(conn, render(self.dispatch(req), live))
+                }
+            }
+        }
+    }
+
+    // Find the handler for a request and run it, contained so a handler that
+    // raises answers 500 instead of killing this worker's accept loop.
+    fun dispatch(req <map>) {
+        key := req["method"] + " " + req["path"]
+        handler, params := option {
+            has(self.routes, key) -> {
+                (self.routes[key], {})
+            }
+            {
+                match_dynamic(self.dynamic, req["method"], __split(req["path"], "/"))
+            }
+        }
+        option {
+            handler == None -> {
+                fail_with(404, "not found")
+            }
+            {
+                req["params"] = params
+                outcome := <type<Error> || <Value>>(handler(req))
+                option {
+                    is_error(outcome) -> {
+                        // The message can name internals, so it goes to the log,
+                        // not to the client.
+                        <log<Error>>("api: {req["method"]} {req["path"]} failed: {outcome.msg}")
+                        fail_with(500, "internal server error")
+                    }
+                    {
+                        to_res(outcome.value)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Scan the parameterized routes for one matching this method and path. Returns
+// a (handler, params) pair, or (None, {}) when nothing matches.
+fun match_dynamic(dynamic <array>, method <str>, segs <array>) {
+    count := len(segs)
+    each entry in dynamic {
+        route_method, segments, handler := entry
+        option {
+            route_method == method and len(segments) == count -> {
+                params <map> := {}
+                matched <bool> := True
+                each i in range(count) {
+                    is_param, name := segments[i]
+                    option {
+                        is_param -> {
+                            params[name] = decode(segs[i])
+                        }
+                        name != segs[i] -> {
+                            matched = False
+                            stop
+                        }
+                    }
+                }
+                give (handler, params) when matched
+            }
+        }
+    }
+    (None, {})
+}
+
+// Normalize whatever a handler returned into a response.
+fun to_res(v <generic>) {
+    option {
+        type(v) == "Res" -> {
+            v
+        }
+        type(v) == "STRING" -> {
+            text(v)
+        }
+        {
+            json(v)
+        }
+    }
+}
+
+// ── HTTP wire format ──────────────────────────────────────────────────────
+// Read one request. Returns a request map, a `Res` to send back when the
+// request is unusable, or None when the peer closed the connection.
+fun read_request(conn <int>) {
+    buf <str> := net.receive(conn, read_size)
+    repeat when buf != "" and not __contains_str(buf, "\r\n\r\n") and len(buf) <= head_limit {
+        chunk := net.receive(conn, read_size)
+        option {
+            chunk == "" -> {
+                stop
+            }
+        }
+        buf = buf + chunk
+    }
+    option {
+        buf == "" -> {
+            give None
+        }
+        not __contains_str(buf, "\r\n\r\n") -> {
+            give fail_with(431, "request headers too large")
+        }
+    }
+    // A body may itself contain a blank line, so everything past the first
+    // separator is body, not just the next split field.
+    parts := __split(buf, "\r\n\r\n")
+    lines := __split(parts[0], "\r\n")
+    request_line := __split(lines[0], " ")
+    option {
+        len(request_line) < 3 -> {
+            give fail_with(400, "malformed request line")
+        }
+    }
+    headers <map> := {}
+    each line in rest(lines) {
+        kv := __split(line, ":")
+        headers[__lower(__trim(kv[0]))] = __trim(__join(rest(kv), ":")) when len(kv) > 1
+        // Values contain colons (Host: x:8000), so only the first one splits.
+    }
+    length := content_length(headers)
+    option {
+        is_error(length) -> {
+            give fail_with(400, "invalid Content-Length")
+        }
+        length.value > body_limit -> {
+            give fail_with(413, "request body too large")
+        }
+    }
+    body := read_body(conn, __join(rest(parts), "\r\n\r\n"), length.value)
+    target := request_line[1]
+    path <str> := target
+    query <map> := {}
+    option {
+        __contains_str(target, "?") -> {
+            split_target := __split(target, "?")
+            path = split_target[0]
+            query = parse_query(__join(rest(split_target), "?"))
+        }
+    }
+    {"method": request_line[0], "version": request_line[2], "path": path, "params": {}, "query": query, "headers": headers, "body": body}
+}
+
+// Content-Length as an Error||Value: absent means 0, unparseable means an error.
+fun content_length(headers <map>) {
+    option {
+        has(headers, "content-length") -> {
+            <type<Error> || <Value>>(int(headers["content-length"]))
+        }
+        {
+            <Value>(0)
+        }
+    }
+}
+
+// Read the rest of the body. Chunks are collected and joined once — repeated
+// `+` would recopy the whole body per chunk.
+//
+// ponytail: no request pipelining. A second request that arrives inside the same
+// read is treated as body bytes, because separating them needs a leftover buffer
+// carried across requests. Every mainstream client has pipelining off; add the
+// buffer if that ever changes.
+fun read_body(conn <int>, so_far <str>, length <int>) {
+    have <int> := len(so_far)
+    option {
+        have >= length -> {
+            give so_far
+        }
+    }
+    chunks <array> := [so_far]
+    repeat when have < length {
+        chunk := net.receive(conn, read_size)
+        option {
+            chunk == "" -> {
+                stop
+            }
+        }
+        chunks = push(chunks, chunk)
+        have = have + len(chunk)
+    }
+    __join(chunks, "")
+}
+
+// HTTP/1.1 keeps the connection open unless told otherwise; HTTP/1.0 is the
+// reverse.
+fun wants_keep_alive(req <map>) {
+    connection := option {
+        has(req["headers"], "connection") -> {
+            __lower(req["headers"]["connection"])
+        }
+        {
+            ""
+        }
+    }
+    option {
+        connection == "close" -> {
+            False
+        }
+        connection == "keep-alive" -> {
+            True
+        }
+        {
+            req["version"] == "HTTP/1.1"
+        }
+    }
+}
+
+// Serialize a response. Built as one string and sent in a single write, so the
+// status line and body never land in separate TCP segments.
+fun render(res <Res>, live <bool>) {
+    out <array> := ["HTTP/1.1 {res.status} {reason(res.status)}\r\n"]
+    each name, value in res.headers {
+        out = push(out, "{name}: {value}\r\n")
+    }
+    out = push(out, "Content-Length: {len(res.body)}\r\n")
+    out = push(out, option {
+        live -> {
+            "Connection: keep-alive\r\n"
+        }
+        {
+            "Connection: close\r\n"
+        }
+    })
+    out = push(out, "\r\n")
+    out = push(out, res.body)
+    __join(out, "")
+}
+
+// Reason phrase for a status code. Only the codes this module and its users
+// reach for; anything else is served as "OK", which clients ignore anyway.
+fun reason(status <int>) {
+    option {
+        status == 200 -> {
+            "OK"
+        }
+        status == 201 -> {
+            "Created"
+        }
+        status == 202 -> {
+            "Accepted"
+        }
+        status == 204 -> {
+            "No Content"
+        }
+        status == 301 -> {
+            "Moved Permanently"
+        }
+        status == 302 -> {
+            "Found"
+        }
+        status == 304 -> {
+            "Not Modified"
+        }
+        status == 400 -> {
+            "Bad Request"
+        }
+        status == 401 -> {
+            "Unauthorized"
+        }
+        status == 403 -> {
+            "Forbidden"
+        }
+        status == 404 -> {
+            "Not Found"
+        }
+        status == 405 -> {
+            "Method Not Allowed"
+        }
+        status == 409 -> {
+            "Conflict"
+        }
+        status == 413 -> {
+            "Content Too Large"
+        }
+        status == 422 -> {
+            "Unprocessable Content"
+        }
+        status == 429 -> {
+            "Too Many Requests"
+        }
+        status == 431 -> {
+            "Request Header Fields Too Large"
+        }
+        status == 500 -> {
+            "Internal Server Error"
+        }
+        status == 503 -> {
+            "Service Unavailable"
+        }
+        {
+            "OK"
+        }
+    }
+}
+
+// ── Server ────────────────────────────────────────────────────────────────
+// Bind host:port and run `worker` on `workers` threads, each with its own
+// router over the shared listening socket. Blocks until the acceptors stop.
+//
+// `worker` must be a top-level function taking one argument — a config map —
+// that calls `api.app(cfg)`, registers its routes, and then calls
+// `app.listen()`.
+//
+// `workers` is how many connections are served at once: this is a thread-per-
+// connection server, not an event loop, so a connection holds its acceptor until
+// it closes. Clients beyond that wait their turn — `idle_timeout` reclaims a
+// worker whose client went quiet, and `keep_alive_max` rotates one whose client
+// is still busy, so waiting never becomes waiting forever. Raise `workers`
+// toward the number of clients you expect connected at once, not toward core
+// count.
+//
+// Keeping connections alive is worth roughly double the throughput, which is why
+// it is the default. Set `keep_alive=False` to answer one request per connection
+// instead; concurrency then caps at `workers` requests rather than `workers`
+// clients.
+//
+// `idle_timeout` bounds each individual read, not the request as a whole, so it
+// also costs a slowloris client its connection. A body still arriving in pieces
+// keeps resetting it; only a client that sends nothing at all for that long is
+// dropped.
+//
+// ponytail: fixed worker count, no growth under load. Size it for peak
+// concurrent connections; add a dynamic pool if that stops being predictable.
+fun serve(worker <generic>, host <str> = "0.0.0.0", port <int> = 8000, workers <int> = 64, keep_alive <bool> = True, idle_timeout <int> = 5000) {
+    server := net.listen(host, port)
+    println("api listening on http://{host}:{port} ({workers} workers)")
+    config := {"server": server, "keep_alive": keep_alive, "idle_timeout": idle_timeout}
+    tasks <array> := []
+    each i in range(workers) {
+        // __spawn, not `diverge`: the worker function is a parameter here, and
+        // only a spawn's *callee* crosses a thread by name. Captured in a
+        // `diverge` block it would be an upvalue, which closures cannot be.
+        tasks = push(tasks, __spawn(worker, config))
+    }
+    converge tasks
+}
