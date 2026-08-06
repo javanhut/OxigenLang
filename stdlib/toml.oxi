@@ -1,5 +1,6 @@
 introduce io
 introduce strings
+introduce array
 
 // Parse a TOML string into Oxigen values.
 // Tables become maps, arrays stay arrays, and date/time values become strings.
@@ -76,6 +77,24 @@ fun has_key_in(tbl <map>, path <str>) {
         i++
     }
     True
+}
+
+// ── Arrays of tables ──
+// Update the first table whose `key` equals `val` by deep-merging `fields`
+// into it; append a new table when there is none. This is the [[array of
+// tables]] editor:
+//
+//     cfg["products"] = toml.set_where(cfg["products"], "name", "hammer",
+//                                      {"sku": 738594937})
+//
+// Fields not named survive the update. Returns the array, edited in place
+// either way (arrays are shared references); assigning the result back is the
+// clearer form and costs nothing.
+fun set_where(arr <array>, key <generic>, val <generic>, fields <map>) {
+    found := array.find_where(arr, key, val)
+    give push(arr, deep_merge(insert({}, key, val), fields)) when found == None
+    deep_merge(found, fields)
+    arr
 }
 
 // Merge two maps. Keys in `b` overwrite keys in `a`.

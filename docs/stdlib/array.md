@@ -7,7 +7,12 @@ transforms, grouping, and sorting.
 introduce array
 ```
 
-Every function returns a **new** array; none modify the one you passed in.
+Every function here returns a **new** array; none modify the one you passed in.
+(The `push` builtin is the exception to watch — it appends in place and returns
+the same array.) Note that the *records inside* an array are shared references,
+so editing one edits the array — see
+[`find_where`](#find_wherearr-key-val).
+
 The functions that take an `f`/`pred`/`key_fn` accept a lambda
 (`fun(x) { ... }`) or a named function — except [`pmap`](#pmaparr-f), which
 needs a named one.
@@ -35,6 +40,10 @@ needs a named one.
 | [`find`](#findarr-pred) | `find(arr, pred)` | element or `Error` |
 | [`find_index`](#find_indexarr-pred) | `find_index(arr, pred)` | `int` (`-1` if none) |
 | [`index_of`](#index_ofarr-val) | `index_of(arr, val)` | `int` (`-1` if absent) |
+| [`find_where`](#find_wherearr-key-val) | `find_where(arr, key, val)` | record or `None` |
+| [`index_where`](#index_wherearr-key-val) | `index_where(arr, key, val)` | `int` (`-1` if absent) |
+| [`filter_where`](#filter_wherearr-key-val) | `filter_where(arr, key, val)` | `array` |
+| [`remove_where`](#remove_wherearr-key-val) | `remove_where(arr, key, val)` | `array` |
 | [`unique`](#uniquearr) | `unique(arr)` | `array` |
 | [`enumerate`](#enumeratearr) | `enumerate(arr)` | `array` of `(i, x)` |
 | [`slice`](#slicearr-start-end) | `slice(arr, start, end)` | `array` |
@@ -209,6 +218,80 @@ println(array.includes([1, 2], 9))      // False
 ```
 
 The builtin `has(arr, val)` does the same thing without importing the module.
+
+---
+
+## Searching an array of records
+
+An array of maps — records loaded from JSON, rows, config entries — is common
+enough that matching on a field has its own functions. They save you a lambda,
+and they skip elements that are not maps or that lack the key, so a **ragged**
+array is safe to search without guarding every element.
+
+Given:
+
+```oxi
+people := [
+    {"person": "john", "info": {"age": 32, "job": "unemployed"}},
+    {"person": "jane"},
+    {"info": {"age": 28, "job": "engineer"}},    // no "person" key at all
+]
+```
+
+### `find_where(arr, key, val)`
+
+The first record whose `key` field equals `val`, or `None`.
+
+```oxi
+println(array.find_where(people, "person", "john"))
+// {person: john, info: {age: 32, job: unemployed}}
+
+println(array.find_where(people, "person", "nobody"))   // None
+```
+
+Unlike [`find`](#findarr-pred), a miss is `None` rather than an error — with a
+lookup by field, "no such record" is an ordinary answer.
+
+**The record it returns is the one in the array**, not a copy, so editing it
+edits the array:
+
+```oxi
+john := array.find_where(people, "person", "john")
+john["info"]["job"] = "developer"
+println(people[0])   // {person: john, info: {age: 32, job: developer}}
+```
+
+For the same thing plus "insert it if absent", see
+[`json.set_where`](json.md#set_wherearr-key-val-fields).
+
+### `index_where(arr, key, val)`
+
+Its index, or `-1`. Use it when you need to replace or splice the record rather
+than edit it in place.
+
+```oxi
+println(array.index_where(people, "person", "jane"))   // 1
+println(array.index_where(people, "person", "zz"))     // -1
+```
+
+### `filter_where(arr, key, val)`
+
+Every record with that field value, in order.
+
+```oxi
+println(array.filter_where(people, "person", "john"))
+// [{person: john, info: {age: 32, job: unemployed}}]
+```
+
+### `remove_where(arr, key, val)`
+
+A copy of the array **without** the matching records. The original is left
+alone.
+
+```oxi
+people = array.remove_where(people, "person", "john")
+println(len(people))   // 2
+```
 
 ---
 

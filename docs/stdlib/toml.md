@@ -17,6 +17,7 @@ introduce toml
 | [`set_in`](#set_intbl-path-val) | `set_in(tbl, path, val)` | the root `map` |
 | [`del_in`](#del_intbl-path) | `del_in(tbl, path)` | the root `map` |
 | [`has_key_in`](#has_key_intbl-path) | `has_key_in(tbl, path)` | `bool` |
+| [`set_where`](#set_wherearr-key-val-fields) | `set_where(arr, key, val, fields)` | `array` |
 | [`merge`](#mergea-b) | `merge(a, b)` | `map` |
 | [`deep_merge`](#deep_mergea-b) | `deep_merge(a, b)` | `map` |
 
@@ -117,7 +118,8 @@ println(toml.get_in(t, "server.port"))   // 8080
 println(toml.get_in(t, "server.nope"))   // None
 ```
 
-Array indices are not supported in a path — index the array yourself.
+A path addresses **tables only** — it does not descend into arrays. For an
+`[[array of tables]]`, see [`set_where`](#set_wherearr-key-val-fields).
 
 ### `set_in(tbl, path, val)`
 
@@ -147,6 +149,49 @@ println(toml.has_key_in(config, "server.ssl"))   // False
 ```oxi
 println(toml.has_key_in(config, "server.host"))   // True
 ```
+
+---
+
+## Arrays of tables
+
+An `[[array of tables]]` parses to an array of maps, which a dotted path cannot
+descend into. `set_where` edits one by field value; the
+[`array`](array.md#searching-an-array-of-records) module has the matching
+`find_where` / `index_where` / `filter_where` / `remove_where`.
+
+### `set_where(arr, key, val, fields)`
+
+Update the first table whose `key` equals `val` by deep-merging `fields` into
+it — or append a new table when there is none.
+
+```oxi
+introduce toml
+
+cfg := toml.read("products.toml")
+
+cfg["products"] = toml.set_where(cfg["products"], "name", "hammer", {"sku": 738594937})
+cfg["products"] = toml.set_where(cfg["products"], "name", "screw", {"sku": 3})
+
+toml.write("products.toml", cfg)
+```
+
+```toml
+[[products]]
+name = "hammer"
+sku = 738594937
+
+[[products]]
+name = "nail"
+sku = 2
+
+[[products]]
+name = "screw"
+sku = 3
+```
+
+Fields not named survive the update, tables lacking the key are skipped rather
+than erroring, and only the first match is updated. It returns the array,
+edited in place — assigning the result back is the clearer form.
 
 ---
 

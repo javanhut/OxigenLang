@@ -222,6 +222,51 @@ fun index_of(arr <array>, val <generic>) {
     idx
 }
 
+// ── Searching an array of records ──
+// The first element whose `key` field equals `val`, or None.
+//
+//     array.find_where(people, "person", "john")
+//
+// Elements that are not maps, or that lack the key, are skipped rather than
+// erroring — a ragged array (some records missing the field) is safe to search
+// without guarding every element yourself. Returns None rather than an error
+// because "no such record" is an ordinary answer here, not a failure.
+fun find_where(arr <array>, key <generic>, val <generic>) {
+    each x in arr {
+        give x when type(x) == "MAP" and has(x, key) and x[key] == val
+    }
+    None
+}
+
+// Index of that element, or -1. Use it when you need to replace or remove the
+// record rather than edit it in place.
+fun index_where(arr <array>, key <generic>, val <generic>) {
+    i <int>
+    each x in arr {
+        give i when type(x) == "MAP" and has(x, key) and x[key] == val
+        i = i + 1
+    }
+    -1
+}
+
+// Every element whose `key` field equals `val`.
+fun filter_where(arr <array>, key <generic>, val <generic>) {
+    result <array>
+    each x in arr {
+        result = push(result, x) when type(x) == "MAP" and has(x, key) and x[key] == val
+    }
+    result
+}
+
+// Copy of `arr` without the elements whose `key` field equals `val`.
+fun remove_where(arr <array>, key <generic>, val <generic>) {
+    result <array>
+    each x in arr {
+        result = push(result, x) unless type(x) == "MAP" and has(x, key) and x[key] == val
+    }
+    result
+}
+
 // ── Transforms ──
 fun unique(arr <array>) {
     result <array>

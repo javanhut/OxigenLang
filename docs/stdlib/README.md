@@ -82,12 +82,14 @@ option {
 
 [result](result.md) has the helpers that make chains of these readable.
 
-**Maps are mutable and shared.** `insert`, `remove`, and every `*_in`/`merge`
-function in [json](json.md) and [toml](toml.md) modify the map you pass and
-return that same map. Round-trip through `stringify`/`parse` for a copy.
+**Maps and arrays are shared references.** `insert`, `remove`, `push`, and
+every `*_in`/`merge`/`set_where` function in [json](json.md) and
+[toml](toml.md) modify the value you pass and return that same value.
+Round-trip through `stringify`/`parse` for a copy of a map;
+`array.slice(a, 0, len(a))` copies an array.
 
-**Strings and arrays are not.** Everything in [strings](strings.md) and
-[array](array.md) returns a new value.
+**Strings are immutable**, and the [array](array.md) module's own functions
+(`map`, `filter`, `unique`, …) build a new array rather than editing yours.
 
 **Sockets and streams use handles.** [net](net.md) hands back an opaque number;
 always `close` it.

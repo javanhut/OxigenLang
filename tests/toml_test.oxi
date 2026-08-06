@@ -1,4 +1,5 @@
 introduce toml
+introduce array
 
 <test>("parse scalars and sections") {
     t := toml.parse("title = \"x\"\nnum = 5\n\n[server]\nport = 8080\n")
@@ -97,4 +98,27 @@ introduce toml
 <test>("deep_merge overwrites when b is not a table") {
     a := toml.parse("[n]\na = 1\n")
     expect(toml.deep_merge(a, {"n": 5})["n"]).eq(5)
+}
+
+// ── Arrays of tables ──
+fun sample_products() { toml.parse("[[products]]\nname = \"hammer\"\nsku = 1\n\n[[products]]\nname = \"nail\"\nsku = 2\n")["products"] }
+
+<test>("set_where updates a matching table") {
+    products <array> := toml.set_where(sample_products(), "name", "hammer", {"sku": 738594937})
+    expect(array.find_where(products, "name", "hammer")["sku"]).eq(738594937)
+    expect(array.find_where(products, "name", "nail")["sku"]).eq(2)
+    expect(len(products)).eq(2)
+}
+
+<test>("set_where appends a new table") {
+    products <array> := toml.set_where(sample_products(), "name", "screw", {"sku": 3})
+    expect(len(products)).eq(3)
+    expect(array.find_where(products, "name", "screw")["sku"]).eq(3)
+}
+
+<test>("set_where output re-serializes as an array of tables") {
+    cfg <map> := {"products": toml.set_where(sample_products(), "name", "screw", {"sku": 3})}
+    reparsed := toml.parse(toml.stringify(cfg))
+    expect(len(reparsed["products"])).eq(3)
+    expect(array.find_where(reparsed["products"], "name", "screw")["sku"]).eq(3)
 }

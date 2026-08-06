@@ -17,6 +17,7 @@ introduce json
 | [`set_in`](#set_inobj-path-val) | `set_in(obj, path, val)` | the root `map` |
 | [`del_in`](#del_inobj-path) | `del_in(obj, path)` | the root `map` |
 | [`has_key_in`](#has_key_inobj-path) | `has_key_in(obj, path)` | `bool` |
+| [`set_where`](#set_wherearr-key-val-fields) | `set_where(arr, key, val, fields)` | `array` |
 | [`merge`](#mergea-b) | `merge(a, b)` | `map` |
 | [`deep_merge`](#deep_mergea-b) | `deep_merge(a, b)` | `map` |
 
@@ -118,8 +119,10 @@ println(json.get_in(user, "name.city"))      // None
 `None` is also a legitimate stored value, so a `None` result means "missing or
 null". Use `has_key_in` when you need to tell those apart.
 
-Array indices are **not** supported in a path — `"items.0.name"` will not work.
-Index the array yourself: `json.get_in(d, "items")[0]["name"]`.
+A path addresses **maps only** — it does not descend into arrays, so
+`"items.0.name"` will not work. For an array of records, find the record with
+[`array.find_where`](array.md#find_wherearr-key-val) and carry on from there;
+to update or add one, use [`set_where`](#set_wherearr-key-val-fields).
 
 ### `set_in(obj, path, val)`
 
@@ -160,6 +163,96 @@ Does the dotted path exist? True even when the stored value is `None`.
 ```oxi
 println(json.has_key_in(user, "address.city"))   // True
 println(json.has_key_in(user, "a.b"))            // False
+```
+
+---
+
+## Arrays of records
+
+JSON data is usually a list of records — `{"information": [{...}, {...}]}` —
+and a dotted path stops at the array. These two cover it: find the record with
+[`array.find_where`](array.md#find_wherearr-key-val), and update or add one
+with `set_where`.
+
+Given `example.json`:
+
+```json
+{"information": [
+    {"person": "john", "info": {"age": 32, "job": "unemployed"}},
+    {"person": "jane"},
+    {"info": {"age": 28, "job": "engineer"}}
+]}
+```
+
+### `set_where(arr, key, val, fields)`
+
+Update the first record whose `key` equals `val` by deep-merging `fields` into
+it — or append a new record when there is none. This is the same rule as
+[`set_in`](#set_inobj-path-val), which also creates what is missing.
+
+```oxi
+introduce json
+
+data := json.read("example.json")
+
+// john got a job — age survives, because the merge is recursive
+data["information"] = json.set_where(data["information"], "person", "john",
+                                     {"info": {"job": "developer"}})
+
+// ada is new — appended as {"person": "ada", "info": {...}}
+data["information"] = json.set_where(data["information"], "person", "ada",
+                                     {"info": {"age": 36, "job": "mathematician"}})
+
+// jane has no "info" at all — it gets created
+data["information"] = json.set_where(data["information"], "person", "jane",
+                                     {"info": {"age": 41}})
+
+json.write("example.json", data)
+```
+
+```json
+{"information": [
+    {"person": "john", "info": {"age": 32, "job": "developer"}},
+    {"person": "jane", "info": {"age": 41}},
+    {"info": {"age": 28, "job": "engineer"}},
+    {"person": "ada", "info": {"age": 36, "job": "mathematician"}}
+]}
+```
+
+Notes:
+
+- **Records without the key are skipped, not errors.** The third entry above
+  has no `"person"` field and is simply passed over — ragged data does not need
+  a guard at every element.
+- Only the **first** match is updated.
+- It returns the array, edited in place (arrays are shared references, like
+  maps). Assigning the result back is the clearer form and costs nothing.
+- `json.write` rewrites the whole file; there is no partial update.
+
+### Editing a record directly
+
+When you only want to change one field, find the record and assign — what
+`find_where` hands back **is** the record in the array, not a copy:
+
+```oxi
+introduce json
+introduce array
+
+data := json.read("example.json")
+
+john := array.find_where(data["information"], "person", "john")
+john["info"]["job"] = "developer"
+
+json.write("example.json", data)     // data already sees the change
+```
+
+`set_where` is the version that also handles "…and add them if they are not
+there yet".
+
+### Removing a record
+
+```oxi
+data["information"] = array.remove_where(data["information"], "person", "john")
 ```
 
 ---

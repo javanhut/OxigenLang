@@ -69,13 +69,19 @@ len(set(1, 2, 3))
 
 ### `push(array, element)`
 
-Returns a **new** array with the element appended to the end. The original array is not modified.
+Appends the element to the end of the array and returns **that same array** — arrays are shared references, so the original is modified too.
 
 ```oxi
 arr := [1, 2]
 arr := push(arr, 3)
-println(arr)
+println(arr)          // [1, 2, 3]
+
+a := [1, 2]
+b := push(a, 3)
+println(a)            // [1, 2, 3]  <- a changed as well
 ```
+
+Assigning the result back (`arr := push(arr, x)`) is the idiomatic form and is always correct. If you need the original left alone, copy it first — for example `array.slice(a, 0, len(a))`.
 
 **Argument types:** First argument must be an Array.
 
@@ -521,7 +527,7 @@ option {
 | `print`     | `(args...)`            | `None`       | Print args separated by spaces        |
 | `println`   | `(args...)`            | `None`       | Print args separated by spaces        |
 | `len`       | `(collection)`         | `Integer`    | Length of string/array/tuple/map/set  |
-| `push`      | `(array, element)`     | `Array`      | New array with element appended       |
+| `push`      | `(array, element)`     | `Array`      | Appends in place; returns same array  |
 | `first`     | `(array)`              | `any`/`None` | First element or None                 |
 | `last`      | `(array)`              | `any`/`None` | Last element or None                  |
 | `rest`      | `(array)`              | `Array`/`None`| All elements except first            |
