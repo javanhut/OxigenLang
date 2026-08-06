@@ -332,6 +332,6 @@ For detailed information, see the [docs](docs/) directory:
 | [Type System](docs/type_system.md) | Type annotations, conversions, mutability control |
 | [Imports and Modules](docs/imports.md) | The `introduce` keyword and module system |
 | [Built-in Functions](docs/builtins.md) | Complete reference for all built-ins |
-| [Standard Library](docs/stdlib.md) | Full reference for the stdlib modules |
+| [Standard Library](docs/stdlib/README.md) | One page per stdlib module, every function documented |
 | [Testing](docs/testing.md) | The built-in test runner, `expect` matchers, `oxigen test` |
 | [JIT Architecture](docs/JIT_ARCHITECTURE.md) | **Experimental** — baseline Cranelift JIT: runtime flags, build options, supported opcodes, safety invariants, benchmark status vs CPython |

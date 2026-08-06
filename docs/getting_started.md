@@ -293,4 +293,4 @@ See the full [Control Flow](control_flow.md) guide for details.
 - [Type System](type_system.md) — optional type annotations and mutability control
 - [Built-in Functions](builtins.md) — the standard library of built-in functions
 - [Imports and Modules](imports.md) — the `introduce` keyword and module system
-- [Standard Library](stdlib.md) — math, strings, array, io, os, time, random, path, json, toml, net
+- [Standard Library](stdlib/README.md) — math, strings, array, io, os, path, time, datetime, random, regex, json, toml, encoding, hash, net, api, result, test, ansi, env, parse_args

@@ -160,7 +160,7 @@ results := diverge each name in ["a", "b"] {
 }
 ```
 
-This is why [`api`](stdlib.md#api) has you register routes inside a function
+This is why [`api`](stdlib/api.md) has you register routes inside a function
 that each worker calls, instead of configuring one app and handing it over.
 
 ## Limitations
