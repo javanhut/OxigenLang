@@ -82,6 +82,22 @@ option {
 
 [result](result.md) has the helpers that make chains of these readable.
 
+**Reach for dot access on a key you know is there.** `resp.status`,
+`data.information`, `john.info.job` — reading *or* writing. A mistyped key
+errors instead of silently reading `None`, which is the point:
+
+```oxi
+resp := net.get(url)
+println(resp.status)         // always present — dot
+println(resp.stauts)         // error: key 'stauts' not found on map
+```
+
+Brackets are for the three cases dot cannot serve: a key that may be **absent**
+(`req.query["page"]`), a key held in a **variable** (`users[id]`), and a key
+that is not an identifier (`headers["content-type"]`). Bracket reads answer
+`None` for a missing key, so they are also the form to use when absence is the
+thing you are testing. Full rules in [data_types.md](../data_types.md).
+
 **Maps and arrays are shared references.** `insert`, `remove`, `push`, and
 every `*_in`/`merge`/`set_where` function in [json](json.md) and
 [toml](toml.md) modify the value you pass and return that same value.

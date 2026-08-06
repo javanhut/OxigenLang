@@ -83,8 +83,8 @@ introduce net
 introduce json
 
 resp := net.get("https://api.example.com/data")
-println(resp["status"])          // 200
-data := json.parse(resp["body"])
+println(resp.status)          // 200
+data := json.parse(resp.body)
 ```
 
 ### `post(url, body, headers)`
@@ -94,7 +94,7 @@ data := json.parse(resp["body"])
 ```oxi
 body := json.stringify({"name": "test"})
 resp := net.post("https://api.example.com/items", body)
-println(resp["status"])   // 201
+println(resp.status)   // 201
 ```
 
 Posting a form instead:
@@ -114,7 +114,7 @@ Same shape as `post`.
 ### `delete(url)`
 
 ```oxi
-println(net.delete("https://api.example.com/items/7")["status"])   // 204
+println(net.delete("https://api.example.com/items/7").status)   // 204
 ```
 
 ### `head(url)`
@@ -122,7 +122,7 @@ println(net.delete("https://api.example.com/items/7")["status"])   // 204
 Headers only — the body comes back as `""`.
 
 ```oxi
-println(net.head("https://example.com/")["status"])   // 200
+println(net.head("https://example.com/").status)   // 200
 ```
 
 ### `request(method, url, headers, body)`
@@ -455,7 +455,7 @@ fun api_get(url <str>) {
     r := <type<Error> || <Value>>(net.get(url))
     option {
         is_error(r) -> { <Error<http>>(r.msg) }
-        { json.parse(r.value["body"]) }
+        { json.parse(r.value.body) }
     }
 }
 

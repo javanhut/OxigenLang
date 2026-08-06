@@ -69,7 +69,7 @@ fun sample_people() { [
 
 <test>("find_where returns the matching record") {
     people <array> := sample_people()
-    expect(array.find_where(people, "person", "john")["info"]["age"]).eq(32)
+    expect(array.find_where(people, "person", "john").info.age).eq(32)
     expect(array.find_where(people, "person", "jane")).ne(None)
 }
 
@@ -79,15 +79,15 @@ fun sample_people() { [
 }
 
 <test>("find_where skips records without the key and non-maps") {
-    expect(array.find_where([5, "str", None, {"id": 1}], "id", 1)["id"]).eq(1)
+    expect(array.find_where([5, "str", None, {"id": 1}], "id", 1).id).eq(1)
     expect(array.find_where([5, "str", None], "id", 1)).eq(None)
 }
 
 <test>("find_where hands back the record itself, not a copy") {
     people <array> := sample_people()
     john := array.find_where(people, "person", "john")
-    john["info"]["job"] = "developer"
-    expect(people[0]["info"]["job"]).eq("developer")
+    john.info.job = "developer"
+    expect(people[0].info.job).eq("developer")
 }
 
 <test>("index_where reports position or -1") {

@@ -169,8 +169,8 @@ introduce toml
 
 cfg := toml.read("products.toml")
 
-cfg["products"] = toml.set_where(cfg["products"], "name", "hammer", {"sku": 738594937})
-cfg["products"] = toml.set_where(cfg["products"], "name", "screw", {"sku": 3})
+cfg.products = toml.set_where(cfg.products, "name", "hammer", {"sku": 738594937})
+cfg.products = toml.set_where(cfg.products, "name", "screw", {"sku": 3})
 
 toml.write("products.toml", cfg)
 ```

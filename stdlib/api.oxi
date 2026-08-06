@@ -5,10 +5,10 @@
 //
 //     introduce api
 //
-//     fun hello(req) { {"message": "hello"} }
-//     fun show_user(req) { {"id": req.params["id"], "page": req.query["page"]} }
+//     fun hello(req <map>) { {"message": "hello"} }
+//     fun show_user(req <map>) { {"id": req.params["id"], "page": req.query["page"]} }
 //
-//     fun routes(cfg) {
+//     fun routes(cfg <map>) {
 //         app := api.app(cfg)
 //         app.get("/", hello)
 //         app.get("/users/:id", show_user)
@@ -17,12 +17,23 @@
 //
 //     main { api.serve(routes, port=8000) }
 //
+// The two framework-supplied values, and where each comes from:
+//
+//     cfg <map>  from `serve`, once per worker thread. Keys: "server" (the
+//                listening socket handle), "keep_alive", "idle_timeout". Pass
+//                it straight to api.app(cfg); nothing else reads it.
+//     req <map>  from the dispatcher, once per request. Keys: "method",
+//                "path", "version", "params", "query", "headers", "body".
+//
 // Why the routes live inside a function instead of at the top level: Oxigen's
-// concurrency is share-nothing, so a handler *closure* cannot be copied to a
-// worker thread. `serve` therefore hands each worker nothing but the listening
-// socket, and every worker calls your function to build its own routing table
-// from the module's top-level functions. One function per server, and the table
-// is built once per worker rather than once per request.
+// concurrency is share-nothing, and a function is not a sendable value — only a
+// spawn's callee crosses a thread, by name. `serve` therefore cannot build one
+// App and hand it (or your handlers) to the workers; it hands each worker
+// nothing but the listening socket, and every worker calls your function to
+// build its own routing table from the module's top-level functions. That is
+// also why the function must end in app.listen(): that call is the worker's
+// accept loop, and it has to run on the worker. One function per server, and
+// the table is built once per worker rather than once per request.
 introduce net
 
 // Hot-path string and JSON work calls the builtins directly rather than the

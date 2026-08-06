@@ -8,12 +8,12 @@ introduce json
 
 users <map> = {"1": "ada", "42": "grace"}
 
-fun index(req) {
+fun index(req <map>) {
     {"service": "oxigen api", "routes": ["/", "/users/:id", "/echo"]}
 }
 
-fun show_user(req) {
-    id := req.params["id"]
+fun show_user(req <map>) {
+    id <str> := req.params["id"]
     option {
         has(users, id) -> {
             {"id": id, "name": users[id], "query": req.query}
@@ -24,13 +24,13 @@ fun show_user(req) {
     }
 }
 
-fun echo(req) {
+fun echo(req <map>) {
     {"you_sent": api.body_json(req), "bytes": len(req.body)}
 }
 
-fun boom(req) { <fail>("this handler is broken on purpose") }
+fun boom(req <map>) { <fail>("this handler is broken on purpose") }
 
-fun routes(cfg) {
+fun routes(cfg <map>) {
     app := api.app(cfg)
     app.get("/", index)
     app.get("/users/:id", show_user)

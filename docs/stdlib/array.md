@@ -257,7 +257,7 @@ edits the array:
 
 ```oxi
 john := array.find_where(people, "person", "john")
-john["info"]["job"] = "developer"
+john.info.job = "developer"
 println(people[0])   // {person: john, info: {age: 32, job: developer}}
 ```
 

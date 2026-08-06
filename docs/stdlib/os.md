@@ -48,8 +48,8 @@ Run a command **through a shell** (`sh -c` on Unix, `cmd /C` on Windows).
 introduce os
 
 result := os.exec("echo hello")
-println(result["stdout"])   // hello
-println(result["code"])     // 0
+println(result.stdout)   // hello
+println(result.code)     // 0
 ```
 
 Because a shell is involved, pipelines, globs and redirection work — and every
@@ -57,7 +57,7 @@ shell metacharacter in the string is live: `;`, `|`, `&`, `$(...)`, backticks,
 `>`, `*`.
 
 ```oxi
-println(os.exec("ls *.oxi | wc -l")["stdout"])
+println(os.exec("ls *.oxi | wc -l").stdout)
 ```
 
 `exec` takes exactly **one** argument. The older variadic form
@@ -71,7 +71,7 @@ Run a program **directly**, with no shell. Each element of `argv` arrives as
 exactly one literal argument.
 
 ```oxi
-println(os.exec_argv("echo", ["a; b"])["stdout"])   // a; b
+println(os.exec_argv("echo", ["a; b"]).stdout)   // a; b
 ```
 
 **Use this whenever any part of the command comes from outside your program** —
@@ -80,11 +80,11 @@ user input, filenames, config values, network data, `os.args()`.
 ```oxi
 name := "notes.txt; echo PWNED"   // untrusted
 
-print(os.exec("echo " + name)["stdout"])
+print(os.exec("echo " + name).stdout)
 // notes.txt
 // PWNED                       <- the shell ran a second command
 
-print(os.exec_argv("echo", [name])["stdout"])
+print(os.exec_argv("echo", [name]).stdout)
 // notes.txt; echo PWNED       <- one literal argument
 ```
 
@@ -299,7 +299,7 @@ introduce strings
 fun source_files(root <str>) {
     option {
         os.is_dir(path.join([root, ".git"])) -> {
-            strings.lines(os.exec_argv("git", ["-C", root, "ls-files"])["stdout"])
+            strings.lines(os.exec_argv("git", ["-C", root, "ls-files"]).stdout)
         }
         { os.walk_dir(root) }
     }

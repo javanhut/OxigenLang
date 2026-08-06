@@ -83,7 +83,7 @@ Map key order is preserved as inserted.
 
 ```oxi
 config := json.read("config.json")
-println(config["debug"])
+println(config.debug)
 ```
 
 ### `write(path, val)`
@@ -196,16 +196,16 @@ introduce json
 data := json.read("example.json")
 
 // john got a job — age survives, because the merge is recursive
-data["information"] = json.set_where(data["information"], "person", "john",
-                                     {"info": {"job": "developer"}})
+data.information = json.set_where(data.information, "person", "john",
+                                  {"info": {"job": "developer"}})
 
 // ada is new — appended as {"person": "ada", "info": {...}}
-data["information"] = json.set_where(data["information"], "person", "ada",
-                                     {"info": {"age": 36, "job": "mathematician"}})
+data.information = json.set_where(data.information, "person", "ada",
+                                  {"info": {"age": 36, "job": "mathematician"}})
 
 // jane has no "info" at all — it gets created
-data["information"] = json.set_where(data["information"], "person", "jane",
-                                     {"info": {"age": 41}})
+data.information = json.set_where(data.information, "person", "jane",
+                                  {"info": {"age": 41}})
 
 json.write("example.json", data)
 ```
@@ -240,8 +240,8 @@ introduce array
 
 data := json.read("example.json")
 
-john := array.find_where(data["information"], "person", "john")
-john["info"]["job"] = "developer"
+john := array.find_where(data.information, "person", "john")
+john.info.job = "developer"
 
 json.write("example.json", data)     // data already sees the change
 ```
@@ -252,7 +252,7 @@ there yet".
 ### Removing a record
 
 ```oxi
-data["information"] = array.remove_where(data["information"], "person", "john")
+data.information = array.remove_where(data.information, "person", "john")
 ```
 
 ---
@@ -301,7 +301,7 @@ introduce array
 
 // Fetch a JSON list, keep the interesting fields, and save it.
 resp := net.get("https://api.example.com/users")
-users := json.parse(resp["body"])
+users := json.parse(resp.body)
 
 fun summary(u <map>) {
     {"id": u["id"], "city": json.get_in(u, "address.city")}

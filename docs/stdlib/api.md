@@ -29,13 +29,13 @@ introduce api
 ```oxi
 introduce api
 
-fun index(req) { {"service": "oxigen"} }
+fun index(req <map>) { {"service": "oxigen"} }
 
-fun show_user(req) { {"id": req.params["id"], "page": req.query["page"]} }
+fun show_user(req <map>) { {"id": req.params["id"], "page": req.query["page"]} }
 
-fun create_user(req) { api.json(api.body_json(req), 201) }
+fun create_user(req <map>) { api.json(api.body_json(req), 201) }
 
-fun routes(cfg) {
+fun routes(cfg <map>) {
     app := api.app(cfg)
     app.get("/", index)
     app.get("/users/:id", show_user)
@@ -52,6 +52,38 @@ $ curl localhost:8000/
 
 $ curl 'localhost:8000/users/42?page=2'
 {"id":"42","page":"2"}
+```
+
+### Where `cfg` and `req` come from
+
+Two values arrive from the framework rather than from your code, and neither is
+magic — each has exactly one source.
+
+**`cfg <map>`** is handed to your worker function by
+[`serve`](#serveworker-host-port-workers-keep_alive-idle_timeout). You never
+build it and never read from it directly; you pass it straight to
+[`api.app(cfg)`](#appcfg), which turns it into an [`App`](#struct-app). It
+carries the three things a worker thread needs:
+
+| Key | Type | From |
+|-----|------|------|
+| `server` | `int` | the listening socket handle `serve` bound |
+| `keep_alive` | `bool` | the `keep_alive` argument you gave `serve` |
+| `idle_timeout` | `int` | the `idle_timeout` argument you gave `serve` |
+
+It is a plain map rather than an `App` because it has to cross a thread
+boundary — see [why the routes live in a function](#why-your-routes-live-in-a-function).
+
+**`req <map>`** is handed to your handler by the dispatcher, once per request,
+after the raw bytes have been parsed. Its full contents are listed under
+[the request map](#the-request-map). You do not construct it, and there is
+nothing else in it.
+
+So a complete server has exactly two framework-supplied names, both `<map>`:
+
+```oxi
+fun routes(cfg <map>) { ... }     // cfg  from serve, once per worker thread
+fun index(req <map>) { ... }      // req  from the dispatcher, once per request
 ```
 
 ---
@@ -77,15 +109,39 @@ router over the shared listening socket. **Blocks** until the acceptors stop.
 | `keep_alive` | `True` | reuse a connection for more requests |
 | `idle_timeout` | `5000` | ms a single read may stall before the connection is dropped |
 
-`serve` takes a **top-level function**, not a configured app. Oxigen's
-concurrency is share-nothing — a handler closure cannot be copied to another
-thread — so `serve` hands each worker only the listening socket, and each
-worker calls your function to build its own routing table from the module's
-top-level functions. The table is built once per worker, not once per request,
-and no handler ever crosses a thread boundary.
+### Why your routes live in a function
 
-That is why the routes live inside a function and why it ends with
-`app.listen()`.
+If you know FastAPI, this is the one place the shape differs, so it is worth
+one paragraph. There, `app = FastAPI()` sits at module level, decorators
+register handlers onto it, and `uvicorn` imports that object. Here you write a
+function that builds the app, and `serve` calls it on every worker thread.
+
+The reason is not taste. Oxigen's concurrency is **share-nothing**: the only
+thing that crosses a thread boundary is the spawned function's *name*. A
+function is not a sendable value at all —
+
+```oxi
+__spawn(runner, {"fn": some_function})
+// spawn(): cannot send value of type FUNCTION across threads
+```
+
+— so `serve` cannot build one `App` and hand it, or your handlers, to the
+workers. What it can do is spawn *your named function* on each thread and give
+it the socket. Each worker then builds its own routing table from its module's
+top-level functions, which never move anywhere.
+
+The consequences, all of them:
+
+- `serve` takes a **top-level function**, not a configured app.
+- That function takes `cfg` and must call `api.app(cfg)` to get its `App`.
+- It must end with `app.listen()`, because that call *is* the worker's accept
+  loop — `serve` cannot run it for you, since it happens on the worker thread.
+- No handler is ever copied between threads, and the table is built once per
+  worker rather than once per request.
+
+There are no decorators, no module-level `app`, and no dependency injection.
+What you get instead is `app.get(path, handler)` registration, which is closer
+to Express than to FastAPI.
 
 ```oxi
 main { api.serve(routes, host="127.0.0.1", port=3000, workers=16) }
@@ -103,7 +159,7 @@ Build this worker's router from the config map `serve` handed it. Returns an
 [`App`](#struct-app). Call it as the first line of your worker function.
 
 ```oxi
-fun routes(cfg) {
+fun routes(cfg <map>) {
     app := api.app(cfg)
     // ... register routes ...
     app.listen()
@@ -181,9 +237,9 @@ A handler is a function of one argument that returns whatever it wants to send:
 | anything else (map, array, number, struct) | `200 application/json` |
 
 ```oxi
-fun index(req) { {"service": "oxigen"} }        // 200 application/json
-fun plain(req) { "just text" }                  // 200 text/plain
-fun page(req) { api.html("<h1>hi</h1>") }       // 200 text/html
+fun index(req <map>) { {"service": "oxigen"} }    // 200 application/json
+fun plain(req <map>) { "just text" }              // 200 text/plain
+fun page(req <map>) { api.html("<h1>hi</h1>") }   // 200 text/html
 ```
 
 A handler that raises answers **500** and logs the real message server-side;
@@ -229,8 +285,8 @@ The request is a map, so `req.params` and `req["params"]` both work:
 A missing query key reads as `None`, which serializes to `null`.
 
 ```oxi
-fun show_user(req) {
-    id := req.params["id"]
+fun show_user(req <map>) {
+    id <str> := req.params["id"]
     option {
         has(users, id) -> { {"id": id, "name": users[id], "query": req.query} }
         { api.fail_with(404, "no user {id}") }
@@ -258,7 +314,7 @@ Each returns a [`Res`](#struct-res).
 JSON response from any Oxigen value — maps, arrays, structs, primitives.
 
 ```oxi
-fun create_user(req) { api.json(api.body_json(req), 201) }
+fun create_user(req <map>) { api.json(api.body_json(req), 201) }
 ```
 
 Returning a plain map from a handler does the same thing with status 200; use
@@ -267,13 +323,13 @@ Returning a plain map from a handler does the same thing with status 200; use
 ### `text(body, status)`
 
 ```oxi
-fun health(req) { api.text("ok") }
+fun health(req <map>) { api.text("ok") }
 ```
 
 ### `html(body, status)`
 
 ```oxi
-fun page(req) { api.html("<h1>hi</h1>") }
+fun page(req <map>) { api.html("<h1>hi</h1>") }
 ```
 
 ### `redirect(location, status)`
@@ -281,8 +337,8 @@ fun page(req) { api.html("<h1>hi</h1>") }
 302 by default; pass 301 for a permanent move.
 
 ```oxi
-fun go(req) { api.redirect("/") }
-fun moved(req) { api.redirect("https://new.example.com", 301) }
+fun go(req <map>) { api.redirect("/") }
+fun moved(req <map>) { api.redirect("https://new.example.com", 301) }
 ```
 
 ### `respond(status, body, headers)`
@@ -291,7 +347,7 @@ The escape hatch when the helpers do not fit — explicit status, body, and
 headers.
 
 ```oxi
-fun custom(req) { api.respond(202, "queued", {"X-Job": "7"}) }
+fun custom(req <map>) { api.respond(202, "queued", {"X-Job": "7"}) }
 ```
 
 ```
@@ -306,7 +362,7 @@ A JSON error body under the given status — the same shape unmatched routes and
 failed handlers return, so clients see one error format.
 
 ```oxi
-fun show(req) {
+fun show(req <map>) {
     option {
         has(users, req.params["id"]) -> { users[req.params["id"]] }
         { api.fail_with(404, "no such user") }
@@ -331,14 +387,14 @@ fun show(req) {
 Parse the request body as JSON.
 
 ```oxi
-fun echo(req) { {"you_sent": api.body_json(req), "bytes": len(req.body)} }
+fun echo(req <map>) { {"you_sent": api.body_json(req), "bytes": len(req.body)} }
 ```
 
 A malformed body makes this raise, which the dispatcher turns into a 500. To
 answer 400 instead, normalize it:
 
 ```oxi
-fun echo(req) {
+fun echo(req <map>) {
     parsed := <type<Error> || <Value>>(api.body_json(req))
     option {
         is_error(parsed) -> { api.fail_with(400, "body must be JSON") }
@@ -353,7 +409,7 @@ Parse the body as an HTML form (`application/x-www-form-urlencoded`). Keys and
 values are percent-decoded.
 
 ```oxi
-fun submit(req) { api.form(req) }
+fun submit(req <map>) { api.form(req) }
 ```
 
 ```
@@ -375,6 +431,177 @@ Percent-decode, **falling back to the raw text on a malformed escape**. A
 client controls these strings, so a bad `%ZZ` must not put an error value where
 a handler expects a string. Used internally for path parameters and query
 values.
+
+---
+
+## Recipes
+
+Every handler below is complete and typed, and every response shown was
+produced by running it. They all register the same way:
+
+```oxi
+fun routes(cfg <map>) {
+    app := api.app(cfg)
+    app.get("/users/:id", show_user)      // ... and so on
+    app.listen()
+}
+```
+
+### Read a path parameter
+
+```oxi
+users <map> = {"1": "ada", "42": "grace"}
+
+fun show_user(req <map>) {
+    id <str> := req.params["id"]
+    option {
+        has(users, id) -> { {"id": id, "name": users[id]} }
+        { api.fail_with(404, "no user {id}") }
+    }
+}
+```
+
+```
+$ curl localhost:8000/users/42          # app.get("/users/:id", show_user)
+{"id":"42","name":"grace"}
+
+$ curl localhost:8000/users/9
+{"error":"no user 9"}
+```
+
+Values are always **strings** — convert with `int(...)` if you need a number.
+
+### Two path parameters
+
+```oxi
+fun user_post(req <map>) { {"user": req.params["id"], "post": req.params["post_id"]} }
+```
+
+```
+$ curl localhost:8000/users/42/posts/7  # app.get("/users/:id/posts/:post_id", user_post)
+{"user":"42","post":"7"}
+```
+
+### Read the query string, with a default
+
+`req.query` always exists; the keys in it do not, so guard with `has` rather
+than dot access.
+
+```oxi
+fun search(req <map>) {
+    page <str> := option {
+        has(req.query, "page") -> { req.query["page"] }
+        { "1" }
+    }
+    {"q": req.query["q"], "page": int(page)}
+}
+```
+
+```
+$ curl 'localhost:8000/search?q=hi%20there&page=3'
+{"q":"hi there","page":3}
+
+$ curl 'localhost:8000/search?q=solo'
+{"q":"solo","page":1}
+```
+
+Percent-decoding is done for you.
+
+### Accept a JSON body and answer 201
+
+```oxi
+fun create_user(req <map>) {
+    body := <type<Error> || <Value>>(api.body_json(req))
+    option {
+        is_error(body) -> { api.fail_with(400, "body must be JSON") }
+        { api.json({"created": body.value}, 201) }
+    }
+}
+```
+
+```
+$ curl -X POST localhost:8000/users -d '{"name":"ada"}'
+{"created":{"name":"ada"}}
+
+$ curl -X POST localhost:8000/users -d 'nope'
+{"error":"body must be JSON"}
+```
+
+Without the `<type<Error> || <Value>>` wrapper a malformed body raises, and the
+dispatcher turns that into a 500. Wrapping it is what makes it a 400.
+
+### Accept an HTML form
+
+```oxi
+fun submit(req <map>) { api.json({"form": api.form(req)}) }
+```
+
+```
+$ curl -X POST localhost:8000/submit -d 'a=1&b=hello%20world'
+{"form":{"a":"1","b":"hello world"}}
+```
+
+### Read a request header
+
+Header names are **lowercased**, and `content-type` is not an identifier, so
+these are bracket lookups.
+
+```oxi
+introduce strings
+
+fun secret(req <map>) {
+    auth <str> := option {
+        has(req.headers, "authorization") -> { req.headers["authorization"] }
+        { "" }
+    }
+    option {
+        strings.starts_with(auth, "Bearer ") -> { {"token": strings.replace(auth, "Bearer ", "")} }
+        { api.fail_with(401, "missing bearer token") }
+    }
+}
+```
+
+```
+$ curl -H 'Authorization: Bearer abc123' localhost:8000/secret
+{"token":"abc123"}
+
+$ curl localhost:8000/secret
+{"error":"missing bearer token"}
+```
+
+### Inspect the request itself
+
+```oxi
+fun index(req <map>) { {"service": "oxigen", "method": req.method, "path": req.path} }
+```
+
+```
+$ curl localhost:8000/
+{"service":"oxigen","method":"GET","path":"/"}
+```
+
+### Non-JSON responses
+
+```oxi
+fun health(req <map>) { api.text("ok") }
+
+fun page(req <map>) { api.html("<h1>hi</h1>") }
+
+fun old(req <map>) { api.redirect("/", 301) }
+
+fun queued(req <map>) { api.respond(202, "queued", {"X-Job": "7"}) }
+```
+
+```
+$ curl -i localhost:8000/old
+HTTP/1.1 301 Moved Permanently
+Location: /
+
+$ curl -i -X POST localhost:8000/jobs
+HTTP/1.1 202 Accepted
+X-Job: 7
+Content-Length: 6
+```
 
 ---
 
@@ -436,7 +663,7 @@ constructible through a module namespace, so `api.Res(...)` fails with
 introduce api
 introduce {Res} from api
 
-fun raw(req) { Res(200, {"X-A": "1"}, "hi") }
+fun raw(req <map>) { Res(200, {"X-A": "1"}, "hi") }
 ```
 
 ### Struct: `App`
@@ -516,25 +743,25 @@ introduce api
 
 users <map> = {"1": "ada", "42": "grace"}
 
-fun index(req) {
+fun index(req <map>) {
     {"service": "oxigen api", "routes": ["/", "/users/:id", "/echo"]}
 }
 
-fun show_user(req) {
-    id := req.params["id"]
+fun show_user(req <map>) {
+    id <str> := req.params["id"]
     option {
         has(users, id) -> { {"id": id, "name": users[id], "query": req.query} }
         { api.fail_with(404, "no user {id}") }
     }
 }
 
-fun echo(req) {
+fun echo(req <map>) {
     {"you_sent": api.body_json(req), "bytes": len(req.body)}
 }
 
-fun boom(req) { <fail>("this handler is broken on purpose") }
+fun boom(req <map>) { <fail>("this handler is broken on purpose") }
 
-fun routes(cfg) {
+fun routes(cfg <map>) {
     app := api.app(cfg)
     app.get("/", index)
     app.get("/users/:id", show_user)

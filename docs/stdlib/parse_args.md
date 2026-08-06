@@ -34,8 +34,8 @@ main {
     p.define_flag(verbose_name="count")
     p.handle_args()
 
-    println(p.args_map["name"])
-    println(p.args_map["count"])
+    println(p.args_map.name)
+    println(p.args_map.count)
 }
 ```
 
@@ -83,8 +83,8 @@ Read whichever the user supplied:
 
 ```oxi
 name := option {
-    p.args_map["name"] != "" -> { p.args_map["name"] }
-    { p.args_map["n"] }
+    p.args_map.name != "" -> { p.args_map.name }
+    { p.args_map.n }
 }
 ```
 
@@ -186,13 +186,13 @@ main {
     p.handle_args()
 
     name := option {
-        p.args_map["name"] != "" -> { p.args_map["name"] }
-        p.args_map["n"] != "" -> { p.args_map["n"] }
+        p.args_map.name != "" -> { p.args_map.name }
+        p.args_map.n != "" -> { p.args_map.n }
         { usage() }
     }
     greeting := option {
-        p.args_map["greeting"] != "" -> { p.args_map["greeting"] }
-        p.args_map["g"] != "" -> { p.args_map["g"] }
+        p.args_map.greeting != "" -> { p.args_map.greeting }
+        p.args_map.g != "" -> { p.args_map.g }
         { "Hello" }
     }
 

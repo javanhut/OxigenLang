@@ -103,49 +103,49 @@ introduce array
 // ── Arrays of records ──
 // The third record has no "person" key, which set_where must skip rather than
 // error on.
-fun sample_records() { json.parse("\{\"information\": [\{\"person\": \"john\", \"info\": \{\"age\": 32, \"job\": \"unemployed\"}}, \{\"person\": \"jane\"}, \{\"info\": \{\"age\": 28}}]}")["information"] }
+fun sample_records() { json.parse("\{\"information\": [\{\"person\": \"john\", \"info\": \{\"age\": 32, \"job\": \"unemployed\"}}, \{\"person\": \"jane\"}, \{\"info\": \{\"age\": 28}}]}").information }
 
 <test>("set_where updates a matching record and keeps its other fields") {
     people <array> := json.set_where(sample_records(), "person", "john", {"info": {"job": "developer"}})
     john := array.find_where(people, "person", "john")
-    expect(john["info"]["job"]).eq("developer")
-    expect(john["info"]["age"]).eq(32)
+    expect(john.info.job).eq("developer")
+    expect(john.info.age).eq(32)
     expect(len(people)).eq(3)
 }
 
 <test>("set_where appends when nothing matches") {
     people <array> := json.set_where(sample_records(), "person", "ada", {"info": {"age": 36}})
     expect(len(people)).eq(4)
-    expect(array.find_where(people, "person", "ada")["info"]["age"]).eq(36)
+    expect(array.find_where(people, "person", "ada").info.age).eq(36)
 }
 
 <test>("set_where creates a field the record did not have") {
     people <array> := json.set_where(sample_records(), "person", "jane", {"info": {"age": 41}})
-    expect(array.find_where(people, "person", "jane")["info"]["age"]).eq(41)
+    expect(array.find_where(people, "person", "jane").info.age).eq(41)
 }
 
 <test>("set_where skips records without the key") {
     // The keyless record must neither match nor be disturbed.
     people <array> := json.set_where(sample_records(), "person", "john", {"info": {"job": "developer"}})
-    expect(people[2]["info"]["age"]).eq(28)
+    expect(people[2].info.age).eq(28)
     expect(has(people[2], "person")).falsy()
 }
 
 <test>("set_where only updates the first match") {
     rows <array> := json.set_where([{"id": 1, "n": "a"}, {"id": 1, "n": "b"}], "id", 1, {"n": "z"})
-    expect(rows[0]["n"]).eq("z")
-    expect(rows[1]["n"]).eq("b")
+    expect(rows[0].n).eq("z")
+    expect(rows[1].n).eq("b")
 }
 
 <test>("set_where appends onto an empty array") {
     rows <array> := json.set_where([], "id", 1, {"n": "first"})
     expect(len(rows)).eq(1)
-    expect(rows[0]["id"]).eq(1)
-    expect(rows[0]["n"]).eq("first")
+    expect(rows[0].id).eq(1)
+    expect(rows[0].n).eq("first")
 }
 
 <test>("set_where survives non-map elements") {
     rows <array> := json.set_where([5, "str", {"id": 1, "n": "a"}], "id", 1, {"n": "b"})
-    expect(rows[2]["n"]).eq("b")
+    expect(rows[2].n).eq("b")
     expect(len(rows)).eq(3)
 }
