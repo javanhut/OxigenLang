@@ -695,9 +695,14 @@ means editing `stdlib/api.oxi`.
 
 ## Internals
 
-Everything below is exported because every top-level binding in an Oxigen
-module is. You do not need it to write a server — it is documented so that
-reading a stack trace, or extending the module, is not guesswork.
+Everything below is public. Oxigen has `hide fun` for module-private helpers
+(see [imports.md](../imports.md#hide--module-private-functions)), but these are
+deliberately left exposed: `tests/api_test.oxi` exercises `render`,
+`to_res`, `parse_query` and `wants_keep_alive` directly as pure functions, which
+is far cheaper than driving them through a socket.
+
+You do not need any of it to write a server — it is documented so that reading a
+stack trace, or extending the module, is not guesswork.
 
 ### Connection handling
 

@@ -87,6 +87,12 @@ impl TypeAnnotation {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub statements: Vec<Statement>,
+    /// Top-level names declared with `hide`. Collected by the parser rather
+    /// than carried on each statement so `hide` stays a declaration modifier
+    /// and no existing `Statement` match arm has to change. The compiler
+    /// copies this onto the script `Function`, and `import_module` turns it
+    /// into the module's private set.
+    pub hidden: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

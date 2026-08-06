@@ -82,6 +82,11 @@ option {
 
 [result](result.md) has the helpers that make chains of these readable.
 
+**A module's API is what it does not hide.** Top-level bindings are public by
+default; a helper marked `hide fun` is callable only inside its own file
+(`array`'s `_min_index_by` and `_remove_at`, for instance). Struct fields take
+the same keyword inside the struct body.
+
 **Reach for dot access on a key you know is there.** `resp.status`,
 `data.information`, `john.info.job` — reading *or* writing. A mistyped key
 errors instead of silently reading `None`, which is the point:

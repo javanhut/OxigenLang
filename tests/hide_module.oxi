@@ -1,0 +1,23 @@
+// `hide fun` module privacy: a hidden function is callable inside its own
+// module and refused across the boundary.
+//
+// NOT a `<test>`-block file — a selective import that must fail cannot be
+// written inside a test block, because the import is the thing that fails.
+// Run it directly:
+//
+//     oxigen tests/hide_module.oxi
+//
+// It self-asserts with `expect`; any mismatch raises and exits non-zero.
+introduce {expect} from test
+introduce .hide_fixture.private
+
+main {
+    // The module's public function reaches its own hidden helpers.
+    expect(private.get_name()).eq("ada!")
+    // Namespace access to a hidden name is refused.
+    expect(private.__name() guard _err -> "blocked").eq("blocked")
+    expect(private.__shout("x") guard _err -> "blocked").eq("blocked")
+    // A public name is still reachable both ways.
+    expect(private.get_name() guard _err -> "blocked").eq("ada!")
+    println("hide_module: ok")
+}

@@ -747,6 +747,21 @@ impl VM {
         for pair in flat.chunks(2) {
             if let Some(fname) = pair[0].as_string() {
                 if let Some(&idx) = layout.indices.get(fname.as_ref()) {
+                    // Setting a hidden field from a literal is still setting it
+                    // from outside; allowing it would make `hide` half a rule.
+                    if layout.slots[idx].2
+                        && self
+                            .active_closure_method_of()
+                            .is_none_or(|owner| !self.struct_chain_contains(&struct_name_str, owner))
+                    {
+                        return Err(self.runtime_error_hint(
+                            &format!(
+                                "field '{}' is hidden on {} and cannot be set in a literal",
+                                fname, struct_name_str
+                            ),
+                            "declare the value (`x <Struct>`) and set it through a method of the struct",
+                        ));
+                    }
                     field_vec[idx] = pair[1].clone();
                     assigned[idx] = true;
                 } else {
@@ -860,6 +875,10 @@ impl VM {
             ValueRepr::StructInstance(inst) => {
                 // Direct Vec index via the instance's cached layout, no HashMap in the hot path.
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+                    // slots[idx].2 is the `hide` flag from the declaration.
+                    if inst.layout.slots[idx].2 && !self.hidden_field_access_allowed(&inst) {
+                        return Err(self.hidden_field_error(fname, &inst.struct_name));
+                    }
                     return Ok(inst.get_field(idx));
                 }
                 // Fall through: it might be a method on the struct def.
@@ -879,13 +898,21 @@ impl VM {
                     ))
                 }
             }
-            ValueRepr::Module(m) => match m.globals.get(fname.as_ref()) {
-                Some(val) => Ok(val.clone()),
-                None => Err(self.runtime_error_hint(
-                    &format!("module '{}' has no member '{}'", m.name, fname),
-                    "check the module's public API for available members",
-                )),
-            },
+            ValueRepr::Module(m) => {
+                if m.hidden.contains(fname.as_ref()) {
+                    return Err(self.runtime_error_hint(
+                        &format!("'{}' is hidden inside module '{}'", fname, m.name),
+                        "it is declared `hide fun` — call it through a function the module exposes",
+                    ));
+                }
+                match m.globals.get(fname.as_ref()) {
+                    Some(val) => Ok(val.clone()),
+                    None => Err(self.runtime_error_hint(
+                        &format!("module '{}' has no member '{}'", m.name, fname),
+                        "check the module's public API for available members",
+                    )),
+                }
+            }
             ValueRepr::ErrorValue(data) => match fname.as_str() {
                 "msg" => Ok(Value::String(Rc::clone(&data.msg))),
                 "tag" => Ok(match &data.tag {
@@ -1008,6 +1035,66 @@ impl VM {
         }
     }
 
+    /// Is the code in the current frame allowed to touch a hidden field of
+    /// `inst`? Yes when that code was compiled as part of a struct in the
+    /// instance's own inheritance chain — a method of the struct, a method it
+    /// inherited, or a closure nested inside one of those.
+    ///
+    /// Deliberately chain-directional: a `Person` method may read a hidden
+    /// field of an `American` (an American is-a Person), but a method of an
+    /// unrelated struct may not, and neither may top-level code.
+    fn hidden_field_access_allowed(&self, inst: &crate::vm::value::ObjStructInstance) -> bool {
+        // `active_closure` is authoritative for both interpreted and JIT'd
+        // frames; reading `frames.last()` would answer for the caller once a
+        // hot method tiered up, and deny its own `self.field`.
+        if self.frames.is_empty() && !self.jit_executing.get() {
+            return false;
+        }
+        let Some(owner) = self.active_closure().function.method_of.as_deref() else {
+            return false;
+        };
+        self.struct_chain_contains(&inst.struct_name, owner)
+    }
+
+    /// `method_of` of the innermost activation, interpreted or JIT'd.
+    fn active_closure_method_of(&self) -> Option<&str> {
+        if self.frames.is_empty() && !self.jit_executing.get() {
+            return None;
+        }
+        self.active_closure().function.method_of.as_deref()
+    }
+
+    /// Does `struct_name`'s inheritance chain include `owner`?
+    fn struct_chain_contains(&self, struct_name: &str, owner: &str) -> bool {
+        if struct_name == owner {
+            return true;
+        }
+        let mut current = self
+            .globals
+            .get(struct_name)
+            .and_then(|v| v.as_struct_def())
+            .and_then(|d| d.parent.clone());
+        while let Some(name) = current {
+            if name == owner {
+                return true;
+            }
+            current = self
+                .globals
+                .get(&name)
+                .and_then(|v| v.as_struct_def())
+                .and_then(|d| d.parent.clone());
+        }
+        false
+    }
+
+    /// Error for a refused hidden-field access.
+    fn hidden_field_error(&self, field: &str, struct_name: &str) -> VMError {
+        self.runtime_error_hint(
+            &format!("field '{}' is hidden on {}", field, struct_name),
+            "it is declared `hide` — reach it through a method of the struct",
+        )
+    }
+
     pub(crate) fn handle_set_field(&mut self, field_idx: u16) -> Result<(), VMError> {
         let value = self.pop();
         let object = self.pop();
@@ -1027,6 +1114,9 @@ impl VM {
         match object.repr() {
             ValueRepr::StructInstance(inst) => {
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+                    if inst.layout.slots[idx].2 && !self.hidden_field_access_allowed(&inst) {
+                        return Err(self.hidden_field_error(fname, &inst.struct_name));
+                    }
                     inst.set_field(idx, value);
                     Ok(())
                 } else {
@@ -3267,7 +3357,24 @@ impl VM {
                 // Omitted fields used to take their type's zero, so a half-built struct looked complete.
                 let mut field_vec: Vec<Value> = Vec::with_capacity(layout.slots.len());
                 let mut missing: Vec<String> = Vec::new();
+                // Construction from outside the struct may not supply hidden
+                // fields — otherwise `hide` would stop reads while leaving the
+                // initial value wide open.
+                let outside = self
+                    .active_closure_method_of()
+                    .is_none_or(|owner| !self.struct_chain_contains(&def_name, owner));
                 for (i, slot) in layout.slots.iter().enumerate() {
+                    let supplied_here = i < args.len()
+                        || named_args.iter().any(|(n, _)| *n == slot.0);
+                    if slot.2 && supplied_here && outside {
+                        return Err(self.runtime_error_hint(
+                            &format!(
+                                "field '{}' is hidden on {} and cannot be set from outside",
+                                slot.0, def_name
+                            ),
+                            "declare the value (`x <Struct>`) and set it through a method of the struct",
+                        ));
+                    }
                     let val = if i < args.len() {
                         args[i].clone()
                     } else if let Some((_, v)) =
@@ -3453,6 +3560,12 @@ impl VM {
             }
             ValueRepr::Module(m) => {
                 // Module method call: module.func(args)
+                if m.hidden.contains(method_name) {
+                    return Err(self.runtime_error_hint(
+                        &format!("'{}' is hidden inside module '{}'", method_name, m.name),
+                        "it is declared `hide fun` — call it through a function the module exposes",
+                    ));
+                }
                 if let Some(func) = m.globals.get(method_name).cloned() {
                     self.stack[instance_idx] = func.clone();
                     // Pass module globals so the function can reach module-scoped variables.
@@ -4256,6 +4369,10 @@ impl VM {
         sub_vm.is_main_context = false;
         self.import_stack.push(module_path.clone());
 
+        // Read before `run` consumes the function.
+        let module_hidden: std::collections::HashSet<String> =
+            function.hidden_globals.iter().cloned().collect();
+
         let _result = sub_vm.run(function).map_err(|e| {
             self.runtime_error(&format!("error in module '{}': {}", path_str, e.message))
         })?;
@@ -4278,6 +4395,7 @@ impl VM {
         let module = Rc::new(ObjModule {
             name: path_str.to_string(),
             globals: globals_rc,
+            hidden: module_hidden,
         });
 
         self.module_cache.insert(module_path, Rc::clone(&module));
@@ -4299,6 +4417,12 @@ impl VM {
         } else {
             // Selective import
             for name in selective_names {
+                if module.hidden.contains(name) {
+                    return Err(self.runtime_error_hint(
+                        &format!("'{}' is hidden inside module '{}'", name, path_str),
+                        "it is declared `hide fun` and cannot be imported",
+                    ));
+                }
                 if let Some(val) = module.globals.get(name) {
                     self.globals.insert(name.clone(), val.clone());
                     self.jit.bump_global_version(name);

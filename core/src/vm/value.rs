@@ -497,6 +497,14 @@ pub struct Function {
     /// since the compiler itself has no notion of files. `None` means the
     /// entry script, whose source the VM already holds.
     pub origin: RefCell<Option<Rc<ModuleOrigin>>>,
+    /// Top-level names this file declared with `hide`. Only ever non-empty on
+    /// a script function (the whole-file body); `import_module` reads it to
+    /// build the module's private set.
+    pub hidden_globals: Vec<String>,
+    /// When this function is a struct method, the name of the struct whose
+    /// `includes` block defined it — nested closures inherit it. Hidden-field
+    /// access is permitted only from code carrying the owning struct's name.
+    pub method_of: Option<String>,
 }
 
 impl Function {
@@ -511,6 +519,8 @@ impl Function {
             has_loop: false,
             id: 0,
             origin: RefCell::new(None),
+            hidden_globals: Vec::new(),
+            method_of: None,
         }
     }
 }
@@ -913,6 +923,11 @@ pub struct ObjEnumInstance {
 pub struct ObjModule {
     pub name: String,
     pub globals: Rc<HashMap<String, Value>>,
+    /// Names the module declared with `hide`. They stay in `globals` so the
+    /// module's own functions can still call them; what they are barred from
+    /// is crossing the module boundary — `mod.name` and
+    /// `introduce {name} from mod` both refuse.
+    pub hidden: std::collections::HashSet<String>,
 }
 
 // ── Value methods ──────────────────────────────────────────────────────

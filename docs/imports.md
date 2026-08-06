@@ -74,9 +74,39 @@ println(strings.upper("hello"))
 
 ### Exports
 
-All top-level bindings (functions, variables, structs, and patterns) in a module file are automatically exported. There is no explicit export mechanism.
+Top-level bindings (functions, variables, structs, and patterns) are exported by default — public unless you say otherwise. There is no export list; the exception is marked at the declaration with `hide`.
 
 Use top-level definitions for reusable module APIs, and put script-only work inside `main`. The `main` block is skipped when the file is imported with `introduce`.
+
+### `hide` — module-private functions
+
+A top-level `fun` marked `hide` stays callable inside its own file and is refused across the module boundary:
+
+```oxi
+// text.oxi
+hide fun __normalize(s <str>) { strings.trim(strings.lower(s)) }
+
+fun matches(a <str>, b <str>) { __normalize(a) == __normalize(b) }
+```
+
+```oxi
+introduce .text
+
+text.matches(" Ada ", "ada")   // True — the public face
+text.__normalize(" Ada ")      // error: '__normalize' is hidden inside module './text'
+```
+
+Both routes in are closed, and the error names the reason rather than pretending the function does not exist:
+
+```oxi
+introduce {__normalize} from .text
+// error: '__normalize' is hidden inside module './text'
+//   hint: it is declared `hide fun` and cannot be imported
+```
+
+`hide` applies to top-level functions only — `hide x <int> = 1` is a parse error. For struct fields, `hide` goes inside the struct body; see [structs.md](structs.md#hidden-fields).
+
+The stdlib uses it: `array.oxi` marks `_min_index_by` and `_remove_at` hidden, since they are the selection sort behind `sort_by` rather than part of the module's API.
 
 ```oxi
 // mylib.oxi

@@ -1,0 +1,8 @@
+// Fixture for tests/hide_module.oxi — a module with private helpers.
+hide fun __name() { "ada" }
+
+hide fun __shout(s <str>) { s + "!" }
+
+// The public face: it calls both hidden helpers, so the module's own use of
+// them has to keep working.
+fun get_name() { __shout(__name()) }

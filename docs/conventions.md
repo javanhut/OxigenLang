@@ -494,9 +494,10 @@ struct User {
 
 ### Encapsulate with `hide`
 
-Oxigen is public by default; everything on a struct is accessible unless marked
-with `hide`. Hide only genuine implementation details, and keep anything that's
-part of the public interface visible.
+Oxigen is public by default; everything is accessible unless marked with
+`hide`. Hide only genuine implementation details, and keep anything that's part
+of the public interface visible. It applies in two places: struct fields, and
+top-level functions in a module.
 
 ```oxi
 struct Account {
@@ -506,15 +507,37 @@ struct Account {
 }
 
 Account includes {
+    fun open(n <str>, b <int>, p <int>) {
+        self.name = n
+        self.balance = b
+        self.pin = p
+    }
     fun deposit(amount <int>) { self.balance = self.balance + amount }
     fun get_balance() { self.balance }
 }
 
-a <Account> := Account("Alice", 1000, 1234)
+a <Account>
+a.open("Alice", 1000, 1234)
 println(a.name)          // works — public
 println(a.get_balance()) // works — public method
 println(a.balance)       // error — hidden field
 ```
+
+A hidden field cannot be supplied from outside, so `Account("Alice", 1000, 1234)`
+is refused too — declare the value and let a method set it, as above. See
+[structs.md](structs.md#hidden-fields) for the full access rules.
+
+The same keyword makes a module's helpers private:
+
+```oxi
+hide fun __normalize(s <str>) { strings.trim(strings.lower(s)) }
+
+fun matches(a <str>, b <str>) { __normalize(a) == __normalize(b) }
+```
+
+`__normalize` stays callable inside its own file and is refused through the
+module namespace and through `introduce {…} from`. See
+[imports.md](imports.md#hide--module-private-functions).
 
 ### Always Use `self.field` in Methods
 

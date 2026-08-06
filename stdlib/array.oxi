@@ -342,7 +342,8 @@ fun group_by(arr <array>, key_fn <generic>) {
 }
 
 // ── Sorting by key (selection sort; stable for equal keys) ──
-fun _min_index_by(arr <array>, key_fn <generic>) {
+// `hide`: implementation details of sort_by, not part of the module's API.
+hide fun _min_index_by(arr <array>, key_fn <generic>) {
     best <int>
     i <int> := 1
     repeat when i < len(arr) {
@@ -356,7 +357,7 @@ fun _min_index_by(arr <array>, key_fn <generic>) {
     best
 }
 
-fun _remove_at(arr <array>, idx <int>) {
+hide fun _remove_at(arr <array>, idx <int>) {
     result <array>
     i <int>
     each x in arr {

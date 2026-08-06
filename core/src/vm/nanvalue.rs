@@ -1450,6 +1450,7 @@ mod tests {
         let module = Rc::new(ObjModule {
             name: "math".to_string(),
             globals: Rc::new(globals),
+            hidden: std::collections::HashSet::new(),
         });
 
         vec![
@@ -1738,6 +1739,7 @@ mod tests {
         let rc = Rc::new(ObjModule {
             name: "m".to_string(),
             globals: Rc::new(HashMap::new()),
+            hidden: std::collections::HashSet::new(),
         });
         check_rc_refcount_round_trip(rc, NanValue::from_module);
     }
@@ -1790,6 +1792,7 @@ mod tests {
         let inner_rc = Rc::new(ObjModule {
             name: "inner".to_string(),
             globals: Rc::new(HashMap::new()),
+            hidden: std::collections::HashSet::new(),
         });
         let baseline = Rc::strong_count(&inner_rc);
 

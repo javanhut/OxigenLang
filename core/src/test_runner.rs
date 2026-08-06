@@ -54,6 +54,7 @@ fn parse_stmts(src: &str) -> Vec<Statement> {
 fn eval_test_name(name: &Expression, source: &str, file_path: &Option<PathBuf>) -> String {
     let prog = Program {
         statements: vec![Statement::Expr(name.clone())],
+        hidden: Vec::new(),
     };
     match Compiler::new().compile(&prog) {
         Ok(func) => {
@@ -109,7 +110,7 @@ pub fn run_vm_tests(
 
         let mut statements = prelude.clone();
         statements.extend(body.iter().cloned());
-        let sub = Program { statements };
+        let sub = Program { statements, hidden: Vec::new() };
 
         let outcome = match Compiler::new().compile(&sub) {
             Ok(func) => {

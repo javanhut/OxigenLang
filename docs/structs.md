@@ -106,6 +106,65 @@ println(p.get_name())
 
 Use `hide` to encapsulate implementation details and control access through methods.
 
+### What counts as "inside"
+
+Access is allowed from code compiled as part of the struct's own chain, and
+refused everywhere else:
+
+| Where the code is | Hidden field |
+|-------------------|--------------|
+| a method of the struct | allowed |
+| a method it **inherited**, or a subclass's method | allowed |
+| a lambda nested inside one of those | allowed |
+| a method of the same struct, reading **another instance** | allowed |
+| a method of an unrelated struct | refused |
+| a plain top-level function, or `main` | refused |
+
+```oxi
+Account includes {
+    // both allowed — `other` is an Account too
+    fun richer_than(other <Account>) { self.balance > other.balance }
+}
+
+fun audit(a <Account>) { a.balance }
+// error: field 'balance' is hidden on Account
+//   hint: it is declared `hide` — reach it through a method of the struct
+```
+
+### Building one
+
+A hidden field cannot be supplied from outside, because setting the initial
+value from anywhere would make `hide` half a rule:
+
+```oxi
+Account(balance=100, owner="ada")
+// error: field 'balance' is hidden on Account and cannot be set from outside
+```
+
+Two ways to build one instead — zero-value declaration plus a method, or a
+factory **inside** the struct, which is not "outside" and may use the literal
+form:
+
+```oxi
+a <Account>              // every field takes its zero value
+a.open("ada", 100)       // a method sets the hidden one
+
+Account includes {
+    fun clone_with(b <int>) { Account(balance=b, owner=self.owner) }
+}
+```
+
+### One thing `hide` does not do
+
+It is an access rule, not a secrecy guarantee: `println` still shows the field,
+since printing is a diagnostic rather than a way to reach the value.
+
+```oxi
+println(a)   // Account { balance: 100, owner: ada }
+```
+
+Do not treat `hide` as a place to put a secret that must never be displayed.
+
 ## Methods
 
 Attach methods to a struct using a `includes` block:

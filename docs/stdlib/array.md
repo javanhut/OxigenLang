@@ -469,13 +469,18 @@ dominates for something like doubling a number.
 
 ## Internal helpers
 
-These are exported because every top-level binding in a module is, but they are
-implementation details of `sort_by` and may change:
+`sort_by` is a selection sort built on two helpers, both declared `hide fun` —
+they are module-private and calling them raises:
 
 | Function | Purpose |
 |----------|---------|
 | `_min_index_by(arr, key_fn)` | Index of the element with the smallest key |
 | `_remove_at(arr, idx)` | Copy of `arr` without the element at `idx` |
+
+```oxi
+array._remove_at([1, 2, 3], 0)
+// error: '_remove_at' is hidden inside module 'array'
+```
 
 ---
 

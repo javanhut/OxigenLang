@@ -406,6 +406,7 @@ impl Parser {
     pub fn parse_program(&mut self) -> Program {
         let mut program = Program {
             statements: Vec::new(),
+            hidden: Vec::new(),
         };
         // Extents of statements the parser dropped without emitting anything.
         let mut dropped: Vec<Span> = Vec::new();
@@ -417,7 +418,31 @@ impl Parser {
 
             let stmt_span = self.curr_token.span;
             let errors_before = self.errors.len();
+
+            // `hide fun name() {...}` — a top-level declaration modifier. The
+            // statement compiles exactly like an ordinary one; only the name is
+            // recorded, so nothing downstream has to know about `hide`.
+            let hidden_decl = if self.curr_token.token_type == TokenType::Hide {
+                if self.peek_token.token_type != TokenType::Function {
+                    self.errors.push(diag_hint(
+                        codes::UNEXPECTED_TOKEN,
+                        self.peek_token.span,
+                        "`hide` must be followed by a top-level `fun`".to_string(),
+                        "only functions can be hidden at module level; struct fields take `hide` inside the struct body",
+                    ));
+                    self.synchronize();
+                    continue;
+                }
+                self.next_token(); // consume `hide`, now at `fun`
+                true
+            } else {
+                false
+            };
+
             if let Some(stmt) = self.parse_statement() {
+                if hidden_decl && let Statement::Let { name, .. } = &stmt {
+                    program.hidden.push(name.value.clone());
+                }
                 program.statements.push(stmt);
             } else {
                 // A rise in the error count means it was reported; otherwise it is only a candidate for the gave-up note.

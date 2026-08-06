@@ -26,6 +26,9 @@ pub struct Formatter {
     /// keeps an unindented comment at the opener's own margin outside entirely.
     body_column: usize,
     open_column: usize,
+    /// Set when the next statement is a `hide fun` declaration, so the keyword
+    /// is re-emitted ahead of it.
+    hide_next_fn: bool,
 }
 
 impl Default for Formatter {
@@ -45,6 +48,7 @@ impl Formatter {
             next_anchor: None,
             body_column: usize::MAX,
             open_column: 0,
+            hide_next_fn: false,
         }
     }
 
@@ -156,6 +160,14 @@ impl Formatter {
     fn format_program(&mut self, program: &Program) {
         let stmts = &program.statements;
         for (i, stmt) in stmts.iter().enumerate() {
+            // `hide` lives on the Program, not the statement, so it has to be
+            // replayed here — dropping it would silently publish a private
+            // function on the next `oxigen fmt`.
+            if let Statement::Let { name, value: Expression::FunctionLiteral { .. } } = stmt
+                && program.hidden.iter().any(|h| h == &name.value)
+            {
+                self.hide_next_fn = true;
+            }
             self.emit_statement_line(stmt, stmts.get(i + 1));
 
             if i + 1 < stmts.len() && should_add_top_level_blank_line(stmt, &stmts[i + 1]) {
@@ -184,6 +196,9 @@ impl Formatter {
             self.flush_comments_before(span.line());
         }
         self.push_indent();
+        if std::mem::take(&mut self.hide_next_fn) {
+            self.push("hide ");
+        }
 
         let (saved_anchor, saved_open) = (self.next_anchor, self.open_column);
         self.next_anchor = next.and_then(stmt_span).or(saved_anchor);

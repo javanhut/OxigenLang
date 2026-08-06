@@ -305,6 +305,10 @@ pub struct Compiler {
     /// Stack of resolvable self-field sets for the method currently being
     /// compiled (top = innermost). Empty outside method bodies.
     method_field_stack: Vec<std::collections::HashSet<String>>,
+    /// Struct whose `includes` block is being compiled, so each method (and
+    /// anything nested in it) can be stamped with its owner for hidden-field
+    /// access checks.
+    method_struct_stack: Vec<String>,
     /// Names defined as globals (top-level `:=` / `<type>` declarations), in
     /// compilation order. A walrus `:=` of one of these from inside a nested
     /// block updates the global (SetGlobal) rather than creating a shadowing
@@ -346,6 +350,7 @@ impl Compiler {
             struct_fields: std::collections::HashMap::new(),
             struct_parents: std::collections::HashMap::new(),
             method_field_stack: Vec::new(),
+            method_struct_stack: Vec::new(),
             declared_globals: std::collections::HashSet::new(),
             typed_globals: std::collections::HashSet::new(),
             fn_counter: 0,
@@ -407,6 +412,7 @@ impl Compiler {
         let frame = self.frames.pop().unwrap();
         let mut function = frame.function;
         function.id = self.fn_counter;
+        function.hidden_globals = program.hidden.clone();
         self.fn_counter += 1;
         Ok(function)
     }
@@ -1880,6 +1886,7 @@ impl Compiler {
                 // Make the struct's fields resolvable as implicit-self while compiling method bodies.
                 let self_fields = self.collect_self_fields(&struct_name.value);
                 self.method_field_stack.push(self_fields);
+                self.method_struct_stack.push(struct_name.value.clone());
                 // Compile each method with an implicit `self` first parameter
                 for (method_name, method_expr) in methods {
                     if let Expression::FunctionLiteral {
@@ -1909,6 +1916,7 @@ impl Compiler {
                     self.emit_constant(Value::String(rc_str(method_name.value.as_str())), line);
                 }
                 self.method_field_stack.pop();
+                self.method_struct_stack.pop();
                 // Emit DefineMethod opcode
                 let struct_const =
                     self.make_constant(Value::String(rc_str(struct_name.value.as_str())), line);
@@ -3010,8 +3018,17 @@ impl Compiler {
         line: u32,
     ) {
         // Push a new compiler frame for this function.
+        // A method carries the struct it was defined in, and so does anything
+        // nested inside it — a lambda in a method body still counts as that
+        // struct's code, which is what lets it touch `self`'s hidden fields.
+        let owning_struct = self
+            .method_struct_stack
+            .last()
+            .cloned()
+            .or_else(|| self.current_frame().function.method_of.clone());
         self.frames
             .push(CompilerFrame::new(name.map(|s| s.to_string()), 1));
+        self.current_frame_mut().function.method_of = owning_struct;
         self.current_frame_mut().function.arity = parameters.len() as u8;
 
         // Compile parameter info
