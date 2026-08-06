@@ -529,7 +529,7 @@ fn non_hashable_key_error(v: &Value, what: &str) -> Option<Value> {
     if v.try_hash_key().is_some() {
         return None;
     }
-    Some(Value::Error(rc_str(&format!(
+    Some(Value::Error(rc_str(format!(
         "{} is not hashable and cannot be used as a {what}; hashable kinds are int, uint, float, bool, char, byte, str, None, and tuples of those",
         v.type_name()
     ))))

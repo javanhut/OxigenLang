@@ -48,7 +48,7 @@ fn run_with_helpers(main_src: &str, tag: &str) -> String {
 
     let mut vm = VM::new();
     vm.set_source(&source);
-    vm.set_file(PathBuf::from(dir.join("main.oxi")));
+    vm.set_file(dir.join("main.oxi"));
     let out = vm
         .run(function)
         .map(|v| format!("{}", v))

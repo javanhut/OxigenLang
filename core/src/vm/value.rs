@@ -583,7 +583,7 @@ impl ModuleGlobals {
         self.ptr.set(
             globals
                 .as_ref()
-                .map_or(std::ptr::null(), |rc| Rc::as_ptr(rc)),
+                .map_or(std::ptr::null(), Rc::as_ptr),
         );
         *self.rc.borrow_mut() = globals;
     }
