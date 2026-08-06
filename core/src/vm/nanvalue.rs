@@ -1094,7 +1094,7 @@ mod tests {
             methods: RefCell::new(HashMap::new()),
             parent: None,
             layout: std::cell::OnceCell::new(),
-            module_globals: RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
         });
         let inst = Rc::new(ObjStructInstance::new(
             "Empty".to_string(),
@@ -1274,7 +1274,7 @@ mod tests {
             methods: RefCell::new(HashMap::new()),
             parent: None,
             layout: std::cell::OnceCell::new(),
-            module_globals: RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
         });
         let inst = Rc::new(ObjStructInstance::new(
             "Box".to_string(),
@@ -1396,7 +1396,7 @@ mod tests {
             methods: RefCell::new(HashMap::new()),
             parent: None,
             layout: std::cell::OnceCell::new(),
-            module_globals: RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
         });
         let struct_inst = Rc::new(ObjStructInstance::new(
             "Pair".to_string(),
@@ -1411,7 +1411,7 @@ mod tests {
         let closure = Rc::new(ObjClosure {
             function: func,
             upvalues: Vec::new(),
-            module_globals: RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
@@ -1582,7 +1582,7 @@ mod tests {
             methods: RefCell::new(HashMap::new()),
             parent: None,
             layout: std::cell::OnceCell::new(),
-            module_globals: RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
         });
         let inst = Rc::new(ObjStructInstance::new(
             "Box".to_string(),
@@ -1680,7 +1680,7 @@ mod tests {
         let rc = Rc::new(ObjClosure {
             function: func,
             upvalues: Vec::new(),
-            module_globals: RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
@@ -1704,7 +1704,7 @@ mod tests {
             methods: RefCell::new(HashMap::new()),
             parent: None,
             layout: std::cell::OnceCell::new(),
-            module_globals: RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
         });
         check_rc_refcount_round_trip(rc, NanValue::from_struct_def);
     }
@@ -1896,7 +1896,7 @@ mod tests {
         let rc = Rc::new(ObjClosure {
             function: func,
             upvalues: Vec::new(),
-            module_globals: RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),

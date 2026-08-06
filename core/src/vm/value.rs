@@ -172,7 +172,7 @@ mod layout_tests {
         let obj = Rc::new(ObjClosure {
             function: func,
             upvalues: Vec::new(),
-            module_globals: RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
@@ -203,6 +203,26 @@ mod layout_tests {
         drop(obj);
     }
 
+    /// JIT-emitted call sequences read a callee's owning module with a single
+    /// pointer load at `offset_of!(ObjClosure, module_globals)`, so the raw
+    /// mirror must stay the first field of the `#[repr(C)]` `ModuleGlobals`.
+    /// If it moves, every call under a module frame stores a garbage pointer
+    /// into the new `JitFrame` and global lookups read freed memory.
+    #[test]
+    fn module_globals_ptr_is_first_field() {
+        let dict = Rc::new(HashMap::from([("x".to_string(), Value::Integer(1))]));
+        let mg = ModuleGlobals::from(Some(Rc::clone(&dict)));
+
+        let first_word = unsafe { *(&mg as *const ModuleGlobals as *const *const HashMap<String, Value>) };
+        assert_eq!(first_word, Rc::as_ptr(&dict), "raw view must be at offset 0");
+        assert_eq!(first_word, mg.as_ptr());
+        assert!(mg.get().unwrap().contains_key("x"));
+
+        mg.set(None);
+        assert!(mg.as_ptr().is_null(), "clearing must clear both views");
+        assert!(mg.get().is_none());
+    }
+
     /// The JIT's inline MethodCall fast path relies on `Rc<T>` being
     /// `NonNull<RcBox<T>>` with `strong: Cell<usize>` at RcBox offset 0.
     /// If a future Rust reorders `RcBox` or changes the `Cell<usize>`
@@ -217,7 +237,7 @@ mod layout_tests {
         let obj = Rc::new(ObjClosure {
             function: func,
             upvalues: Vec::new(),
-            module_globals: RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
@@ -279,7 +299,7 @@ mod layout_tests {
             methods: RefCell::new(HashMap::new()),
             parent: None,
             layout: std::cell::OnceCell::new(),
-            module_globals: RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
         });
         let inst = ObjStructInstance::new(
             "Pair".to_string(),
@@ -530,12 +550,67 @@ pub struct LocalInfo {
     pub type_constraint: Option<String>,
 }
 
+/// The globals of the module a closure or struct def was defined in — the
+/// scope its free names resolve against. `None` for definitions in the main
+/// script, which resolve against the VM's own globals.
+///
+/// Wired post-hoc: a module runs in a sub-VM, so its definitions are tagged
+/// once it finishes loading (`VM::import_module`).
+///
+/// `ptr` mirrors `rc` so JIT-emitted code can read the dict with one
+/// pointer-sized load at a pinned offset — it cannot walk a
+/// `RefCell<Option<Rc<_>>>`, whose layout is not guaranteed. `#[repr(C)]`
+/// keeps `ptr` at offset 0, and `set` is the only writer, so the two views
+/// cannot drift apart.
+#[repr(C)]
+#[derive(Debug, Default)]
+pub struct ModuleGlobals {
+    ptr: Cell<*const HashMap<String, Value>>,
+    rc: RefCell<Option<Rc<HashMap<String, Value>>>>,
+}
+
+impl ModuleGlobals {
+    /// Defined in the main script — no owning module.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self) -> Option<Rc<HashMap<String, Value>>> {
+        self.rc.borrow().clone()
+    }
+
+    pub fn set(&self, globals: Option<Rc<HashMap<String, Value>>>) {
+        self.ptr.set(
+            globals
+                .as_ref()
+                .map_or(std::ptr::null(), |rc| Rc::as_ptr(rc)),
+        );
+        *self.rc.borrow_mut() = globals;
+    }
+
+    /// Raw view for the JIT, which stores it into a `JitFrame`. Null = none.
+    pub fn as_ptr(&self) -> *const HashMap<String, Value> {
+        self.ptr.get()
+    }
+}
+
+impl From<Option<Rc<HashMap<String, Value>>>> for ModuleGlobals {
+    fn from(globals: Option<Rc<HashMap<String, Value>>>) -> Self {
+        let mg = Self::none();
+        mg.set(globals);
+        mg
+    }
+}
+
 /// A closure: a compiled function + captured upvalues.
 #[derive(Debug)]
 pub struct ObjClosure {
     pub function: Rc<Function>,
     pub upvalues: Vec<Rc<RefCell<Upvalue>>>,
-    pub module_globals: RefCell<Option<std::rc::Rc<HashMap<String, Value>>>>,
+    /// The module this closure was defined in. Inherited at *creation* time
+    /// by nested closures, never at call time — a callback handed to another
+    /// module still resolves its names in the file it was written in.
+    pub module_globals: ModuleGlobals,
     /// How many times this closure has been called. Used by the JIT engine
     /// for hot-function detection. Interior mutability keeps closures
     /// cheaply shareable through `Rc`.
@@ -626,7 +701,7 @@ impl ObjClosure {
         ObjClosure {
             function,
             upvalues,
-            module_globals: RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
@@ -679,7 +754,7 @@ pub struct ObjStructDef {
     /// their own module's top-level functions (e.g. `Parser` in
     /// stdlib/parse_args.oxi calling its file-local `normalize_array`).
     /// `None` for structs defined in the main script.
-    pub module_globals: RefCell<Option<std::rc::Rc<HashMap<String, Value>>>>,
+    pub module_globals: ModuleGlobals,
 }
 
 /// Flattened field layout for a struct (including inherited fields).

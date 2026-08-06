@@ -451,7 +451,7 @@ impl VM {
         let closure = Rc::new(ObjClosure {
             function: Rc::new(function),
             upvalues: Vec::new(),
-            module_globals: std::cell::RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
             call_count: std::cell::Cell::new(0),
             loop_count: std::cell::Cell::new(0),
             jit_state: std::cell::Cell::new(0),
@@ -1130,11 +1130,11 @@ impl VM {
         let closure = Rc::new(ObjClosure {
             function: Rc::clone(&template.function),
             upvalues,
-            module_globals: std::cell::RefCell::new(
+            // Lexical capture: a closure belongs to the module it is created in.
+            module_globals: crate::vm::value::ModuleGlobals::from(
                 template
                     .module_globals
-                    .borrow()
-                    .clone()
+                    .get()
                     .or_else(|| self.active_module_globals_rc()),
             ),
             call_count: std::cell::Cell::new(0),
@@ -1488,13 +1488,17 @@ impl VM {
             .map(|frame| unsafe { &*frame.closure_raw })
     }
 
+    /// The module scope of the innermost activation. A JIT frame's answer is
+    /// authoritative *including* "none" — falling through to the interpreter
+    /// frame underneath would hand a main-script function the module scope of
+    /// whatever module happened to call it.
     #[inline(always)]
     fn active_module_globals(&self) -> Option<&HashMap<String, Value>> {
         if self.jit_executing.get()
-            && let Some(frame) = self.jit_frame_top()
-                && !frame.module_globals.is_null() {
-                    return Some(unsafe { &*frame.module_globals });
-                }
+            && let Some(frame) = self.jit_frame_top() {
+                return (!frame.module_globals.is_null())
+                    .then(|| unsafe { &*frame.module_globals });
+            }
         self.frames.last().and_then(|f| f.module_globals.as_deref())
     }
 
@@ -1510,10 +1514,9 @@ impl VM {
     /// `increment_strong_count` is sound.
     fn active_module_globals_rc(&self) -> Option<Rc<HashMap<String, Value>>> {
         if self.jit_executing.get()
-            && let Some(frame) = self.jit_frame_top()
-                && !frame.module_globals.is_null() {
-                    return unsafe { mg_rc(frame.module_globals) };
-                }
+            && let Some(frame) = self.jit_frame_top() {
+                return unsafe { mg_rc(frame.module_globals) };
+            }
         self.frames.last().and_then(|f| f.module_globals.clone())
     }
 
@@ -1525,10 +1528,9 @@ impl VM {
     #[inline(always)]
     pub(crate) fn has_active_module_globals(&self) -> bool {
         if self.jit_executing.get()
-            && let Some(frame) = self.jit_frame_top()
-                && !frame.module_globals.is_null() {
-                    return true;
-                }
+            && let Some(frame) = self.jit_frame_top() {
+                return !frame.module_globals.is_null();
+            }
         self.frames
             .last()
             .map(|f| f.module_globals.is_some())
@@ -3211,7 +3213,7 @@ impl VM {
 
         match callee.repr() {
             ValueRepr::Closure(closure) => {
-                let module_globals = closure.module_globals.borrow().clone();
+                let module_globals = closure.module_globals.get();
                 self.call_closure(Rc::clone(closure), arg_count, named_args, module_globals)
             }
             ValueRepr::Builtin(func) => {
@@ -3401,7 +3403,7 @@ impl VM {
                     })?;
 
                 // Use the defining module's globals so the body can reach that module's file-local helpers.
-                let owning_module_globals = inst.def.module_globals.borrow().clone();
+                let owning_module_globals = inst.def.module_globals.get();
 
                 if let Some(closure) = method.as_closure().cloned() {
                     // Rearrange [instance, args..] to [closure, instance, args..] so the instance becomes `self`.
@@ -3561,7 +3563,7 @@ impl VM {
                 return Some(m);
             }
             cur = d.parent.as_ref().and_then(|p| {
-                if let Some(mg) = d.module_globals.borrow().as_ref()
+                if let Some(mg) = d.module_globals.get()
                     && let Some(Value::StructDef(pd)) = mg.get(p) {
                         return Some(Rc::clone(pd));
                     }
@@ -3624,10 +3626,8 @@ impl VM {
         let expected = closure.function.arity as usize;
         let slot_offset = self.stack.len() - expected - 1;
         let stop_depth = self.frames.len();
-        let inherited_mg = self
-            .active_module_globals()
-            .map(|mg| mg as *const HashMap<String, Value>)
-            .unwrap_or(std::ptr::null());
+        // The callee's own module, not the caller's — see `call_closure`.
+        let inherited_mg = closure.module_globals.as_ptr();
         let entry_line = closure.function.chunk.lines.first().copied().unwrap_or(0);
         self.jit_frame_push_raw(Rc::as_ptr(closure), slot_offset, inherited_mg, entry_line);
         let vm_ptr = self as *mut VM;
@@ -3783,8 +3783,10 @@ impl VM {
 
         let slot_offset = self.stack.len() - expected - 1; // -1 for the function itself
 
-        // Inherit module globals so nested calls within a module function keep module scope.
-        let inherited_mg = module_globals.or_else(|| self.active_module_globals_rc());
+        // A function resolves its free names in the module it was DEFINED in, so
+        // fall back to the callee's own module — never the caller's. `module_globals`
+        // is the override struct-method dispatch passes for the defining def.
+        let inherited_mg = module_globals.or_else(|| closure.module_globals.get());
 
         // The JIT helper drives execute_until for exactly this one activation.
         let stop_depth = self.frames.len();
@@ -4265,10 +4267,10 @@ impl VM {
         for value in globals_rc.values() {
             match value.repr() {
                 ValueRepr::Closure(closure) => {
-                    *closure.module_globals.borrow_mut() = Some(Rc::clone(&globals_rc));
+                    closure.module_globals.set(Some(Rc::clone(&globals_rc)));
                 }
                 ValueRepr::StructDef(def) => {
-                    *def.module_globals.borrow_mut() = Some(Rc::clone(&globals_rc));
+                    def.module_globals.set(Some(Rc::clone(&globals_rc)));
                 }
                 _ => {}
             }

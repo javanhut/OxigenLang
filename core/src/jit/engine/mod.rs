@@ -44,8 +44,8 @@ pub(crate) use cache::{
 pub(crate) use counters::{HelperCounter, JitCounters};
 use counters::{counter_offsets, emit_counter_bump};
 use defs::{
-    Entry, vm_jit_frame_view_len_offset, vm_jit_frame_view_ptr_offset, vm_stack_view_len_offset,
-    vm_stack_view_ptr_offset,
+    Entry, obj_closure_module_globals_offset, vm_jit_frame_view_len_offset,
+    vm_jit_frame_view_ptr_offset, vm_stack_view_len_offset, vm_stack_view_ptr_offset,
 };
 pub(crate) use defs::{EntryKind, InvokeOutcome, SpecializedEntryKind};
 use helpers::{HelperIds, HelperRefs, declare_helper_refs, declare_helpers, register_helpers};
@@ -2140,11 +2140,13 @@ impl JitInner {
                                     .iconst(types::I64, std::mem::size_of::<JitFrame>() as i64);
                                 let frame_off = builder.ins().imul(jit_frames_len, frame_size);
                                 let new_frame_ptr = builder.ins().iadd(jit_frames_ptr, frame_off);
+                                // The callee's own module, never the caller's — a frame's scope
+                                // follows the function that was defined there.
                                 let module_globals = builder.ins().load(
                                     ptr_ty,
                                     flags,
-                                    caller_frame_ptr,
-                                    JitFrame::OFFSET_MODULE_GLOBALS,
+                                    closure_ptr,
+                                    obj_closure_module_globals_offset(),
                                 );
                                 let line_val = builder.ins().iconst(types::I32, line as i64);
                                 builder.ins().store(
@@ -2463,13 +2465,11 @@ impl JitInner {
                                     builder.ins().imul(jit_frames_len_ca, frame_size_ca);
                                 let new_frame_ptr_ca =
                                     builder.ins().iadd(jit_frames_ptr_ca, frame_off_ca);
-                                let caller_frame_ptr_ca =
-                                    emit_load_top_jit_frame_ptr(&mut builder, vm_val);
                                 let module_globals_ca = builder.ins().load(
                                     ptr_ty,
                                     flags,
-                                    caller_frame_ptr_ca,
-                                    JitFrame::OFFSET_MODULE_GLOBALS,
+                                    closure_obj_ptr,
+                                    obj_closure_module_globals_offset(),
                                 );
                                 let line_val_ca =
                                     builder.ins().iconst(types::I32, line as i64);
@@ -2623,14 +2623,6 @@ impl JitInner {
                                 .iconst(types::I64, std::mem::size_of::<JitFrame>() as i64);
                             let frame_off = builder.ins().imul(jit_frames_len, frame_size);
                             let new_frame_ptr = builder.ins().iadd(jit_frames_ptr, frame_off);
-                            let caller_frame_ptr =
-                                emit_load_top_jit_frame_ptr(&mut builder, vm_val);
-                            let module_globals = builder.ins().load(
-                                ptr_ty,
-                                flags,
-                                caller_frame_ptr,
-                                JitFrame::OFFSET_MODULE_GLOBALS,
-                            );
                             let thunk_raw = builder.ins().load(
                                 ptr_ty,
                                 flags,
@@ -2641,6 +2633,12 @@ impl JitInner {
                             // Adjust by RC_VALUE_OFFSET so closure_raw points at ObjClosure, not the RcBox header.
                             let closure_t_ptr =
                                 builder.ins().iadd_imm(curr_rc, RC_VALUE_OFFSET as i64);
+                            let module_globals = builder.ins().load(
+                                ptr_ty,
+                                flags,
+                                closure_t_ptr,
+                                obj_closure_module_globals_offset(),
+                            );
                             builder.ins().store(
                                 flags,
                                 closure_t_ptr,
@@ -3152,13 +3150,11 @@ impl JitInner {
                                     .iconst(types::I64, std::mem::size_of::<JitFrame>() as i64);
                                 let frame_off = builder.ins().imul(jit_frames_len, frame_size);
                                 let new_frame_ptr = builder.ins().iadd(jit_frames_ptr, frame_off);
-                                let caller_frame_ptr =
-                                    emit_load_top_jit_frame_ptr(&mut builder, vm_val);
                                 let module_globals = builder.ins().load(
                                     ptr_ty,
                                     flags,
-                                    caller_frame_ptr,
-                                    JitFrame::OFFSET_MODULE_GLOBALS,
+                                    closure_raw_t,
+                                    obj_closure_module_globals_offset(),
                                 );
                                 // JitFrame stores the T pointer, not the RcBox pointer.
                                 builder.ins().store(

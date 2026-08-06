@@ -1796,7 +1796,7 @@ impl Compiler {
                         methods: std::cell::RefCell::new(std::collections::HashMap::new()),
                         parent: parent.as_ref().map(|p| p.value.clone()),
                         layout: std::cell::OnceCell::new(),
-                        module_globals: std::cell::RefCell::new(None),
+                        module_globals: crate::vm::value::ModuleGlobals::none(),
                     }));
                 let const_idx = self.make_constant(struct_def, line);
                 self.emit_op_u16(OpCode::Constant, const_idx, line);
@@ -3085,7 +3085,7 @@ impl Compiler {
             Value::Closure(std::rc::Rc::new(crate::vm::value::ObjClosure {
                 function: std::rc::Rc::new(function),
                 upvalues: Vec::new(), // placeholder, VM fills real upvalues
-                module_globals: std::cell::RefCell::new(None),
+                module_globals: crate::vm::value::ModuleGlobals::none(),
                 call_count: std::cell::Cell::new(0),
                 loop_count: std::cell::Cell::new(0),
                 jit_state: std::cell::Cell::new(0),

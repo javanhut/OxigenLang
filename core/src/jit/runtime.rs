@@ -1262,7 +1262,7 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
         (cache.struct_def.as_ref(), cache.closure.as_ref())
         && Rc::ptr_eq(cached_def, &struct_def) {
             let closure = Rc::clone(cached_closure);
-            let owning_mg = struct_def.module_globals.borrow().clone();
+            let owning_mg = struct_def.module_globals.get();
             let before_depth = vm.frames_len();
             return match vm.call_struct_method_with_closure(closure, ac, owning_mg) {
                 Ok(()) => {
@@ -1337,7 +1337,7 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
                 }
             cache.struct_def = Some(Rc::clone(&struct_def));
             cache.closure = Some(Rc::clone(&closure));
-            let owning_mg = struct_def.module_globals.borrow().clone();
+            let owning_mg = struct_def.module_globals.get();
             let before_depth = vm.frames_len();
             match vm.call_struct_method_with_closure(closure, ac, owning_mg) {
                 Ok(()) => {
