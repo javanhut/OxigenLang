@@ -283,7 +283,6 @@ impl NanValue {
         if (SMI_MIN..=SMI_MAX).contains(&n) {
             Self::smi_from_i64_unchecked(n)
         } else {
-            // Box the outlier into a heap i64.
             let rc: Rc<i64> = Rc::new(n);
             Self::from_rc_pointer_b(Rc::into_raw(rc) as *const (), PointerKindB::BoxedInt)
         }
@@ -1296,7 +1295,6 @@ mod tests {
         let v2 = v.clone();
         assert_eq!(Rc::strong_count(&inst), before + 2);
 
-        // Drop both NanValues.
         drop(v);
         assert_eq!(Rc::strong_count(&inst), before + 1);
         drop(v2);

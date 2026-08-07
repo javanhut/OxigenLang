@@ -175,13 +175,11 @@ impl Lexer {
             return tok;
         }
 
-        // Handle indentation at line start (indent mode only)
         if self.indent_mode && self.at_line_start {
             self.at_line_start = false;
             let indent_level = self.measure_indentation();
             self.handle_indentation(indent_level);
 
-            // Check if we queued any dedent tokens
             if let Some(tok) = self.pending_tokens.pop_front() {
                 return tok;
             }
@@ -225,7 +223,6 @@ impl Lexer {
                 // At EOF in indent mode, emit RBrace for any remaining open blocks
                 if self.indent_mode && self.indent_stack.len() > 1 {
                     self.indent_stack.pop();
-                    // Queue remaining closes
                     while self.indent_stack.len() > 1 {
                         self.indent_stack.pop();
                         self.pending_tokens.push_back(Token {
@@ -234,7 +231,6 @@ impl Lexer {
                             span,
                         });
                     }
-                    // Queue the final EOF
                     self.pending_tokens.push_back(Token {
                         token_type: TokenType::Eof,
                         literal: "".into(),
@@ -339,7 +335,7 @@ impl Lexer {
             ':' => {
                 // In indent mode, colon at end of line becomes LBrace
                 if self.indent_mode && self.is_colon_at_eol() {
-                    self.read_char(); // consume ':'
+                    self.read_char();
                     Token {
                         token_type: TokenType::LBrace,
                         literal: "{".into(),
@@ -499,8 +495,8 @@ impl Lexer {
 
     fn skip_line_comment(&mut self) {
         let (span, own_line, start) = self.comment_start();
-        self.read_char(); // skip first '/'
-        self.read_char(); // skip second '/'
+        self.read_char();
+        self.read_char();
         while self.ch != '\n' && self.ch != '\0' {
             self.read_char();
         }
@@ -510,16 +506,16 @@ impl Lexer {
 
     fn skip_block_comment(&mut self) {
         let (span, own_line, start) = self.comment_start();
-        self.read_char(); // skip '/'
-        self.read_char(); // skip '*'
+        self.read_char();
+        self.read_char();
         let mut closed = false;
         loop {
             if self.ch == '\0' {
                 break;
             }
             if self.ch == '*' && self.peek_char() == '/' {
-                self.read_char(); // skip '*'
-                self.read_char(); // skip '/'
+                self.read_char();
+                self.read_char();
                 closed = true;
                 break;
             }
@@ -595,10 +591,9 @@ impl Lexer {
             self.read_char();
         }
 
-        // Check for decimal point followed by digits
         if self.ch == '.' && self.peek_char().is_ascii_digit() {
             is_float = true;
-            self.read_char(); // consume '.'
+            self.read_char();
             while self.ch.is_ascii_digit() {
                 self.read_char();
             }
@@ -677,7 +672,6 @@ impl Lexer {
     fn read_string(&mut self, delimiter: char, triple: bool, span: Span) -> Token {
         self.consume_quote_fence(triple); // opening quote(s)
 
-        // Check if this string contains interpolation
         let has_interp = self.string_has_interpolation(delimiter, triple);
 
         if !has_interp {
@@ -732,7 +726,7 @@ impl Lexer {
                     span: expr_span,
                 });
 
-                self.read_char(); // skip '{'
+                self.read_char();
 
                 // Lex tokens inside {} using a brace depth counter
                 let mut brace_depth = 1;
@@ -785,7 +779,7 @@ impl Lexer {
                     span: end_span,
                 });
 
-                self.read_char(); // skip closing '}'
+                self.read_char();
             } else if self.ch == '\\' {
                 self.push_escape_sequence(&mut literal_buf, delimiter);
             } else {
@@ -861,7 +855,7 @@ impl Lexer {
     }
 
     fn push_escape_sequence(&mut self, literal: &mut std::string::String, delimiter: char) {
-        self.read_char(); // consume '\'
+        self.read_char();
         match self.ch {
             'n' => {
                 literal.push('\n');
@@ -882,9 +876,9 @@ impl Lexer {
             'x' if self.peek_hex_byte().is_some() => {
                 let value = self.peek_hex_byte().unwrap();
                 literal.push(value as char);
-                self.read_char(); // consume 'x'
-                self.read_char(); // consume first hex digit
-                self.read_char(); // consume second hex digit
+                self.read_char();
+                self.read_char();
+                self.read_char();
             }
             '\\' => {
                 literal.push('\\');
@@ -957,15 +951,14 @@ impl Lexer {
     }
 
     fn read_char_literal(&mut self, span: Span) -> Token {
-        self.read_char(); // opening `
+        self.read_char();
         let start = self.position;
         while self.ch != '`' && self.ch != '\0' {
             self.read_char();
         }
         let literal: String = self.input[start..self.position].iter().collect();
-        self.read_char(); // closing `
+        self.read_char();
 
-        // Validate it's exactly one character
         if literal.chars().count() != 1 {
             let span = Span::range(span.start, self.pos());
             self.diagnostics.push(
@@ -1015,7 +1008,6 @@ impl Lexer {
         let mut indent = 0;
         let mut pos = self.position;
 
-        // If we're past a newline, start from read_position
         if self.ch == '\n' {
             pos = self.read_position;
         }

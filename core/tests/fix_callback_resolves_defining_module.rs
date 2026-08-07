@@ -12,7 +12,6 @@
 //! break — both directions are asserted here, in the interpreter and under the
 //! JIT (the emitted call sequence copied the same caller-frame pointer).
 
-use std::path::PathBuf;
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;

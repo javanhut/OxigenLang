@@ -209,8 +209,6 @@ pub unsafe extern "C" fn jit_push_float_inline(vm: *mut VM, bits: u64) {
     vm.push(Value::Float(f64::from_bits(bits)));
 }
 
-// Removed once virt_stack absorbed every zero-payload push site.
-
 // ── Stack manipulation ─────────────────────────────────────────────────
 
 pub unsafe extern "C" fn jit_pop(vm: *mut VM) {

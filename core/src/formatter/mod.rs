@@ -67,7 +67,6 @@ impl Formatter {
 
     fn run(mut self, program: &Program) -> String {
         self.format_program(program);
-        // Ensure file ends with exactly one newline
         let result = self.output.trim_end().to_string();
         if result.is_empty() {
             String::new()
@@ -700,7 +699,6 @@ impl Formatter {
             Expression::Float { value, .. } => {
                 let s = value.to_string();
                 self.push(&s);
-                // Ensure float always has a decimal point
                 if !s.contains('.') {
                     self.push(".0");
                 }

@@ -609,10 +609,8 @@ impl Parser {
             value: name_token.literal.clone(),
         };
 
-        // consume ':='
         self.expect_peek(TokenType::Walrus)?;
 
-        // move to expression start
         self.next_token();
 
         let value = self.parse_expression(Precedence::Lowest)?;
@@ -627,7 +625,6 @@ impl Parser {
             let tt = self.peek_nth(idx).token_type.clone();
             match tt {
                 TokenType::Comma => {
-                    // Next should be an ident
                     let next = self.peek_nth(idx + 1).token_type.clone();
                     if next != TokenType::Ident {
                         return false;
@@ -643,7 +640,6 @@ impl Parser {
     fn parse_unpack_statement(&mut self) -> Option<Statement> {
         let mut names = Vec::new();
 
-        // First identifier (curr_token)
         names.push(Identifier {
             token: self.curr_token.clone(),
             value: self.curr_token.literal.clone(),
@@ -670,10 +666,8 @@ impl Parser {
             });
         }
 
-        // consume ':='
         self.expect_peek(TokenType::Walrus)?;
 
-        // move to expression
         self.next_token();
         let first_value = self.parse_expression(Precedence::Lowest)?;
 
@@ -723,7 +717,6 @@ impl Parser {
     fn parse_unpack_reassign_statement(&mut self) -> Option<Statement> {
         let mut names = Vec::new();
 
-        // First identifier (curr_token)
         names.push(Identifier {
             token: self.curr_token.clone(),
             value: self.curr_token.literal.clone(),
@@ -750,10 +743,8 @@ impl Parser {
             });
         }
 
-        // consume '='
         self.expect_peek(TokenType::Assign)?;
 
-        // move to expression
         self.next_token();
         let first_value = self.parse_expression(Precedence::Lowest)?;
 
@@ -792,7 +783,6 @@ impl Parser {
         self.expect_peek(TokenType::Lt)?;
         let type_ann = self.parse_type_annotation()?;
 
-        // determine walrus or strict assign
         let walrus = self.peek_token.token_type == TokenType::Walrus;
         if walrus {
             self.expect_peek(TokenType::Walrus)?;
@@ -800,7 +790,6 @@ impl Parser {
             self.expect_peek(TokenType::Assign)?;
         }
 
-        // move to expression start
         self.next_token();
         let value = self.parse_expression(Precedence::Lowest)?;
 
@@ -819,7 +808,6 @@ impl Parser {
             value: name_token.literal.clone(),
         };
 
-        // consume 'as'
         self.expect_peek(TokenType::As)?;
 
         // consume '<type>' (and any || continuations)
@@ -851,10 +839,8 @@ impl Parser {
             value: name_token.literal.clone(),
         };
 
-        // consume '='
         self.expect_peek(TokenType::Assign)?;
 
-        // move to expression start
         self.next_token();
         let value = self.parse_expression(Precedence::Lowest)?;
 
@@ -1277,7 +1263,7 @@ impl Parser {
             }
         } else {
             // <log> — no tags
-            self.expect_peek(TokenType::Gt)?; // close '>'
+            self.expect_peek(TokenType::Gt)?;
         }
 
         // Optional parenthesized message
@@ -1536,7 +1522,6 @@ impl Parser {
         let tok = self.curr_token.clone(); // '{'
         let mut entries = Vec::new();
 
-        // Skip newlines
         while self.peek_token.token_type == TokenType::Newline {
             self.next_token();
         }
@@ -1553,7 +1538,6 @@ impl Parser {
         loop {
             self.next_token(); // move to key
 
-            // Skip newlines
             while self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -1568,12 +1552,10 @@ impl Parser {
             let value = self.parse_expression(Precedence::Lowest)?;
             entries.push((key, value));
 
-            // Skip comma if present
             if self.peek_token.token_type == TokenType::Comma {
                 self.next_token();
             }
 
-            // Skip newlines
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -1614,7 +1596,7 @@ impl Parser {
             self.next_token(); // curr = 'each'
             return self.parse_diverge_each(tok);
         }
-        self.expect_peek(TokenType::LBrace)?; // '{'
+        self.expect_peek(TokenType::LBrace)?;
         let body = self.parse_block()?;
         Some(Expression::Diverge { token: tok, body })
     }
@@ -1800,8 +1782,8 @@ impl Parser {
                     });
                 }
             }
-            self.expect_peek(TokenType::RBrace)?; // consume '}'
-            self.expect_peek(TokenType::From)?; // consume 'from'
+            self.expect_peek(TokenType::RBrace)?;
+            self.expect_peek(TokenType::From)?;
             let path = self.parse_module_path()?;
             Some(Statement::Introduce {
                 token,
@@ -2019,7 +2001,6 @@ impl Parser {
                 args.push(expr);
             }
 
-            // Skip newlines between an argument and the following comma or ')'.
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2206,7 +2187,6 @@ impl Parser {
 
         let mut field_values = Vec::new();
 
-        // Skip newlines after '{'
         while self.peek_token.token_type == TokenType::Newline {
             self.next_token();
         }
@@ -2224,7 +2204,6 @@ impl Parser {
         loop {
             self.next_token(); // move to field name
 
-            // Skip newlines
             while self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2234,17 +2213,15 @@ impl Parser {
             }
 
             let field_name = self.curr_token.literal.clone();
-            self.expect_peek(TokenType::Colon)?; // ':'
+            self.expect_peek(TokenType::Colon)?;
             self.next_token(); // move to value expression
             let value = self.parse_expression(Precedence::Lowest)?;
             field_values.push((field_name, value));
 
-            // Skip comma if present
             if self.peek_token.token_type == TokenType::Comma {
                 self.next_token();
             }
 
-            // Skip newlines
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2265,7 +2242,6 @@ impl Parser {
     fn parse_expression_list(&mut self, end: TokenType) -> Option<Vec<Expression>> {
         let mut args = Vec::new();
 
-        // Skip newlines after the opening bracket.
         while self.peek_token.token_type == TokenType::Newline {
             self.next_token();
         }
@@ -2280,7 +2256,6 @@ impl Parser {
         args.push(self.parse_expression(Precedence::Lowest)?);
 
         loop {
-            // Skip newlines between an element and the following comma or `]`.
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2290,7 +2265,6 @@ impl Parser {
             }
             self.next_token(); // consume comma
 
-            // Skip newlines after the comma.
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2313,7 +2287,7 @@ impl Parser {
     // each num in x { ... }
     fn parse_main_block(&mut self) -> Option<Statement> {
         let token = self.curr_token.clone(); // 'main'
-        self.expect_peek(TokenType::LBrace)?; // curr is now '{'
+        self.expect_peek(TokenType::LBrace)?;
         let body = self.parse_block()?;
         Some(Statement::Main { token, body })
     }
@@ -2322,12 +2296,12 @@ impl Parser {
     fn parse_test_statement(&mut self) -> Option<Statement> {
         let token = self.curr_token.clone(); // '<'
         self.next_token(); // move to 'test'
-        self.expect_peek(TokenType::Gt)?; // curr is now '>'
-        self.expect_peek(TokenType::LParen)?; // curr is now '('
+        self.expect_peek(TokenType::Gt)?;
+        self.expect_peek(TokenType::LParen)?;
         self.next_token(); // move to the name expression
         let name = self.parse_expression(Precedence::Lowest)?;
-        self.expect_peek(TokenType::RParen)?; // curr is now ')'
-        self.expect_peek(TokenType::LBrace)?; // curr is now '{'
+        self.expect_peek(TokenType::RParen)?;
+        self.expect_peek(TokenType::LBrace)?;
         let body = self.parse_block()?;
         Some(Statement::Test { token, name, body })
     }
@@ -2353,12 +2327,12 @@ impl Parser {
             };
         }
 
-        self.expect_peek(TokenType::In)?; // 'in'
+        self.expect_peek(TokenType::In)?;
         self.next_token(); // move to iterable
 
         let iterable = self.parse_expression(Precedence::Lowest)?;
 
-        self.expect_peek(TokenType::LBrace)?; // '{'
+        self.expect_peek(TokenType::LBrace)?;
         let body = self.parse_block()?;
 
         Some(Statement::Each {
@@ -2410,7 +2384,7 @@ impl Parser {
             value: self.curr_token.literal.clone(),
         };
 
-        self.expect_peek(TokenType::LParen)?; // '('
+        self.expect_peek(TokenType::LParen)?;
 
         // Parse parameters
         let mut params = Vec::new();
@@ -2430,9 +2404,9 @@ impl Parser {
                 });
             }
         }
-        self.expect_peek(TokenType::RParen)?; // ')'
+        self.expect_peek(TokenType::RParen)?;
 
-        self.expect_peek(TokenType::When)?; // 'when'
+        self.expect_peek(TokenType::When)?;
         self.next_token(); // move to condition
 
         let condition = self.parse_expression(Precedence::Lowest)?;
@@ -2452,22 +2426,19 @@ impl Parser {
         self.next_token(); // move to subject
         let subject = self.parse_expression(Precedence::Lowest)?;
 
-        self.expect_peek(TokenType::LBrace)?; // '{'
+        self.expect_peek(TokenType::LBrace)?;
 
         let mut arms = Vec::new();
 
-        // Skip newlines after opening brace
         while self.peek_token.token_type == TokenType::Newline {
             self.next_token();
         }
 
-        // Parse arms until we hit '}'
         while self.peek_token.token_type != TokenType::RBrace
             && self.peek_token.token_type != TokenType::Eof
         {
             self.next_token(); // move to pattern name or 'else'
 
-            // Skip newlines
             while self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2481,7 +2452,7 @@ impl Parser {
                 self.next_token(); // move to pattern name
                 let pattern_name = self.curr_token.literal.clone();
 
-                self.expect_peek(TokenType::LParen)?; // '('
+                self.expect_peek(TokenType::LParen)?;
 
                 let mut params = Vec::new();
                 if self.peek_token.token_type != TokenType::RParen {
@@ -2499,14 +2470,14 @@ impl Parser {
                         });
                     }
                 }
-                self.expect_peek(TokenType::RParen)?; // ')'
+                self.expect_peek(TokenType::RParen)?;
 
-                self.expect_peek(TokenType::When)?; // 'when'
+                self.expect_peek(TokenType::When)?;
                 self.next_token(); // move to condition
 
                 let condition = self.parse_expression(Precedence::Lowest)?;
 
-                self.expect_peek(TokenType::Arrow)?; // '->'
+                self.expect_peek(TokenType::Arrow)?;
                 self.next_token(); // move to body expression
 
                 let body = if self.curr_token.token_type == TokenType::LBrace {
@@ -2530,7 +2501,7 @@ impl Parser {
                 // Reference to pre-defined pattern
                 let pattern_name = self.curr_token.literal.clone();
 
-                self.expect_peek(TokenType::Arrow)?; // '->'
+                self.expect_peek(TokenType::Arrow)?;
                 self.next_token(); // move to body expression
 
                 let body = if self.curr_token.token_type == TokenType::LBrace {
@@ -2552,18 +2523,16 @@ impl Parser {
                 });
             }
 
-            // Skip comma if present
             if self.peek_token.token_type == TokenType::Comma {
                 self.next_token();
             }
 
-            // Skip newlines
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
         }
 
-        self.expect_peek(TokenType::RBrace)?; // '}'
+        self.expect_peek(TokenType::RBrace)?;
 
         Some(Statement::Choose {
             token,
@@ -2574,13 +2543,12 @@ impl Parser {
 
     fn parse_option_expression(&mut self) -> Option<Expression> {
         let token = self.curr_token.clone(); // 'option'
-        self.expect_peek(TokenType::LBrace)?; // '{'
+        self.expect_peek(TokenType::LBrace)?;
 
         let mut arms = Vec::new();
         let mut default: Option<Vec<Statement>> = None;
         let mut error_default: Option<Vec<Statement>> = None;
 
-        // Skip newlines after '{'
         while self.peek_token.token_type == TokenType::Newline {
             self.next_token();
         }
@@ -2590,7 +2558,6 @@ impl Parser {
         {
             self.next_token(); // move to condition/default expression
 
-            // Skip newlines
             while self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2606,8 +2573,8 @@ impl Parser {
                 && self.peek_nth(2).token_type == TokenType::Arrow
             {
                 self.next_token(); // move to Error
-                self.expect_peek(TokenType::Gt)?; // close '>'
-                self.expect_peek(TokenType::Arrow)?; // '->'
+                self.expect_peek(TokenType::Gt)?;
+                self.expect_peek(TokenType::Arrow)?;
                 self.next_token(); // move to body
 
                 let body = if self.curr_token.token_type == TokenType::LBrace {
@@ -2637,11 +2604,9 @@ impl Parser {
                 && !self.brace_opens_map_literal()
             {
                 default = Some(self.parse_block()?);
-                // Skip comma if present
                 if self.peek_token.token_type == TokenType::Comma {
                     self.next_token();
                 }
-                // Skip newlines
                 while self.peek_token.token_type == TokenType::Newline {
                     self.next_token();
                 }
@@ -2688,11 +2653,9 @@ impl Parser {
                         _ => {}
                     }
                 }
-                // Skip comma if present
                 if self.peek_token.token_type == TokenType::Comma {
                     self.next_token();
                 }
-                // Skip newlines
                 while self.peek_token.token_type == TokenType::Newline {
                     self.next_token();
                 }
@@ -2703,7 +2666,7 @@ impl Parser {
                 self.next_token(); // move to true value
                 let true_expr = self.parse_expression(Precedence::Lowest)?;
 
-                self.expect_peek(TokenType::Comma)?; // ','
+                self.expect_peek(TokenType::Comma)?;
                 self.next_token(); // move to false value
                 let false_expr = self.parse_expression(Precedence::Lowest)?;
 
@@ -2716,29 +2679,25 @@ impl Parser {
             } else {
                 // bare default (no ->)
                 default = Some(vec![Statement::Expr(expr)]);
-                // Skip comma if present
                 if self.peek_token.token_type == TokenType::Comma {
                     self.next_token();
                 }
-                // Skip newlines
                 while self.peek_token.token_type == TokenType::Newline {
                     self.next_token();
                 }
                 break;
             }
 
-            // Skip comma if present
             if self.peek_token.token_type == TokenType::Comma {
                 self.next_token();
             }
 
-            // Skip newlines
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
         }
 
-        self.expect_peek(TokenType::RBrace)?; // '}'
+        self.expect_peek(TokenType::RBrace)?;
 
         Some(Expression::Option {
             token,
@@ -2756,7 +2715,7 @@ impl Parser {
 
         let negated = Self::negate_expression(condition);
 
-        self.expect_peek(TokenType::LBrace)?; // '{'
+        self.expect_peek(TokenType::LBrace)?;
         let consequence = self.parse_block()?;
 
         Some(Statement::If {
@@ -2835,7 +2794,6 @@ impl Parser {
         let open_brace_span = self.curr_token.span;
         self.next_token(); // move past '{'
 
-        // Skip leading newlines
         while self.curr_token.token_type == TokenType::Newline {
             self.next_token();
         }
@@ -2848,7 +2806,6 @@ impl Parser {
             }
             self.next_token();
 
-            // Skip newlines
             while self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2885,7 +2842,7 @@ impl Parser {
                 token: self.curr_token.clone(),
                 value: self.curr_token.literal.clone(),
             };
-            self.expect_peek(TokenType::RParen)?; // consume ')'
+            self.expect_peek(TokenType::RParen)?;
             Some(parent_ident)
         } else if self.peek_token.token_type == TokenType::Ident
             && self.peek_token.literal == "includes"
@@ -2902,11 +2859,10 @@ impl Parser {
             None
         };
 
-        self.expect_peek(TokenType::LBrace)?; // '{'
+        self.expect_peek(TokenType::LBrace)?;
 
         let mut fields = Vec::new();
 
-        // Skip newlines after '{'
         while self.peek_token.token_type == TokenType::Newline {
             self.next_token();
         }
@@ -2917,7 +2873,6 @@ impl Parser {
         {
             self.next_token(); // move to field name
 
-            // Skip newlines
             while self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2950,7 +2905,7 @@ impl Parser {
                 value: self.curr_token.literal.clone(),
             };
 
-            self.expect_peek(TokenType::Lt)?; // '<'
+            self.expect_peek(TokenType::Lt)?;
             let type_ann = self.parse_type_annotation()?;
 
             fields.push(crate::ast::StructField {
@@ -2959,13 +2914,12 @@ impl Parser {
                 hidden,
             });
 
-            // Skip newlines
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
         }
 
-        self.expect_peek(TokenType::RBrace)?; // '}'
+        self.expect_peek(TokenType::RBrace)?;
 
         Some(Statement::StructDef {
             token,
@@ -2984,11 +2938,10 @@ impl Parser {
             value: self.curr_token.literal.clone(),
         };
 
-        self.expect_peek(TokenType::LBrace)?; // '{'
+        self.expect_peek(TokenType::LBrace)?;
 
         let mut variants: Vec<crate::ast::EnumVariant> = Vec::new();
 
-        // Skip newlines after '{'
         while self.peek_token.token_type == TokenType::Newline {
             self.next_token();
         }
@@ -2998,7 +2951,6 @@ impl Parser {
         {
             self.next_token(); // move to variant name (or a separator we skip)
 
-            // Skip newlines and commas between variants
             while self.curr_token.token_type == TokenType::Newline
                 || self.curr_token.token_type == TokenType::Comma
             {
@@ -3040,7 +2992,7 @@ impl Parser {
                                 token: self.curr_token.clone(),
                                 value: self.curr_token.literal.clone(),
                             };
-                            self.expect_peek(TokenType::Lt)?; // '<'
+                            self.expect_peek(TokenType::Lt)?;
                             let type_ann = self.parse_type_annotation()?;
                             params.push((param_name, type_ann));
                             if self.peek_token.token_type == TokenType::Comma {
@@ -3101,7 +3053,6 @@ impl Parser {
                 kind,
             });
 
-            // Skip trailing newlines or commas between variants
             while self.peek_token.token_type == TokenType::Newline
                 || self.peek_token.token_type == TokenType::Comma
             {
@@ -3126,11 +3077,10 @@ impl Parser {
         let token = self.curr_token.clone();
 
         self.next_token(); // consume the `includes` identifier (contextual keyword)
-        self.expect_peek(TokenType::LBrace)?; // '{'
+        self.expect_peek(TokenType::LBrace)?;
 
         let mut methods = Vec::new();
 
-        // Skip newlines after '{'
         while self.peek_token.token_type == TokenType::Newline {
             self.next_token();
         }
@@ -3141,7 +3091,6 @@ impl Parser {
         {
             self.next_token(); // move to 'fun'
 
-            // Skip newlines
             while self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -3184,13 +3133,12 @@ impl Parser {
 
             methods.push((method_name, func_expr));
 
-            // Skip newlines
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
         }
 
-        self.expect_peek(TokenType::RBrace)?; // '}'
+        self.expect_peek(TokenType::RBrace)?;
 
         Some(Statement::IncludesDef {
             token,

@@ -26,7 +26,6 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 	for i, line := range lines {
 		lineNum := uint32(i)
 
-		// Function declaration
 		if m := funRe.FindStringSubmatchIndex(line); m != nil {
 			name := line[m[2]:m[3]]
 			col := uint32(m[2])
@@ -40,13 +39,11 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 			continue
 		}
 
-		// Struct definition
 		if m := structRe.FindStringSubmatchIndex(line); m != nil {
 			name := line[m[2]:m[3]]
 			col := uint32(m[2])
 			symbols = append(symbols, makeSymbol(name, SymbolKindStruct, uri, lineNum, col))
 
-			// Extract fields from subsequent lines
 			for j := i + 1; j < len(lines); j++ {
 				fieldLine := strings.TrimSpace(lines[j])
 				if fieldLine == "}" || fieldLine == "" {
@@ -91,7 +88,6 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 			continue
 		}
 
-		// Pattern declaration
 		if m := patternRe.FindStringSubmatchIndex(line); m != nil {
 			name := line[m[2]:m[3]]
 			col := uint32(m[2])
@@ -110,7 +106,6 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 			continue
 		}
 
-		// Variable assignment at top level
 		if m := letRe.FindStringSubmatchIndex(line); m != nil {
 			indent := countLeadingSpaces(line)
 			if indent == 0 {
@@ -126,7 +121,6 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 			continue
 		}
 
-		// Typed variable at top level
 		if m := typedLetRe.FindStringSubmatchIndex(line); m != nil {
 			indent := countLeadingSpaces(line)
 			if indent == 0 {

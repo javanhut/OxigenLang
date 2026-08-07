@@ -414,7 +414,6 @@ impl VM {
 
     pub fn set_script_args(&mut self, args: &[String]) {
         self.script_args = args.to_vec();
-        // Make script args available as __args global
         let args_val: Vec<Value> = args
             .iter()
             .map(|a| Value::String(rc_str(a.as_str())))
@@ -876,7 +875,7 @@ impl VM {
                 // Direct Vec index via the instance's cached layout, no HashMap in the hot path.
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
                     // slots[idx].2 is the `hide` flag from the declaration.
-                    if inst.layout.slots[idx].2 && !self.hidden_field_access_allowed(&inst) {
+                    if inst.layout.slots[idx].2 && !self.hidden_field_access_allowed(inst) {
                         return Err(self.hidden_field_error(fname, &inst.struct_name));
                     }
                     return Ok(inst.get_field(idx));
@@ -1114,7 +1113,7 @@ impl VM {
         match object.repr() {
             ValueRepr::StructInstance(inst) => {
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
-                    if inst.layout.slots[idx].2 && !self.hidden_field_access_allowed(&inst) {
+                    if inst.layout.slots[idx].2 && !self.hidden_field_access_allowed(inst) {
                         return Err(self.hidden_field_error(fname, &inst.struct_name));
                     }
                     inst.set_field(idx, value);
@@ -2243,7 +2242,6 @@ impl VM {
                         self.error_handlers.pop();
                     }
 
-                    // Close upvalues
                     self.close_upvalues(frame.slot_offset);
 
                     // Pop the function's stack slots
@@ -2490,7 +2488,6 @@ impl VM {
                     let selective_count = self.frames[frame_idx].read_byte() as usize;
                     let path = self.frames[frame_idx].read_constant(path_idx).clone();
 
-                    // Collect selective names
                     let mut selective_names = Vec::new();
                     for _ in 0..selective_count {
                         let name = self.pop();
@@ -3972,7 +3969,6 @@ impl VM {
     // ── Upvalue Management ──────────────────────────────────────────────
 
     pub(crate) fn capture_upvalue(&mut self, stack_slot: usize) -> Rc<RefCell<Upvalue>> {
-        // Check if we already have an open upvalue for this slot
         for uv in &self.open_upvalues {
             if let Upvalue::Open(slot) = &*uv.borrow()
                 && *slot == stack_slot {
@@ -4312,15 +4308,12 @@ impl VM {
     // ── Module System ───────────────────────────────────────────────────
 
     fn import_module(&mut self, path_str: &str, selective_names: &[String]) -> Result<(), VMError> {
-        // Resolve the module path
         let module_path = self.resolve_module_path(path_str)?;
 
-        // Check cache
         if let Some(cached) = self.module_cache.get(&module_path).cloned() {
             return self.bind_module(&cached, path_str, selective_names);
         }
 
-        // Check circular imports
         if self.import_stack.contains(&module_path) {
             return Err(self.runtime_error_hint(
                 &format!("circular import: {}", module_path.display()),
@@ -4362,7 +4355,6 @@ impl VM {
         });
         crate::vm::value::set_module_origin(&function, &origin);
 
-        // Execute in a sub-VM
         let mut sub_vm = VM::new();
         sub_vm.set_source(&source);
         sub_vm.set_file(module_path.clone());

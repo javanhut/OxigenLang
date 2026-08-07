@@ -355,7 +355,6 @@ impl Compiler {
             typed_globals: std::collections::HashSet::new(),
             fn_counter: 0,
         };
-        // Push the top-level script frame.
         compiler.frames.push(CompilerFrame::new(None, 0));
         compiler
     }
@@ -738,7 +737,6 @@ impl Compiler {
         self.current_frame_mut().scope_depth -= 1;
         let depth = self.current_frame().scope_depth;
 
-        // Collect which locals to pop and whether they need CloseUpvalue.
         let mut ops: Vec<bool> = Vec::new(); // true = captured, false = not
         while let Some(local) = self.current_frame().locals.last() {
             if local.depth <= depth {
@@ -748,7 +746,6 @@ impl Compiler {
             self.current_frame_mut().locals.pop();
         }
 
-        // Emit the ops
         for captured in ops {
             if captured {
                 self.emit_op(OpCode::CloseUpvalue, line);
@@ -900,7 +897,6 @@ impl Compiler {
             return None;
         }
 
-        // Check if it's a local in the enclosing frame.
         let parent_idx = frame_idx - 1;
         let local_slot = {
             let parent = &self.frames[parent_idx];
@@ -918,7 +914,6 @@ impl Compiler {
             return Some(self.add_upvalue(frame_idx, slot, true));
         }
 
-        // Recursively check further enclosing scopes.
         if let Some(upvalue_idx) = self.resolve_upvalue(parent_idx, name) {
             return Some(self.add_upvalue(frame_idx, upvalue_idx, false));
         }
@@ -928,7 +923,6 @@ impl Compiler {
 
     fn add_upvalue(&mut self, frame_idx: usize, index: u16, is_local: bool) -> u16 {
         let frame = &mut self.frames[frame_idx];
-        // Check if we already have this upvalue.
         for (i, uv) in frame.upvalues.iter().enumerate() {
             if uv.index == index && uv.is_local == is_local {
                 return i as u16;
@@ -1185,7 +1179,6 @@ impl Compiler {
                         self.emit_op_u16(OpCode::SetGlobal, name_const, line);
                         self.emit_op(OpCode::Pop, line);
                     } else if self.current_frame().scope_depth > 0 {
-                        // New local variable
                         self.add_local(&name.value, BindingKind::Mutable, None);
                     } else {
                         // Global — DefineGlobal overwrites
@@ -1321,7 +1314,6 @@ impl Compiler {
             }
 
             Statement::Assign { name, value } => {
-                // Check immutability for locals at compile time
                 if let Some(slot) = self.resolve_local(&name.value)
                     && !self.current_frame().locals[slot as usize].kind.is_mutable()
                 {
@@ -1371,9 +1363,8 @@ impl Compiler {
             } => {
                 self.compile_expression(condition);
                 let then_jump = self.emit_jump(OpCode::JumpIfFalse, line);
-                self.emit_op(OpCode::Pop, line); // pop condition (true path)
+                self.emit_op(OpCode::Pop, line);
 
-                // Compile consequence in its own scope
                 self.begin_scope();
                 for s in consequence {
                     self.compile_statement(s);
@@ -1383,7 +1374,7 @@ impl Compiler {
                 // Always jump over the false-path Pop (and alternative if present)
                 let else_jump = self.emit_jump(OpCode::Jump, line);
                 self.patch_jump(then_jump);
-                self.emit_op(OpCode::Pop, line); // pop condition (false path)
+                self.emit_op(OpCode::Pop, line);
 
                 if let Some(alt) = alternative {
                     self.begin_scope();
@@ -1414,12 +1405,10 @@ impl Compiler {
                     .loop_handler_depths
                     .push(handler_floor);
 
-                // Compile condition
                 self.compile_expression(condition);
                 let exit_jump = self.emit_jump(OpCode::JumpIfFalse, line);
-                self.emit_op(OpCode::Pop, line); // pop condition
+                self.emit_op(OpCode::Pop, line);
 
-                // Compile body
                 self.begin_scope();
                 for s in body {
                     self.compile_statement(s);
@@ -1435,14 +1424,11 @@ impl Compiler {
                 self.current_frame_mut().loop_exit_floors.pop();
                 self.current_frame_mut().loop_handler_depths.pop();
 
-                // Loop back
                 self.emit_loop(loop_start, line);
 
-                // Patch exit
                 self.patch_jump(exit_jump);
-                self.emit_op(OpCode::Pop, line); // pop condition
+                self.emit_op(OpCode::Pop, line);
 
-                // Patch any `stop` jumps
                 let exits = self.current_frame_mut().loop_exits.pop().unwrap();
                 for exit in exits {
                     self.patch_jump(exit);
@@ -1529,7 +1515,6 @@ impl Compiler {
                         line,
                     );
                 } else {
-                    // len(iterable) > index
                     self.emit_op_u16(OpCode::GetLocal, iter_slot, line);
                     self.emit_op(OpCode::IterLen, line);
                     self.emit_op_u16(OpCode::GetLocal, index_slot, line);
@@ -1626,14 +1611,11 @@ impl Compiler {
                 self.emit_op_u16(OpCode::SetLocal, index_slot, line);
                 self.emit_op(OpCode::Pop, line);
 
-                // Loop back
                 self.emit_loop(loop_start, line);
 
-                // Patch exit
                 self.patch_jump(exit_jump);
                 self.emit_op(OpCode::Pop, line);
 
-                // Patch stop jumps
                 let exits = self.current_frame_mut().loop_exits.pop().unwrap();
                 for exit in exits {
                     self.patch_jump(exit);
@@ -1781,7 +1763,6 @@ impl Compiler {
                 fields,
                 ..
             } => {
-                // Compile struct definition
                 let field_info: Vec<(String, String, bool)> = fields
                     .iter()
                     .map(|f| (f.name.value.clone(), f.type_ann.type_name(), f.hidden))
@@ -1893,7 +1874,6 @@ impl Compiler {
                         parameters, body, ..
                     } = method_expr
                     {
-                        // Add `self` as implicit first parameter
                         let mut method_params = vec![TypedParam {
                             ident: Identifier {
                                 token: crate::token::Token {
@@ -1912,12 +1892,10 @@ impl Compiler {
                     } else {
                         self.compile_expression(method_expr);
                     }
-                    // Push method name string
                     self.emit_constant(Value::String(rc_str(method_name.value.as_str())), line);
                 }
                 self.method_field_stack.pop();
                 self.method_struct_stack.pop();
-                // Emit DefineMethod opcode
                 let struct_const =
                     self.make_constant(Value::String(rc_str(struct_name.value.as_str())), line);
                 self.emit_op_u16(OpCode::DefineMethod, struct_const, line);
@@ -1974,7 +1952,6 @@ impl Compiler {
                         self.emit_op_u16(OpCode::DefineGlobal, nc, line);
                     }
 
-                    // Call pattern function with subject
                     let pattern_global = format!("__pattern_{}", arm.pattern_name);
                     let pg_const =
                         self.make_constant(Value::String(rc_str(pattern_global.as_str())), line);
@@ -1983,7 +1960,6 @@ impl Compiler {
                     self.emit_op_u16(OpCode::GetGlobal, subj_const, line);
                     self.emit_op_u8(OpCode::Call, 1, line);
 
-                    // Check result
                     let skip = self.emit_jump(OpCode::JumpIfFalse, line);
                     self.emit_op(OpCode::Pop, line); // pop True
 
@@ -2013,7 +1989,6 @@ impl Compiler {
             Statement::Introduce {
                 path, selective, ..
             } => {
-                // Push the module path as a string
                 let path_str = if path.is_relative {
                     let mut s = String::new();
                     for _ in 0..path.parent_levels {
@@ -2214,7 +2189,6 @@ impl Compiler {
             Expression::Postfix { operator, left, .. } => {
                 // Postfix requires an identifier
                 if let Expression::Ident(ident) = left.as_ref() {
-                    // Check immutability
                     if let Some(slot) = self.resolve_local(&ident.value)
                         && !self.current_frame().locals[slot as usize].kind.is_mutable()
                     {
@@ -2231,15 +2205,12 @@ impl Compiler {
                     self.compile_identifier(ident);
                     // Duplicate for the return value
                     self.emit_op(OpCode::Dup, line);
-                    // Push 1
                     self.emit_constant(Value::Integer(1), line);
-                    // Add or subtract
                     match operator.as_str() {
                         "++" => self.emit_op(OpCode::Add, line),
                         "--" => self.emit_op(OpCode::Subtract, line),
                         _ => self.error_coded(codes::UNKNOWN_OPERATOR,&format!("unknown postfix operator: {}", operator), line),
                     }
-                    // Store back
                     if let Some(slot) = self.resolve_local(&ident.value) {
                         self.emit_op_u16(OpCode::SetLocal, slot, line);
                     } else {
@@ -2411,10 +2382,8 @@ impl Compiler {
                 field_values,
                 ..
             } => {
-                // Push struct name
                 let name_const =
                     self.make_constant(Value::String(rc_str(struct_name.as_str())), line);
-                // Push field name-value pairs
                 for (fname, fval) in field_values {
                     self.emit_constant(Value::String(rc_str(fname.as_str())), line);
                     self.compile_expression(fval);
@@ -2551,7 +2520,6 @@ impl Compiler {
                     None => 0xFFFF,
                 };
 
-                // Emit Guard opcode with jump offset placeholder
                 self.emit_op(OpCode::Guard, line);
                 let guard_jump_pos = self.current_chunk().len();
                 self.current_chunk().write_u16(0xFFFF, line); // jump offset placeholder
@@ -2841,7 +2809,6 @@ impl Compiler {
                 return;
             }
         }
-        // Leaf: compile both sides and emit comparison
         if value_on_right {
             self.compile_expression(logical_expr);
             self.compile_expression(cmp_value_expr);
@@ -2900,7 +2867,6 @@ impl Compiler {
             self.emit_op(OpCode::False, line);
             return;
         }
-        // Evaluate the first argument (the value)
         self.compile_expression(&args[0]);
         // Second argument should be a type name identifier
         if let Expression::Ident(type_ident) = &args[1] {
@@ -2999,13 +2965,11 @@ impl Compiler {
                 self.emit_op_u16(OpCode::GetField, field_const, line);
                 return;
             }
-        // Try upvalue
         let frame_idx = self.frames.len() - 1;
         if let Some(uv_idx) = self.resolve_upvalue(frame_idx, &ident.value) {
             self.emit_op_u16(OpCode::GetUpvalue, uv_idx, line);
             return;
         }
-        // Fall back to global
         let name_const = self.make_constant(Value::String(rc_str(ident.value.as_str())), line);
         self.emit_op_u16(OpCode::GetGlobal, name_const, line);
     }
@@ -3031,7 +2995,6 @@ impl Compiler {
         self.current_frame_mut().function.method_of = owning_struct;
         self.current_frame_mut().function.arity = parameters.len() as u8;
 
-        // Compile parameter info
         let params: Vec<ParamInfo> = parameters
             .iter()
             .map(|p| ParamInfo {
@@ -3043,7 +3006,6 @@ impl Compiler {
             .collect();
         self.current_frame_mut().function.params = params;
 
-        // Add parameters as locals
         for param in parameters {
             self.add_local(
                 &param.ident.value,
@@ -3052,7 +3014,6 @@ impl Compiler {
             );
         }
 
-        // Compile default parameter initialization
         for (i, param) in parameters.iter().enumerate() {
             if let Some(default_expr) = &param.default {
                 let slot = (i + 1) as u16; // +1 for slot 0 reserved
@@ -3089,14 +3050,12 @@ impl Compiler {
             }
         }
 
-        // Pop this frame and get the function + upvalues
         let frame = self.frames.pop().unwrap();
         let mut function = frame.function;
         function.id = self.fn_counter;
         self.fn_counter += 1;
         let upvalues = frame.upvalues;
 
-        // Add the function as a constant in the enclosing scope
         let (uv_kinds, uv_values) = crate::vm::value::make_upvalue_int_caches(0);
         let func_const = self.make_constant(
             Value::Closure(std::rc::Rc::new(crate::vm::value::ObjClosure {
@@ -3117,7 +3076,6 @@ impl Compiler {
             line,
         );
 
-        // Emit Closure opcode
         self.emit_op_u16(OpCode::Closure, func_const, line);
         // Followed by upvalue descriptors
         for uv in &upvalues {
@@ -3132,7 +3090,6 @@ impl Compiler {
         condition: &Expression,
         line: u32,
     ) {
-        // Create a mini function for the pattern condition
         let params: Vec<TypedParam> = param_names
             .iter()
             .map(|name| TypedParam {
@@ -3150,7 +3107,6 @@ impl Compiler {
             })
             .collect();
 
-        // Wrap in a give statement
         let body = vec![Statement::Give {
             token: crate::token::Token {
                 token_type: crate::token::TokenType::Give,

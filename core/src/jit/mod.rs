@@ -191,7 +191,6 @@ impl JitEngine {
 
         #[cfg(feature = "jit")]
         {
-            // Lazy-init the Cranelift module on first hot function.
             let inner = self.inner.get_or_insert_with(engine::JitInner::new);
             inner.maybe_compile(func)
         }

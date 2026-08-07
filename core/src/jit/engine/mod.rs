@@ -508,7 +508,6 @@ impl JitInner {
 
                 let refs = declare_helper_refs(&self.helpers, &mut self.module, &mut builder);
 
-                // Create blocks.
                 let entry_block = builder.create_block();
                 builder.append_block_params_for_function_params(entry_block);
 
@@ -6002,13 +6001,11 @@ fn emit_inline_generic_return(
         .ins()
         .store(flags, result_hi, cm_addr, VALUE_INT_PAYLOAD_OFFSET as i32);
 
-    // stack_view.len = slot_offset + 1
     let new_stack_len = builder.ins().iadd(slot_offset_val, one_i64);
     builder
         .ins()
         .store(flags, new_stack_len, vm_val, vm_stack_view_len_offset());
 
-    // jit_frame_view.len -= 1
     let jfv_len = builder
         .ins()
         .load(types::I64, flags, vm_val, vm_jit_frame_view_len_offset());
@@ -6052,7 +6049,6 @@ fn emit_inline_get_local(
     let dst_off = builder.ins().imul(stack_len, value_size);
     let dst_addr = builder.ins().iadd(stack_ptr, dst_off);
 
-    // Memcpy 16 bytes from src to dst.
     emit_copy_value(builder, src_addr, dst_addr);
 
     // Bump only when tag > 6 && tag != 13; two icmps are shorter than the fused range check.
@@ -6085,7 +6081,6 @@ fn emit_inline_get_local(
     builder.ins().jump(post_bump_block, &[]);
 
     builder.switch_to_block(post_bump_block);
-    // Bump stack_view.len.
     let one = builder.ins().iconst(types::I64, 1);
     let new_len = builder.ins().iadd(stack_len, one);
     builder
@@ -6120,12 +6115,10 @@ fn emit_inline_set_local(
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
     let one = builder.ins().iconst(types::I64, 1);
 
-    // addr_top = stack_ptr + (len - 1) * VALUE_SIZE
     let top_idx = builder.ins().isub(stack_len, one);
     let top_off = builder.ins().imul(top_idx, value_size);
     let addr_top = builder.ins().iadd(stack_ptr, top_off);
 
-    // addr_slot = stack_ptr + (slot_offset + slot) * VALUE_SIZE
     let slot_const = builder.ins().iconst(types::I64, slot as i64);
     let abs_slot = builder.ins().iadd(slot_offset_val, slot_const);
     let slot_off = builder.ins().imul(abs_slot, value_size);

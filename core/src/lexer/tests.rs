@@ -19,7 +19,6 @@ fn test_brace_mode_unchanged() {
     let input = "x := 5\nif y {\n  print(x)\n}";
     let tokens = collect_tokens(input);
 
-    // Should have LBrace and RBrace as literals
     let has_lbrace = tokens
         .iter()
         .any(|t| t.token_type == TokenType::LBrace && t.literal == "{");
@@ -35,7 +34,6 @@ fn test_indent_mode_colon_becomes_lbrace() {
     let input = "#[indent]\neach num in x:\n  print(num)\n";
     let tokens = collect_tokens(input);
 
-    // Colon at EOL should become LBrace
     let has_lbrace = tokens.iter().any(|t| t.token_type == TokenType::LBrace);
     assert!(
         has_lbrace,
@@ -48,7 +46,6 @@ fn test_indent_mode_dedent_becomes_rbrace() {
     let input = "#[indent]\neach num in x:\n  print(num)\ny := 5\n";
     let tokens = collect_tokens(input);
 
-    // Dedent should produce RBrace
     let has_rbrace = tokens.iter().any(|t| t.token_type == TokenType::RBrace);
     assert!(has_rbrace, "Dedent should produce RBrace in indent mode");
 }
@@ -82,7 +79,6 @@ fn test_indent_directive_stripped() {
     let input = "#[indent]\nx := 5";
     let tokens = collect_tokens(input);
 
-    // Should not have Hash or the indent directive tokens
     let has_hash_indent = tokens
         .iter()
         .any(|t| t.literal == "#" || t.literal == "indent");
@@ -108,7 +104,6 @@ fn test_location_directive_is_stripped() {
 
 #[test]
 fn test_indent_and_brace_produce_same_structure() {
-    // Simple equivalent programs
     let indent_input = "#[indent]\neach x:\n  print(x)\n";
     let brace_input = "each x {\n  print(x)\n}";
 
@@ -189,11 +184,9 @@ fn test_span_tracking() {
     let input = "x := 5\ny := 10";
     let tokens = collect_tokens(input);
 
-    // 'x' should be at line 1, col 1
     assert_eq!(tokens[0].span.line(), 1);
     assert_eq!(tokens[0].span.column(), 1);
 
-    // 'y' should be at line 2, col 1
     let y_tok = tokens.iter().find(|t| t.literal == "y").unwrap();
     assert_eq!(y_tok.span.line(), 2);
     assert_eq!(y_tok.span.column(), 1);
@@ -204,15 +197,12 @@ fn test_span_column_tracking() {
     let input = "abc := 42";
     let tokens = collect_tokens(input);
 
-    // 'abc' at col 1
     assert_eq!(tokens[0].literal, "abc");
     assert_eq!(tokens[0].span.column(), 1);
 
-    // ':=' at col 5
     assert_eq!(tokens[1].literal, ":=");
     assert_eq!(tokens[1].span.column(), 5);
 
-    // '42' at col 8
     assert_eq!(tokens[2].literal, "42");
     assert_eq!(tokens[2].span.column(), 8);
 }

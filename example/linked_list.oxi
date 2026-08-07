@@ -1,10 +1,8 @@
-// Node struct
 struct Node {
     data <generic>
     next <Node> || <None>
 }
 
-// Linked List
 struct LinkedList {
     head <Node> || <None>
 }

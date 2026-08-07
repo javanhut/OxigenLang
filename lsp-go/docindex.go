@@ -115,7 +115,6 @@ func indexDocument(source, uri string) *docIndex {
 			continue
 		}
 
-		// Top-level function.
 		if topLevel {
 			if m := funSigRe.FindStringSubmatch(line); m != nil {
 				idx.funcs = append(idx.funcs, docMember{
@@ -126,7 +125,6 @@ func indexDocument(source, uri string) *docIndex {
 			}
 		}
 
-		// Pattern declaration.
 		if m := patternRe.FindStringSubmatch(line); m != nil {
 			idx.patterns = append(idx.patterns, docMember{name: m[1], detail: "pattern " + m[1]})
 			continue
