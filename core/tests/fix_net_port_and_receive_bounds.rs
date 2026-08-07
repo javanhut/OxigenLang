@@ -124,14 +124,7 @@ fn a_udp_datagram_is_never_truncated_by_the_buffer_cap() {
     // not fit, so a buffer smaller than the datagram loses data silently. The
     // cap is larger than any possible datagram, so this must round-trip whole
     // even though `max` is absurd.
-    // netres exposes no local_addr, so borrow a free port from a std socket and
-    // hand it straight to udp_bind.
-    let probe = UdpSocket::bind("127.0.0.1:0").expect("probe for a free port");
-    let port = probe.local_addr().unwrap().port() as i64;
-    drop(probe);
-
-    let receiver = netres::udp_bind("127.0.0.1", port).expect("bind receiver");
-    let sender = netres::udp_bind("127.0.0.1", 0).expect("bind sender");
+    let (receiver, sender, port) = udp_pair();
     // 9000 bytes: over any 8 KiB chunk cap, under the platform datagram limit.
     let payload = "u".repeat(9_000);
     netres::udp_send(sender, &payload, "127.0.0.1", port).expect("send datagram");
@@ -142,15 +135,25 @@ fn a_udp_datagram_is_never_truncated_by_the_buffer_cap() {
     netres::close(receiver);
 }
 
-/// Borrows a free UDP port from a std socket (netres exposes no `local_addr`)
-/// and returns a bound receiver/sender pair on it.
+/// Returns a bound receiver/sender pair and the receiver's real port.
+///
+/// The receiver binds on port 0 and learns its own port by announcing itself to
+/// a throwaway socket, because netres exposes no `local_addr`. Probing for a
+/// free port and rebinding it instead is a race: the tests here run
+/// concurrently, and another one takes the port between the probe closing and
+/// the rebind — "Address already in use", intermittently, on a loaded machine.
 fn udp_pair() -> (u64, u64, i64) {
-    let probe = UdpSocket::bind("127.0.0.1:0").expect("probe for a free port");
-    let port = probe.local_addr().unwrap().port() as i64;
-    drop(probe);
-    let receiver = netres::udp_bind("127.0.0.1", port).expect("bind receiver");
+    let receiver = netres::udp_bind("127.0.0.1", 0).expect("bind receiver");
     let sender = netres::udp_bind("127.0.0.1", 0).expect("bind sender");
-    (receiver, sender, port)
+
+    let probe = UdpSocket::bind("127.0.0.1:0").expect("probe socket");
+    let probe_port = probe.local_addr().unwrap().port() as i64;
+    netres::udp_send(receiver, "?", "127.0.0.1", probe_port).expect("announce receiver port");
+    let (_, from) = probe
+        .recv_from(&mut [0u8; 1])
+        .expect("hear the receiver announce itself");
+
+    (receiver, sender, from.port() as i64)
 }
 
 #[test]
