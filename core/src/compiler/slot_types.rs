@@ -229,6 +229,21 @@ pub struct FunctionSlotTypes {
     /// `collatz_steps` call) plus the auto-flush that the helper-call
     /// dispatch path would otherwise force.
     pub noop_type_wrap_ips: std::collections::HashSet<usize>,
+
+    /// True iff this chunk contains a `GetGlobal` naming this very function.
+    ///
+    /// Purely a performance hint for the JIT's direct self-recursion path, whose
+    /// runtime guard is `callee == this frame's own closure`. A top-level named
+    /// function reaches itself only through `GetGlobal` (`GetGlobal` is the sole
+    /// opcode that reads a global), so when this is false that guard can never
+    /// succeed and emitting it costs every call a dead compare plus a virt-stack
+    /// snapshot and re-flush.
+    ///
+    /// False negatives are free: the direct path always falls through to the same
+    /// inline cache that runs when it is not emitted at all, so suppressing it
+    /// costs a fast path and never correctness. Anonymous `f := fun(n){ f(n-1) }`
+    /// and functions reaching themselves through an upvalue land here.
+    pub self_reachable_by_global_name: bool,
 }
 
 impl FunctionSlotTypes {
@@ -671,6 +686,8 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         }
     }
 
+    let self_reachable_by_global_name = chunk_reads_global_named(chunk, func.name.as_deref());
+
     FunctionSlotTypes {
         slots: result,
         local_init_result_ip,
@@ -684,6 +701,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         specialized_param_slots,
         wants_closure_arg,
         noop_type_wrap_ips,
+        self_reachable_by_global_name,
     }
 }
 
@@ -1554,6 +1572,40 @@ fn transfer(
 #[inline]
 fn read_u16(code: &[u8], offset: usize) -> u16 {
     ((code[offset] as u16) << 8) | (code[offset + 1] as u16)
+}
+
+/// True iff `chunk` contains a `GetGlobal` whose name constant is `name`.
+///
+/// Walks by `instruction_len` rather than a fixed stride: `Closure` carries
+/// trailing upvalue descriptors, and a desynchronised cursor would happily read
+/// an operand byte as an opcode and invent a `GetGlobal` that isn't there.
+///
+/// An undecodable chunk answers `true` — the caller uses this only to *suppress*
+/// an optimization, so the conservative answer is the one that changes nothing.
+fn chunk_reads_global_named(chunk: &Chunk, name: Option<&str>) -> bool {
+    let Some(name) = name else {
+        return false;
+    };
+    let code = &chunk.code;
+    let mut ip = 0usize;
+    while ip < code.len() {
+        let Ok(len) = chunk.instruction_len(ip) else {
+            return true;
+        };
+        if matches!(OpCode::from_byte(code[ip]), Some(OpCode::GetGlobal)) && ip + 2 < code.len() {
+            let idx = read_u16(code, ip + 1) as usize;
+            if chunk
+                .constants
+                .get(idx)
+                .and_then(|v| v.as_string())
+                .is_some_and(|s| s.as_str() == name)
+            {
+                return true;
+            }
+        }
+        ip += len.max(1);
+    }
+    false
 }
 
 // Certifier: debug-only invariant checks for B2.1+ consumers.
@@ -2593,4 +2645,114 @@ mod tests {
     }
 
     // OpCode::Closure always rejects first, so the nested-closure case never reaches has_get_upvalue.
+
+    #[test]
+    fn self_reachable_by_global_name_true_for_top_level_recursion() {
+        // A top-level fn reaches itself through GetGlobal, so the JIT's direct
+        // self-recursion guard can match and must stay enabled. bench_fib and
+        // bench_arith depend on this being true.
+        let f = compile_for_analysis(
+            r#"
+fun fib(n <int>) {
+    give n when n < 2
+    fib(n - 1) + fib(n - 2)
+}
+fib(10)
+"#,
+            Some("fib"),
+        );
+        let r = analyze(&f);
+        assert!(r.self_reachable_by_global_name);
+        assert!(r.specialized_entry_eligible);
+    }
+
+    #[test]
+    fn self_reachable_by_global_name_false_for_local_callee() {
+        // The bench_closure `run` shape: it calls a closure held in a LOCAL, so no
+        // GetGlobal names `run` and the self-recursion guard is dead weight.
+        // Eligibility must survive — we want to drop the guard, not the specialized
+        // entry, which still serves the closure-aware dispatch path.
+        let f = compile_for_analysis(
+            r#"
+fun make_adder(x) { fun(y) { x + y } }
+fun run(n <int>) {
+    add5 := make_adder(5)
+    total <int> := 0
+    i <int> := 0
+    repeat when i < n {
+        total = total + add5(i)
+        i = i + 1
+    }
+    total
+}
+run(10)
+"#,
+            Some("run"),
+        );
+        let r = analyze(&f);
+        assert!(
+            !r.self_reachable_by_global_name,
+            "no GetGlobal names `run`, so the self-recursion guard can never match"
+        );
+        assert!(
+            r.specialized_entry_eligible,
+            "suppressing the guard must not suppress the specialized entry"
+        );
+    }
+
+    #[test]
+    fn self_reachable_by_global_name_false_for_mutual_recursion() {
+        // a -> b -> a never satisfies "callee is my own closure", so the guard was
+        // failing 100% of the time here too.
+        let f = compile_for_analysis(
+            r#"
+fun a(n <int>) {
+    give 0 when n <= 0
+    b(n - 1)
+}
+fun b(n <int>) { a(n - 1) + 1 }
+a(4)
+"#,
+            Some("a"),
+        );
+        let r = analyze(&f);
+        assert!(!r.self_reachable_by_global_name);
+    }
+
+    #[test]
+    fn nested_named_self_recursion_is_eligible_and_closure_aware() {
+        // Documents the shape that used to sink an entire function. A nested named
+        // fn is predeclared as a local of the ENCLOSING frame, so from inside its own
+        // body its own name resolves as an upvalue — leaving it specialized-entry
+        // eligible AND closure-aware AND containing a Call, all at once.
+        //
+        // That trio is what the JIT's direct self-recursion path must refuse: it
+        // passes [vm, args..] while the closure-aware signature leads with a
+        // *const ObjClosure, and the resulting arity mismatch fails the Cranelift
+        // verifier, dropping the whole function to the interpreter. See the
+        // !spec_wants_closure_arg clause in jit::engine's a3_eligible.
+        let f = compile_for_analysis(
+            r#"
+fun outer() {
+    base <int> := 100
+    fun rec(n <int>) {
+        give base when n <= 0
+        rec(n - 1) + 1
+    }
+    rec(10)
+}
+"#,
+            Some("rec"),
+        );
+        let r = analyze(&f);
+        assert!(
+            r.specialized_entry_eligible,
+            "rec must stay specialized-entry eligible: {:?}",
+            r.specialized_entry_outcome
+        );
+        assert!(
+            r.wants_closure_arg,
+            "rec reaches its own name through GetUpvalue, so it is closure-aware"
+        );
+    }
 }

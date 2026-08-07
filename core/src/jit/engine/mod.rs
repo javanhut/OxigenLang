@@ -534,8 +534,23 @@ impl JitInner {
                     builder.import_signature(sig)
                 };
 
+                // This activation's own JitFrame address, computed once. Same rationale
+                // as slot_offset below: jit_frames is preallocated to FRAMES_MAX and
+                // never reallocates, and every callee teardown and bailout/error rollback
+                // restores jit_frame_view.len before this function's next instruction —
+                // so `ptr + (len-1)*size` is fixed for the whole activation. Every
+                // consumer wants *this* frame (its closure, its slot offset, its current
+                // line), never whatever happens to be on top, so recomputing it from a
+                // mutable len bought nothing but ~5 instructions a site.
+                let own_frame_ptr = emit_load_top_jit_frame_ptr(&mut builder, vm_val);
+
                 // The slot offset is immutable for the lifetime of this activation.
-                let slot_offset_val = emit_load_top_jit_frame_slot_offset(&mut builder, vm_val);
+                let slot_offset_val = builder.ins().load(
+                    types::I64,
+                    cranelift_codegen::ir::MemFlags::trusted(),
+                    own_frame_ptr,
+                    JitFrame::OFFSET_SLOT_OFFSET,
+                );
 
                 // Backing slot is still populated so stack shape stays valid; flush_all spills before generic ops.
                 let mut int_locals: HashMap<u16, Variable> = HashMap::new();
@@ -758,7 +773,7 @@ impl JitInner {
                     let col = chunk.columns.get(ip).copied().unwrap_or(0);
                     // Only emit loc stores for opcodes that can surface an error attributed to this IP.
                     if opcode_always_needs_line(op) && last_emitted_loc != Some((line, col)) {
-                        emit_store_current_loc(&mut builder, vm_val, line, col);
+                        emit_store_current_loc(&mut builder, own_frame_ptr, line, col);
                         last_emitted_loc = Some((line, col));
                     }
 
@@ -1129,7 +1144,7 @@ impl JitInner {
                                     builder.switch_to_block(err_block);
                                     maybe_emit_current_line(
                                         &mut builder,
-                                        vm_val,
+                                        own_frame_ptr,
                                         line,
                                         col,
                                         &mut last_emitted_loc,
@@ -1156,7 +1171,7 @@ impl JitInner {
                                     // Non-int type lock: enforce via the fallible checked helper.
                                     maybe_emit_current_line(
                                         &mut builder,
-                                        vm_val,
+                                        own_frame_ptr,
                                         line,
                                         col,
                                         &mut last_emitted_loc,
@@ -1203,142 +1218,29 @@ impl JitInner {
                             } else if virt_stack.pending_depth() == 1
                                 && virt_stack.peek_int_ssa().is_some()
                             {
-                                // Mixed-mode: tag-check memory's lhs, register-arith on hit, flush and use the helper on miss.
-                                use cranelift_codegen::ir::MemFlags;
-                                use cranelift_codegen::ir::condcodes::IntCC;
-                                let flags = MemFlags::trusted();
-
+                                // Mixed-mode: memory lhs, register rhs.
                                 maybe_emit_current_line(
                                     &mut builder,
-                                    vm_val,
+                                    own_frame_ptr,
                                     line,
                                     col,
                                     &mut last_emitted_loc,
                                 );
-
-                                let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
-                                let stack_len = emit_load_stack_len(&mut builder, vm_val);
-                                let value_size =
-                                    builder.ins().iconst(types::I64, VALUE_SIZE as i64);
-                                let one = builder.ins().iconst(types::I64, 1);
-                                let mem_top_idx = builder.ins().isub(stack_len, one);
-                                let mem_top_off =
-                                    builder.ins().imul(mem_top_idx, value_size);
-                                let mem_top_addr =
-                                    builder.ins().iadd(stack_ptr, mem_top_off);
-
-                                let lhs_tag =
-                                    builder.ins().load(types::I8, flags, mem_top_addr, 0);
-                                let int_tag_const = builder
-                                    .ins()
-                                    .iconst(types::I8, VALUE_TAG_INTEGER as i64);
-                                let is_int = builder.ins().icmp(
-                                    IntCC::Equal,
-                                    lhs_tag,
-                                    int_tag_const,
-                                );
-
-                                let fast_block = builder.create_block();
-                                let slow_block = builder.create_block();
-                                let cont_block = builder.create_block();
-                                builder.ins().brif(
-                                    is_int,
-                                    fast_block,
-                                    &[],
-                                    slow_block,
-                                    &[],
-                                );
-
-                                // Tag byte is already Integer, so only the payload needs overwriting.
-                                builder.switch_to_block(fast_block);
-                                let lhs_payload = builder.ins().load(
-                                    types::I64,
-                                    flags,
-                                    mem_top_addr,
-                                    VALUE_INT_PAYLOAD_OFFSET as i32,
-                                );
-                                let rhs_for_fast = virt_stack.peek_int_ssa().unwrap();
-                                let result_fast = match op {
-                                    OpCode::Add => {
-                                        builder.ins().iadd(lhs_payload, rhs_for_fast)
-                                    }
-                                    OpCode::Subtract => {
-                                        builder.ins().isub(lhs_payload, rhs_for_fast)
-                                    }
-                                    OpCode::Multiply => {
-                                        builder.ins().imul(lhs_payload, rhs_for_fast)
-                                    }
-                                    _ => unreachable!(),
-                                };
-                                builder.ins().store(
-                                    flags,
-                                    result_fast,
-                                    mem_top_addr,
-                                    VALUE_INT_PAYLOAD_OFFSET as i32,
-                                );
-                                builder.ins().jump(cont_block, &[]);
-
-                                // Flush the virt rhs and let int_fast_arith handle the type dispatch.
-                                builder.switch_to_block(slow_block);
-                                let rhs_for_slow = virt_stack.peek_int_ssa().unwrap();
-                                {
-                                    let stack_ptr2 =
-                                        emit_load_stack_ptr(&mut builder, vm_val);
-                                    let top2 =
-                                        emit_load_stack_len(&mut builder, vm_val);
-                                    let value_size2 = builder
-                                        .ins()
-                                        .iconst(types::I64, VALUE_SIZE as i64);
-                                    let byte_off2 =
-                                        builder.ins().imul(top2, value_size2);
-                                    let slot_ptr2 =
-                                        builder.ins().iadd(stack_ptr2, byte_off2);
-                                    let int_tag = builder
-                                        .ins()
-                                        .iconst(types::I8, VALUE_TAG_INTEGER as i64);
-                                    builder.ins().store(flags, int_tag, slot_ptr2, 0);
-                                    builder.ins().store(
-                                        flags,
-                                        rhs_for_slow,
-                                        slot_ptr2,
-                                        VALUE_INT_PAYLOAD_OFFSET as i32,
-                                    );
-                                    let one2 = builder.ins().iconst(types::I64, 1);
-                                    let new_top = builder.ins().iadd(top2, one2);
-                                    builder.ins().store(
-                                        flags,
-                                        new_top,
-                                        vm_val,
-                                        vm_stack_view_len_offset(),
-                                    );
-                                }
-                                let (arith_op, slow_helper) = match op {
-                                    OpCode::Add => (IntArithOp::Add, refs.add),
-                                    OpCode::Subtract => (IntArithOp::Sub, refs.sub),
-                                    OpCode::Multiply => (IntArithOp::Mul, refs.mul),
-                                    _ => unreachable!(),
-                                };
-                                emit_int_fast_arith(
+                                let rhs = virt_stack.peek_int_ssa().unwrap();
+                                emit_mixed_mode_int_arith(
                                     &mut builder,
                                     exit_block,
                                     &refs,
                                     vm_val,
-                                    arith_op,
-                                    slow_helper,
+                                    rhs,
+                                    op,
                                 );
-                                builder.ins().jump(cont_block, &[]);
-
-                                // Both branches consumed the virt rhs and left the result on memory top.
-                                builder.switch_to_block(cont_block);
-                                builder.seal_block(fast_block);
-                                builder.seal_block(slow_block);
-                                builder.seal_block(cont_block);
                                 let _ = virt_stack.pop_int_ssa().unwrap();
                             } else {
                                 // The slow path can call the fallible helper, so stamp the line first.
                                 maybe_emit_current_line(
                                     &mut builder,
-                                    vm_val,
+                                    own_frame_ptr,
                                     line,
                                     col,
                                     &mut last_emitted_loc,
@@ -1384,7 +1286,7 @@ impl JitInner {
                             } else {
                                 maybe_emit_current_line(
                                     &mut builder,
-                                    vm_val,
+                                    own_frame_ptr,
                                     line,
                                     col,
                                     &mut last_emitted_loc,
@@ -1456,7 +1358,7 @@ impl JitInner {
                                 // Both paths can raise (zero divisor, INT_MIN/-1), so stamp the line.
                                 maybe_emit_current_line(
                                     &mut builder,
-                                    vm_val,
+                                    own_frame_ptr,
                                     line,
                                     col,
                                     &mut last_emitted_loc,
@@ -1476,7 +1378,7 @@ impl JitInner {
                             } else {
                                 maybe_emit_current_line(
                                     &mut builder,
-                                    vm_val,
+                                    own_frame_ptr,
                                     line,
                                     col,
                                     &mut last_emitted_loc,
@@ -1589,7 +1491,7 @@ impl JitInner {
                                     // Slow path: helper may type-error.
                                     maybe_emit_current_line(
                                         &mut builder,
-                                        vm_val,
+                                        own_frame_ptr,
                                         line,
                                         col,
                                     &mut last_emitted_loc,
@@ -1616,7 +1518,7 @@ impl JitInner {
                                 // Standalone comparison always touches the helper, so stamp the line.
                                 maybe_emit_current_line(
                                     &mut builder,
-                                    vm_val,
+                                    own_frame_ptr,
                                     line,
                                     col,
                                     &mut last_emitted_loc,
@@ -1659,7 +1561,7 @@ impl JitInner {
                             } else {
                                 maybe_emit_current_line(
                                     &mut builder,
-                                    vm_val,
+                                    own_frame_ptr,
                                     line,
                                     col,
                                     &mut last_emitted_loc,
@@ -1675,7 +1577,7 @@ impl JitInner {
                         OpCode::Log => {
                             maybe_emit_current_line(
                                 &mut builder,
-                                vm_val,
+                                own_frame_ptr,
                                 line,
                                 col,
                                     &mut last_emitted_loc,
@@ -1910,8 +1812,7 @@ impl JitInner {
                             let closure_ptr = if let Some(var) = closure_arg_var {
                                 builder.use_var(var)
                             } else {
-                                let frame_ptr =
-                                    emit_load_top_jit_frame_ptr(&mut builder, vm_val);
+                                let frame_ptr = own_frame_ptr;
                                 builder.ins().load(
                                     ptr_ty,
                                     flags,
@@ -2016,10 +1917,50 @@ impl JitInner {
 
 
                             // Direct self-recursion: guard on callee_rc == our own closure_raw, else fall through to the IC.
+                            //
+                            // Excludes the closure-aware shape: that signature leads with a
+                            // *const ObjClosure the direct call below never passes, so emitting it
+                            // fails the Cranelift verifier and takes the whole function down with
+                            // it — a nested named fn reaches itself through GetUpvalue, so it lands
+                            // here, and every such function silently ran interpreted.
+                            //
+                            // Also skipped where no GetGlobal names this function, since the
+                            // guard below can then never match: it cost bench_closure a dead
+                            // compare plus a snapshot and re-flush on all 12M calls.
                             let a3_eligible = slot_types.specialized_entry_eligible
+                                && !spec_wants_closure_arg
+                                && slot_types.self_reachable_by_global_name
                                 && spec_thunk_id.is_some()
                                 && arg_count as usize == func.arity as usize
                                 && virt_stack.top_n_are_int_ssa(arg_count as usize);
+
+                            // Fuse the call with a following int arith op. Both register-carrying
+                            // success paths (A3, closure-aware) currently box their i64 result onto
+                            // the value stack for the very next opcode to tag-check and reload —
+                            // fusing hands it straight over in a register instead.
+                            //
+                            // Requires a path that can actually carry a register, and that the arith
+                            // op is reached ONLY by falling out of this call: if it is a branch
+                            // target, some other predecessor expects the result in memory.
+                            let fuse_op: Option<OpCode> = if (a3_eligible || arg_count == 1)
+                                && ip + 2 < code.len()
+                                && !blocks.contains_key(&(ip + 2))
+                            {
+                                match OpCode::from_byte(code[ip + 2]) {
+                                    Some(o @ (OpCode::Add | OpCode::Subtract | OpCode::Multiply)) => {
+                                        Some(o)
+                                    }
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            };
+                            // One I64 param carries the un-boxed result to the fused arithmetic.
+                            let fast_join: Option<Block> = fuse_op.map(|_| {
+                                let b = builder.create_block();
+                                builder.append_block_param(b, types::I64);
+                                b
+                            });
 
                             // Snapshot virt_stack: A3's fallback never runs its pops, so the IC would otherwise flush an empty stack.
                             let virt_snap_pre_a3: Option<Vec<VirtSlot>> = if a3_eligible {
@@ -2082,8 +2023,7 @@ impl JitInner {
                                 // curr_rc_raw is NonNull<RcBox<ObjClosure>>; JitFrame.closure_raw is adjusted by RC_VALUE_OFFSET.
                                 let closure_ptr =
                                     builder.ins().iadd_imm(curr_rc_raw, RC_VALUE_OFFSET as i64);
-                                let caller_frame_ptr =
-                                    emit_load_top_jit_frame_ptr(&mut builder, vm_val);
+                                let caller_frame_ptr = own_frame_ptr;
                                 let current_closure_raw = builder.ins().load(
                                     ptr_ty,
                                     flags,
@@ -2195,6 +2135,16 @@ impl JitInner {
                                 popped.reverse();
                                 call_args.extend(popped);
 
+                                // A mismatch here fails the verifier and silently drops the whole
+                                // function to the interpreter, so catch it in tests rather than in
+                                // a benchmark. Not assert!: a release panic beats no fast path by
+                                // nothing at all.
+                                debug_assert_eq!(
+                                    call_args.len(),
+                                    1 + func.arity as usize,
+                                    "A3 direct call must match the non-closure-aware specialized signature"
+                                );
+
                                 let spec_fref =
                                     self.module.declare_func_in_func(spec_id, builder.func);
                                 let call = builder.ins().call(spec_fref, &call_args);
@@ -2236,8 +2186,15 @@ impl JitInner {
 
                                 // Callee already truncated the stack to slot_offset, dropping closure and args.
                                 builder.switch_to_block(ok_block_a3);
-                                emit_inline_push_integer(&mut builder, vm_val, payload);
-                                builder.ins().jump(post_call_block, &[]);
+                                match fast_join {
+                                    Some(fj) => {
+                                        builder.ins().jump(fj, &[payload.into()]);
+                                    }
+                                    None => {
+                                        emit_inline_push_integer(&mut builder, vm_val, payload);
+                                        builder.ins().jump(post_call_block, &[]);
+                                    }
+                                }
 
                                 builder.switch_to_block(fallback_block);
                                 // Restore the pre-A3 snapshot: the fallback path never runs those pops, so the IC would read garbage.
@@ -2587,8 +2544,15 @@ impl JitInner {
                                         counter_offsets::CLOSURE_AWARE_CALL_DISPATCH,
                                     );
                                 }
-                                emit_inline_push_integer(&mut builder, vm_val, ca_payload);
-                                builder.ins().jump(ca_pcb, &[]);
+                                match fast_join {
+                                    Some(fj) => {
+                                        builder.ins().jump(fj, &[ca_payload.into()]);
+                                    }
+                                    None => {
+                                        emit_inline_push_integer(&mut builder, vm_val, ca_payload);
+                                        builder.ins().jump(ca_pcb, &[]);
+                                    }
+                                }
 
                                 builder.switch_to_block(post_ca_block);
                                 Some(post_ca_block)
@@ -2753,7 +2717,73 @@ impl JitInner {
                                 builder.ins().jump(pcb, &[]);
                                 builder.switch_to_block(pcb);
                             }
-                            ip += 2;
+
+                            match (fuse_op, fast_join) {
+                                (Some(fop), Some(fj)) => {
+                                    // Emit the fused arithmetic twice — once per result location.
+                                    // Both sides end with the result at the same memory slot and an
+                                    // empty virt stack, so exactly one opcode needs duplicating.
+                                    let fip = ip + 2;
+                                    let fline = chunk.lines.get(fip).copied().unwrap_or(0);
+                                    let fcol = chunk.columns.get(fip).copied().unwrap_or(0);
+                                    let after_fuse = builder.create_block();
+
+                                    // Slow side: result was boxed onto the stack, so both operands
+                                    // are in memory — byte-for-byte the pre-fusion emission.
+                                    emit_store_current_loc(
+                                        &mut builder,
+                                        own_frame_ptr,
+                                        fline,
+                                        fcol,
+                                    );
+                                    let (arith_op, slow_helper) = match fop {
+                                        OpCode::Add => (IntArithOp::Add, refs.add),
+                                        OpCode::Subtract => (IntArithOp::Sub, refs.sub),
+                                        OpCode::Multiply => (IntArithOp::Mul, refs.mul),
+                                        _ => unreachable!(),
+                                    };
+                                    emit_int_fast_arith(
+                                        &mut builder,
+                                        exit_block,
+                                        &refs,
+                                        vm_val,
+                                        arith_op,
+                                        slow_helper,
+                                    );
+                                    builder.ins().jump(after_fuse, &[]);
+
+                                    // Fast side: the result never reached memory, so the stack top
+                                    // is still the lhs and the register is the rhs — the same
+                                    // operand roles the mixed-mode path already handles.
+                                    builder.switch_to_block(fj);
+                                    let reg_result = builder.block_params(fj)[0];
+                                    emit_store_current_loc(
+                                        &mut builder,
+                                        own_frame_ptr,
+                                        fline,
+                                        fcol,
+                                    );
+                                    emit_mixed_mode_int_arith(
+                                        &mut builder,
+                                        exit_block,
+                                        &refs,
+                                        vm_val,
+                                        reg_result,
+                                        fop,
+                                    );
+                                    builder.ins().jump(after_fuse, &[]);
+
+                                    builder.switch_to_block(after_fuse);
+                                    builder.seal_block(fj);
+                                    builder.seal_block(after_fuse);
+                                    virt_stack = VirtStack::new();
+                                    last_emitted_loc = Some((fline, fcol));
+                                    ip += 3;
+                                }
+                                _ => {
+                                    ip += 2;
+                                }
+                            }
                         }
 
                         // ── Struct ops ──────────────────────────────────
@@ -4162,30 +4192,39 @@ fn emit_write_closure_value(
         .store(flags, closure_raw, dst_ptr, VALUE_INT_PAYLOAD_OFFSET as i32);
 }
 
+/// Records `(line, col)` in this activation's frame for error attribution.
+///
+/// `frame_ptr` is the caller's hoisted `own_frame_ptr` — this always writes the
+/// *running* function's frame, never whatever is on top at the moment.
+///
+/// `line` and `column` are adjacent `u32`s at offsets 24 and 28 of a `#[repr(C)]`
+/// `JitFrame` whose total size is 32, so one 8-byte store covers both exactly and
+/// cannot overrun. Little-endian puts `line` in the low half.
 #[allow(dead_code)]
 #[inline]
 fn emit_store_current_loc(
     builder: &mut FunctionBuilder<'_>,
-    vm_val: cranelift_codegen::ir::Value,
+    frame_ptr: cranelift_codegen::ir::Value,
     line: u32,
     col: u32,
 ) {
     use cranelift_codegen::ir::MemFlags;
 
-    let frame_ptr = emit_load_top_jit_frame_ptr(builder, vm_val);
-    let line_val = builder.ins().iconst(types::I32, line as i64);
+    const _: () = assert!(
+        JitFrame::OFFSET_COLUMN == JitFrame::OFFSET_LINE + 4
+            && std::mem::size_of::<JitFrame>() == JitFrame::OFFSET_COLUMN as usize + 4,
+        "packed loc store requires line/column adjacent and ending the struct"
+    );
+    #[cfg(not(target_endian = "little"))]
+    compile_error!("packed loc store assumes little-endian field order");
+
+    let packed = (line as u64) | ((col as u64) << 32);
+    let packed_val = builder.ins().iconst(types::I64, packed as i64);
     builder.ins().store(
         MemFlags::trusted(),
-        line_val,
+        packed_val,
         frame_ptr,
         JitFrame::OFFSET_LINE,
-    );
-    let col_val = builder.ins().iconst(types::I32, col as i64);
-    builder.ins().store(
-        MemFlags::trusted(),
-        col_val,
-        frame_ptr,
-        JitFrame::OFFSET_COLUMN,
     );
 }
 
@@ -4196,13 +4235,13 @@ fn emit_store_current_loc(
 #[inline]
 fn maybe_emit_current_line(
     builder: &mut FunctionBuilder<'_>,
-    vm_val: cranelift_codegen::ir::Value,
+    frame_ptr: cranelift_codegen::ir::Value,
     line: u32,
     col: u32,
     last_emitted_loc: &mut Option<(u32, u32)>,
 ) {
     if *last_emitted_loc != Some((line, col)) {
-        emit_store_current_loc(builder, vm_val, line, col);
+        emit_store_current_loc(builder, frame_ptr, line, col);
         *last_emitted_loc = Some((line, col));
     }
 }
@@ -4276,6 +4315,108 @@ enum IntArithOp {
 /// payloads (wrapping semantics) and writes the result back in-place,
 /// then calls the `stack_pop_one` helper to drop the now-duplicate top.
 /// Otherwise it falls through to `slow_helper`.
+/// Arithmetic where the lhs is on the value stack and the rhs is already in a
+/// register: tag-check the memory lhs, do register arithmetic and overwrite the
+/// payload in place on a hit, otherwise materialize `rhs` and fall back to the
+/// generic helper.
+///
+/// The fast path never touches `stack_view.len` — it rewrites the payload of a
+/// slot whose tag it has just proven is Integer, so nothing is abandoned and no
+/// Rc is dropped. Both paths leave the result at the same memory top, so the
+/// continuation sees one consistent stack shape.
+///
+/// `rhs` is passed in rather than read from the virt stack so a call site that
+/// has the value in a register but not staged (a call result) can reuse this.
+/// The caller owns stamping the line and popping the staged rhs.
+#[inline]
+fn emit_mixed_mode_int_arith(
+    builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
+    refs: &HelperRefs,
+    vm_val: cranelift_codegen::ir::Value,
+    rhs: cranelift_codegen::ir::Value,
+    op: OpCode,
+) {
+    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::condcodes::IntCC;
+    let flags = MemFlags::trusted();
+
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
+    let stack_len = emit_load_stack_len(builder, vm_val);
+    let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+    let one = builder.ins().iconst(types::I64, 1);
+    let mem_top_idx = builder.ins().isub(stack_len, one);
+    let mem_top_off = builder.ins().imul(mem_top_idx, value_size);
+    let mem_top_addr = builder.ins().iadd(stack_ptr, mem_top_off);
+
+    let lhs_tag = builder.ins().load(types::I8, flags, mem_top_addr, 0);
+    let int_tag_const = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
+    let is_int = builder.ins().icmp(IntCC::Equal, lhs_tag, int_tag_const);
+
+    let fast_block = builder.create_block();
+    let slow_block = builder.create_block();
+    let cont_block = builder.create_block();
+    builder
+        .ins()
+        .brif(is_int, fast_block, &[], slow_block, &[]);
+
+    // Tag byte is already Integer, so only the payload needs overwriting.
+    builder.switch_to_block(fast_block);
+    let lhs_payload = builder.ins().load(
+        types::I64,
+        flags,
+        mem_top_addr,
+        VALUE_INT_PAYLOAD_OFFSET as i32,
+    );
+    let result_fast = match op {
+        OpCode::Add => builder.ins().iadd(lhs_payload, rhs),
+        OpCode::Subtract => builder.ins().isub(lhs_payload, rhs),
+        OpCode::Multiply => builder.ins().imul(lhs_payload, rhs),
+        _ => unreachable!(),
+    };
+    builder.ins().store(
+        flags,
+        result_fast,
+        mem_top_addr,
+        VALUE_INT_PAYLOAD_OFFSET as i32,
+    );
+    builder.ins().jump(cont_block, &[]);
+
+    // Materialize the register rhs and let int_fast_arith handle type dispatch.
+    builder.switch_to_block(slow_block);
+    {
+        let stack_ptr2 = emit_load_stack_ptr(builder, vm_val);
+        let top2 = emit_load_stack_len(builder, vm_val);
+        let value_size2 = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+        let byte_off2 = builder.ins().imul(top2, value_size2);
+        let slot_ptr2 = builder.ins().iadd(stack_ptr2, byte_off2);
+        let int_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
+        builder.ins().store(flags, int_tag, slot_ptr2, 0);
+        builder
+            .ins()
+            .store(flags, rhs, slot_ptr2, VALUE_INT_PAYLOAD_OFFSET as i32);
+        let one2 = builder.ins().iconst(types::I64, 1);
+        let new_top = builder.ins().iadd(top2, one2);
+        builder
+            .ins()
+            .store(flags, new_top, vm_val, vm_stack_view_len_offset());
+    }
+    let (arith_op, slow_helper) = match op {
+        OpCode::Add => (IntArithOp::Add, refs.add),
+        OpCode::Subtract => (IntArithOp::Sub, refs.sub),
+        OpCode::Multiply => (IntArithOp::Mul, refs.mul),
+        _ => unreachable!(),
+    };
+    emit_int_fast_arith(builder, exit_block, refs, vm_val, arith_op, slow_helper);
+    builder.ins().jump(cont_block, &[]);
+
+    // Both branches left the result on memory top.
+    builder.switch_to_block(cont_block);
+    builder.seal_block(fast_block);
+    builder.seal_block(slow_block);
+    builder.seal_block(cont_block);
+}
+
 fn emit_int_fast_arith(
     builder: &mut FunctionBuilder<'_>,
     exit_block: Block,

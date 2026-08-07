@@ -155,3 +155,25 @@ outer()
     // 24 + 7 = 31
     assert_parity(src, "31");
 }
+
+#[test]
+fn typed_nested_named_fn_capturing_an_outer_local_compiles_under_jit() {
+    // Int-annotated so specialized-entry eligibility is deterministic rather than
+    // dependent on the int-mirror demand heuristic. That combination — eligible,
+    // closure-aware (self-reference is an upvalue), and self-calling — used to
+    // emit a direct call whose arity mismatched the closure-aware signature; the
+    // Cranelift verifier rejected it and the function ran interpreted forever.
+    // Parity alone would not have caught it, since the interpreter is correct.
+    let src = r#"
+fun outer(){
+  base <int> := 100
+  fun rec(n <int>){
+    give base when n <= 0
+    rec(n - 1) + 1
+  }
+  rec(10)
+}
+outer()
+"#;
+    assert_parity(src, "110");
+}

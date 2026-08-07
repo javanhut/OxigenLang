@@ -11,4 +11,4 @@ fun work(n) {
         }
     }
 }
-work(28)
+work(34)

@@ -26,4 +26,4 @@ fun run(n <int>) {
     }
     c.get()
 }
-run(500000)
+run(8000000)

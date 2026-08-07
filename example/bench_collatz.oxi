@@ -20,9 +20,9 @@ fun run(limit <int>) {
     total <int> := 0
     n <int> := 1
     repeat when n <= limit {
-        total = total + collatz_steps(n)
-        n = n + 1
+        total := total + collatz_steps(n)
+        n := n + 1
     }
     total
 }
-run(50000)
+run(200000)

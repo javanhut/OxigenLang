@@ -1,21 +1,21 @@
 # Oxigen vs Python — native harness (interleaved A/B)
 
-- Generated: `2026-08-07T13:51:40Z`
+- Generated: `2026-08-07T16:21:54Z`
 - Host:      `L6VW6YWMJ2`
 - Kernel:    `Darwin 25.5.0 arm64`
 - Oxigen:    `Oxigen Version: 0.1.3`
 - Python:    `Python 3.14.5` (JIT: not built in)
 - Bun:       `1.3.14`
 - Node:      `v25.7.0` (built-in type-stripping)
-- Warmups:   `3`
-- Runs:      `5`
-- Git commit: `ad55942`
+- Warmups:   `6`
+- Runs:      `25`
+- Git commit: `008ba29`
 - Git branch: `feature_enhancements_for_0_1_4`
 
 ## Min times (ms)
 
-Each cell is the fastest single timed run across `5` rounds
-after `3` warmup rounds. Variants are interleaved A/B/A/B
+Each cell is the fastest single timed run across `25` rounds
+after `6` warmup rounds. Variants are interleaved A/B/A/B
 per round so every variant observes the same thermal state, and
 any thermal drift across the run affects them equally. Min is
 the most reproducible single number on a desktop CPU that may
@@ -24,30 +24,25 @@ throttle after sustained full-CPU work. See
 
 | benchmark | no-jit | default | jit | python | bun (ts) | node (ts) | jit vs py | jit vs bun | jit vs node |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| bench_arith | 77.1 | 13.8 | 14.9 | 43 | 11.6 | 68.2 | 2.89x | 0.78x | 4.58x |
-| bench_closure | 83.9 | 11.2 | 12.6 | 33.4 | 10.8 | 77.5 | 2.66x | 0.86x | 6.16x |
-| bench_collatz | 844.1 | 15.6 | 16.6 | 198.7 | 20.7 | 81.3 | 11.99x | 1.25x | 4.91x |
-| bench_fib | 184.6 | 24.7 | 26.3 | 69.7 | 12.8 | 68.8 | 2.65x | 0.49x | 2.61x |
-| bench_loop | 61.3 | 5.1 | 7.3 | 39.9 | 11.2 | 65.6 | 5.45x | 1.53x | 8.96x |
-| bench_nested_loop | 18.6 | 4.5 | 5.7 | 24.5 | 9.8 | 64.7 | 4.26x | 1.7x | 11.26x |
-| bench_nested_loop_big | 239.1 | 6.6 | 7.7 | 107.2 | 12.7 | 69.8 | 13.97x | 1.65x | 9.1x |
-| bench_primes_parallel | 30.2 | 31.3 | 34.3 | 367 | - | - | 10.7x | - | - |
-| bench_primes_serial | 9076.7 | 175.3 | 176.1 | 1738.9 | - | - | 9.87x | - | - |
-| bench_struct_method | 170.4 | 10.9 | 12.6 | 50.1 | 11.7 | 70.1 | 3.98x | 0.93x | 5.56x |
+| bench_loop | 1210.8 | 13.5 | 14.7 | 460.6 | 21.9 | 94.7 | 31.39x | 1.49x | 6.45x |
+| bench_nested_loop | 556.5 | 8.4 | 9.7 | 222.6 | 15 | 79.3 | 22.96x | 1.55x | 8.18x |
 
 ## JIT min / p50 (ms)
 
 | benchmark | jit min | jit p50 |
 | --- | ---: | ---: |
-| bench_arith | 14.9 | 15.7 |
-| bench_closure | 12.6 | 12.9 |
-| bench_collatz | 16.6 | 19.1 |
-| bench_fib | 26.3 | 27.2 |
-| bench_loop | 7.3 | 8.4 |
-| bench_nested_loop | 5.7 | 6.2 |
-| bench_nested_loop_big | 7.7 | 8.7 |
-| bench_primes_parallel | 34.3 | 34.7 |
-| bench_primes_serial | 176.1 | 178.2 |
-| bench_struct_method | 12.6 | 12.8 |
+| bench_loop | 14.7 | 16.6 |
+| bench_nested_loop | 9.7 | 10.7 |
+
+## A/B comparison: `/private/tmp/claude-502/-Users-jhutchinson-Development-OxigenLang/5aa73862-e3f8-4386-ab84-5ed8fc41ed51/scratchpad/target/release/oxigen` vs `/private/tmp/claude-502/-Users-jhutchinson-Development-OxigenLang/5aa73862-e3f8-4386-ab84-5ed8fc41ed51/scratchpad/oxigen_orig_samedir` (--jit)
+
+Both binaries run interleaved A/B/A/B per round so they share
+the same thermal/cache state. `B/A < 1.00` means OXIGEN_BIN_B
+(B) is faster than OXIGEN_BIN (A); `> 1.00` means slower.
+
+| benchmark | A min | A p50 | B min | B p50 | B/A min | B/A p50 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| bench_loop | 14.7 | 16.6 | 14.1 | 15.6 | 0.96x | 0.94x |
+| bench_nested_loop | 9.7 | 10.7 | 9.2 | 10.2 | 0.949x | 0.948x |
 
 Per-benchmark JSON (per-round samples + summary stats) in `/Users/jhutchinson/Development/OxigenLang/benchmark_reports/`.

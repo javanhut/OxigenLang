@@ -1845,6 +1845,39 @@ fn jit_specialized_recursion_non_int_return() {
         ("fun f(n) { option { n <= 0 -> None, f(n - 1) } }\nf(3)", "None"),
         ("fun f(n) { option { n <= 0 -> 2, n == 1 -> 3.5, f(n - 1) } }\nf(3)", "3.5"),
         ("fun fib(n) { give n when n < 2\nfib(n-1) + fib(n-2) }\nfib(15)", "610"),
+        // Call-with-arith fusion: the caller emits the arithmetic twice, once for
+        // each place the callee can leave its result. `g(1)` returns an Integer
+        // (status 0, result handed over in a register — the fast side); `g(0)`
+        // returns a Float (status 3, result already boxed on the stack — the slow
+        // side). One compiled `caller` body, both duplicated emissions exercised.
+        (
+            "fun g(n <int>) { option { n <= 0 -> 3.5, n == 1 -> 7, g(n - 1) } }\n\
+             fun caller(k <int>) { 1 + g(k) }\ncaller(1)",
+            "8",
+        ),
+        (
+            "fun g(n <int>) { option { n <= 0 -> 3.5, n == 1 -> 7, g(n - 1) } }\n\
+             fun caller(k <int>) { 1 + g(k) }\ncaller(0)",
+            "4.5",
+        ),
+        // Subtract and Multiply take the same fused path; operand order differs
+        // between the two sides (memory-lhs vs register-rhs), so a transposition
+        // would show up here and not in the Add cases above.
+        (
+            "fun g(n <int>) { option { n <= 0 -> 3.5, n == 1 -> 7, g(n - 1) } }\n\
+             fun caller(k <int>) { 10 - g(k) }\ncaller(1)",
+            "3",
+        ),
+        (
+            "fun g(n <int>) { option { n <= 0 -> 3.5, n == 1 -> 7, g(n - 1) } }\n\
+             fun caller(k <int>) { 10 - g(k) }\ncaller(0)",
+            "6.5",
+        ),
+        (
+            "fun g(n <int>) { option { n <= 0 -> 3.5, n == 1 -> 7, g(n - 1) } }\n\
+             fun caller(k <int>) { 3 * g(k) }\ncaller(1)",
+            "21",
+        ),
     ];
     for (src, expected) in cases {
         assert_eq!(run_result(src, None).unwrap(), *expected, "interp: {src}");

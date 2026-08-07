@@ -10,4 +10,4 @@ def nested_sum(n):
     return total
 
 
-nested_sum(500)
+nested_sum(3000)

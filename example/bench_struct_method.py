@@ -24,4 +24,4 @@ def run(n):
     return c.get()
 
 
-run(500_000)
+run(8_000_000)

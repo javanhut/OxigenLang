@@ -1,4 +1,4 @@
-// 4_000_000 total iterations (vs 250_000 in bench_nested_loop) — gives
+// 36_000_000 total iterations (vs 9_000_000 in bench_nested_loop) — gives
 // any tiering JIT time to reach its top optimization tier so the result
 // reflects steady-state, not warmup.
 fun nested_sum(n) {
@@ -14,4 +14,4 @@ fun nested_sum(n) {
     }
     total
 }
-nested_sum(2000)
+nested_sum(6000)

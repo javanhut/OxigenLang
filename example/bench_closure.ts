@@ -15,4 +15,4 @@ function run(n: number): number {
     return total;
 }
 
-run(500_000);
+run(12_000_000);

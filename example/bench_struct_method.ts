@@ -25,4 +25,4 @@ function run(n: number): number {
     return c.get();
 }
 
-run(500_000);
+run(8_000_000);
