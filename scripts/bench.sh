@@ -96,6 +96,33 @@ PYTHON_BIN="${PYTHON_BIN:-$(command -v python3)}"
 BUN_BIN="${BUN_BIN:-$(command -v bun 2>/dev/null || true)}"
 NODE_BIN="${NODE_BIN:-$(command -v node 2>/dev/null || true)}"
 
+# CPython's copy-and-patch JIT (3.13+) only exists if the interpreter was
+# built with --enable-experimental-jit, and the `yes-off` build variant
+# ships it compiled in but disabled until PYTHON_JIT=1. Ask for it
+# unconditionally — builds without the JIT ignore the variable — so a
+# JIT-capable python is always measured with its JIT on. Set PYTHON_JIT=0
+# to compare against the pure interpreter; that override is honoured.
+export PYTHON_JIT="${PYTHON_JIT:-1}"
+
+# Then ask the interpreter what it actually ended up doing, with the
+# variable already exported so this reports the real run condition rather
+# than the default one. `sys._jit` is 3.14+; older builds can't self-report.
+PYTHON_JIT_STATE="unknown"
+if [[ -n "$PYTHON_BIN" && -x "$PYTHON_BIN" ]]; then
+    PYTHON_JIT_STATE="$("$PYTHON_BIN" -c '
+import sys
+jit = getattr(sys, "_jit", None)
+if jit is None:
+    print("unknown (needs python 3.14+ to self-report)")
+elif jit.is_enabled():
+    print("enabled")
+elif jit.is_available():
+    print("built in, disabled")
+else:
+    print("not built in")
+' 2>/dev/null || echo unknown)"
+fi
+
 # Node ≥ 22 runs .ts files with built-in type-stripping. Older versions
 # require --experimental-strip-types. Default to off; probe at runtime.
 NODE_TS_ARGS=()
@@ -498,7 +525,7 @@ done < <(discover_benchmarks "$@")
 [[ ${#benchmarks[@]} -gt 0 ]] || die "no benchmarks found"
 
 echo "Oxigen binary: $OXIGEN_BIN"
-echo "Python binary: $PYTHON_BIN"
+echo "Python binary: $PYTHON_BIN (JIT: $PYTHON_JIT_STATE)"
 echo "Benchmarks:    ${#benchmarks[@]} (${benchmarks[*]})"
 echo "Warmups:       $WARMUPS"
 echo "Runs:          $RUNS"
@@ -524,7 +551,7 @@ latest_md="$REPORT_DIR/latest-native.md"
     echo "- Host:      \`${HOSTNAME:-$(uname -n)}\`"
     echo "- Kernel:    \`$(uname -srm)\`"
     echo "- Oxigen:    \`$("$OXIGEN_BIN" --version 2>/dev/null | head -1 || echo unknown)\`"
-    echo "- Python:    \`$("$PYTHON_BIN" --version 2>&1)\`"
+    echo "- Python:    \`$("$PYTHON_BIN" --version 2>&1)\` (JIT: $PYTHON_JIT_STATE)"
     if [[ -n "$BUN_BIN" && -x "$BUN_BIN" ]]; then
         echo "- Bun:       \`$("$BUN_BIN" --version 2>&1 | head -1)\`"
     fi
