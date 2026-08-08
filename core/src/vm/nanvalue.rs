@@ -1418,6 +1418,8 @@ mod tests {
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
             specialized_kind: Cell::new(0),
+            lean_thunk: Cell::new(None),
+            lean_arity: Cell::new(0),
             upvalue_int_kinds: kinds,
             upvalue_int_values: values,
         });
@@ -1688,6 +1690,8 @@ mod tests {
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
             specialized_kind: Cell::new(0),
+            lean_thunk: Cell::new(None),
+            lean_arity: Cell::new(0),
             upvalue_int_kinds: kinds,
             upvalue_int_values: values,
         });
@@ -1906,6 +1910,8 @@ mod tests {
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
             specialized_kind: Cell::new(0),
+            lean_thunk: Cell::new(None),
+            lean_arity: Cell::new(0),
             upvalue_int_kinds: kinds,
             upvalue_int_values: values,
         });

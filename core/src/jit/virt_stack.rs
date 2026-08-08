@@ -251,7 +251,7 @@ fn emit_inline_push_integer(
     vm_val: ir::Value,
     payload: ir::Value,
 ) {
-    let flags = ir::MemFlags::trusted();
+    let flags = ir::MemFlagsData::trusted();
     let stack_ptr = load_stack_ptr(builder, vm_val);
     let top = load_stack_len(builder, vm_val);
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
@@ -271,7 +271,7 @@ fn emit_inline_push_integer(
 
 /// Inline `jit_push_float_inline`.
 fn emit_inline_push_float(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value, bits: ir::Value) {
-    let flags = ir::MemFlags::trusted();
+    let flags = ir::MemFlagsData::trusted();
     let stack_ptr = load_stack_ptr(builder, vm_val);
     let top = load_stack_len(builder, vm_val);
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
@@ -293,7 +293,7 @@ fn emit_inline_push_float(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value, 
 /// by `value_bool_tag_and_payload_are_pinned` and
 /// `value_none_layout_is_pinned` tests in `vm/value.rs`.
 fn emit_inline_push_const(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value, k: VirtConst) {
-    let flags = ir::MemFlags::trusted();
+    let flags = ir::MemFlagsData::trusted();
     let stack_ptr = load_stack_ptr(builder, vm_val);
     let top = load_stack_len(builder, vm_val);
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
@@ -329,14 +329,14 @@ fn emit_inline_push_const(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value, 
 }
 
 fn load_stack_ptr(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value) -> ir::Value {
-    let flags = ir::MemFlags::trusted();
+    let flags = ir::MemFlagsData::trusted();
     builder
         .ins()
         .load(types::I64, flags, vm_val, vm_stack_view_ptr_offset())
 }
 
 fn load_stack_len(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value) -> ir::Value {
-    let flags = ir::MemFlags::trusted();
+    let flags = ir::MemFlagsData::trusted();
     builder
         .ins()
         .load(types::I64, flags, vm_val, vm_stack_view_len_offset())

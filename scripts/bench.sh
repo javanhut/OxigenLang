@@ -300,8 +300,10 @@ run_one_benchmark() {
     if [[ $WARMUPS -gt 0 ]]; then
         printf "  warmup:"
         for ((round=1; round<=WARMUPS; round++)); do
-            for spec in "${specs[@]}"; do
-                local cmd="${spec#*$'\t'}"
+            # Rotate here too, so the state the first measured round inherits
+            # isn't itself a fixed-order artifact.
+            for ((i=0; i<n_variants; i++)); do
+                local cmd="${specs[$(( (i + round) % n_variants ))]#*$'\t'}"
                 eval "$cmd" >/dev/null 2>&1 || true
             done
             printf " %d" "$round"
@@ -318,11 +320,20 @@ run_one_benchmark() {
 
     printf "  measure:"
     for ((round=1; round<=RUNS; round++)); do
-        for i in $(seq 0 $((n_variants - 1))); do
-            local cmd="${specs[$i]#*$'\t'}"
+        # Rotate the starting variant each round. Interleaving alone equalizes
+        # thermal state but not POSITION: with a fixed order the first variant
+        # always runs right after the previous round's last one, which here is
+        # `oxigen --no-jit` — the slowest, most cache-disruptive variant in the
+        # rotation. That cost a fixed ~0.5ms, invisible at 200ms but a 4-6%
+        # penalty at 10ms, enough to invent a regression that isn't there.
+        # Rotating gives every variant an equal share of every slot.
+        for ((i=0; i<n_variants; i++)); do
+            local idx=$(( (i + round) % n_variants ))
+            local cmd="${specs[$idx]#*$'\t'}"
             local t
             t="$(time_one "$cmd")"
-            printf "%s\n" "$t" >> "${sample_files[$i]}"
+            # Sample stays keyed by variant; only execution order rotates.
+            printf "%s\n" "$t" >> "${sample_files[$idx]}"
         done
         printf " %d" "$round"
     done

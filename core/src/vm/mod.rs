@@ -459,6 +459,8 @@ impl VM {
             specialized_thunk: std::cell::Cell::new(None),
             specialized_arity: std::cell::Cell::new(0),
             specialized_kind: std::cell::Cell::new(0),
+                lean_thunk: std::cell::Cell::new(None),
+                lean_arity: std::cell::Cell::new(0),
             upvalue_int_kinds: uv_kinds,
             upvalue_int_values: uv_values,
         });
@@ -1234,6 +1236,8 @@ impl VM {
             specialized_thunk: std::cell::Cell::new(None),
             specialized_arity: std::cell::Cell::new(0),
             specialized_kind: std::cell::Cell::new(0),
+                lean_thunk: std::cell::Cell::new(None),
+                lean_arity: std::cell::Cell::new(0),
             upvalue_int_kinds: uv_kinds,
             upvalue_int_values: uv_values,
         });
@@ -3913,13 +3917,15 @@ impl VM {
                     closure.jit_thunk.set(Some(thunk));
                     closure.jit_state.set(1);
                     Some(thunk)
-                } else if let Some((generic, specialized, spec_arity, spec_kind)) =
+                } else if let Some((generic, specialized, spec_arity, spec_kind, lean, lean_arity)) =
                     self.jit.maybe_compile_entries_for(&closure.function, count)
                 {
                     closure.jit_thunk.set(Some(generic));
                     closure.specialized_thunk.set(specialized);
                     closure.specialized_arity.set(spec_arity);
                     closure.specialized_kind.set(spec_kind);
+                    closure.lean_thunk.set(lean);
+                    closure.lean_arity.set(lean_arity);
                     closure.jit_state.set(1);
                     Some(generic)
                 } else {
@@ -3930,6 +3936,53 @@ impl VM {
                 }
             }
         };
+
+        // ── Phase 2.2/2.4: lean integer entry ──
+        //
+        // Taken only when the entry exists AND every argument is actually an
+        // Integer. The lean ABI has no tag guard of its own — that check is the
+        // guard, and it is the caller's job precisely because the entry has no
+        // way to report a violation.
+        //
+        // Nothing is unwound on the cold path: a lean entry never touches
+        // stack_view.len, jit_frame_view.len or any Rc, so the state here is
+        // still exactly what it was before the call. That is the Phase 2.4
+        // reconstruction description for this entry kind.
+        if let Some(lean) = closure.lean_thunk.get() {
+            let arity = closure.lean_arity.get() as usize;
+            let mut args: Vec<i64> = Vec::with_capacity(arity);
+            let base = slot_offset + 1;
+            for i in 0..arity {
+                match self.stack.get(base + i) {
+                    Some(Value::Integer(n)) => args.push(*n),
+                    _ => {
+                        args.clear();
+                        break;
+                    }
+                }
+            }
+            if args.len() == arity && arity > 0 {
+                // Budget mirrors FRAMES_MAX so the depth at which this reports
+                // overflow matches what the interpreter would have done.
+                let budget = (FRAMES_MAX as i64 - self.frames.len() as i64).max(1);
+                match unsafe { crate::jit::runtime::invoke_lean(lean, &args, budget) } {
+                    Ok(v) => {
+                        self.stack_truncate(slot_offset);
+                        self.push(Value::Integer(v));
+                        closure.jit_bailouts.set(0);
+                        return Ok(());
+                    }
+                    Err(crate::jit::runtime::LeanExit::Overflow) => {
+                        return Err(self.runtime_error_hint(
+                            "stack overflow",
+                            "check for infinite recursion or deeply nested calls",
+                        ));
+                    }
+                    // Not an error — just no lean path. Fall through below.
+                    Err(crate::jit::runtime::LeanExit::Unsupported) => {}
+                }
+            }
+        }
 
         if let Some(thunk) = thunk {
             let entry_line = closure.function.chunk.lines.first().copied().unwrap_or(0);

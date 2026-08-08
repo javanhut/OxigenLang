@@ -181,6 +181,8 @@ mod layout_tests {
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
             specialized_kind: Cell::new(0),
+            lean_thunk: Cell::new(None),
+            lean_arity: Cell::new(0),
             upvalue_int_kinds: kinds,
             upvalue_int_values: values,
         });
@@ -246,6 +248,8 @@ mod layout_tests {
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
             specialized_kind: Cell::new(0),
+            lean_thunk: Cell::new(None),
+            lean_arity: Cell::new(0),
             upvalue_int_kinds: kinds,
             upvalue_int_values: values,
         });
@@ -664,6 +668,13 @@ pub struct ObjClosure {
     /// A3 direct-call dispatch gates on `== 2`; trampolines never
     /// receive direct-call traffic.
     pub specialized_kind: Cell<u8>,
+    /// Phase 2.2: pointer to the lean integer entry
+    /// (`fn(i64 args.., i64 budget) -> i64`), when the function qualified.
+    /// Opaque — only the JIT boundary knows the real signature.
+    pub lean_thunk: Cell<Option<*const ()>>,
+    /// Arity the lean entry expects, so the boundary can read exactly that many
+    /// integer arguments before committing to the call.
+    pub lean_arity: Cell<u8>,
     /// B2.2: JIT-visible parallel cache for the `Closed(Integer)`
     /// upvalue shape. `upvalue_int_kinds[i] == 1` means upvalue `i` is
     /// currently `Upvalue::Closed(Value::Integer(_))` and the i64 is in
@@ -720,6 +731,8 @@ impl ObjClosure {
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
             specialized_kind: Cell::new(0),
+            lean_thunk: Cell::new(None),
+            lean_arity: Cell::new(0),
             upvalue_int_kinds,
             upvalue_int_values,
         }

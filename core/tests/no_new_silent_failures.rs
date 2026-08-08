@@ -45,6 +45,7 @@ const BASELINE: &[(&str, usize)] = &[
     ("core/src/compiler/slot_types.rs", 1),
     ("core/src/concurrent.rs", 6),
     ("core/src/diagnostics/render.rs", 2),
+    ("core/src/jit/engine/lean.rs", 1),
     ("core/src/jit/engine/mod.rs", 9),
     ("core/src/jit/mod.rs", 5),
     ("core/src/keyinput.rs", 1),

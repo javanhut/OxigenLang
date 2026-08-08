@@ -65,9 +65,19 @@ pub(crate) struct CallCacheEntry {
     /// lifetime — the closure can't change `specialized_kind` after
     /// install.
     pub specialized_kind: u8,
+    /// Phase 1: inline expansion of the *callee's body* at this call site.
+    /// Populated on a normal IC miss once the real callee is known. When set,
+    /// the Call IR evaluates the body directly and never pushes a `JitFrame`,
+    /// materializes an operand-stack argument, or issues a call at all.
+    /// See `ClosureInlineKind`.
+    pub inline_kind: ClosureInlineKind,
     /// ABI alignment padding — never read; `pub(crate)` so the struct
     /// can be initialized from outside this module.
-    pub(crate) _pad: [u8; 6],
+    pub(crate) _pad: [u8; 1],
+    /// Which upvalue slot `ClosureInlineKind::AddUpvalueArg` reads. Meaningful
+    /// only when `inline_kind` is non-`None`. Occupies former padding, so the
+    /// struct's size and every existing offset are unchanged.
+    pub inline_upvalue_index: u32,
     /// B2.2.f: cache of `closure.specialized_thunk` (or null when
     /// none). Same rationale as `specialized_kind`.
     pub specialized_thunk: *const (),
@@ -82,7 +92,28 @@ impl CallCacheEntry {
     #[allow(dead_code)]
     pub(crate) const OFFSET_THUNK_RAW: i32 = 8;
     pub(crate) const OFFSET_SPECIALIZED_KIND: i32 = 17;
+    pub(crate) const OFFSET_INLINE_KIND: i32 = 18;
+    pub(crate) const OFFSET_INLINE_UPVALUE_INDEX: i32 = 20;
     pub(crate) const OFFSET_SPECIALIZED_THUNK: i32 = 24;
+}
+
+/// Kind tag for inline expansion of a *closure* body at its call site — the
+/// `Call` analogue of `MethodInlineKind`.
+///
+/// Deliberately one shape to start. The guard cost is paid on every call, so a
+/// wide detector that rarely matches is a straight loss; widen only against a
+/// benchmark that demands it.
+///
+/// `#[repr(u8)]` so the JIT reads a single byte at `OFFSET_INLINE_KIND`.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ClosureInlineKind {
+    /// No inline expansion known; take the normal dispatch path.
+    None = 0,
+    /// Body is exactly `GetUpvalue(k); GetLocal(1); Add; Return` with arity 1 —
+    /// i.e. `fun(y) { x + y }` over an immutable captured `x`. Evaluates to a
+    /// single wrapping integer add at the caller.
+    AddUpvalueArg = 1,
 }
 
 /// Kind tag for inline expansion of a struct-method body at its caller.

@@ -1966,3 +1966,123 @@ fn constant_folding_all_positions() {
         assert_eq!(run_result(src, Some(1)).unwrap(), *expected, "jit: {src}");
     }
 }
+
+// ── Phase 1: closure-body inlining at the call site ─────────────────────────
+
+/// The inlinable shape and every neighbouring shape that must NOT inline.
+/// All are asserted against the interpreter, so a mis-fired guard shows up as
+/// a wrong answer rather than merely a slow one.
+#[test]
+fn closure_inline_shapes_match_interpreter() {
+    let cases: &[(&str, &str)] = &[
+        // The target shape: immutable captured int, arity 1, body is one add.
+        (
+            "fun mk(x) { fun(y) { x + y } }\nadd5 := mk(5)\n\
+             fun run(n <int>) { t <int> := 0\ni <int> := 0\n\
+             repeat when i < n { t = t + add5(i)\ni = i + 1 }\nt }\nrun(200)",
+            "20900",
+        ),
+        // Mutable capture: the body contains SetUpvalue, so it is not the
+        // 8-byte shape and must never inline.
+        (
+            "fun mk() { c := 0\nfun(y) { c = c + y\nc } }\nacc := mk()\n\
+             fun run(n <int>) { t <int> := 0\ni <int> := 0\n\
+             repeat when i < n { t = t + acc(i)\ni = i + 1 }\nt }\nrun(50)",
+            "20825",
+        ),
+        // Non-integer upvalue: shape matches, but the runtime upvalue-kind
+        // guard must decline and fall through to the normal path.
+        (
+            "fun mk(x) { fun(y) { x + y } }\nf := mk(1.5)\n\
+             fun run(n <int>) { t := 0.0\ni <int> := 0\n\
+             repeat when i < n { t = t + f(i)\ni = i + 1 }\nt }\nrun(100)",
+            "5100",
+        ),
+        // Non-integer argument: the argument-tag guard must decline.
+        (
+            "fun mk(x) { fun(y) { x + y } }\nf := mk(2)\n\
+             fun run(n <int>) { t := 0.0\ni <int> := 0\n\
+             repeat when i < n { t = t + f(i + 0.5)\ni = i + 1 }\nt }\nrun(100)",
+            "5200",
+        ),
+        // String upvalue with a string argument — shape matches but neither
+        // value is an integer; concatenation semantics must survive.
+        (
+            "fun mk(x) { fun(y) { x + y } }\nf := mk(\"a\")\n\
+             fun run(n <int>) { s := \"\"\ni <int> := 0\n\
+             repeat when i < 3 { s = s + f(\"b\")\ni = i + 1 }\ns }\nrun(3)",
+            "ababab",
+        ),
+        // Wrong arity for the shape (2 params) — must not inline.
+        (
+            "fun mk(x) { fun(a, b) { x + a + b } }\nf := mk(1)\n\
+             fun run(n <int>) { t <int> := 0\ni <int> := 0\n\
+             repeat when i < n { t = t + f(i, 2)\ni = i + 1 }\nt }\nrun(100)",
+            "5250",
+        ),
+    ];
+    for (src, expected) in cases {
+        assert_eq!(run_result(src, None).unwrap(), *expected, "interp: {src}");
+        assert_eq!(
+            run_result(src, Some(1)).unwrap(),
+            *expected,
+            "eager-jit: {src}"
+        );
+    }
+}
+
+/// Two different closures reaching one call site must not reuse each other's
+/// inline metadata. The site sees `add5` first, then `add100`; a stale
+/// upvalue index or a skipped identity check would return the wrong sum.
+#[test]
+fn closure_inline_does_not_reuse_stale_metadata_across_callees() {
+    let src = r#"
+fun mk(x) { fun(y) { x + y } }
+fun apply(f, k <int>) { f(k) }
+fun run(n <int>) {
+  a := mk(5)
+  b := mk(100)
+  t <int> := 0
+  i <int> := 0
+  repeat when i < n {
+    t = t + apply(a, i) + apply(b, i)
+    i = i + 1
+  }
+  t
+}
+run(200)
+"#;
+    // sum over i<200 of (5+i) + (100+i) = 200*105 + 2*(199*200/2) = 21000 + 39800
+    assert_eq!(run_result(src, None).unwrap(), "60800");
+    assert_eq!(run_result(src, Some(1)).unwrap(), "60800");
+}
+
+/// A closure that stops being inlinable mid-run (its call site later sees a
+/// non-inlinable callee) must keep producing correct results.
+#[test]
+fn closure_inline_site_survives_callee_swap() {
+    let src = r#"
+fun mk(x) { fun(y) { x + y } }
+fun mul3(y <int>) { y * 3 }
+fun apply(f, k <int>) { f(k) }
+fun run(n <int>) {
+  a := mk(5)
+  t <int> := 0
+  i <int> := 0
+  repeat when i < n {
+    t = t + apply(a, i)
+    i = i + 1
+  }
+  i = 0
+  repeat when i < n {
+    t = t + apply(mul3, i)
+    i = i + 1
+  }
+  t
+}
+run(100)
+"#;
+    // sum(5+i) = 500 + 4950 = 5450 ; sum(3i) = 3*4950 = 14850
+    assert_eq!(run_result(src, None).unwrap(), "20300");
+    assert_eq!(run_result(src, Some(1)).unwrap(), "20300");
+}

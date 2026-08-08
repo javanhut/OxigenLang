@@ -35,8 +35,10 @@ use super::{CompiledEntries, CompiledThunk, SpecializedThunkRaw};
 
 mod cache;
 mod counters;
+mod lean;
 mod defs;
 mod helpers;
+pub(crate) use cache::ClosureInlineKind;
 pub(crate) use cache::{
     CallCacheEntry, FieldCacheEntry, FieldCacheKind, GlobalCacheEntry, MethodCacheEntry,
     MethodInlineKind,
@@ -62,6 +64,7 @@ pub(super) struct JitInner {
 
     /// Cached helper `FuncId`s — registered once at module init.
     helpers: HelperIds,
+    lean_cold_id: cranelift_module::FuncId,
 
     /// Pre-call frame depth, stashed by `invoke` before jumping to compiled
     /// code and read by runtime helpers through the VM pointer.
@@ -126,6 +129,16 @@ impl JitInner {
 
         let helpers = declare_helpers(&mut module);
 
+        // The lean entry's only cold exit. Declared once here so every lean
+        // entry can reference the same import.
+        let lean_cold_id = {
+            let mut sig = module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            module
+                .declare_function("oxigen_lean_overflow", Linkage::Import, &sig)
+                .expect("declare lean overflow helper")
+        };
+
         Self {
             module,
             ctx: Context::new(),
@@ -133,6 +146,7 @@ impl JitInner {
             compiled: HashMap::new(),
             retained: HashMap::new(),
             helpers,
+            lean_cold_id,
             current_stop_depth: 0,
             pending_error: None,
             next_id: 0,
@@ -192,7 +206,9 @@ impl JitInner {
             thunk_raw: std::ptr::null(),
             arity: 0,
             specialized_kind: 0,
-            _pad: [0; 6],
+            inline_kind: cache::ClosureInlineKind::None,
+            _pad: [0; 1],
+            inline_upvalue_index: 0,
             specialized_thunk: std::ptr::null(),
             _keeper: None,
         }));
@@ -547,7 +563,7 @@ impl JitInner {
                 // The slot offset is immutable for the lifetime of this activation.
                 let slot_offset_val = builder.ins().load(
                     types::I64,
-                    cranelift_codegen::ir::MemFlags::trusted(),
+                    cranelift_codegen::ir::MemFlagsData::trusted(),
                     own_frame_ptr,
                     JitFrame::OFFSET_SLOT_OFFSET,
                 );
@@ -622,8 +638,8 @@ impl JitInner {
                 // Generic tag-guards each param; IntSpecialized trusts the caller's contract.
                 match kind {
                     EntryKind::IntSpecialized => {
-                        use cranelift_codegen::ir::MemFlags;
-                        let flags = MemFlags::trusted();
+                        use cranelift_codegen::ir::MemFlagsData;
+                        let flags = MemFlagsData::trusted();
                         let arity = func.arity as usize;
 
                         // Closure-aware layout is [vm, closure_ptr, args..]; otherwise [vm, args..].
@@ -676,8 +692,8 @@ impl JitInner {
                     }
                     EntryKind::Generic => {
                         if !prologue_slots.is_empty() {
-                            use cranelift_codegen::ir::MemFlags;
-                            let flags = MemFlags::trusted();
+                            use cranelift_codegen::ir::MemFlagsData;
+                            let flags = MemFlagsData::trusted();
 
                             let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
                             let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
@@ -1092,8 +1108,8 @@ impl JitInner {
                                 }
                                 // Peek before the store: without this re-sync the Variable stays pinned at its Constant-init def forever.
                                 let top_payload = int_locals.get(&slot).map(|_| {
-                                    use cranelift_codegen::ir::MemFlags;
-                                    let flags = MemFlags::trusted();
+                                    use cranelift_codegen::ir::MemFlagsData;
+                                    let flags = MemFlagsData::trusted();
                                     let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
                                     let stack_len = emit_load_stack_len(&mut builder, vm_val);
                                     let value_size =
@@ -1121,9 +1137,9 @@ impl JitInner {
                                     == Some("INTEGER");
                                 if constrained && int_constraint {
                                     // Inline the int type-lock check; only a real violation crosses into the checked helper.
-                                    use cranelift_codegen::ir::MemFlags;
+                                    use cranelift_codegen::ir::MemFlagsData;
                                     use cranelift_codegen::ir::condcodes::IntCC;
-                                    let flags = MemFlags::trusted();
+                                    let flags = MemFlagsData::trusted();
                                     let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
                                     let stack_len = emit_load_stack_len(&mut builder, vm_val);
                                     let value_size =
@@ -1684,9 +1700,9 @@ impl JitInner {
                             let idx_val = builder.ins().iconst(types::I32, idx as i64);
                             let cache_val = builder.ins().iconst(ptr_ty, cache_ptr as i64);
                             // Version check, then tag-gated Rc bump and copy; miss falls through to the helper.
-                            use cranelift_codegen::ir::MemFlags;
+                            use cranelift_codegen::ir::MemFlagsData;
                             use cranelift_codegen::ir::condcodes::IntCC;
-                            let flags = MemFlags::trusted();
+                            let flags = MemFlagsData::trusted();
                             let cache_ver = builder.ins().load(types::I64, flags, cache_val, 0);
                             // Per-name version cell trades one dependent load for the VM-wide globals_version read.
                             let cell_ptr = builder.ins().load(
@@ -1705,7 +1721,7 @@ impl JitInner {
                             // ── Hit ──
                             builder.switch_to_block(hit_block);
                             // cache.value sits at byte offset 8 of the cache.
-                            let cache_value_ptr = builder.ins().iadd_imm(cache_val, 8);
+                            let cache_value_ptr = builder.ins().iadd_imm_s(cache_val, 8);
                             // Heap-backed means tag > 6 AND tag != 13: Builtin's payload is a fn pointer, and bumping it SIGBUSes.
                             let tag = builder.ins().load(types::I8, flags, cache_value_ptr, 0);
                             let six = builder.ins().iconst(types::I8, 6);
@@ -1732,7 +1748,7 @@ impl JitInner {
                                 VALUE_INT_PAYLOAD_OFFSET as i32,
                             );
                             let strong = builder.ins().load(types::I64, flags, rc_ptr, 0);
-                            let strong_new = builder.ins().iadd_imm(strong, 1);
+                            let strong_new = builder.ins().iadd_imm_s(strong, 1);
                             builder.ins().store(flags, strong_new, rc_ptr, 0);
                             builder.ins().jump(post_bump, &[]);
 
@@ -1803,11 +1819,11 @@ impl JitInner {
                         // ── Upvalues ────────────────────────────────────
                         OpCode::GetUpvalue => {
                             // Read kinds[idx] from the closure's cache; the helper populates it so later runs hit the fast path.
-                            use cranelift_codegen::ir::MemFlags;
+                            use cranelift_codegen::ir::MemFlagsData;
                             use cranelift_codegen::ir::condcodes::IntCC;
                             let idx = read_u16(code, ip + 1);
                             let idx_val = builder.ins().iconst(types::I32, idx as i64);
-                            let flags = MemFlags::trusted();
+                            let flags = MemFlagsData::trusted();
 
                             let closure_ptr = if let Some(var) = closure_arg_var {
                                 builder.use_var(var)
@@ -1835,7 +1851,7 @@ impl JitInner {
                                     .load(ptr_ty, flags, closure_ptr, kinds_box_off);
                             let kind_byte =
                                 builder.ins().load(types::I8, flags, kinds_data, idx as i32);
-                            let is_int = builder.ins().icmp_imm(IntCC::Equal, kind_byte, 1);
+                            let is_int = builder.ins().icmp_imm_s(IntCC::Equal, kind_byte, 1);
 
                             let fast_block = builder.create_block();
                             let fallback_block = builder.create_block();
@@ -1970,10 +1986,10 @@ impl JitInner {
                             };
 
                             let a3_post_call_block: Option<Block> = if a3_eligible {
-                                use cranelift_codegen::ir::MemFlags;
+                                use cranelift_codegen::ir::MemFlagsData;
                                 use cranelift_codegen::ir::condcodes::IntCC;
 
-                                let flags = MemFlags::trusted();
+                                let flags = MemFlagsData::trusted();
                                 let spec_id = spec_thunk_id.unwrap();
 
                                 // Args are still on expr_stack, so the callee is at stack top, not stack_top - arg_count.
@@ -2022,7 +2038,7 @@ impl JitInner {
                                 );
                                 // curr_rc_raw is NonNull<RcBox<ObjClosure>>; JitFrame.closure_raw is adjusted by RC_VALUE_OFFSET.
                                 let closure_ptr =
-                                    builder.ins().iadd_imm(curr_rc_raw, RC_VALUE_OFFSET as i64);
+                                    builder.ins().iadd_imm_s(curr_rc_raw, RC_VALUE_OFFSET as i64);
                                 let caller_frame_ptr = own_frame_ptr;
                                 let current_closure_raw = builder.ins().load(
                                     ptr_ty,
@@ -2218,7 +2234,7 @@ impl JitInner {
                             let _ = a3_post_call_block; // used after IC below
 
                             // Guard reads vm.stack_view directly: tag == CLOSURE and Rc == cache.closure_raw, else jit_op_call_miss.
-                            use cranelift_codegen::ir::MemFlags;
+                            use cranelift_codegen::ir::MemFlagsData;
                             use cranelift_codegen::ir::condcodes::IntCC;
 
                             let stack_ptr = emit_load_stack_ptr(&mut builder, vm_val);
@@ -2232,7 +2248,7 @@ impl JitInner {
                             let callee_off = builder.ins().imul(callee_slot, value_size);
                             let callee_ptr = builder.ins().iadd(stack_ptr, callee_off);
 
-                            let flags = MemFlags::trusted();
+                            let flags = MemFlagsData::trusted();
                             let tag = builder.ins().load(types::I8, flags, callee_ptr, 0);
                             let closure_tag =
                                 builder.ins().iconst(types::I8, VALUE_TAG_CLOSURE as i64);
@@ -2276,7 +2292,7 @@ impl JitInner {
                                 emit_counter_bump(&mut builder, cp, counter_offsets::CALL_IC_HIT);
                                 // A4.0 probe: count cached callees with a NativeIntBody specialized entry.
                                 let probe_closure_ptr =
-                                    builder.ins().iadd_imm(curr_rc, RC_VALUE_OFFSET as i64);
+                                    builder.ins().iadd_imm_s(curr_rc, RC_VALUE_OFFSET as i64);
                                 let spec_kind_off = std::mem::offset_of!(
                                     crate::vm::value::ObjClosure,
                                     specialized_kind
@@ -2287,7 +2303,7 @@ impl JitInner {
                                     probe_closure_ptr,
                                     spec_kind_off,
                                 );
-                                let is_native = builder.ins().icmp_imm(
+                                let is_native = builder.ins().icmp_imm_s(
                                     IntCC::Equal,
                                     spec_kind,
                                     crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY as i64,
@@ -2313,12 +2329,218 @@ impl JitInner {
                                 builder.seal_block(probe_after_block);
                             }
 
+                            // ── Phase 1: inline the callee body ──────────────
+                            //
+                            // Sits ahead of every dispatch path because it is strictly
+                            // cheaper than all of them: on a hit nothing is pushed, no
+                            // frame is built and no call is issued — the whole callee
+                            // becomes one wrapping add. The IC's tag+Rc match above has
+                            // already pinned callee identity, so what remains to check is
+                            // the recorded shape and the two value-representation facts
+                            // that cannot be known at compile time.
+                            //
+                            // Any guard failure falls through to the existing paths with
+                            // nothing mutated, so this can only ever be a speed change.
+                            if arg_count == 1 && matches!(kind, EntryKind::Generic | EntryKind::IntSpecialized) {
+                                use cranelift_codegen::ir::MemFlagsData;
+                                use cranelift_codegen::ir::condcodes::IntCC;
+                                let f = MemFlagsData::trusted();
+
+                                let inline_after_block = builder.create_block();
+                                let try_inline_block = builder.create_block();
+
+                                // Guard 1: this site recorded an inlinable callee.
+                                let ik = builder.ins().load(
+                                    types::I8,
+                                    f,
+                                    cache_val,
+                                    CallCacheEntry::OFFSET_INLINE_KIND,
+                                );
+                                let is_add_upv = builder.ins().icmp_imm_s(
+                                    IntCC::Equal,
+                                    ik,
+                                    ClosureInlineKind::AddUpvalueArg as i64,
+                                );
+                                builder.ins().brif(
+                                    is_add_upv,
+                                    try_inline_block,
+                                    &[],
+                                    inline_after_block,
+                                    &[],
+                                );
+
+                                builder.switch_to_block(try_inline_block);
+                                let inline_obj_ptr =
+                                    builder.ins().iadd_imm_s(curr_rc, RC_VALUE_OFFSET as i64);
+
+                                // Argument slot is stack top; the callee sits just below it.
+                                let sp_i = emit_load_stack_ptr(&mut builder, vm_val);
+                                let sl_i = emit_load_stack_len(&mut builder, vm_val);
+                                let vsz_i = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+                                let one_i = builder.ins().iconst(types::I64, 1);
+                                let arg_slot_i = builder.ins().isub(sl_i, one_i);
+                                let arg_addr_i = {
+                                    let off = builder.ins().imul(arg_slot_i, vsz_i);
+                                    builder.ins().iadd(sp_i, off)
+                                };
+
+                                // Guard 2: the argument is an Integer.
+                                let arg_tag_i = builder.ins().load(types::I8, f, arg_addr_i, 0);
+                                let arg_is_int = builder.ins().icmp_imm_s(
+                                    IntCC::Equal,
+                                    arg_tag_i,
+                                    VALUE_TAG_INTEGER as i64,
+                                );
+
+                                // Guard 3: the captured upvalue is cached as a closed
+                                // integer. Same per-closure cache the callee's own inline
+                                // GetUpvalue reads, so a hit here means the callee would
+                                // have taken its fast path too.
+                                let upv_idx = builder.ins().load(
+                                    types::I32,
+                                    f,
+                                    cache_val,
+                                    CallCacheEntry::OFFSET_INLINE_UPVALUE_INDEX,
+                                );
+                                let upv_idx64 = builder.ins().uextend(types::I64, upv_idx);
+                                let kinds_off = std::mem::offset_of!(
+                                    crate::vm::value::ObjClosure,
+                                    upvalue_int_kinds
+                                ) as i32;
+                                let vals_off = std::mem::offset_of!(
+                                    crate::vm::value::ObjClosure,
+                                    upvalue_int_values
+                                ) as i32;
+                                let kinds_data =
+                                    builder.ins().load(ptr_ty, f, inline_obj_ptr, kinds_off);
+                                let kind_addr = builder.ins().iadd(kinds_data, upv_idx64);
+                                let upv_kind = builder.ins().load(types::I8, f, kind_addr, 0);
+                                let upv_is_int =
+                                    builder.ins().icmp_imm_s(IntCC::Equal, upv_kind, 1);
+
+                                let both_ok = builder.ins().band(arg_is_int, upv_is_int);
+                                let do_inline_block = builder.create_block();
+                                let guard_miss_block = builder.create_block();
+                                builder.ins().brif(
+                                    both_ok,
+                                    do_inline_block,
+                                    &[],
+                                    guard_miss_block,
+                                    &[],
+                                );
+
+                                builder.switch_to_block(guard_miss_block);
+                                if let Some(cp) = counters_ptr_opt {
+                                    emit_counter_bump(
+                                        &mut builder,
+                                        cp,
+                                        counter_offsets::CLOSURE_INLINE_GUARD_MISS,
+                                    );
+                                }
+                                builder.ins().jump(inline_after_block, &[]);
+
+                                // ── The body: one wrapping add ──
+                                builder.switch_to_block(do_inline_block);
+                                let vals_data =
+                                    builder.ins().load(ptr_ty, f, inline_obj_ptr, vals_off);
+                                let eight_i = builder.ins().iconst(types::I64, 8);
+                                let val_off = builder.ins().imul(upv_idx64, eight_i);
+                                let val_addr = builder.ins().iadd(vals_data, val_off);
+                                let upv_val = builder.ins().load(types::I64, f, val_addr, 0);
+                                let arg_val = builder.ins().load(
+                                    types::I64,
+                                    f,
+                                    arg_addr_i,
+                                    VALUE_INT_PAYLOAD_OFFSET as i32,
+                                );
+                                let inline_result = builder.ins().iadd(upv_val, arg_val);
+
+                                // Release the closure the preceding GetGlobal/GetLocal
+                                // pushed: dropping the two stack slots below is a raw
+                                // length store that runs no Drop. `strong == 1` would need
+                                // a real Drop chain, so that case declines to inline —
+                                // unreachable in practice because the IC keeper holds one.
+                                let callee_slot_i = builder.ins().isub(arg_slot_i, one_i);
+                                let callee_addr_i = {
+                                    let off = builder.ins().imul(callee_slot_i, vsz_i);
+                                    builder.ins().iadd(sp_i, off)
+                                };
+                                let cm_rc_i = builder.ins().load(
+                                    types::I64,
+                                    f,
+                                    callee_addr_i,
+                                    VALUE_INT_PAYLOAD_OFFSET as i32,
+                                );
+                                let strong_i = builder.ins().load(types::I64, f, cm_rc_i, 0);
+                                let strong_gt1_i = builder.ins().icmp(
+                                    IntCC::UnsignedGreaterThan,
+                                    strong_i,
+                                    one_i,
+                                );
+                                let commit_block = builder.create_block();
+                                builder.ins().brif(
+                                    strong_gt1_i,
+                                    commit_block,
+                                    &[],
+                                    guard_miss_block,
+                                    &[],
+                                );
+
+                                builder.switch_to_block(commit_block);
+                                let dec_i = builder.ins().iadd_imm_s(strong_i, -1);
+                                builder.ins().store(f, dec_i, cm_rc_i, 0);
+                                // Pop callee + argument. Both are now primitives as far as
+                                // Drop is concerned: the argument is an Integer (guard 2)
+                                // and the closure's count was just released.
+                                builder.ins().store(
+                                    f,
+                                    callee_slot_i,
+                                    vm_val,
+                                    vm_stack_view_len_offset(),
+                                );
+                                if let Some(cp) = counters_ptr_opt {
+                                    emit_counter_bump(
+                                        &mut builder,
+                                        cp,
+                                        counter_offsets::CLOSURE_INLINE_HIT,
+                                    );
+                                }
+                                match fast_join {
+                                    Some(fj) => {
+                                        builder.ins().jump(fj, &[inline_result.into()]);
+                                    }
+                                    None => {
+                                        emit_inline_push_integer(
+                                            &mut builder,
+                                            vm_val,
+                                            inline_result,
+                                        );
+                                        let pcb = match shared_post_call_block {
+                                            Some(b) => b,
+                                            None => {
+                                                let b = builder.create_block();
+                                                shared_post_call_block = Some(b);
+                                                b
+                                            }
+                                        };
+                                        builder.ins().jump(pcb, &[]);
+                                    }
+                                }
+
+                                builder.switch_to_block(inline_after_block);
+                                builder.seal_block(try_inline_block);
+                                builder.seal_block(do_inline_block);
+                                builder.seal_block(guard_miss_block);
+                                builder.seal_block(commit_block);
+                                builder.seal_block(inline_after_block);
+                            }
+
                             // Fires inside the IC hit block after tag+RC match; non-CA cost is 1 kind load + 1 brif.
                             let post_ca_dispatch_block = if arg_count == 1 {
                                 // Compute closure_obj_ptr once.
                                 let closure_obj_ptr = builder
                                     .ins()
-                                    .iadd_imm(curr_rc, RC_VALUE_OFFSET as i64);
+                                    .iadd_imm_s(curr_rc, RC_VALUE_OFFSET as i64);
 
                                 // Locate the arg slot up front so it can be tag-checked alongside kind/arity.
                                 let stack_ptr_ca = emit_load_stack_ptr(&mut builder, vm_val);
@@ -2345,17 +2567,17 @@ impl JitInner {
                                 );
                                 let arg_tag = builder.ins().load(types::I8, flags, arg_addr_ca, 0);
 
-                                let is_ca_kind = builder.ins().icmp_imm(
+                                let is_ca_kind = builder.ins().icmp_imm_s(
                                     IntCC::Equal,
                                     kind_byte,
                                     crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE as i64,
                                 );
-                                let arity_match = builder.ins().icmp_imm(
+                                let arity_match = builder.ins().icmp_imm_s(
                                     IntCC::Equal,
                                     arity_byte,
                                     arg_count as i64,
                                 );
-                                let arg_is_int = builder.ins().icmp_imm(
+                                let arg_is_int = builder.ins().icmp_imm_s(
                                     IntCC::Equal,
                                     arg_tag,
                                     VALUE_TAG_INTEGER as i64,
@@ -2436,7 +2658,7 @@ impl JitInner {
                                     JitFrame::OFFSET_CLOSURE_RAW,
                                 );
                                 // The spec entry's slot_offset is the closure's position, arg_slot_ca - 1.
-                                let callee_slot_ca = builder.ins().iadd_imm(arg_slot_ca, -1);
+                                let callee_slot_ca = builder.ins().iadd_imm_s(arg_slot_ca, -1);
                                 builder.ins().store(
                                     flags,
                                     callee_slot_ca,
@@ -2595,7 +2817,7 @@ impl JitInner {
                             let line_val = builder.ins().iconst(types::I32, line as i64);
                             // Adjust by RC_VALUE_OFFSET so closure_raw points at ObjClosure, not the RcBox header.
                             let closure_t_ptr =
-                                builder.ins().iadd_imm(curr_rc, RC_VALUE_OFFSET as i64);
+                                builder.ins().iadd_imm_s(curr_rc, RC_VALUE_OFFSET as i64);
                             let module_globals = builder.ins().load(
                                 ptr_ty,
                                 flags,
@@ -2651,7 +2873,7 @@ impl JitInner {
 
                             builder.switch_to_block(hit_nonzero_block);
                             let bail_block = builder.create_block();
-                            let is_bailout = builder.ins().icmp_imm(
+                            let is_bailout = builder.ins().icmp_imm_s(
                                 cranelift_codegen::ir::condcodes::IntCC::Equal,
                                 hit_status,
                                 2,
@@ -2877,7 +3099,7 @@ impl JitInner {
 
                             // Bump the method closure's strong count, commit Vec::len after raw stores, roll back the frame on error.
                             if arg_count <= 1 {
-                                use cranelift_codegen::ir::MemFlags;
+                                use cranelift_codegen::ir::MemFlagsData;
                                 use cranelift_codegen::ir::condcodes::IntCC;
 
                                 let mi_val = builder.ins().iconst(types::I32, method_idx as i64);
@@ -2893,7 +3115,7 @@ impl JitInner {
                                 let receiver_slot = builder.ins().isub(stack_len, offset_from_top);
                                 let receiver_off = builder.ins().imul(receiver_slot, value_size);
                                 let receiver_ptr = builder.ins().iadd(stack_ptr, receiver_off);
-                                let flags = MemFlags::trusted();
+                                let flags = MemFlagsData::trusted();
 
                                 let check_def_block = builder.create_block();
                                 let hit_block = builder.create_block();
@@ -2923,7 +3145,7 @@ impl JitInner {
                                     VALUE_INT_PAYLOAD_OFFSET as i32,
                                 );
                                 let inst_ptr =
-                                    builder.ins().iadd_imm(receiver_raw, RC_VALUE_OFFSET as i64);
+                                    builder.ins().iadd_imm_s(receiver_raw, RC_VALUE_OFFSET as i64);
                                 let inst_def_raw = builder.ins().load(
                                     ptr_ty,
                                     flags,
@@ -3097,7 +3319,7 @@ impl JitInner {
                                 );
 
                                 // Guarded strong > 1 above, so this decrement never has to run Drop.
-                                let strong_dec = builder.ins().iadd_imm(strong, -1);
+                                let strong_dec = builder.ins().iadd_imm_s(strong, -1);
                                 builder.ins().store(flags, strong_dec, receiver_rcbox, 0);
 
                                 // Tag-only write: Value::None has no Drop and the JIT only reads the tag.
@@ -3129,11 +3351,11 @@ impl JitInner {
                                 // Balance the Drop that stack teardown will run; without it the RcBox is freed while the cache keeper still points at it.
                                 let strong =
                                     builder.ins().load(types::I64, flags, closure_raw_box, 0);
-                                let strong_inc = builder.ins().iadd_imm(strong, 1);
+                                let strong_inc = builder.ins().iadd_imm_s(strong, 1);
                                 builder.ins().store(flags, strong_inc, closure_raw_box, 0);
                                 let closure_raw_t = builder
                                     .ins()
-                                    .iadd_imm(closure_raw_box, RC_VALUE_OFFSET as i64);
+                                    .iadd_imm_s(closure_raw_box, RC_VALUE_OFFSET as i64);
                                 let thunk_raw = builder.ins().load(
                                     ptr_ty,
                                     flags,
@@ -3156,7 +3378,7 @@ impl JitInner {
                                     receiver_ptr,
                                     closure_raw_box,
                                 );
-                                let new_stack_len = builder.ins().iadd_imm(stack_len, 1);
+                                let new_stack_len = builder.ins().iadd_imm_s(stack_len, 1);
                                 // Commit Vec::len or bounds-checked helpers OOB-panic on the next non-inline local access.
                                 builder
                                     .ins()
@@ -3210,7 +3432,7 @@ impl JitInner {
                                     new_frame_ptr,
                                     JitFrame::OFFSET_LINE,
                                 );
-                                let new_jit_len = builder.ins().iadd_imm(jit_frames_len, 1);
+                                let new_jit_len = builder.ins().iadd_imm_s(jit_frames_len, 1);
                                 builder.ins().store(
                                     flags,
                                     new_jit_len,
@@ -3308,12 +3530,75 @@ impl JitInner {
                                 }
                                 EntryKind::IntSpecialized => {
                                     // Raw i64 payload only when the return is provably Integer; otherwise status 3 leaves it boxed on the stack.
-                                    use cranelift_codegen::ir::MemFlags;
+                                    use cranelift_codegen::ir::MemFlagsData;
                                     use cranelift_codegen::ir::condcodes::IntCC;
-                                    let flags = MemFlags::trusted();
+                                    let flags = MemFlagsData::trusted();
 
+                                    // Releases the closure marker at slot_offset before the raw
+                                    // len store abandons it. `sync_stack_from_view` is a bare
+                                    // `set_len` and runs no Drop, so without this every call
+                                    // through a specialized entry leaked one strong reference to
+                                    // its own callee — silently, since a leak is never a wrong
+                                    // answer. The Generic return arm has always done this; this
+                                    // arm never did.
+                                    //
+                                    // `$slow_result` is the return value when it lives in a
+                                    // register rather than on the stack: the strong == 1 fallback
+                                    // hands off to `op_return`, which pops the stack top, so a
+                                    // register result has to be materialized first.
                                     macro_rules! emit_intspec_teardown {
-                                        () => {{
+                                        ($slow_result:expr) => {{
+                                            let stack_ptr_td =
+                                                emit_load_stack_ptr(&mut builder, vm_val);
+                                            let vsize_td = builder
+                                                .ins()
+                                                .iconst(types::I64, VALUE_SIZE as i64);
+                                            let cm_off_td =
+                                                builder.ins().imul(slot_offset_val, vsize_td);
+                                            let cm_addr_td =
+                                                builder.ins().iadd(stack_ptr_td, cm_off_td);
+                                            let cm_rc_td = builder.ins().load(
+                                                types::I64,
+                                                flags,
+                                                cm_addr_td,
+                                                VALUE_INT_PAYLOAD_OFFSET as i32,
+                                            );
+                                            let strong_td =
+                                                builder.ins().load(types::I64, flags, cm_rc_td, 0);
+                                            let one_td =
+                                                builder.ins().iconst(types::I64, 1);
+                                            let gt1_td = builder.ins().icmp(
+                                                IntCC::UnsignedGreaterThan,
+                                                strong_td,
+                                                one_td,
+                                            );
+                                            let fast_td = builder.create_block();
+                                            let slow_td = builder.create_block();
+                                            builder
+                                                .ins()
+                                                .brif(gt1_td, fast_td, &[], slow_td, &[]);
+
+                                            // strong == 1 means this is the last reference and a
+                                            // real recursive Drop is required, which IR cannot
+                                            // express. Hand off to the helper and report the boxed
+                                            // protocol every caller already handles.
+                                            builder.switch_to_block(slow_td);
+                                            if let Some(v) = $slow_result {
+                                                emit_inline_push_integer(&mut builder, vm_val, v);
+                                            }
+                                            builder.ins().call(refs.op_return, &[vm_val]);
+                                            let three_td = builder.ins().iconst(types::I32, 3);
+                                            let zero64_td = builder.ins().iconst(types::I64, 0);
+                                            builder
+                                                .ins()
+                                                .jump(exit_block, &[three_td.into(), zero64_td.into()]);
+
+                                            builder.switch_to_block(fast_td);
+                                            builder.seal_block(fast_td);
+                                            builder.seal_block(slow_td);
+                                            let dec_td = builder.ins().iadd_imm_s(strong_td, -1);
+                                            builder.ins().store(flags, dec_td, cm_rc_td, 0);
+
                                             builder.ins().store(
                                                 flags,
                                                 slot_offset_val,
@@ -3337,9 +3622,33 @@ impl JitInner {
                                         }};
                                     }
 
-                                    if let Some(top) = virt_stack.pop_int_ssa() {
+                                    // Same gate the Generic arm applies. The inline teardown
+                                    // abandons every slot from slot_offset up without a Drop, so
+                                    // it is only sound when those slots are primitives and no
+                                    // nested closure captured this frame. This arm previously
+                                    // truncated unconditionally.
+                                    let spec_inline_eligible = !info.may_capture_upvalues
+                                        && return_slots_safe_to_truncate(
+                                            &slot_types,
+                                            &param_mirrors,
+                                            func,
+                                        );
+
+                                    if !spec_inline_eligible {
+                                        // Locals may hold Rc-bearing Values. Flush so the helper
+                                        // pops the real result, then use the boxed protocol.
+                                        if !virt_stack.is_empty() {
+                                            virt_stack.flush_to_memory(&mut builder, vm_val);
+                                        }
+                                        builder.ins().call(refs.op_return, &[vm_val]);
+                                        let three = builder.ins().iconst(types::I32, 3);
+                                        let zero64 = builder.ins().iconst(types::I64, 0);
+                                        builder
+                                            .ins()
+                                            .jump(exit_block, &[three.into(), zero64.into()]);
+                                    } else if let Some(top) = virt_stack.pop_int_ssa() {
                                         // Provably Integer — fast i64 return.
-                                        emit_intspec_teardown!();
+                                        emit_intspec_teardown!(Some(top));
                                         let zero32 = builder.ins().iconst(types::I32, 0);
                                         builder
                                             .ins()
@@ -3374,7 +3683,11 @@ impl JitInner {
                                             top_addr,
                                             VALUE_INT_PAYLOAD_OFFSET as i32,
                                         );
-                                        emit_intspec_teardown!();
+                                        // Result is already on the stack top, so the strong == 1
+                                        // fallback needs nothing materialized.
+                                        emit_intspec_teardown!(
+                                            None::<cranelift_codegen::ir::Value>
+                                        );
                                         let zero32 = builder.ins().iconst(types::I32, 0);
                                         builder
                                             .ins()
@@ -3422,7 +3735,7 @@ impl JitInner {
                 }
 
                 builder.seal_all_blocks();
-                builder.finalize();
+                builder.finalize(self.module.target_config());
             }
 
             // OXIGEN_JIT_DISASM=<name> dumps that function's disasm; ALL dumps every one.
@@ -3482,11 +3795,41 @@ impl JitInner {
                 .set(self.counters.specialized_entry_compiled.get() + 1);
         }
 
+        // Phase 2.2: a lean integer entry, when the whole body stays inside the
+        // integer world. Compiled after the others and entirely independently —
+        // refusing costs nothing, because dispatch falls back to whatever entry
+        // the function already has.
+        let (lean, lean_arity) = if slot_types.lean_entry_eligible {
+            let cold_id = self.lean_cold_id;
+            self.next_id = self.next_id.wrapping_add(1);
+            let seq = self.next_id;
+            match lean::compile_lean_entry(
+                &mut self.module,
+                &mut self.ctx,
+                &mut self.fbc,
+                func,
+                cold_id,
+                seq,
+            ) {
+                Some(id) => {
+                    // define_function already ran; publish it.
+                    self.module.finalize_definitions().map_err(|_| ())?;
+                    let p = self.module.get_finalized_function(id);
+                    (Some(p as *const ()), func.arity)
+                }
+                None => (None, 0),
+            }
+        } else {
+            (None, 0)
+        };
+
         Ok(CompiledEntries {
             generic,
             specialized,
             specialized_arity,
             specialized_kind,
+            lean,
+            lean_arity,
         })
     }
 }
@@ -3555,9 +3898,9 @@ fn emit_inline_recursion_guard(
     refs: &HelperRefs,
     vm_val: cranelift_codegen::ir::Value,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
     use cranelift_codegen::ir::condcodes::IntCC;
-    let flags = MemFlags::trusted();
+    let flags = MemFlagsData::trusted();
     let jfl = builder
         .ins()
         .load(types::I64, flags, vm_val, vm_jit_frame_view_len_offset());
@@ -3652,6 +3995,50 @@ struct LocalArithUpdate {
 enum StructFieldAddShape {
     Const { addend: i64 },
     Local { rhs_slot: u16 },
+}
+
+/// Detects whether `func` is exactly `fun(y) { x + y }` over one immutable
+/// captured integer, returning the upvalue slot it reads.
+///
+/// The whole body must be these 8 bytes:
+///
+/// ```text
+/// GetUpvalue(k)   3
+/// GetLocal(1)     3     slot 0 is the closure marker, so 1 is the parameter
+/// Add             1
+/// Return          1
+/// ```
+///
+/// Matching the entire chunk is what makes the rest of the eligibility list
+/// free rather than something to verify: a body of exactly these four opcodes
+/// provably contains no `SetUpvalue` (so the capture is immutable), no call,
+/// closure, guard, handler or module write (so there are no observable side
+/// effects), and no branch (so there is nothing to re-enter). `Add` on two
+/// integers is integer, so the result type follows from the operand guards the
+/// call site already emits.
+///
+/// Whether the upvalue actually *holds* an integer is a runtime property, so it
+/// stays a guard at the call site rather than a condition here.
+pub(crate) fn detect_inline_closure_upvalue_add(func: &Function) -> Option<u16> {
+    if func.arity != 1 {
+        return None;
+    }
+    let code = &func.chunk.code;
+    if code.len() != 8 {
+        return None;
+    }
+    if OpCode::from_byte(code[0]) != Some(OpCode::GetUpvalue)
+        || OpCode::from_byte(code[3]) != Some(OpCode::GetLocal)
+        || OpCode::from_byte(code[6]) != Some(OpCode::Add)
+        || OpCode::from_byte(code[7]) != Some(OpCode::Return)
+    {
+        return None;
+    }
+    // The GetLocal must read the parameter, not some other slot.
+    if read_u16(code, 4) != 1 {
+        return None;
+    }
+    Some(read_u16(code, 1))
 }
 
 /// Result of inspecting a struct method's bytecode for an inline-expandable
@@ -4092,10 +4479,10 @@ fn emit_load_stack_ptr(
     builder: &mut FunctionBuilder<'_>,
     vm_val: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
     builder.ins().load(
         types::I64,
-        MemFlags::trusted(),
+        MemFlagsData::trusted(),
         vm_val,
         vm_stack_view_ptr_offset(),
     )
@@ -4107,10 +4494,10 @@ fn emit_load_stack_len(
     builder: &mut FunctionBuilder<'_>,
     vm_val: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
     builder.ins().load(
         types::I64,
-        MemFlags::trusted(),
+        MemFlagsData::trusted(),
         vm_val,
         vm_stack_view_len_offset(),
     )
@@ -4122,17 +4509,17 @@ fn emit_load_top_jit_frame_ptr(
     builder: &mut FunctionBuilder<'_>,
     vm_val: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
 
     let base = builder.ins().load(
         types::I64,
-        MemFlags::trusted(),
+        MemFlagsData::trusted(),
         vm_val,
         vm_jit_frame_view_ptr_offset(),
     );
     let len = builder.ins().load(
         types::I64,
-        MemFlags::trusted(),
+        MemFlagsData::trusted(),
         vm_val,
         vm_jit_frame_view_len_offset(),
     );
@@ -4150,12 +4537,12 @@ fn emit_load_top_jit_frame_slot_offset(
     builder: &mut FunctionBuilder<'_>,
     vm_val: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
 
     let frame_ptr = emit_load_top_jit_frame_ptr(builder, vm_val);
     builder.ins().load(
         types::I64,
-        MemFlags::trusted(),
+        MemFlagsData::trusted(),
         frame_ptr,
         JitFrame::OFFSET_SLOT_OFFSET,
     )
@@ -4167,9 +4554,9 @@ fn emit_copy_value(
     src_ptr: cranelift_codegen::ir::Value,
     dst_ptr: cranelift_codegen::ir::Value,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
 
-    let flags = MemFlags::trusted();
+    let flags = MemFlagsData::trusted();
     for off in (0..VALUE_SIZE).step_by(8) {
         let word = builder.ins().load(types::I64, flags, src_ptr, off as i32);
         builder.ins().store(flags, word, dst_ptr, off as i32);
@@ -4182,9 +4569,9 @@ fn emit_write_closure_value(
     dst_ptr: cranelift_codegen::ir::Value,
     closure_raw: cranelift_codegen::ir::Value,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
 
-    let flags = MemFlags::trusted();
+    let flags = MemFlagsData::trusted();
     let closure_tag = builder.ins().iconst(types::I8, VALUE_TAG_CLOSURE as i64);
     builder.ins().store(flags, closure_tag, dst_ptr, 0);
     builder
@@ -4208,7 +4595,7 @@ fn emit_store_current_loc(
     line: u32,
     col: u32,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
 
     const _: () = assert!(
         JitFrame::OFFSET_COLUMN == JitFrame::OFFSET_LINE + 4
@@ -4221,7 +4608,7 @@ fn emit_store_current_loc(
     let packed = (line as u64) | ((col as u64) << 32);
     let packed_val = builder.ins().iconst(types::I64, packed as i64);
     builder.ins().store(
-        MemFlags::trusted(),
+        MemFlagsData::trusted(),
         packed_val,
         frame_ptr,
         JitFrame::OFFSET_LINE,
@@ -4337,9 +4724,9 @@ fn emit_mixed_mode_int_arith(
     rhs: cranelift_codegen::ir::Value,
     op: OpCode,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
     use cranelift_codegen::ir::condcodes::IntCC;
-    let flags = MemFlags::trusted();
+    let flags = MemFlagsData::trusted();
 
     let stack_ptr = emit_load_stack_ptr(builder, vm_val);
     let stack_len = emit_load_stack_len(builder, vm_val);
@@ -4425,7 +4812,7 @@ fn emit_int_fast_arith(
     op: IntArithOp,
     slow_helper: FuncRef,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
 
     let stack_ptr = emit_load_stack_ptr(builder, vm_val);
     let stack_len = emit_load_stack_len(builder, vm_val);
@@ -4441,7 +4828,7 @@ fn emit_int_fast_arith(
     let val_b_ptr = builder.ins().iadd(stack_ptr, off_b);
     let val_a_ptr = builder.ins().iadd(stack_ptr, off_a);
 
-    let flags = MemFlags::trusted();
+    let flags = MemFlagsData::trusted();
     let tag_b = builder.ins().load(types::I8, flags, val_b_ptr, 0);
     let tag_a = builder.ins().load(types::I8, flags, val_a_ptr, 0);
     let int_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
@@ -4546,10 +4933,10 @@ fn emit_inline_struct_field_add(
     cache_ptr: *mut FieldCacheEntry,
     shape: StructFieldAddShape,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
     use cranelift_codegen::ir::condcodes::IntCC;
 
-    let flags = MemFlags::trusted();
+    let flags = MemFlagsData::trusted();
     let cache_val = builder.ins().iconst(ptr_ty, cache_ptr as i64);
 
     let check_def_block = builder.create_block();
@@ -4584,7 +4971,7 @@ fn emit_inline_struct_field_add(
     let rcbox = builder
         .ins()
         .load(ptr_ty, flags, self_val_ptr, VALUE_INT_PAYLOAD_OFFSET as i32);
-    let inst_ptr = builder.ins().iadd_imm(rcbox, RC_VALUE_OFFSET as i64);
+    let inst_ptr = builder.ins().iadd_imm_s(rcbox, RC_VALUE_OFFSET as i64);
     let inst_def_raw =
         builder
             .ins()
@@ -4713,8 +5100,8 @@ fn emit_inline_stack_pop_one(
     builder: &mut FunctionBuilder<'_>,
     vm_val: cranelift_codegen::ir::Value,
 ) {
-    use cranelift_codegen::ir::MemFlags;
-    let flags = MemFlags::trusted();
+    use cranelift_codegen::ir::MemFlagsData;
+    let flags = MemFlagsData::trusted();
     let top = emit_load_stack_len(builder, vm_val);
     let one = builder.ins().iconst(types::I64, 1);
     let new_top = builder.ins().isub(top, one);
@@ -4735,8 +5122,8 @@ fn emit_inline_push_integer(
     vm_val: cranelift_codegen::ir::Value,
     payload: cranelift_codegen::ir::Value,
 ) {
-    use cranelift_codegen::ir::MemFlags;
-    let flags = MemFlags::trusted();
+    use cranelift_codegen::ir::MemFlagsData;
+    let flags = MemFlagsData::trusted();
     let stack_ptr = emit_load_stack_ptr(builder, vm_val);
     let top = emit_load_stack_len(builder, vm_val);
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
@@ -4771,8 +5158,8 @@ fn emit_store_stack_slot_integer(
     slot: u16,
     value: cranelift_codegen::ir::Value,
 ) {
-    use cranelift_codegen::ir::MemFlags;
-    let flags = MemFlags::trusted();
+    use cranelift_codegen::ir::MemFlagsData;
+    let flags = MemFlagsData::trusted();
     let stack_ptr = emit_load_stack_ptr(builder, vm_val);
     let slot_const = builder.ins().iconst(types::I64, slot as i64);
     let abs_slot = builder.ins().iadd(slot_offset_val, slot_const);
@@ -4835,8 +5222,8 @@ fn emit_inline_op_return(
     refs: &HelperRefs,
     vm_val: cranelift_codegen::ir::Value,
 ) {
-    use cranelift_codegen::ir::MemFlags;
-    let flags = MemFlags::trusted();
+    use cranelift_codegen::ir::MemFlagsData;
+    let flags = MemFlagsData::trusted();
 
     // Load slot_offset of the current (about-to-pop) JitFrame.
     let slot_off = emit_load_top_jit_frame_slot_offset(builder, vm_val);
@@ -4893,8 +5280,8 @@ fn emit_inline_replace_top2_with_bool(
     vm_val: cranelift_codegen::ir::Value,
     bool_val: cranelift_codegen::ir::Value, // i32, nonzero => true
 ) {
-    use cranelift_codegen::ir::MemFlags;
-    let flags = MemFlags::trusted();
+    use cranelift_codegen::ir::MemFlagsData;
+    let flags = MemFlagsData::trusted();
     let stack_ptr = emit_load_stack_ptr(builder, vm_val);
     let top = emit_load_stack_len(builder, vm_val);
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
@@ -4924,9 +5311,9 @@ fn emit_inline_pop_tag_gated(
     refs: &HelperRefs,
     vm_val: cranelift_codegen::ir::Value,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
     use cranelift_codegen::ir::condcodes::IntCC;
-    let flags = MemFlags::trusted();
+    let flags = MemFlagsData::trusted();
     let stack_ptr = emit_load_stack_ptr(builder, vm_val);
     let top = emit_load_stack_len(builder, vm_val);
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
@@ -4966,8 +5353,8 @@ fn emit_inline_push_float(
     vm_val: cranelift_codegen::ir::Value,
     bits: cranelift_codegen::ir::Value,
 ) {
-    use cranelift_codegen::ir::MemFlags;
-    let flags = MemFlags::trusted();
+    use cranelift_codegen::ir::MemFlagsData;
+    let flags = MemFlagsData::trusted();
     let stack_ptr = emit_load_stack_ptr(builder, vm_val);
     let top = emit_load_stack_len(builder, vm_val);
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
@@ -4993,7 +5380,7 @@ fn emit_int_fast_divmod(
     is_modulo: bool,
     slow_helper: FuncRef,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
     use cranelift_codegen::ir::condcodes::IntCC;
 
     let stack_ptr = emit_load_stack_ptr(builder, vm_val);
@@ -5008,7 +5395,7 @@ fn emit_int_fast_divmod(
     let val_b_ptr = builder.ins().iadd(stack_ptr, off_b);
     let val_a_ptr = builder.ins().iadd(stack_ptr, off_a);
 
-    let flags = MemFlags::trusted();
+    let flags = MemFlagsData::trusted();
     let tag_b = builder.ins().load(types::I8, flags, val_b_ptr, 0);
     let tag_a = builder.ins().load(types::I8, flags, val_a_ptr, 0);
     let int_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
@@ -5036,7 +5423,7 @@ fn emit_int_fast_divmod(
         val_b_ptr,
         VALUE_INT_PAYLOAD_OFFSET as i32,
     );
-    let rhs_nonzero = builder.ins().icmp_imm(IntCC::NotEqual, rhs, 0);
+    let rhs_nonzero = builder.ins().icmp_imm_s(IntCC::NotEqual, rhs, 0);
     let nonzero_block = builder.create_block();
     let fast_math_block = builder.create_block();
     builder
@@ -5044,8 +5431,8 @@ fn emit_int_fast_divmod(
         .brif(rhs_nonzero, nonzero_block, &[], slow_block, &[]);
 
     builder.switch_to_block(nonzero_block);
-    let lhs_min = builder.ins().icmp_imm(IntCC::Equal, lhs, i64::MIN);
-    let rhs_neg1 = builder.ins().icmp_imm(IntCC::Equal, rhs, -1);
+    let lhs_min = builder.ins().icmp_imm_s(IntCC::Equal, lhs, i64::MIN);
+    let rhs_neg1 = builder.ins().icmp_imm_s(IntCC::Equal, rhs, -1);
     let overflow = builder.ins().band(lhs_min, rhs_neg1);
     builder
         .ins()
@@ -5245,13 +5632,13 @@ fn try_emit_parity_branch_peephole(
         virt_stack.pop_int_ssa().unwrap(); // 0 — already proven via is_iconst_imm
     }
 
-    let parity = builder.ins().band_imm(lhs, 1);
+    let parity = builder.ins().band_imm_u(lhs, 1);
     let cc = if is_equal {
         IntCC::Equal
     } else {
         IntCC::NotEqual
     };
-    let pred = builder.ins().icmp_imm(cc, parity, 0);
+    let pred = builder.ins().icmp_imm_s(cc, parity, 0);
 
     let target_block = blocks[&target_ip];
     let fall_block = *blocks
@@ -5282,8 +5669,8 @@ fn emit_load_stack_top_integer_payload(
     builder: &mut FunctionBuilder<'_>,
     vm_val: cranelift_codegen::ir::Value,
 ) -> cranelift_codegen::ir::Value {
-    use cranelift_codegen::ir::MemFlags;
-    let flags = MemFlags::trusted();
+    use cranelift_codegen::ir::MemFlagsData;
+    let flags = MemFlagsData::trusted();
     let stack_ptr = emit_load_stack_ptr(builder, vm_val);
     let stack_len = emit_load_stack_len(builder, vm_val);
     let one = builder.ins().iconst(types::I64, 1);
@@ -5352,11 +5739,11 @@ fn try_emit_sdiv_pow2_peephole(
         // |d| == 1: x / 1 == x; x / -1 was rejected above.
         lhs
     } else {
-        let sign = builder.ins().sshr_imm(lhs, 63);
+        let sign = builder.ins().sshr_imm_u(lhs, 63);
         let bias_mask = abs - 1;
-        let bias = builder.ins().band_imm(sign, bias_mask);
+        let bias = builder.ins().band_imm_u(sign, bias_mask);
         let adjusted = builder.ins().iadd(lhs, bias);
-        builder.ins().sshr_imm(adjusted, k)
+        builder.ins().sshr_imm_u(adjusted, k)
     };
 
     let q = if d < 0 { builder.ins().ineg(q) } else { q };
@@ -5376,7 +5763,7 @@ fn emit_int_virt_divmod(
 ) -> cranelift_codegen::ir::Value {
     use cranelift_codegen::ir::condcodes::IntCC;
 
-    let rhs_nonzero = builder.ins().icmp_imm(IntCC::NotEqual, rhs, 0);
+    let rhs_nonzero = builder.ins().icmp_imm_s(IntCC::NotEqual, rhs, 0);
     let nonzero_block = builder.create_block();
     let zero_slow_block = builder.create_block();
     let overflow_slow_block = builder.create_block();
@@ -5398,8 +5785,8 @@ fn emit_int_virt_divmod(
 
     // i64::MIN / -1 overflow guard.
     builder.switch_to_block(nonzero_block);
-    let lhs_min = builder.ins().icmp_imm(IntCC::Equal, lhs, i64::MIN);
-    let rhs_neg1 = builder.ins().icmp_imm(IntCC::Equal, rhs, -1);
+    let lhs_min = builder.ins().icmp_imm_s(IntCC::Equal, lhs, i64::MIN);
+    let rhs_neg1 = builder.ins().icmp_imm_s(IntCC::Equal, rhs, -1);
     let overflow = builder.ins().band(lhs_min, rhs_neg1);
     builder
         .ins()
@@ -5466,7 +5853,7 @@ fn emit_inline_local_const_arith_update(
     op: IntArithOp,
     pop_after: bool,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
     use cranelift_codegen::ir::condcodes::IntCC;
 
     let stack_ptr = emit_load_stack_ptr(builder, vm_val);
@@ -5477,7 +5864,7 @@ fn emit_inline_local_const_arith_update(
     let byte_off = builder.ins().imul(abs_slot, value_size);
     let addr_slot = builder.ins().iadd(stack_ptr, byte_off);
 
-    let flags = MemFlags::trusted();
+    let flags = MemFlagsData::trusted();
     let tag = builder.ins().load(types::I8, flags, addr_slot, 0);
     let int_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
     let is_int = builder.ins().icmp(IntCC::Equal, tag, int_tag);
@@ -5567,7 +5954,7 @@ fn emit_inline_local_scaled_arith_update(
     op: IntArithOp,
     pop_after: bool,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
     use cranelift_codegen::ir::condcodes::IntCC;
 
     let stack_ptr = emit_load_stack_ptr(builder, vm_val);
@@ -5584,7 +5971,7 @@ fn emit_inline_local_scaled_arith_update(
     let rhs_off = builder.ins().imul(abs_rhs, value_size);
     let addr_rhs = builder.ins().iadd(stack_ptr, rhs_off);
 
-    let flags = MemFlags::trusted();
+    let flags = MemFlagsData::trusted();
     let dst_tag = builder.ins().load(types::I8, flags, addr_dst, 0);
     let rhs_tag = builder.ins().load(types::I8, flags, addr_rhs, 0);
     let int_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
@@ -5698,7 +6085,7 @@ fn emit_int_fast_cmp(
     cc: cranelift_codegen::ir::condcodes::IntCC,
     slow_helper: FuncRef,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
 
     let stack_ptr = emit_load_stack_ptr(builder, vm_val);
     let stack_len = emit_load_stack_len(builder, vm_val);
@@ -5713,7 +6100,7 @@ fn emit_int_fast_cmp(
     let val_b_ptr = builder.ins().iadd(stack_ptr, off_b);
     let val_a_ptr = builder.ins().iadd(stack_ptr, off_a);
 
-    let flags = MemFlags::trusted();
+    let flags = MemFlagsData::trusted();
     let tag_b = builder.ins().load(types::I8, flags, val_b_ptr, 0);
     let tag_a = builder.ins().load(types::I8, flags, val_a_ptr, 0);
     let int_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
@@ -5780,7 +6167,7 @@ fn emit_int_fast_eq(
     vm_val: cranelift_codegen::ir::Value,
     is_equal: bool,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
     use cranelift_codegen::ir::condcodes::IntCC;
 
     let stack_ptr = emit_load_stack_ptr(builder, vm_val);
@@ -5796,7 +6183,7 @@ fn emit_int_fast_eq(
     let val_b_ptr = builder.ins().iadd(stack_ptr, off_b);
     let val_a_ptr = builder.ins().iadd(stack_ptr, off_a);
 
-    let flags = MemFlags::trusted();
+    let flags = MemFlagsData::trusted();
     let tag_b = builder.ins().load(types::I8, flags, val_b_ptr, 0);
     let tag_a = builder.ins().load(types::I8, flags, val_a_ptr, 0);
     let int_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
@@ -5866,7 +6253,7 @@ fn emit_fused_int_cmp_branch(
     target_block: Block,
     fall_block: Block,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
 
     debug_assert!(matches!(
         branch_op,
@@ -5886,7 +6273,7 @@ fn emit_fused_int_cmp_branch(
     let val_b_ptr = builder.ins().iadd(stack_ptr, off_b);
     let val_a_ptr = builder.ins().iadd(stack_ptr, off_a);
 
-    let flags = MemFlags::trusted();
+    let flags = MemFlagsData::trusted();
     let tag_b = builder.ins().load(types::I8, flags, val_b_ptr, 0);
     let tag_a = builder.ins().load(types::I8, flags, val_a_ptr, 0);
     let int_tag = builder.ins().iconst(types::I8, VALUE_TAG_INTEGER as i64);
@@ -6061,10 +6448,10 @@ fn emit_inline_generic_return(
     slot_offset_val: cranelift_codegen::ir::Value,
     virt_stack: &mut VirtStack,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
     use cranelift_codegen::ir::condcodes::IntCC;
 
-    let flags = MemFlags::trusted();
+    let flags = MemFlagsData::trusted();
 
     // Int SSA on top builds {tag, payload} directly; otherwise flush and read 16 bytes from memory.
     let result_ssa: Option<cranelift_codegen::ir::Value> = virt_stack.pop_int_ssa();
@@ -6133,7 +6520,7 @@ fn emit_inline_generic_return(
 
     // ── Fast path: strong > 1. Inline dec + truncate + push.
     builder.switch_to_block(fast_block);
-    let strong_dec = builder.ins().iadd_imm(strong, -1);
+    let strong_dec = builder.ins().iadd_imm_s(strong, -1);
     builder.ins().store(flags, strong_dec, cm_rc, 0);
 
     // The dec'd closure marker's Rc was already adjusted, so overwriting it is safe.
@@ -6169,7 +6556,7 @@ fn emit_inline_get_local(
     slot_offset_val: cranelift_codegen::ir::Value,
     slot: u16,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
     use cranelift_codegen::ir::condcodes::IntCC;
 
     let _ = refs; // helper-table no longer consulted on the hot path
@@ -6182,7 +6569,7 @@ fn emit_inline_get_local(
     let byte_off = builder.ins().imul(abs_slot, value_size);
     let src_addr = builder.ins().iadd(stack_ptr, byte_off);
 
-    let flags = MemFlags::trusted();
+    let flags = MemFlagsData::trusted();
     let tag = builder.ins().load(types::I8, flags, src_addr, 0);
 
     // Compute destination address (stack[len] before increment).
@@ -6217,7 +6604,7 @@ fn emit_inline_get_local(
         .ins()
         .load(types::I64, flags, src_addr, VALUE_INT_PAYLOAD_OFFSET as i32);
     let strong = builder.ins().load(types::I64, flags, rc_ptr, 0);
-    let strong_new = builder.ins().iadd_imm(strong, 1);
+    let strong_new = builder.ins().iadd_imm_s(strong, 1);
     builder.ins().store(flags, strong_new, rc_ptr, 0);
     builder.ins().jump(post_bump_block, &[]);
 
@@ -6247,7 +6634,7 @@ fn emit_inline_set_local(
     slot_offset_val: cranelift_codegen::ir::Value,
     slot: u16,
 ) {
-    use cranelift_codegen::ir::MemFlags;
+    use cranelift_codegen::ir::MemFlagsData;
     use cranelift_codegen::ir::condcodes::IntCC;
 
     let stack_ptr = emit_load_stack_ptr(builder, vm_val);
@@ -6265,7 +6652,7 @@ fn emit_inline_set_local(
     let slot_off = builder.ins().imul(abs_slot, value_size);
     let addr_slot = builder.ins().iadd(stack_ptr, slot_off);
 
-    let flags = MemFlags::trusted();
+    let flags = MemFlagsData::trusted();
     let top_tag = builder.ins().load(types::I8, flags, addr_top, 0);
     let old_tag = builder.ins().load(types::I8, flags, addr_slot, 0);
     // Primitive = tags 0..=6; anything holding an Rc or RefCell is >= 7.

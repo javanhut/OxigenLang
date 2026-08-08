@@ -3070,6 +3070,8 @@ impl Compiler {
                 specialized_thunk: std::cell::Cell::new(None),
                 specialized_arity: std::cell::Cell::new(0),
                 specialized_kind: std::cell::Cell::new(0),
+                lean_thunk: std::cell::Cell::new(None),
+                lean_arity: std::cell::Cell::new(0),
                 upvalue_int_kinds: uv_kinds,
                 upvalue_int_values: uv_values,
             })),

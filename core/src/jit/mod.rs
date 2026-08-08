@@ -56,6 +56,9 @@ pub(crate) struct CompiledEntries {
     pub specialized: Option<SpecializedThunkRaw>,
     pub specialized_arity: u8,
     pub specialized_kind: Option<engine::SpecializedEntryKind>,
+    /// Phase 2.2 lean integer entry, when the function qualified.
+    pub lean: Option<*const ()>,
+    pub lean_arity: u8,
 }
 
 /// Outcome of invoking a JIT-compiled function.
@@ -209,7 +212,7 @@ impl JitEngine {
         &mut self,
         func: &Rc<Function>,
         call_count: u32,
-    ) -> Option<(CompiledThunk, Option<SpecializedThunkRaw>, u8, u8)> {
+    ) -> Option<(CompiledThunk, Option<SpecializedThunkRaw>, u8, u8, Option<*const ()>, u8)> {
         if call_count < self.threshold {
             return None;
         }
@@ -224,7 +227,7 @@ impl JitEngine {
                 crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE
             }
         };
-        Some((e.generic, e.specialized, e.specialized_arity, kind_u8))
+        Some((e.generic, e.specialized, e.specialized_arity, kind_u8, e.lean, e.lean_arity))
     }
 
     #[cfg(not(feature = "jit"))]
@@ -232,7 +235,7 @@ impl JitEngine {
         &mut self,
         func: &Rc<Function>,
         call_count: u32,
-    ) -> Option<(CompiledThunk, Option<SpecializedThunkRaw>, u8, u8)> {
+    ) -> Option<(CompiledThunk, Option<SpecializedThunkRaw>, u8, u8, Option<*const ()>, u8)> {
         let _ = (func, call_count);
         None
     }

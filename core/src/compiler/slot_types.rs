@@ -244,6 +244,27 @@ pub struct FunctionSlotTypes {
     /// costs a fast path and never correctness. Anonymous `f := fun(n){ f(n-1) }`
     /// and functions reaching themselves through an upvalue land here.
     pub self_reachable_by_global_name: bool,
+
+    /// Phase 2.1: the function's whole body stays inside the integer world, so
+    /// a lean entry could run it without materializing VM state.
+    ///
+    /// Requires every reachable operation to be an integer constant, a
+    /// virtualizable integer local, wrapping integer arithmetic, an integer
+    /// comparison or branch, or a return — plus no captured slot, no upvalue,
+    /// and no heap-bearing constant. Anything that could make the interpreter
+    /// observe live operand-stack state disqualifies the function, because a
+    /// lean entry by definition has not maintained that state.
+    ///
+    /// `Call` is permitted only where the callee can be the function itself
+    /// (`self_reachable_by_global_name`) with matching arity: a self-recursive
+    /// edge re-enters the same lean entry and so preserves the contract, while
+    /// a generic callee would expect a materialized stack.
+    ///
+    /// This is the gate, not the implementation — emitting a lean entry also
+    /// needs the per-bailout reconstruction description that Phase 2.4
+    /// describes, and a function without one is not eligible however cleanly it
+    /// passes here.
+    pub lean_entry_eligible: bool,
 }
 
 impl FunctionSlotTypes {
@@ -687,6 +708,12 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
     }
 
     let self_reachable_by_global_name = chunk_reads_global_named(chunk, func.name.as_deref());
+    let lean_entry_eligible = compute_lean_entry_eligible(
+        func,
+        &result,
+        &captured_slots,
+        self_reachable_by_global_name,
+    );
 
     FunctionSlotTypes {
         slots: result,
@@ -702,6 +729,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         wants_closure_arg,
         noop_type_wrap_ips,
         self_reachable_by_global_name,
+        lean_entry_eligible,
     }
 }
 
@@ -1572,6 +1600,117 @@ fn transfer(
 #[inline]
 fn read_u16(code: &[u8], offset: usize) -> u16 {
     ((code[offset] as u16) << 8) | (code[offset + 1] as u16)
+}
+
+/// Phase 2.1: whether every reachable operation stays inside the integer world.
+///
+/// Deliberately a whitelist. A blacklist would silently admit every opcode
+/// added later, and the failure mode here is not a wrong answer but a lean
+/// entry running with VM state it never materialized.
+fn compute_lean_entry_eligible(
+    func: &Function,
+    _slots: &[SlotType],
+    captured: &HashSet<u16>,
+    self_reachable: bool,
+) -> bool {
+    if func.arity == 0 {
+        return false;
+    }
+    // Note what is deliberately NOT required: that the analyzer proved the
+    // parameters Int64. A lean entry receives raw i64, but nothing reaches it
+    // unguarded —
+    //
+    //   * entry arguments are tag-checked by the caller in `call_closure`,
+    //     which declines the lean path unless every one is `Value::Integer`;
+    //   * recursive arguments are i64 by construction, computed by the integer
+    //     arithmetic below;
+    //   * locals can only ever receive an integer constant, a parameter, or the
+    //     result of an integer operation, because the whitelist admits nothing
+    //     that produces anything else.
+    //
+    // Demanding `SlotType::Int64` would add no safety and would exclude every
+    // untyped-but-integer function — `bench_arith`'s `fun work(n)` among them,
+    // where the analyzer's Int64 is a demand heuristic rather than a proof.
+    // A captured slot outlives the activation, so it cannot live only in a register.
+    if !captured.is_empty() {
+        return false;
+    }
+
+    let chunk = &func.chunk;
+    let code = &chunk.code;
+    let mut ip = 0usize;
+    while ip < code.len() {
+        let Some(op) = OpCode::from_byte(code[ip]) else {
+            return false;
+        };
+        let Ok(len) = chunk.instruction_len(ip) else {
+            return false;
+        };
+        match op {
+            // Integer constants only — a heap constant would need a real stack slot.
+            OpCode::Constant => {
+                let idx = read_u16(code, ip + 1) as usize;
+                match chunk.constants.get(idx).map(|v| v.repr()) {
+                    Some(crate::vm::value::ValueRepr::Integer(_)) => {}
+                    _ => return false,
+                }
+            }
+            // Slot types are not consulted; see the note above. The translator
+            // still refuses a `GetLocal` of a slot never assigned in the body.
+            OpCode::GetLocal | OpCode::SetLocal => {}
+            // Wrapping integer arithmetic, integer comparison, branches, returns.
+            // Divide and Modulo are deliberately absent: both can fail (zero
+            // divisor, i64::MIN / -1), and a lean entry has no status channel to
+            // report that through. They become admissible once the cold exit
+            // carries an error kind as well as overflow.
+            OpCode::Add
+            | OpCode::Subtract
+            | OpCode::Multiply
+            | OpCode::Less
+            | OpCode::LessEqual
+            | OpCode::Greater
+            | OpCode::GreaterEqual
+            | OpCode::Equal
+            | OpCode::NotEqual
+            | OpCode::Jump
+            | OpCode::JumpIfFalse
+            | OpCode::JumpIfTrue
+            | OpCode::Loop
+            | OpCode::Pop
+            | OpCode::Return => {}
+            // Only a self-recursive edge re-enters the same lean entry; any other
+            // callee expects a materialized stack.
+            OpCode::Call => {
+                if !self_reachable || code[ip + 1] != func.arity {
+                    return false;
+                }
+            }
+            // A GetGlobal is allowed solely because it is how a top-level
+            // function names itself for the self-call above. EVERY one must name
+            // this function: the lean translator lowers each Call as a direct
+            // self-call, so a body that also calls some other global would have
+            // that call miscompiled into unbounded self-recursion — observed as a
+            // spurious "stack overflow" rather than a wrong answer.
+            OpCode::GetGlobal => {
+                if !self_reachable {
+                    return false;
+                }
+                let idx = read_u16(code, ip + 1) as usize;
+                let names_self = chunk
+                    .constants
+                    .get(idx)
+                    .and_then(|v| v.as_string())
+                    .zip(func.name.as_deref())
+                    .is_some_and(|(g, own)| g.as_str() == own);
+                if !names_self {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+        ip += len.max(1);
+    }
+    true
 }
 
 /// True iff `chunk` contains a `GetGlobal` whose name constant is `name`.
@@ -2645,6 +2784,94 @@ mod tests {
     }
 
     // OpCode::Closure always rejects first, so the nested-closure case never reaches has_get_upvalue.
+
+    // ── Phase 2.1: lean entry eligibility ───────────────────────────────
+
+    #[test]
+    fn lean_entry_accepts_typed_int_self_recursion() {
+        // bench_arith's shape with the parameter annotated: pure integer
+        // arithmetic, integer comparison, a self-recursive edge, integer return.
+        let f = compile_for_analysis(
+            r#"
+fun work(n <int>) {
+    option {
+        n < 2 -> { n }
+        { work(n - 1) + work(n - 2) * 3 - n }
+    }
+}
+work(10)
+"#,
+            Some("work"),
+        );
+        let r = analyze(&f);
+        assert!(r.lean_entry_eligible, "pure integer recursion must qualify");
+    }
+
+    #[test]
+    fn lean_entry_rejects_string_valued_body() {
+        // A heap constant cannot live in a register, so the body needs a real slot.
+        let f = compile_for_analysis(
+            r#"
+fun label(n <int>) {
+    give "small" when n < 2
+    "big"
+}
+label(3)
+"#,
+            Some("label"),
+        );
+        let r = analyze(&f);
+        assert!(!r.lean_entry_eligible, "a string constant must disqualify");
+    }
+
+    #[test]
+    fn lean_entry_rejects_upvalue_reader() {
+        // The bench_closure inner closure: reads an upvalue, so it depends on
+        // closure state a lean entry does not carry.
+        let f = compile_for_analysis(
+            "fun mk(x) { fun(y <int>) { x + y } }
+mk(1)",
+            None,
+        );
+        // The inner closure is the constant; analyze the outer and assert the
+        // outer itself is not lean-eligible either (it builds a closure).
+        let r = analyze(&f);
+        assert!(!r.lean_entry_eligible);
+    }
+
+    #[test]
+    fn lean_entry_rejects_zero_arity() {
+        let f = compile_for_analysis("fun c() { 1 + 2 }
+c()", Some("c"));
+        let r = analyze(&f);
+        assert!(!r.lean_entry_eligible);
+    }
+
+    #[test]
+    fn lean_entry_accepts_untyped_param_because_the_caller_guards() {
+        // bench_arith as written. The parameter is untyped, so the analyzer's
+        // Int64 would only be a demand heuristic — but eligibility does not rest
+        // on it. `call_closure` refuses the lean path unless every argument is
+        // actually `Value::Integer`, so the entry is guarded where the guess
+        // would otherwise have to be trusted.
+        let f = compile_for_analysis(
+            r#"
+fun work(n) {
+    option {
+        n < 2 -> { n }
+        { work(n - 1) + work(n - 2) * 3 - n }
+    }
+}
+work(10)
+"#,
+            Some("work"),
+        );
+        let r = analyze(&f);
+        assert!(
+            r.lean_entry_eligible,
+            "an untyped int-only body qualifies; the caller supplies the guard"
+        );
+    }
 
     #[test]
     fn self_reachable_by_global_name_true_for_top_level_recursion() {

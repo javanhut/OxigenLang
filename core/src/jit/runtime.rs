@@ -1551,6 +1551,20 @@ pub unsafe extern "C" fn jit_op_call_miss(
                         .specialized_thunk
                         .get()
                         .unwrap_or(std::ptr::null());
+                    // Phase 1: if the callee's whole body is one add over an
+                    // immutable captured integer, record it so the call site can
+                    // evaluate it directly instead of dispatching.
+                    match super::engine::detect_inline_closure_upvalue_add(&c.function) {
+                        Some(idx) => {
+                            cache.inline_kind =
+                                super::engine::ClosureInlineKind::AddUpvalueArg;
+                            cache.inline_upvalue_index = idx as u32;
+                        }
+                        None => {
+                            cache.inline_kind = super::engine::ClosureInlineKind::None;
+                            cache.inline_upvalue_index = 0;
+                        }
+                    }
                     cache._keeper = Some(c);
                 }
 
@@ -1668,4 +1682,126 @@ pub unsafe extern "C" fn jit_replace_top2_with_bool(vm: *mut VM, result: u32) {
 #[allow(dead_code)]
 fn _unused_upvalue_reference() -> Option<Upvalue> {
     None
+}
+
+// ── Phase 2.2/2.4: lean integer entry boundary ──────────────────────────────
+
+/// Why a lean entry did not produce a value.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum LeanExit {
+    /// Recursion budget exhausted — report as a stack overflow.
+    Overflow,
+    /// This entry cannot be dispatched (arity outside the supported set). The
+    /// caller must fall through, NOT report an error.
+    Unsupported,
+}
+
+/// Where a lean entry's cold exit lands.
+///
+/// Thread-local, not global. A shared buffer races: one thread's `setjmp` is
+/// overwritten by another's, and the `longjmp` then restores a stack pointer
+/// belonging to a different stack. That reproduced as a SIGTRAP in
+/// `core/tests/jit_unwind_probe.rs`, and Oxigen's `spawn`/`pmap`/threaded
+/// server would hit the same thing in production.
+#[repr(C, align(16))]
+pub struct LeanJmpBuf([u64; 64]);
+
+unsafe extern "C" {
+    #[link_name = "setjmp"]
+    fn lean_setjmp(env: *mut LeanJmpBuf) -> i32;
+    #[link_name = "longjmp"]
+    fn lean_longjmp(env: *mut LeanJmpBuf, val: i32) -> !;
+}
+
+thread_local! {
+    static LEAN_UNWIND: std::cell::UnsafeCell<LeanJmpBuf> =
+        const { std::cell::UnsafeCell::new(LeanJmpBuf([0; 64])) };
+}
+
+/// Raw pointer to this thread's unwind target.
+///
+/// Deliberately separate from the `setjmp` call: `setjmp` must execute in the
+/// frame control returns to, so calling it inside a `with()` closure would
+/// capture the closure's frame and land in one that no longer exists.
+fn lean_unwind_target() -> *mut LeanJmpBuf {
+    LEAN_UNWIND.with(|c| c.get())
+}
+
+/// Called from a lean entry when the recursion budget is exhausted. Never
+/// returns — this is the entire cold-exit protocol, and it is why the ABI needs
+/// no status channel.
+pub unsafe extern "C" fn jit_lean_overflow() -> i64 {
+    unsafe { lean_longjmp(lean_unwind_target(), 1) }
+}
+
+/// Invokes a lean entry with integer arguments.
+///
+/// `Ok(v)` on success. `Err(LeanExit::Overflow)` when the budget ran out, which
+/// the caller reports as the same "stack overflow" the interpreter would;
+/// `Err(LeanExit::Unsupported)` means this entry cannot be dispatched at all and
+/// the caller must fall through to a normal entry. Conflating the two turned an
+/// unsupported arity into a spurious stack-overflow error.
+///
+/// Nothing needs unwinding on the cold path: a lean entry never touches
+/// `stack_view.len`, `jit_frame_view.len` or any `Rc`, so the VM state the
+/// caller held before the call is still exactly right. That is Phase 2.4's
+/// reconstruction description for this entry kind, and it is valid only because
+/// 2.2 holds.
+///
+/// # Safety
+/// `entry` must be a finalized lean entry of arity `args.len()`.
+pub unsafe fn invoke_lean(
+    entry: *const (),
+    args: &[i64],
+    budget: i64,
+) -> Result<i64, LeanExit> {
+    // No live state may straddle the setjmp: Rust's FFI declaration cannot
+    // express "returns twice", so the optimizer is free to keep values in
+    // callee-saved registers that longjmp restores from under it.
+    let rc = unsafe { lean_setjmp(lean_unwind_target()) };
+    if rc != 0 {
+        return Err(LeanExit::Overflow);
+    }
+    let v = unsafe {
+        match args.len() {
+            1 => {
+                let f: extern "C" fn(i64, i64) -> i64 = std::mem::transmute(entry);
+                f(args[0], budget)
+            }
+            2 => {
+                let f: extern "C" fn(i64, i64, i64) -> i64 = std::mem::transmute(entry);
+                f(args[0], args[1], budget)
+            }
+            3 => {
+                let f: extern "C" fn(i64, i64, i64, i64) -> i64 = std::mem::transmute(entry);
+                f(args[0], args[1], args[2], budget)
+            }
+            4 => {
+                let f: extern "C" fn(i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(entry);
+                f(args[0], args[1], args[2], args[3], budget)
+            }
+            5 => {
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(entry);
+                f(args[0], args[1], args[2], args[3], args[4], budget)
+            }
+            6 => {
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(entry);
+                f(args[0], args[1], args[2], args[3], args[4], args[5], budget)
+            }
+            7 => {
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(entry);
+                f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], budget)
+            }
+            8 => {
+                let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(entry);
+                f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], budget)
+            }
+            // Unreachable: `call_closure` checks the arity before dispatching,
+            // and `compile_lean_entry` refuses to build an entry above this
+            // bound. Returning Err here would be reported as a stack overflow,
+            // which is how an unsupported arity once surfaced.
+            _ => return Err(LeanExit::Unsupported),
+        }
+    };
+    Ok(v)
 }

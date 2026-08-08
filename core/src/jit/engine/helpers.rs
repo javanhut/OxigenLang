@@ -223,6 +223,10 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
         };
     }
 
+    // Phase 2.2: the lean entry's cold exit. Never returns — it longjmps to the
+    // boundary's thread-local unwind target.
+    reg!("oxigen_lean_overflow", crate::jit::runtime::jit_lean_overflow);
+
     reg!("jit_run_via_interpreter", runtime::jit_run_via_interpreter);
     reg!("jit_push_constant", runtime::jit_push_constant);
     reg!("jit_push_integer_inline", runtime::jit_push_integer_inline);
