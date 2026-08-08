@@ -9,7 +9,7 @@ use crate::jit::JitEngine;
 use crate::vm::value::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 pub(crate) const STACK_MAX: usize = 262144; // 256K stack slots
@@ -29,6 +29,27 @@ pub(crate) fn type_matches(expected: &str, actual: &str) -> bool {
     } else {
         expected == actual
     }
+}
+
+/// How a file is named in a diagnostic.
+///
+/// Paths under the working directory are shown relative to it — `src/app.oxi`
+/// reads better than an absolute path and is still clickable in a terminal
+/// launched from that directory. Anything outside (an installed stdlib module
+/// under `/usr/local`) stays absolute rather than becoming a `../../..` chain.
+///
+/// `cwd` is a parameter rather than read here so this stays testable without
+/// mutating the process-global working directory.
+fn display_path(path: &Path, cwd: Option<&Path>) -> String {
+    cwd.and_then(|c| path.strip_prefix(c).ok())
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+/// `display_path` against the real working directory.
+fn display_path_cwd(path: &Path) -> String {
+    display_path(path, std::env::current_dir().ok().as_deref())
 }
 
 /// Locate the stdlib directory: next to the executable (dev or system install),
@@ -145,8 +166,7 @@ pub(crate) struct JitFrameView {
     pub len: usize,
 }
 
-// Offsets are baked into JIT-emitted IR, so they're only referenced
-// under the `jit` feature; harmless and unused in a pure-interpreter build.
+// Baked into JIT-emitted IR, so unused in a pure-interpreter build.
 #[cfg_attr(not(feature = "jit"), allow(dead_code))]
 impl JitFrameView {
     pub const OFFSET_PTR: i32 = 0;
@@ -158,6 +178,10 @@ impl JitFrameView {
 pub struct VMError {
     pub message: String,
     pub line: u32,
+    /// Stable identity for this failure. Defaults to the generic runtime code
+    /// so all 137 existing sites keep working while specific codes are given
+    /// out incrementally.
+    pub code: crate::diagnostics::Code,
     /// Error category tag, if any (e.g. from `<fail>(<Error<network>>(...))`).
     /// Preserved across a `guard`/`option <Error>` recovery so tag filters
     /// (`<guard<Error<tag>>>`) can match.
@@ -293,11 +317,7 @@ impl VM {
         let mut globals = HashMap::new();
         builtins::register_builtins(&mut globals);
 
-        // Pre-allocate the full stack so `push` never reallocates. This
-        // lets the JIT cache a raw pointer to the stack buffer and use it
-        // as a stable constant for the VM's lifetime — no re-sync on
-        // every push. Worst-case memory is `STACK_MAX * sizeof(Value)`,
-        // which is a handful of MB at the default `STACK_MAX = 262144`.
+        // Pre-allocated so push never reallocates and the JIT can cache a stable raw pointer.
         let mut stack: Vec<Value> = Vec::with_capacity(STACK_MAX);
         let mut jit_frames: Vec<JitFrame> = Vec::with_capacity(FRAMES_MAX);
         let stack_view = StackView {
@@ -394,7 +414,6 @@ impl VM {
 
     pub fn set_script_args(&mut self, args: &[String]) {
         self.script_args = args.to_vec();
-        // Make script args available as __args global
         let args_val: Vec<Value> = args
             .iter()
             .map(|a| Value::String(rc_str(a.as_str())))
@@ -431,7 +450,7 @@ impl VM {
         let closure = Rc::new(ObjClosure {
             function: Rc::new(function),
             upvalues: Vec::new(),
-            module_globals: std::cell::RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
             call_count: std::cell::Cell::new(0),
             loop_count: std::cell::Cell::new(0),
             jit_state: std::cell::Cell::new(0),
@@ -440,19 +459,16 @@ impl VM {
             specialized_thunk: std::cell::Cell::new(None),
             specialized_arity: std::cell::Cell::new(0),
             specialized_kind: std::cell::Cell::new(0),
+                lean_thunk: std::cell::Cell::new(None),
+                lean_arity: std::cell::Cell::new(0),
             upvalue_int_kinds: uv_kinds,
             upvalue_int_values: uv_values,
         });
 
-        // Push the closure itself onto the stack (slot 0) — this is the
-        // callee slot that `call_closure` expects.
+        // Slot 0 is the callee slot call_closure expects.
         self.push(Value::Closure(Rc::clone(&closure)));
 
-        // Route the top-level through `call_closure` so it participates in
-        // JIT tiering just like any other call. `call_closure` pushes the
-        // frame, bumps the counter, and (if hot) hands off to the JIT; if
-        // the JIT drives the call to completion the frame is already gone
-        // and `execute_until(0)` is a no-op.
+        // Routing the top level through call_closure makes it participate in JIT tiering like any other call.
         self.call_closure(closure, 0, &[], None)?;
 
         self.execute_until(0)?;
@@ -558,8 +574,7 @@ impl VM {
                 "use `:=` to override an immutable binding",
             ));
         }
-        // Enforce the declared type lock, if any. Mutable typed variables keep
-        // their type fixed across reassignment (`x <int> := 10; x = "hi"` errors).
+        // A mutable typed variable keeps its type across reassignment.
         let constraint = self
             .global_type_constraints
             .get(name.as_ref())
@@ -581,10 +596,7 @@ impl VM {
 
     pub(crate) fn handle_define_global(&mut self, name_idx: u16) -> Result<(), VMError> {
         let name = self.name_constant(name_idx)?;
-        // A bare walrus on an existing type-locked global keeps the lock:
-        // `x <int> := 10; x := "hi"` errors. Untyped vars carry no constraint,
-        // so free retyping still works; explicit `x <T> := ...` retyping goes
-        // through DefineGlobalTyped and is allowed to relock.
+        // A bare walrus keeps an existing type lock; explicit `x <T> := ...` retyping goes elsewhere.
         let constraint = self
             .global_type_constraints
             .get(name.as_ref())
@@ -731,10 +743,28 @@ impl VM {
         let layout = self.resolve_field_layout(&struct_name_str)?;
         let mut field_vec: Vec<Value> = layout.slots.iter().map(|_| Value::None).collect();
 
+        // Inferring from a None-valued slot is wrong: an explicit None is indistinguishable from unsupplied.
+        let mut assigned = vec![false; layout.slots.len()];
         for pair in flat.chunks(2) {
             if let Some(fname) = pair[0].as_string() {
                 if let Some(&idx) = layout.indices.get(fname.as_ref()) {
+                    // Setting a hidden field from a literal is still setting it
+                    // from outside; allowing it would make `hide` half a rule.
+                    if layout.slots[idx].2
+                        && self
+                            .active_closure_method_of()
+                            .is_none_or(|owner| !self.struct_chain_contains(&struct_name_str, owner))
+                    {
+                        return Err(self.runtime_error_hint(
+                            &format!(
+                                "field '{}' is hidden on {} and cannot be set in a literal",
+                                fname, struct_name_str
+                            ),
+                            "declare the value (`x <Struct>`) and set it through a method of the struct",
+                        ));
+                    }
                     field_vec[idx] = pair[1].clone();
+                    assigned[idx] = true;
                 } else {
                     return Err(self.runtime_error_hint(
                         &format!("field '{}' not declared on {}", fname, struct_name_str),
@@ -744,11 +774,29 @@ impl VM {
             }
         }
 
-        // Zero-init any slots that weren't provided in the literal.
+        // An empty literal legitimately takes every default; a partial one is the mistake.
+        let supplied = flat.len() / 2;
+        let mut missing: Vec<String> = Vec::new();
         for (i, slot) in layout.slots.iter().enumerate() {
-            if matches!(field_vec[i], Value::None) {
+            if !assigned[i] {
+                if supplied > 0 && !Self::field_is_optional(&slot.1) {
+                    missing.push(format!("`{}`", slot.0));
+                }
                 field_vec[i] = Self::zero_value_for_type(&slot.1);
             }
+        }
+        if !missing.is_empty() {
+            let plural = if missing.len() == 1 { "field" } else { "fields" };
+            return Err(self.runtime_error_coded(
+                crate::diagnostics::registry::STRUCT_MISSING_FIELDS,
+                &format!(
+                    "{} is missing {} {}",
+                    struct_name_str,
+                    plural,
+                    missing.join(", ")
+                ),
+                Some("give every field a value, or none at all for zero-value initialization"),
+            ));
         }
 
         self.push(Value::StructInstance(Rc::new(ObjStructInstance::new(
@@ -777,9 +825,7 @@ impl VM {
             return Ok(Rc::clone(layout));
         }
 
-        // Walk the inheritance chain, collecting fields parent-first. Parent
-        // lookups go through `get_struct_def` so a module-scoped struct's
-        // parents (also module-scoped) resolve via the module globals too.
+        // Parent lookups go through get_struct_def so module-scoped parents resolve too.
         let mut chain: Vec<Rc<crate::vm::value::ObjStructDef>> = Vec::new();
         let mut cur = Some(Rc::clone(&def));
         while let Some(d) = cur {
@@ -804,8 +850,7 @@ impl VM {
         }
 
         let layout = Rc::new(crate::vm::value::FieldLayout { slots, indices });
-        // OnceCell may race if two threads reach here; VM is single-threaded
-        // but be defensive and return whichever is set.
+        // OnceCell may race; the VM is single-threaded but return whichever is set.
         let _ = def.layout.set(Rc::clone(&layout));
         Ok(def.layout.get().cloned().unwrap_or(layout))
     }
@@ -829,9 +874,12 @@ impl VM {
 
         match object.repr() {
             ValueRepr::StructInstance(inst) => {
-                // Field lookup via the instance's cached layout — direct
-                // Vec index, no HashMap lookup in the hot path.
+                // Direct Vec index via the instance's cached layout, no HashMap in the hot path.
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+                    // slots[idx].2 is the `hide` flag from the declaration.
+                    if inst.layout.slots[idx].2 && !self.hidden_field_access_allowed(inst) {
+                        return Err(self.hidden_field_error(fname, &inst.struct_name));
+                    }
                     return Ok(inst.get_field(idx));
                 }
                 // Fall through: it might be a method on the struct def.
@@ -851,13 +899,21 @@ impl VM {
                     ))
                 }
             }
-            ValueRepr::Module(m) => match m.globals.get(fname.as_ref()) {
-                Some(val) => Ok(val.clone()),
-                None => Err(self.runtime_error_hint(
-                    &format!("module '{}' has no member '{}'", m.name, fname),
-                    "check the module's public API for available members",
-                )),
-            },
+            ValueRepr::Module(m) => {
+                if m.hidden.contains(fname.as_ref()) {
+                    return Err(self.runtime_error_hint(
+                        &format!("'{}' is hidden inside module '{}'", fname, m.name),
+                        "it is declared `hide fun` — call it through a function the module exposes",
+                    ));
+                }
+                match m.globals.get(fname.as_ref()) {
+                    Some(val) => Ok(val.clone()),
+                    None => Err(self.runtime_error_hint(
+                        &format!("module '{}' has no member '{}'", m.name, fname),
+                        "check the module's public API for available members",
+                    )),
+                }
+            }
             ValueRepr::ErrorValue(data) => match fname.as_str() {
                 "msg" => Ok(Value::String(Rc::clone(&data.msg))),
                 "tag" => Ok(match &data.tag {
@@ -867,16 +923,18 @@ impl VM {
                 _ => Err(self.runtime_error(&format!("ErrorValue has no field '{}'", fname))),
             },
             ValueRepr::Map(entries) => {
+                // A missing key is an error: returning None made `m.nmae` a silent typo.
                 let entries = entries.borrow();
                 let key = Value::String(Rc::clone(fname));
-                let mut found = None;
-                for (k, v) in entries.iter() {
-                    if *k == key {
-                        found = Some(v.clone());
-                        break;
-                    }
+                match entries.get(&key) {
+                    Some(v) => Ok(v.clone()),
+                    None => Err(self.runtime_error_hint(
+                        &format!("key '{fname}' not found on map"),
+                        &format!(
+                            "use m[\"{fname}\"] or has(m, \"{fname}\") if the key may be absent"
+                        ),
+                    )),
                 }
-                Ok(found.unwrap_or(Value::None))
             }
             ValueRepr::EnumDef(def) => {
                 let variant = def
@@ -978,6 +1036,66 @@ impl VM {
         }
     }
 
+    /// Is the code in the current frame allowed to touch a hidden field of
+    /// `inst`? Yes when that code was compiled as part of a struct in the
+    /// instance's own inheritance chain — a method of the struct, a method it
+    /// inherited, or a closure nested inside one of those.
+    ///
+    /// Deliberately chain-directional: a `Person` method may read a hidden
+    /// field of an `American` (an American is-a Person), but a method of an
+    /// unrelated struct may not, and neither may top-level code.
+    fn hidden_field_access_allowed(&self, inst: &crate::vm::value::ObjStructInstance) -> bool {
+        // `active_closure` is authoritative for both interpreted and JIT'd
+        // frames; reading `frames.last()` would answer for the caller once a
+        // hot method tiered up, and deny its own `self.field`.
+        if self.frames.is_empty() && !self.jit_executing.get() {
+            return false;
+        }
+        let Some(owner) = self.active_closure().function.method_of.as_deref() else {
+            return false;
+        };
+        self.struct_chain_contains(&inst.struct_name, owner)
+    }
+
+    /// `method_of` of the innermost activation, interpreted or JIT'd.
+    fn active_closure_method_of(&self) -> Option<&str> {
+        if self.frames.is_empty() && !self.jit_executing.get() {
+            return None;
+        }
+        self.active_closure().function.method_of.as_deref()
+    }
+
+    /// Does `struct_name`'s inheritance chain include `owner`?
+    fn struct_chain_contains(&self, struct_name: &str, owner: &str) -> bool {
+        if struct_name == owner {
+            return true;
+        }
+        let mut current = self
+            .globals
+            .get(struct_name)
+            .and_then(|v| v.as_struct_def())
+            .and_then(|d| d.parent.clone());
+        while let Some(name) = current {
+            if name == owner {
+                return true;
+            }
+            current = self
+                .globals
+                .get(&name)
+                .and_then(|v| v.as_struct_def())
+                .and_then(|d| d.parent.clone());
+        }
+        false
+    }
+
+    /// Error for a refused hidden-field access.
+    fn hidden_field_error(&self, field: &str, struct_name: &str) -> VMError {
+        self.runtime_error_hint(
+            &format!("field '{}' is hidden on {}", field, struct_name),
+            "it is declared `hide` — reach it through a method of the struct",
+        )
+    }
+
     pub(crate) fn handle_set_field(&mut self, field_idx: u16) -> Result<(), VMError> {
         let value = self.pop();
         let object = self.pop();
@@ -997,6 +1115,9 @@ impl VM {
         match object.repr() {
             ValueRepr::StructInstance(inst) => {
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+                    if inst.layout.slots[idx].2 && !self.hidden_field_access_allowed(inst) {
+                        return Err(self.hidden_field_error(fname, &inst.struct_name));
+                    }
                     inst.set_field(idx, value);
                     Ok(())
                 } else {
@@ -1068,8 +1189,7 @@ impl VM {
 
         let upvalue_count = template.function.upvalue_count as usize;
 
-        // Snapshot what we need from the current frame so we can call
-        // mutable methods below without conflicting borrows.
+        // Snapshot from the frame so mutable methods below do not conflict on borrows.
         let (chunk_rc, parent_upvalues, slot_offset) = {
             let closure = self.active_closure();
             (
@@ -1101,11 +1221,11 @@ impl VM {
         let closure = Rc::new(ObjClosure {
             function: Rc::clone(&template.function),
             upvalues,
-            module_globals: std::cell::RefCell::new(
+            // Lexical capture: a closure belongs to the module it is created in.
+            module_globals: crate::vm::value::ModuleGlobals::from(
                 template
                     .module_globals
-                    .borrow()
-                    .clone()
+                    .get()
                     .or_else(|| self.active_module_globals_rc()),
             ),
             call_count: std::cell::Cell::new(0),
@@ -1116,6 +1236,8 @@ impl VM {
             specialized_thunk: std::cell::Cell::new(None),
             specialized_arity: std::cell::Cell::new(0),
             specialized_kind: std::cell::Cell::new(0),
+                lean_thunk: std::cell::Cell::new(None),
+                lean_arity: std::cell::Cell::new(0),
             upvalue_int_kinds: uv_kinds,
             upvalue_int_values: uv_values,
         });
@@ -1160,9 +1282,7 @@ impl VM {
 
     #[inline(always)]
     pub(crate) fn push(&mut self, value: Value) {
-        // JIT inline paths may have decremented `stack_view.len` without
-        // touching `Vec::len`; re-sync before we use Vec's APIs. See
-        // `sync_stack_from_view` for the safety invariant.
+        // JIT inline paths decrement stack_view.len without touching Vec::len; re-sync first.
         unsafe {
             self.stack.set_len(self.stack_view.len);
         }
@@ -1170,8 +1290,7 @@ impl VM {
             panic!("stack overflow: exceeded {} slots", STACK_MAX);
         }
         self.stack.push(value);
-        // Keep the JIT-visible `stack_view.len` in sync. `ptr` is stable
-        // because the stack was pre-allocated to STACK_MAX in `new()`.
+        // ptr is stable because the stack was pre-allocated to STACK_MAX in new().
         self.stack_view.len = self.stack.len();
     }
 
@@ -1238,10 +1357,7 @@ impl VM {
     /// Clone the constant at `idx` from the current frame's chunk. Used by
     /// the JIT runtime's `jit_push_constant` helper.
     pub(crate) fn current_constant(&self, idx: u16) -> Value {
-        // V5: `fresh_clone` mirrors the interpreter `Constant` opcode so the
-        // JIT's `jit_push_constant` helper also materializes a fresh, unaliased
-        // collection for typed zero-init heap defaults instead of sharing one
-        // `Rc<RefCell<…>>` across calls.
+        // fresh_clone so a typed zero-init heap default is unaliased per load, not shared.
         if self.jit_executing.get()
             && let Some(frame) = self.jit_frame_top() {
                 let closure = unsafe { &*frame.closure_raw };
@@ -1412,8 +1528,7 @@ impl VM {
             && let Some(frame) = self.jit_frame_top() {
                 return frame.line;
             }
-        // No frame yet (e.g. a cancel check that fires at call entry before the
-        // frame is pushed): there's no line to report — diagnostics, never panic.
+        // No frame yet, so there is no line to report; diagnose, never panic.
         let Some(frame) = self.frames.last() else {
             return 0;
         };
@@ -1466,13 +1581,17 @@ impl VM {
             .map(|frame| unsafe { &*frame.closure_raw })
     }
 
+    /// The module scope of the innermost activation. A JIT frame's answer is
+    /// authoritative *including* "none" — falling through to the interpreter
+    /// frame underneath would hand a main-script function the module scope of
+    /// whatever module happened to call it.
     #[inline(always)]
     fn active_module_globals(&self) -> Option<&HashMap<String, Value>> {
         if self.jit_executing.get()
-            && let Some(frame) = self.jit_frame_top()
-                && !frame.module_globals.is_null() {
-                    return Some(unsafe { &*frame.module_globals });
-                }
+            && let Some(frame) = self.jit_frame_top() {
+                return (!frame.module_globals.is_null())
+                    .then(|| unsafe { &*frame.module_globals });
+            }
         self.frames.last().and_then(|f| f.module_globals.as_deref())
     }
 
@@ -1488,10 +1607,9 @@ impl VM {
     /// `increment_strong_count` is sound.
     fn active_module_globals_rc(&self) -> Option<Rc<HashMap<String, Value>>> {
         if self.jit_executing.get()
-            && let Some(frame) = self.jit_frame_top()
-                && !frame.module_globals.is_null() {
-                    return unsafe { mg_rc(frame.module_globals) };
-                }
+            && let Some(frame) = self.jit_frame_top() {
+                return unsafe { mg_rc(frame.module_globals) };
+            }
         self.frames.last().and_then(|f| f.module_globals.clone())
     }
 
@@ -1503,35 +1621,48 @@ impl VM {
     #[inline(always)]
     pub(crate) fn has_active_module_globals(&self) -> bool {
         if self.jit_executing.get()
-            && let Some(frame) = self.jit_frame_top()
-                && !frame.module_globals.is_null() {
-                    return true;
-                }
+            && let Some(frame) = self.jit_frame_top() {
+                return !frame.module_globals.is_null();
+            }
         self.frames
             .last()
             .map(|f| f.module_globals.is_some())
             .unwrap_or(false)
     }
 
-    fn format_error(&self, message: &str, hint: Option<&str>) -> String {
+    fn format_error_coded(
+        &self,
+        code: crate::diagnostics::Code,
+        message: &str,
+        hint: Option<&str>,
+    ) -> String {
         let line_num = self.current_line() as usize;
         let col = self.current_column() as usize;
         let mut out = String::new();
 
-        out.push_str(&format!("error: {}\n", message));
+        out.push_str(&format!("error[{}]: {}\n", code, message));
         let frame_name = self.innermost_frame_name();
-        let location = if col > 0 {
-            format!("line {}:{}", line_num, col)
-        } else {
-            format!("line {}", line_num)
+        // A line number only means something against its own file, so resolve that first.
+        let origin = self.innermost_frame_origin();
+        let file = origin
+            .as_ref()
+            .map(|o| o.file.clone())
+            .or_else(|| self.current_file.as_deref().map(display_path_cwd));
+        let source = origin.as_ref().map(|o| o.source.as_str()).unwrap_or(&self.source);
+
+        let location = match (&file, col > 0) {
+            (Some(f), true) => format!("{}:{}:{}", f, line_num, col),
+            (Some(f), false) => format!("{}:{}", f, line_num),
+            (None, true) => format!("line {}:{}", line_num, col),
+            (None, false) => format!("line {}", line_num),
         };
         match &frame_name {
             Some(name) => out.push_str(&format!("  --> {} (in `{}`)\n", location, name)),
             None => out.push_str(&format!("  --> {}\n", location)),
         }
 
-        if !self.source.is_empty()
-            && let Some(source_line) = self.source.lines().nth(line_num.saturating_sub(1)) {
+        if !source.is_empty()
+            && let Some(source_line) = source.lines().nth(line_num.saturating_sub(1)) {
                 let line_str = format!("{}", line_num);
                 let padding = " ".repeat(line_str.len());
                 out.push_str(&format!("{} |\n", padding));
@@ -1545,17 +1676,39 @@ impl VM {
         if let Some(hint) = hint {
             out.push_str(&format!("\n  = hint: {}", hint));
         }
+        if crate::diagnostics::registry::lookup(code).is_some() {
+            out.push_str(&format!(
+                "\n  = note: run `oxigen explain {code}` for more information"
+            ));
+        }
 
         let trace = self.stack_trace();
         if trace.len() >= 2 {
             out.push_str("\nstack trace (innermost first):");
-            for (name, line) in &trace {
+            for (name, line, frame_file) in &trace {
                 let label = name.as_deref().unwrap_or("<top-level>");
-                out.push_str(&format!("\n   at `{}` (line {})", label, line));
+                // Name the file whenever we know it: mixed-file frames are what made traces confusing.
+                match frame_file {
+                    Some(f) => out.push_str(&format!("\n   at `{}` ({}:{})", label, f, line)),
+                    None => out.push_str(&format!("\n   at `{}` (line {})", label, line)),
+                }
             }
         }
 
         out
+    }
+
+    /// Source and file of the function active at the innermost frame.
+    /// `None` means the entry script, whose source the VM holds directly.
+    fn innermost_frame_origin(&self) -> Option<Rc<crate::vm::value::ModuleOrigin>> {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top() {
+                let closure = unsafe { &*frame.closure_raw };
+                return closure.function.origin.borrow().clone();
+            }
+        self.frames
+            .last()
+            .and_then(|f| f.closure.function.origin.borrow().clone())
     }
 
     /// Name of the function active at the innermost frame. `None` means
@@ -1577,14 +1730,30 @@ impl VM {
     /// `(function_name, line)` per frame. The top-level script body has
     /// `name == None`. When the JIT is executing, all of its frames are
     /// included innermost-first, ahead of any interpreter frames below.
-    fn stack_trace(&self) -> Vec<(Option<String>, u32)> {
-        let mut trace: Vec<(Option<String>, u32)> = Vec::new();
+    fn stack_trace(&self) -> Vec<(Option<String>, u32, Option<String>)> {
+        // None means the entry script.
+        let entry_file = self.current_file.as_deref().map(display_path_cwd);
+        let frame_file = |closure: &ObjClosure| -> Option<String> {
+            closure
+                .function
+                .origin
+                .borrow()
+                .as_ref()
+                .map(|o| o.file.clone())
+                .or_else(|| entry_file.clone())
+        };
+
+        let mut trace: Vec<(Option<String>, u32, Option<String>)> = Vec::new();
         if self.jit_executing.get() {
             let len = self.jit_frame_view.len;
             for i in (0..len).rev() {
                 let frame = unsafe { &*self.jit_frame_view.ptr.add(i) };
                 let closure = unsafe { &*frame.closure_raw };
-                trace.push((closure.function.name.clone(), frame.line));
+                trace.push((
+                    closure.function.name.clone(),
+                    frame.line,
+                    frame_file(closure),
+                ));
             }
         }
         for frame in self.frames.iter().rev() {
@@ -1597,27 +1766,113 @@ impl VM {
                 .get(ip)
                 .copied()
                 .unwrap_or(0);
-            trace.push((frame.closure.function.name.clone(), line));
+            trace.push((
+                frame.closure.function.name.clone(),
+                line,
+                frame_file(&frame.closure),
+            ));
         }
         trace
     }
 
+    /// Whether a field's declared type admits `None`, making omission
+    /// deliberate rather than a slip — a linked-list `next <Node> || <None>`
+    /// is meant to be left off at the tail.
+    fn field_is_optional(type_name: &str) -> bool {
+        type_name.split("||").any(|t| t.trim().eq_ignore_ascii_case("none"))
+    }
+
+    /// Reports a call whose argument count the signature cannot accept.
+    fn arity_error(
+        &self,
+        function: &crate::vm::value::Function,
+        got: usize,
+        required: usize,
+        max: usize,
+    ) -> VMError {
+        let name = function
+            .name
+            .as_deref()
+            .map(|n| format!("`{n}`"))
+            .unwrap_or_else(|| "this function".to_string());
+        let plural = |n: usize| if n == 1 { "argument" } else { "arguments" };
+
+        let expectation = if required == max {
+            format!("{required} {}", plural(required))
+        } else {
+            format!("{required} to {max} arguments")
+        };
+        let was = if got == 1 { "was" } else { "were" };
+        let message = format!(
+            "{name} takes {expectation} but {got} {was} supplied"
+        );
+
+        let hint = if got < required {
+            let missing: Vec<String> = function
+                .params
+                .iter()
+                .skip(got)
+                .filter(|p| !p.has_default && !p.optional)
+                .map(|p| format!("`{}`", p.name))
+                .collect();
+            if missing.is_empty() {
+                "supply the missing arguments".to_string()
+            } else {
+                format!("missing {}", missing.join(", "))
+            }
+        } else {
+            format!("remove the extra {}", plural(got - max))
+        };
+
+        self.runtime_error_coded(
+            crate::diagnostics::registry::WRONG_ARGUMENT_COUNT,
+            &message,
+            Some(&hint),
+        )
+    }
+
     pub(crate) fn runtime_error(&self, message: &str) -> VMError {
+        self.runtime_error_coded(crate::diagnostics::registry::RUNTIME_ERROR, message, None)
+    }
+
+    /// A runtime error with a specific code.
+    pub(crate) fn runtime_error_coded(
+        &self,
+        code: crate::diagnostics::Code,
+        message: &str,
+        hint: Option<&str>,
+    ) -> VMError {
         let line = self.current_line();
         VMError {
-            message: self.format_error(message, None),
+            message: self.format_error_coded(code, message, hint),
             line,
+            code,
             tag: None,
         }
     }
 
     pub(crate) fn runtime_error_hint(&self, message: &str, hint: &str) -> VMError {
-        let line = self.current_line();
-        VMError {
-            message: self.format_error(message, Some(hint)),
-            line,
-            tag: None,
+        self.runtime_error_coded(
+            crate::diagnostics::registry::RUNTIME_ERROR,
+            message,
+            Some(hint),
+        )
+    }
+
+    /// Map keys and set elements must have a hashable projection.
+    ///
+    /// A non-hashable key used to be accepted and fall back to a linear scan, so a program that
+    /// keyed a map by an array got silent O(n) lookups and a key it could mutate out from under
+    /// its own entry. Both are refused here instead.
+    pub(crate) fn require_hashable_key(&self, key: &Value, what: &str) -> Result<(), VMError> {
+        if key.try_hash_key().is_some() {
+            return Ok(());
         }
+        Err(self.runtime_error_coded(
+            crate::diagnostics::registry::NON_HASHABLE_KEY,
+            &format!("{} is not hashable and cannot be used as a {what}", key.type_name()),
+            Some("hashable kinds are int, uint, float, bool, char, byte, str, None, and tuples of those"),
+        ))
     }
 
     // ── Main Execution Loop ────────────────────────────────────────────
@@ -1632,25 +1887,17 @@ impl VM {
     /// the stack. `run()` consumes it; the JIT helper leaves it for its
     /// caller.
     pub(crate) fn execute_until(&mut self, stop_depth: usize) -> Result<(), VMError> {
-        // If the frame we were supposed to drive has already been popped
-        // (e.g. the JIT ran the whole call to completion before we got
-        // here), there is nothing to do.
+        // Nothing to do if the JIT already ran the whole call to completion.
         if self.frames.len() <= stop_depth {
             return Ok(());
         }
-        // While we are driving CallFrames with the interpreter, the
-        // active frame lives in `frames`, not `jit_frame_view`. Flip
-        // the mode flag so `current_constant` / `active_closure` /
-        // `current_line` / `active_module_globals` read the right
-        // frame. Save + restore in case we are called from within a
-        // JIT thunk (nested interpreter → JIT → interpreter → ...).
+        // While the interpreter drives, the active frame is in `frames`, not jit_frame_view.
         let prev_jit_exec = self.jit_executing.replace(false);
         let result = loop {
             match self.execute_until_inner(stop_depth) {
                 Ok(()) => break Ok(()),
                 Err(e) => match self.recover_to_handler(stop_depth, e) {
-                    // Recovered into a `guard`/`option <Error>`/`Error||Value`
-                    // catch target — resume the interpreter loop there.
+                    // Recovered into a catch target: resume the interpreter loop there.
                     Ok(()) => continue,
                     // No handler in this scope — propagate.
                     Err(e) => break Err(e),
@@ -1671,11 +1918,9 @@ impl VM {
             Some(h) if h.frame_len > stop_depth => {
                 self.error_handlers.pop();
                 self.frames.truncate(h.frame_len);
-                // Reset JIT frames (a JIT callee that errored leaves its frame
-                // behind — see `call_compiled`'s RuntimeError arm).
+                // A JIT callee that errored leaves its frame behind; see call_compiled's RuntimeError arm.
                 self.jit_frame_view.len = h.jit_frame_len;
-                // Close any upvalues that captured locals inside the unwound
-                // region before discarding those stack slots.
+                // Close upvalues capturing locals in the unwound region before discarding those slots.
                 self.close_upvalues(h.stack_len);
                 self.stack_truncate(h.stack_len);
                 self.push(Value::ErrorValue(Rc::new(ErrorValueData {
@@ -1692,14 +1937,7 @@ impl VM {
 
     #[inline(always)]
     fn execute_until_inner(&mut self, stop_depth: usize) -> Result<(), VMError> {
-        // Integer fast path for the hot binary ops: check both operands in
-        // place on the stack, compute without the generic ~20-arm type-match
-        // helpers, and write the result over the lhs slot — one Vec pop
-        // instead of two pops + a push (each of which does a
-        // `set_len`/`stack_view` resync). The dispatch loop always runs with
-        // `stack.len() == stack_view.len` (the same invariant `peek` and the
-        // GetLocal/SetLocal arms already rely on), so plain Vec ops + a
-        // trailing `stack_view.len` store are enough here.
+        // Check both operands in place and write over the lhs slot: one Vec pop instead of two pops plus a push.
         macro_rules! int_fast_binop {
             ($l:ident, $r:ident, $guard:expr, $fast:expr, $slow:ident) => {{
                 let n = self.stack.len();
@@ -1734,12 +1972,7 @@ impl VM {
                 // ── Constants & Literals ────────────────────────────
                 OpCode::Constant => {
                     let idx = self.frames[frame_idx].read_u16();
-                    // V5: `fresh_clone` (not `clone`) so a typed zero-init heap
-                    // default (`arr <array>`/`<map>`/`<set>`) parked in the
-                    // constant pool materializes a FRESH, unaliased collection
-                    // per load instead of sharing one `Rc<RefCell<…>>` across
-                    // every call. For all other constants this is an ordinary
-                    // clone (single discriminant branch of overhead).
+                    // fresh_clone so a typed zero-init heap default materializes unaliased per load.
                     let value = self.frames[frame_idx].read_constant(idx).fresh_clone();
                     self.push_fast(value);
                 }
@@ -1760,11 +1993,12 @@ impl VM {
                 OpCode::Add => int_fast_binop!(l, r, true, Value::Integer(l + r), binary_add),
                 OpCode::Subtract => int_fast_binop!(l, r, true, Value::Integer(l - r), binary_sub),
                 OpCode::Multiply => int_fast_binop!(l, r, true, Value::Integer(l * r), binary_mul),
+                // Excludes -1 as well as 0: Rust traps i64::MIN / -1 unconditionally and panic=abort kills the process.
                 OpCode::Divide => {
-                    int_fast_binop!(l, r, r != 0, Value::Integer(l / r), binary_div)
+                    int_fast_binop!(l, r, r != 0 && r != -1, Value::Integer(l / r), binary_div)
                 }
                 OpCode::Modulo => {
-                    int_fast_binop!(l, r, r != 0, Value::Integer(l % r), binary_mod)
+                    int_fast_binop!(l, r, r != 0 && r != -1, Value::Integer(l % r), binary_mod)
                 }
 
                 // ── Comparison ──────────────────────────────────────
@@ -1874,9 +2108,7 @@ impl VM {
                 }
                 OpCode::SetLocal => {
                     let slot = self.frames[frame_idx].read_u16() as usize;
-                    // Enforce a declared type lock on the local, if any. A set
-                    // type stays locked; only an explicitly dynamic variable
-                    // (`<generic>`/untyped) carries no constraint.
+                    // A set type stays locked; only <generic> or untyped carries no constraint.
                     let constraint = self.frames[frame_idx]
                         .closure
                         .function
@@ -1973,8 +2205,7 @@ impl VM {
                         }
                     };
                     let descriptors_offset = self.frames[frame_idx].ip;
-                    // Skip past the upvalue descriptors; `handle_closure`
-                    // reads them directly from the chunk.
+                    // handle_closure reads the upvalue descriptors directly from the chunk.
                     self.frames[frame_idx].ip += 3 * upvalue_count;
                     self.handle_closure(fn_idx, descriptors_offset)?;
                 }
@@ -2006,9 +2237,7 @@ impl VM {
                     let result = self.pop();
                     let frame = self.frames.pop().unwrap();
 
-                    // Drop any error handlers that belonged to the returning
-                    // frame — a `give` inside a guarded option arm exits via
-                    // Return and would otherwise skip its `PopHandler`.
+                    // A `give` inside a guarded option arm exits via Return and would otherwise skip its PopHandler.
                     while self
                         .error_handlers
                         .last()
@@ -2017,16 +2246,12 @@ impl VM {
                         self.error_handlers.pop();
                     }
 
-                    // Close upvalues
                     self.close_upvalues(frame.slot_offset);
 
                     // Pop the function's stack slots
                     self.stack_truncate(frame.slot_offset);
 
-                    // Leave the return value on the stack for the caller.
-                    // The top-level `run()` pops it after `execute_until`
-                    // returns. Nested frames consume it as the `Call`
-                    // opcode's result.
+                    // run() pops the top-level value; nested frames consume it as the Call result.
                     self.push(result);
 
                     if self.frames.len() <= stop_depth {
@@ -2053,6 +2278,7 @@ impl VM {
                     let flat: Vec<Value> = self.stack_drain_from(start);
                     let mut map = crate::vm::collections::OxMap::new();
                     for pair in flat.chunks(2) {
+                        self.require_hashable_key(&pair[0], "map key")?;
                         map.insert(pair[0].clone(), pair[1].clone());
                     }
                     self.push(Value::Map(Rc::new(RefCell::new(map))));
@@ -2061,6 +2287,9 @@ impl VM {
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count;
                     let elements: Vec<Value> = self.stack_drain_from(start);
+                    for e in &elements {
+                        self.require_hashable_key(e, "set element")?;
+                    }
                     let set = crate::vm::collections::OxSet::from_iter_dedup(elements);
                     self.push(Value::Set(Rc::new(RefCell::new(set))));
                 }
@@ -2121,10 +2350,7 @@ impl VM {
                     self.handle_define_method(struct_name_idx, method_count)?;
                 }
 
-                // ── Pattern Matching ────────────────────────────────
-                // Patterns are now compiled as closures stored as __pattern_<name> globals.
-                // DefinePattern and TestPattern opcodes are no longer emitted by the compiler.
-                // These stubs exist only for backwards compatibility.
+                // Patterns compile to __pattern_<name> globals; these opcodes are stubs for older bytecode.
                 OpCode::DefinePattern => {
                     let _name_idx = self.frames[frame_idx].read_u16();
                     let _param_count = self.frames[frame_idx].read_byte();
@@ -2176,8 +2402,7 @@ impl VM {
                     let binding_name = self.frames[frame_idx].read_constant(binding_idx).clone();
 
                     let value = self.peek(0).clone();
-                    // Inspect the error (if any) and whether the tag filter
-                    // matches, ending the borrow of `value` before we act.
+                    // End the borrow of `value` before acting on the tag-filter result.
                     let err: Option<(bool, String, Option<String>)> =
                         if let Some(data) = value.as_error_value() {
                             let matches = if tag_idx == 0xFFFF {
@@ -2215,11 +2440,11 @@ impl VM {
                             return Err(VMError {
                                 message: msg,
                                 line: self.current_line(),
+                                code: crate::diagnostics::registry::RUNTIME_ERROR,
                                 tag,
                             });
                         }
-                        // Not an error: keep the value on the stack as-is
-                        // (including Value(...) wrappers).
+                        // Not an error: keep the value as-is, including Value(...) wrappers.
                         None => {}
                     }
                 }
@@ -2231,6 +2456,7 @@ impl VM {
                             return Err(VMError {
                                 message: data.msg.to_string(),
                                 line: self.current_line(),
+                                code: crate::diagnostics::registry::RUNTIME_ERROR,
                                 tag: data.tag.as_ref().map(|t| t.to_string()),
                             });
                         }
@@ -2238,6 +2464,7 @@ impl VM {
                             return Err(VMError {
                                 message: format!("{}", value),
                                 line: self.current_line(),
+                                code: crate::diagnostics::registry::RUNTIME_ERROR,
                                 tag: None,
                             });
                         }
@@ -2265,7 +2492,6 @@ impl VM {
                     let selective_count = self.frames[frame_idx].read_byte() as usize;
                     let path = self.frames[frame_idx].read_constant(path_idx).clone();
 
-                    // Collect selective names
                     let mut selective_names = Vec::new();
                     for _ in 0..selective_count {
                         let name = self.pop();
@@ -2292,9 +2518,7 @@ impl VM {
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count;
                     let parts: Vec<Value> = self.stack_drain_from(start);
-                    // Accumulate into a single buffer instead of allocating a
-                    // throwaway String per part via `format!` (LuaJIT's SBuf
-                    // idea). `write!` into the buffer is alloc-free per part.
+                    // One buffer instead of a throwaway String per part; write! into it is alloc-free.
                     let mut result = String::with_capacity(count * 8);
                     for part in &parts {
                         let _ = write!(result, "{}", part);
@@ -2376,6 +2600,14 @@ impl VM {
                     let index = self.pop();
                     let iterable = self.pop();
                     let val = self.iter_get(&iterable, &index)?;
+                    self.push(val);
+                }
+
+                OpCode::IterEntry => {
+                    let index = self.pop();
+                    let iterable = self.pop();
+                    let (key, val) = self.iter_entry(&iterable, &index)?;
+                    self.push(key);
                     self.push(val);
                 }
 
@@ -2469,15 +2701,12 @@ impl VM {
                 }
 
                 OpCode::EnumDef => {
-                    // EnumDefs flow through the constant pool / DefineGlobal; this
-                    // opcode is reserved for future use (explicit runtime registration).
+                    // EnumDefs flow through the constant pool; this opcode is reserved for explicit runtime registration.
                     let _idx = self.frames[frame_idx].read_u16();
                 }
 
                 OpCode::MakeEnumVariantUnit => {
-                    // Reserved — unit variants are constructed through GetField on
-                    // an EnumDef receiver. This opcode exists so compilers can emit
-                    // a direct unit construction in the future.
+                    // Reserved: unit variants are built via GetField on an EnumDef receiver.
                     let variant_idx = self.frames[frame_idx].read_u16();
                     let variant_name = self.frames[frame_idx].read_constant(variant_idx).clone();
                     let enum_val = self.pop();
@@ -2719,9 +2948,7 @@ impl VM {
                 new.extend((**r).clone());
                 Ok(Value::Tuple(Rc::new(new)))
             }
-            // Hint wording matches the tree-walker's infix type-mismatch arm
-            // (evaluator/mod.rs `eval_infix_expression`) so file vs REPL output
-            // agrees.
+            // Wording matches the tree-walker so file and REPL output agree.
             _ => Err(self.runtime_error_hint(
                 &format!("type mismatch: {} + {}", a.type_name(), b.type_name()),
                 "operands must be the same type for this operator",
@@ -2771,30 +2998,76 @@ impl VM {
         }
     }
 
+    /// The one division-by-zero error. Shared by every numeric type so the
+    /// message can't drift between them.
+    ///
+    /// The hint matches the tree-walker's (evaluator/mod.rs
+    /// `eval_integer_infix`) so file vs REPL output agrees.
+    fn division_by_zero(&self) -> VMError {
+        self.runtime_error_hint(
+            "division by zero",
+            "ensure the divisor is not zero before dividing",
+        )
+    }
+
+    fn modulo_by_zero(&self) -> VMError {
+        self.runtime_error_hint(
+            "modulo by zero",
+            "ensure the divisor is not zero before using %",
+        )
+    }
+
+    /// `i64::MIN / -1` (and `%`) has no representable result. Rust traps
+    /// signed division overflow regardless of `overflow-checks`, and this
+    /// workspace sets `panic = "abort"`, so without this the process dies
+    /// with a raw Rust panic pointing into the compiler's own source. Same
+    /// shape (and code) as `division_by_zero` so `oxigen explain E0031`
+    /// already covers it.
+    fn division_overflow(&self, op: char) -> VMError {
+        self.runtime_error_hint(
+            &format!("integer overflow: int_min {op} -1 has no int result"),
+            "the smallest int has no positive counterpart; special-case this divisor",
+        )
+    }
+
     pub(crate) fn binary_div(&self, a: Value, b: Value) -> Result<Value, VMError> {
         let (a, b) = (self.force(a), self.force(b));
+        // Float division by zero errors too: silently yielding inf poisons every later computation.
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 if *r == 0 {
-                    // Match the tree-walker's hint (evaluator/mod.rs
-                    // `eval_integer_infix`) so file vs REPL output agrees.
-                    Err(self.runtime_error_hint(
-                        "division by zero",
-                        "ensure the divisor is not zero before dividing",
-                    ))
+                    Err(self.division_by_zero())
                 } else {
-                    Ok(Value::Integer(l / r))
+                    // `checked_div`, not `/`: see `division_overflow`.
+                    l.checked_div(*r)
+                        .map(Value::Integer)
+                        .ok_or_else(|| self.division_overflow('/'))
                 }
             }
-            (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l / r)),
-            (Value::Integer(l), Value::Float(r)) => Ok(Value::Float(*l as f64 / r)),
-            (Value::Float(l), Value::Integer(r)) => Ok(Value::Float(l / *r as f64)),
+            (Value::Float(l), Value::Float(r)) => {
+                if *r == 0.0 {
+                    Err(self.division_by_zero())
+                } else {
+                    Ok(Value::Float(l / r))
+                }
+            }
+            (Value::Integer(l), Value::Float(r)) => {
+                if *r == 0.0 {
+                    Err(self.division_by_zero())
+                } else {
+                    Ok(Value::Float(*l as f64 / r))
+                }
+            }
+            (Value::Float(l), Value::Integer(r)) => {
+                if *r == 0 {
+                    Err(self.division_by_zero())
+                } else {
+                    Ok(Value::Float(l / *r as f64))
+                }
+            }
             (Value::Uint(l), Value::Uint(r)) => {
                 if *r == 0 {
-                    Err(self.runtime_error_hint(
-                        "division by zero",
-                        "ensure the divisor is not zero before dividing",
-                    ))
+                    Err(self.division_by_zero())
                 } else {
                     Ok(Value::Uint(l / r))
                 }
@@ -2811,25 +3084,38 @@ impl VM {
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 if *r == 0 {
-                    // Match the tree-walker's hint (evaluator/mod.rs
-                    // `eval_integer_infix`) so file vs REPL output agrees.
-                    Err(self.runtime_error_hint(
-                        "modulo by zero",
-                        "ensure the divisor is not zero before using %",
-                    ))
+                    Err(self.modulo_by_zero())
                 } else {
-                    Ok(Value::Integer(l % r))
+                    // `checked_rem`, not `%`: see `division_overflow`.
+                    l.checked_rem(*r)
+                        .map(Value::Integer)
+                        .ok_or_else(|| self.division_overflow('%'))
                 }
             }
-            (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l % r)),
-            (Value::Integer(l), Value::Float(r)) => Ok(Value::Float(*l as f64 % r)),
-            (Value::Float(l), Value::Integer(r)) => Ok(Value::Float(l % *r as f64)),
+            (Value::Float(l), Value::Float(r)) => {
+                if *r == 0.0 {
+                    Err(self.modulo_by_zero())
+                } else {
+                    Ok(Value::Float(l % r))
+                }
+            }
+            (Value::Integer(l), Value::Float(r)) => {
+                if *r == 0.0 {
+                    Err(self.modulo_by_zero())
+                } else {
+                    Ok(Value::Float(*l as f64 % r))
+                }
+            }
+            (Value::Float(l), Value::Integer(r)) => {
+                if *r == 0 {
+                    Err(self.modulo_by_zero())
+                } else {
+                    Ok(Value::Float(l % *r as f64))
+                }
+            }
             (Value::Uint(l), Value::Uint(r)) => {
                 if *r == 0 {
-                    Err(self.runtime_error_hint(
-                        "modulo by zero",
-                        "ensure the divisor is not zero before using %",
-                    ))
+                    Err(self.modulo_by_zero())
                 } else {
                     Ok(Value::Uint(l % r))
                 }
@@ -2841,12 +3127,7 @@ impl VM {
         }
     }
 
-    // ── Bitwise Helpers ─────────────────────────────────────────────────
-    //
-    // Shift semantics are pinned: the shift count is masked to the low 6
-    // bits via `as u32` + `wrapping_shl/shr`. This matches x86 `shl/shr`
-    // and Cranelift `ishl/sshr` so debug, release, --jit, and --no-jit all
-    // agree on `1 << 64`, `1 << -1`, etc.
+    // Shift count masked to the low 6 bits, matching x86 and Cranelift.
 
     pub(crate) fn binary_band(&self, a: Value, b: Value) -> Result<Value, VMError> {
         let (a, b) = (self.force(a), self.force(b));
@@ -3023,7 +3304,7 @@ impl VM {
 
         match callee.repr() {
             ValueRepr::Closure(closure) => {
-                let module_globals = closure.module_globals.borrow().clone();
+                let module_globals = closure.module_globals.get();
                 self.call_closure(Rc::clone(closure), arg_count, named_args, module_globals)
             }
             ValueRepr::Builtin(func) => {
@@ -3038,17 +3319,11 @@ impl VM {
                     func,
                     crate::concurrent::builtin_spawn as fn(&[Value]) -> Value,
                 );
-                // Closure transfer: snapshot a spawned capturing closure so the
-                // builtin (no stack access) can read its upvalues. Kept out of
-                // line so its locals don't bloat this hot, deeply-recursed frame.
+                // Out of line so its locals do not bloat this hot, deeply-recursed frame.
                 if is_spawn {
                     self.snapshot_spawn_closure(start);
                 }
-                // `join`/`spawn` are routed to VM-aware paths: `join` rebuilds
-                // struct/enum results; `spawn` snapshots the main thread's user
-                // globals so a spawned closure can resolve top-level `main`
-                // bindings on the worker. Every other builtin never touches
-                // `self`, so its borrow ends before we mutate the stack.
+                // join rebuilds struct/enum results; spawn snapshots the main thread's globals.
                 let result = if is_spawn {
                     crate::concurrent::spawn_with_vm(self, &self.stack[start..])
                 } else if std::ptr::fn_addr_eq(
@@ -3065,6 +3340,7 @@ impl VM {
                     return Err(VMError {
                         message: msg.to_string(),
                         line: self.current_line(),
+                        code: crate::diagnostics::registry::RUNTIME_ERROR,
                         tag: None,
                     });
                 }
@@ -3072,16 +3348,34 @@ impl VM {
                 Ok(())
             }
             ValueRepr::StructDef(def) => {
-                // Struct constructor call. Positional args fill fields in order;
-                // named args (name=value) bind to the matching field by name.
+                // Positional args fill fields in order; named args bind by name.
                 let start = self.stack.len() - arg_count;
                 let args: Vec<Value> = self.stack_drain_from(start);
                 self.pop(); // pop the struct def
 
                 let def_name = def.name.clone();
                 let layout = self.resolve_field_layout(&def_name)?;
+                // Omitted fields used to take their type's zero, so a half-built struct looked complete.
                 let mut field_vec: Vec<Value> = Vec::with_capacity(layout.slots.len());
+                let mut missing: Vec<String> = Vec::new();
+                // Construction from outside the struct may not supply hidden
+                // fields — otherwise `hide` would stop reads while leaving the
+                // initial value wide open.
+                let outside = self
+                    .active_closure_method_of()
+                    .is_none_or(|owner| !self.struct_chain_contains(&def_name, owner));
                 for (i, slot) in layout.slots.iter().enumerate() {
+                    let supplied_here = i < args.len()
+                        || named_args.iter().any(|(n, _)| *n == slot.0);
+                    if slot.2 && supplied_here && outside {
+                        return Err(self.runtime_error_hint(
+                            &format!(
+                                "field '{}' is hidden on {} and cannot be set from outside",
+                                slot.0, def_name
+                            ),
+                            "declare the value (`x <Struct>`) and set it through a method of the struct",
+                        ));
+                    }
                     let val = if i < args.len() {
                         args[i].clone()
                     } else if let Some((_, v)) =
@@ -3089,9 +3383,42 @@ impl VM {
                     {
                         v.clone()
                     } else {
+                        if !Self::field_is_optional(&slot.1) {
+                            missing.push(format!("`{}`", slot.0));
+                        }
                         Self::zero_value_for_type(&slot.1)
                     };
                     field_vec.push(val);
+                }
+                // Supplying nothing is the documented zero-value form; supplying some is the mistake.
+                let supplied = args.len() + named_args.len();
+                if supplied > 0 && !missing.is_empty() {
+                    let plural = if missing.len() == 1 { "field" } else { "fields" };
+                    return Err(self.runtime_error_coded(
+                        crate::diagnostics::registry::STRUCT_MISSING_FIELDS,
+                        &format!(
+                            "{} is missing {} {}",
+                            def_name,
+                            plural,
+                            missing.join(", ")
+                        ),
+                        Some(
+                            "give every field a value, or none at all for zero-value \
+                             initialization",
+                        ),
+                    ));
+                }
+                if args.len() > layout.slots.len() {
+                    return Err(self.runtime_error_coded(
+                        crate::diagnostics::registry::STRUCT_MISSING_FIELDS,
+                        &format!(
+                            "{} takes {} fields but {} were supplied",
+                            def_name,
+                            layout.slots.len(),
+                            args.len()
+                        ),
+                        Some("remove the extra arguments"),
+                    ));
                 }
 
                 self.push(Value::StructInstance(Rc::new(ObjStructInstance::new(
@@ -3118,9 +3445,7 @@ impl VM {
             return Ok(false);
         };
         let closure = Rc::clone(closure);
-        // Inline fast path: JIT-compiled callee with exact arity.
-        // This is every recursive/hot-loop call, and we want it to fold
-        // straight into `jit_op_call` without a Rust function call.
+        // Every recursive and hot-loop call lands here, so it folds straight into jit_op_call.
         if closure.jit_state.get() == 1 && closure.function.arity as usize == arg_count
             && let Some(result) = self.call_closure_fast_path(&closure) {
                 return result.map(|_| true);
@@ -3172,13 +3497,7 @@ impl VM {
                     return self.call_closure(closure, arg_count, named_args, None);
                 }
 
-                // Look up the method on the instance's OWN carried def (with
-                // inheritance). Resolving via the instance — not a by-name
-                // lookup in the current scope — is essential when the instance
-                // is used OUTSIDE its defining module: e.g. a `test`-module
-                // `Expectation` returned by `expect` and asserted on
-                // (`.eq(..)`) in a test file, where `Expectation` is not in the
-                // test file's globals and no module frame is active.
+                // Resolve via the instance's own def, not by name, so it works outside the defining module.
                 let method = self
                     .find_method_on_def(&inst.def, method_name)
                     .ok_or_else(|| {
@@ -3191,16 +3510,11 @@ impl VM {
                         )
                     })?;
 
-                // The method runs with its defining module's globals so its body
-                // can reach that module's file-local helpers (e.g. a struct
-                // method imported from another module calling a top-level fn in
-                // the same file). Taken from the instance's carried def.
-                let owning_module_globals = inst.def.module_globals.borrow().clone();
+                // Use the defining module's globals so the body can reach that module's file-local helpers.
+                let owning_module_globals = inst.def.module_globals.get();
 
                 if let Some(closure) = method.as_closure().cloned() {
-                    // Method has implicit `self` as first param.
-                    // Rearrange stack: [instance, arg1, ...] → [closure, instance, arg1, ...]
-                    // The instance becomes the `self` argument.
+                    // Rearrange [instance, args..] to [closure, instance, args..] so the instance becomes `self`.
                     self.stack[instance_idx] = Value::Closure(Rc::clone(&closure));
                     // Insert instance as first arg (self) right after the closure
                     self.stack_insert(instance_idx + 1, instance);
@@ -3222,8 +3536,7 @@ impl VM {
             | ValueRepr::Map(_)
             | ValueRepr::Set(_)
             | ValueRepr::Tuple(_) => {
-                // Built-in method syntax: collection.method(args)
-                // Convert to builtin call: __method(collection, args)
+                // collection.method(args) becomes __method(collection, args).
                 let builtin_name = format!("__{}", method_name);
                 if let Some(builtin) = self.globals.get(&builtin_name).cloned() {
                     // Rearrange: [instance, arg1, ...] → [builtin, instance, arg1, ...]
@@ -3248,10 +3561,15 @@ impl VM {
             }
             ValueRepr::Module(m) => {
                 // Module method call: module.func(args)
+                if m.hidden.contains(method_name) {
+                    return Err(self.runtime_error_hint(
+                        &format!("'{}' is hidden inside module '{}'", method_name, m.name),
+                        "it is declared `hide fun` — call it through a function the module exposes",
+                    ));
+                }
                 if let Some(func) = m.globals.get(method_name).cloned() {
                     self.stack[instance_idx] = func.clone();
-                    // Pass the module's globals so the function can access
-                    // module-scoped variables (e.g. `io` inside `toml`).
+                    // Pass module globals so the function can reach module-scoped variables.
                     if let Some(closure) = func.as_closure().cloned() {
                         return self.call_closure(
                             closure,
@@ -3332,11 +3650,7 @@ impl VM {
         if let Some(Value::StructDef(def)) = self.globals.get(name) {
             return Some(Rc::clone(def));
         }
-        // Fall back to the active frame's module globals: a function imported
-        // from another module (e.g. `expect` from the `test` module) must be
-        // able to construct/inherit structs defined in ITS module (e.g.
-        // `Expectation`), which live in the module's globals, not the importing
-        // file's globals.
+        // An imported function must construct structs defined in ITS module, which live in those globals.
         if let Some(mg) = self.active_module_globals()
             && let Some(Value::StructDef(def)) = mg.get(name) {
                 return Some(Rc::clone(def));
@@ -3363,7 +3677,7 @@ impl VM {
                 return Some(m);
             }
             cur = d.parent.as_ref().and_then(|p| {
-                if let Some(mg) = d.module_globals.borrow().as_ref()
+                if let Some(mg) = d.module_globals.get()
                     && let Some(Value::StructDef(pd)) = mg.get(p) {
                         return Some(Rc::clone(pd));
                     }
@@ -3376,10 +3690,7 @@ impl VM {
         None
     }
 
-    // Only the JIT runtime helpers resolve methods by struct NAME (the static
-    // `Struct.method()` IC path); the interpreter resolves instance methods via
-    // the instance's carried def (`find_method_on_def`). Gated so a VM-only
-    // (`--no-default-features`) build doesn't warn it unused.
+    // Only JIT helpers resolve by struct name; the interpreter goes through the instance's carried def.
     #[cfg(feature = "jit")]
     pub(crate) fn find_struct_method(
         &self,
@@ -3388,10 +3699,7 @@ impl VM {
     ) -> Result<Value, VMError> {
         let mut current = struct_name.to_string();
         loop {
-            // `get_struct_def` consults the active frame's module globals, so a
-            // method defined on a struct imported from another module (e.g.
-            // `Expectation.eq` from the `test` module) resolves even though the
-            // struct isn't in the importing file's globals.
+            // get_struct_def consults the active frame's module globals, so imported structs resolve.
             if let Some(def) = self.get_struct_def(&current) {
                 let methods = def.methods.borrow();
                 if let Some(method) = methods.get(method_name) {
@@ -3432,10 +3740,8 @@ impl VM {
         let expected = closure.function.arity as usize;
         let slot_offset = self.stack.len() - expected - 1;
         let stop_depth = self.frames.len();
-        let inherited_mg = self
-            .active_module_globals()
-            .map(|mg| mg as *const HashMap<String, Value>)
-            .unwrap_or(std::ptr::null());
+        // The callee's own module, not the caller's — see `call_closure`.
+        let inherited_mg = closure.module_globals.as_ptr();
         let entry_line = closure.function.chunk.lines.first().copied().unwrap_or(0);
         self.jit_frame_push_raw(Rc::as_ptr(closure), slot_offset, inherited_mg, entry_line);
         let vm_ptr = self as *mut VM;
@@ -3486,24 +3792,20 @@ impl VM {
         named_args: &[(String, Value)],
         module_globals: Option<Rc<HashMap<String, Value>>>,
     ) -> Result<(), VMError> {
-        // ponytail: 1 TLS read/call; gate behind a global AtomicBool if a recursion bench regresses.
+        // One TLS read per call; gate behind an AtomicBool if a recursion bench regresses.
         if crate::concurrent::cancelled() {
             return Err(self.runtime_error("task cancelled"));
         }
         let expected = closure.function.arity as usize;
         let state = closure.jit_state.get();
 
-        // Hot-path: JIT-compiled + exact arity + no named args + no explicit
-        // module globals. Every recursive/hot-loop call hits this, so it must
-        // be lean — we skip the call_count bump (already tiered up), the
-        // named-args block, and the arity-fill loop.
+        // Lean by design: skips the call_count bump, the named-args block and the arity re-check.
         if state == 1 && named_args.is_empty() && arg_count == expected && module_globals.is_none()
             && let Some(result) = self.call_closure_fast_path(&closure) {
                 return result;
             }
 
-        // Slow path: only bump the hot-function counter when we haven't
-        // already tiered up. Once state == 1 the counter is never consulted.
+        // Only bump the counter before tier-up; past state == 1 it is never consulted.
         if state != 1 {
             closure
                 .call_count
@@ -3533,17 +3835,24 @@ impl VM {
                     self.stack[slot_base + idx] = val.clone();
                 }
             }
-        } else if arg_count < expected {
-            // Fill missing args with None (for optional/default params)
+        } else {
+            // Too few args used to be padded with None, surfacing the failure deep inside the callee.
+            let required = closure
+                .function
+                .params
+                .iter()
+                .filter(|p| !p.has_default && !p.optional)
+                .count();
+            if arg_count < required || arg_count > expected {
+                return Err(self.arity_error(&closure.function, arg_count, required, expected));
+            }
+            // Optional/default params are filled in below by the defaults pass.
             for _ in arg_count..expected {
                 self.push(Value::None);
             }
         }
 
-        // Enforce parameter type annotations, matching the tree-walking
-        // evaluator. Default parameters are filled later (by bytecode), so a
-        // `None` in an optional/defaulted slot is skipped here just as the
-        // evaluator skips the check for not-yet-provided optional params.
+        // Defaults are filled later by bytecode, so a None in a defaulted slot is skipped here.
         if expected > 0 && closure.function.params.iter().any(|p| p.type_ann.is_some()) {
             let slot_base = self.stack.len() - expected;
             for (i, param) in closure.function.params.iter().enumerate() {
@@ -3555,8 +3864,7 @@ impl VM {
                     continue;
                 }
                 let actual = val.effective_type_name();
-                // Match the specific type or the generic category (ENUM/STRUCT),
-                // mirroring the evaluator so `<Enum>` accepts any enum value.
+                // Match the specific type or the generic category, so <Enum> accepts any enum value.
                 if !type_matches(expected_ty, &actual)
                     && !type_matches(expected_ty, val.type_name())
                 {
@@ -3578,12 +3886,7 @@ impl VM {
             ));
         }
 
-        // Guard the value stack as well: a recursive frame with many locals can
-        // exhaust the pre-allocated stack (STACK_MAX slots) well before
-        // FRAMES_MAX frames are reached, which would otherwise hit the hard
-        // `push` panic (an abort under panic=abort). Trip the same graceful
-        // "stack overflow" runtime error (rc=1) the tree-walker returns. The
-        // margin reserves room for the next frame's locals + operand temporaries.
+        // A recursive frame with many locals exhausts STACK_MAX before FRAMES_MAX, hitting the push abort.
         const STACK_GUARD_MARGIN: usize = 8192;
         if self.stack.len() >= STACK_MAX - STACK_GUARD_MARGIN {
             return Err(self.runtime_error_hint(
@@ -3594,41 +3897,37 @@ impl VM {
 
         let slot_offset = self.stack.len() - expected - 1; // -1 for the function itself
 
-        // Inherit module globals from the current frame if not explicitly provided,
-        // so nested calls within a module function retain module scope access.
-        let inherited_mg = module_globals.or_else(|| self.active_module_globals_rc());
+        // A function resolves its free names in the module it was DEFINED in, so
+        // fall back to the callee's own module — never the caller's. `module_globals`
+        // is the override struct-method dispatch passes for the defining def.
+        let inherited_mg = module_globals.or_else(|| closure.module_globals.get());
 
-        // Remember the pre-call depth so the JIT helper (if we enter it)
-        // can drive `execute_until` for exactly this one activation.
+        // The JIT helper drives execute_until for exactly this one activation.
         let stop_depth = self.frames.len();
 
-        // Ask the JIT: is this function compiled (or can it be)? If so,
-        // invoke it; it will drive `execute_until(stop_depth)` for this one
-        // frame and leave the return value on the stack. A bailout means
-        // we should just return — the outer `execute_until` will pick up
-        // the pushed frame and dispatch as usual.
+        // A bailout just returns; the outer loop carries on.
         let count = closure.call_count.get();
         let thunk = match closure.jit_state.get() {
             1 => closure.jit_thunk.get(),
             2 => None,
             _ => {
-                // Try loop-entry first; otherwise fall through to the
-                // regular threshold path. maybe_compile_entries_for also
-                // installs the specialized pointer (A2) when eligible.
+                // Loop-entry first; maybe_compile_entries_for also installs the specialized pointer.
                 let loop_thunk = self.jit.maybe_compile_loop_entry_thunk(&closure.function);
                 if let Some(thunk) = loop_thunk {
                     closure.jit_thunk.set(Some(thunk));
                     closure.jit_state.set(1);
                     Some(thunk)
-                } else if let Some((generic, specialized, spec_arity, spec_kind)) =
+                } else if let Some(e) =
                     self.jit.maybe_compile_entries_for(&closure.function, count)
                 {
-                    closure.jit_thunk.set(Some(generic));
-                    closure.specialized_thunk.set(specialized);
-                    closure.specialized_arity.set(spec_arity);
-                    closure.specialized_kind.set(spec_kind);
+                    closure.jit_thunk.set(Some(e.generic));
+                    closure.specialized_thunk.set(e.specialized);
+                    closure.specialized_arity.set(e.specialized_arity);
+                    closure.specialized_kind.set(e.specialized_kind);
+                    closure.lean_thunk.set(e.lean);
+                    closure.lean_arity.set(e.lean_arity);
                     closure.jit_state.set(1);
-                    Some(generic)
+                    Some(e.generic)
                 } else {
                     if count >= self.jit.threshold() {
                         closure.jit_state.set(2);
@@ -3637,6 +3936,53 @@ impl VM {
                 }
             }
         };
+
+        // ── Phase 2.2/2.4: lean integer entry ──
+        //
+        // Taken only when the entry exists AND every argument is actually an
+        // Integer. The lean ABI has no tag guard of its own — that check is the
+        // guard, and it is the caller's job precisely because the entry has no
+        // way to report a violation.
+        //
+        // Nothing is unwound on the cold path: a lean entry never touches
+        // stack_view.len, jit_frame_view.len or any Rc, so the state here is
+        // still exactly what it was before the call. That is the Phase 2.4
+        // reconstruction description for this entry kind.
+        if let Some(lean) = closure.lean_thunk.get() {
+            let arity = closure.lean_arity.get() as usize;
+            let mut args: Vec<i64> = Vec::with_capacity(arity);
+            let base = slot_offset + 1;
+            for i in 0..arity {
+                match self.stack.get(base + i) {
+                    Some(Value::Integer(n)) => args.push(*n),
+                    _ => {
+                        args.clear();
+                        break;
+                    }
+                }
+            }
+            if args.len() == arity && arity > 0 {
+                // Budget mirrors FRAMES_MAX so the depth at which this reports
+                // overflow matches what the interpreter would have done.
+                let budget = (FRAMES_MAX as i64 - self.frames.len() as i64).max(1);
+                match unsafe { crate::jit::runtime::invoke_lean(lean, &args, budget) } {
+                    Ok(v) => {
+                        self.stack_truncate(slot_offset);
+                        self.push(Value::Integer(v));
+                        closure.jit_bailouts.set(0);
+                        return Ok(());
+                    }
+                    Err(crate::jit::runtime::LeanExit::Overflow) => {
+                        return Err(self.runtime_error_hint(
+                            "stack overflow",
+                            "check for infinite recursion or deeply nested calls",
+                        ));
+                    }
+                    // Not an error — just no lean path. Fall through below.
+                    Err(crate::jit::runtime::LeanExit::Unsupported) => {}
+                }
+            }
+        }
 
         if let Some(thunk) = thunk {
             let entry_line = closure.function.chunk.lines.first().copied().unwrap_or(0);
@@ -3676,7 +4022,6 @@ impl VM {
     // ── Upvalue Management ──────────────────────────────────────────────
 
     pub(crate) fn capture_upvalue(&mut self, stack_slot: usize) -> Rc<RefCell<Upvalue>> {
-        // Check if we already have an open upvalue for this slot
         for uv in &self.open_upvalues {
             if let Upvalue::Open(slot) = &*uv.borrow()
                 && *slot == stack_slot {
@@ -3700,18 +4045,7 @@ impl VM {
 
             if should_close {
                 let uv = self.open_upvalues.remove(i);
-                // Snapshot the captured value. An Open upvalue whose slot is
-                // at or beyond the current stack length points at a slot that
-                // has already been relocated/removed (this happens when a
-                // block-local captured inside an `option`/`choose` arm becomes
-                // the arm's result value and the arm's cleanup leaves the
-                // open upvalue dangling — see V6). Reading `self.stack[slot]`
-                // there is an out-of-bounds index that aborts the VM. Close
-                // such a stale upvalue to `None` instead of indexing past the
-                // stack: the only closure that holds it has already finished
-                // executing (it observed the live value before the slot was
-                // removed), so its post-mortem value is unobservable, and the
-                // important invariant is simply not to crash.
+                // An Open upvalue at or beyond the stack length points at a slot already relocated or removed.
                 let value = {
                     let borrow = uv.borrow();
                     if let Upvalue::Open(slot) = &*borrow {
@@ -3759,9 +4093,7 @@ impl VM {
         }
     }
 
-    // ── Iteration (each) ────────────────────────────────────────────────
-    // Shared by the `IterLen`/`IterGet` interpreter arms and the JIT helpers
-    // (`jit_op_iter_len`/`jit_op_iter_get`) so both stay byte-faithful.
+    // Shared by the IterLen/IterGet arms and the JIT helpers so both stay byte-faithful.
 
     /// Length of an iterable for an `each` loop. `[it] -> len`.
     pub(crate) fn iter_len(&self, iterable: &Value) -> Result<i64, VMError> {
@@ -3776,6 +4108,34 @@ impl VM {
                 "each loops work with arrays, tuples, strings, sets, and maps",
             )),
         }
+    }
+
+    /// Both halves of an `each k, v in coll` step. `[it, idx] -> (key, value)`.
+    ///
+    /// A map yields its entry's own key; every other iterable yields the
+    /// ordinal index, so `each i, ch in "hi"` and `each i, x in [..]` number
+    /// their elements. The value half always matches what the one-name form
+    /// would bind, except for maps — there the one-name form binds the whole
+    /// `(k, v)` tuple, and this splits it.
+    pub(crate) fn iter_entry(
+        &self,
+        iterable: &Value,
+        index: &Value,
+    ) -> Result<(Value, Value), VMError> {
+        if let ValueRepr::Map(m) = iterable.repr() {
+            let borrowed = m.borrow();
+            let idx = match index.repr() {
+                ValueRepr::Integer(i) => i as usize,
+                _ => return Err(self.runtime_error("index must be integer")),
+            };
+            return Ok(match borrowed.entries().get(idx) {
+                Some((k, v)) => (k.clone(), v.clone()),
+                None => (Value::None, Value::None),
+            });
+        }
+        // Non-map iterables keep `iter_get`'s element semantics verbatim.
+        let value = self.iter_get(iterable, index)?;
+        Ok((index.clone(), value))
     }
 
     /// Element `iterable[index]` for an `each` loop. `[it, idx] -> elem`.
@@ -3808,36 +4168,61 @@ impl VM {
 
     // ── Index Operations ────────────────────────────────────────────────
 
+    /// Resolves a sequence index against `len`, with negative indices counting
+    /// back from the end, and reports an out-of-range access as an error.
+    ///
+    /// Reading past the end used to yield `None`, which silently turned a
+    /// bad index into a value that failed somewhere else entirely (or, worse,
+    /// looked like a legitimately absent map entry). Maps keep `None` for a
+    /// missing key — that is a lookup, not an out-of-range access.
+    pub(crate) fn sequence_index(
+        &self,
+        index: i64,
+        len: usize,
+        type_name: &str,
+    ) -> Result<usize, VMError> {
+        let len_i64 = len as i64;
+        let resolved = if index < 0 {
+            // `checked_add` because a hostile index (i64::MIN) would wrap.
+            len_i64.checked_add(index)
+        } else {
+            Some(index)
+        };
+        match resolved {
+            Some(i) if i >= 0 && i < len_i64 => Ok(i as usize),
+            _ if len == 0 => Err(self.runtime_error_hint(
+                &format!("index {index} out of range: {type_name} is empty"),
+                "check the length before indexing",
+            )),
+            _ => Err(self.runtime_error_hint(
+                &format!(
+                    "index {index} out of range for {type_name} of length {len}",
+                    ),
+                &format!(
+                    "valid indices are 0 to {} (or -1 to -{len} counting from the end)",
+                    len - 1
+                ),
+            )),
+        }
+    }
+
     pub(crate) fn eval_index(&self, collection: Value, index: Value) -> Result<Value, VMError> {
         let (collection, index) = (self.force(collection), self.force(index));
         match (&collection, &index) {
             (Value::Array(arr), Value::Integer(i)) => {
                 let borrowed = arr.borrow();
-                let idx = if *i < 0 {
-                    (borrowed.len() as i64 + i) as usize
-                } else {
-                    *i as usize
-                };
-                Ok(borrowed.get(idx).cloned().unwrap_or(Value::None))
+                let idx = self.sequence_index(*i, borrowed.len(), "ARRAY")?;
+                Ok(borrowed[idx].clone())
             }
             (Value::String(s), Value::Integer(i)) => {
-                let idx = if *i < 0 {
-                    (s.len() as i64 + i) as usize
-                } else {
-                    *i as usize
-                };
-                Ok(s.chars()
-                    .nth(idx)
-                    .map(|c| Value::String(rc_str(c.to_string())))
-                    .unwrap_or(Value::None))
+                // Indices are characters, so the bound is the character count; len() is bytes and disagrees on non-ASCII.
+                let chars: Vec<char> = s.chars().collect();
+                let idx = self.sequence_index(*i, chars.len(), "STRING")?;
+                Ok(Value::String(rc_str(chars[idx].to_string())))
             }
             (Value::Tuple(t), Value::Integer(i)) => {
-                let idx = if *i < 0 {
-                    (t.len() as i64 + i) as usize
-                } else {
-                    *i as usize
-                };
-                Ok(t.get(idx).cloned().unwrap_or(Value::None))
+                let idx = self.sequence_index(*i, t.len(), "TUPLE")?;
+                Ok(t[idx].clone())
             }
             (Value::Map(m), _) => Ok(m.borrow().get(&index).cloned().unwrap_or(Value::None)),
             _ => Err(self.runtime_error_hint(
@@ -3856,17 +4241,13 @@ impl VM {
         match (&collection, &index) {
             (Value::Array(arr), Value::Integer(i)) => {
                 let mut borrowed = arr.borrow_mut();
-                let idx = if *i < 0 {
-                    (borrowed.len() as i64 + i) as usize
-                } else {
-                    *i as usize
-                };
-                if idx < borrowed.len() {
-                    borrowed[idx] = value;
-                }
+                // An out-of-range write used to be dropped: no error, no growth, stale value on the next read.
+                let idx = self.sequence_index(*i, borrowed.len(), "ARRAY")?;
+                borrowed[idx] = value;
                 Ok(())
             }
             (Value::Map(m), _) => {
+                self.require_hashable_key(&index, "map key")?;
                 m.borrow_mut().insert(index, value);
                 Ok(())
             }
@@ -3951,14 +4332,7 @@ impl VM {
                 }
             }
             ValueRepr::Tuple(t) => {
-                // Match the tree-walker oracle's Tuple slice semantics exactly.
-                // The tree-walker converts the slice bounds with `n as usize`
-                // BEFORE clamping (evaluator `Expression::Slice` -> `eval_slice`),
-                // so a negative index wraps to a huge `usize` and then trips the
-                // `s > len` / `s > e` guards, yielding an empty tuple — it does
-                // NOT count from the end. (The VM's Array arm, by contrast, maps
-                // negatives via `len + i`; the two backends already differ there,
-                // and the oracle is the tree-walker, so tuples follow it.)
+                // The tree-walker converts bounds with `as usize` before clamping, so a negative index wraps huge.
                 let len = t.len();
                 let s = match start {
                     Some(Value::Integer(i)) => i as usize,
@@ -3987,15 +4361,12 @@ impl VM {
     // ── Module System ───────────────────────────────────────────────────
 
     fn import_module(&mut self, path_str: &str, selective_names: &[String]) -> Result<(), VMError> {
-        // Resolve the module path
         let module_path = self.resolve_module_path(path_str)?;
 
-        // Check cache
         if let Some(cached) = self.module_cache.get(&module_path).cloned() {
             return self.bind_module(&cached, path_str, selective_names);
         }
 
-        // Check circular imports
         if self.import_stack.contains(&module_path) {
             return Err(self.runtime_error_hint(
                 &format!("circular import: {}", module_path.display()),
@@ -4030,12 +4401,22 @@ impl VM {
             ))
         })?;
 
-        // Execute in a sub-VM
+        // Tag each function with its own file so a failure renders against that source.
+        let origin = Rc::new(crate::vm::value::ModuleOrigin {
+            file: display_path_cwd(&module_path),
+            source: source.clone(),
+        });
+        crate::vm::value::set_module_origin(&function, &origin);
+
         let mut sub_vm = VM::new();
         sub_vm.set_source(&source);
         sub_vm.set_file(module_path.clone());
         sub_vm.is_main_context = false;
         self.import_stack.push(module_path.clone());
+
+        // Read before `run` consumes the function.
+        let module_hidden: std::collections::HashSet<String> =
+            function.hidden_globals.iter().cloned().collect();
 
         let _result = sub_vm.run(function).map_err(|e| {
             self.runtime_error(&format!("error in module '{}': {}", path_str, e.message))
@@ -4043,20 +4424,15 @@ impl VM {
 
         self.import_stack.pop();
 
-        // Create module from sub-VM globals (excluding builtins). Wire
-        // module-owned definitions back to this module's globals so
-        // imported functions and methods can reach their file-local
-        // helpers and enum definitions.
-        // Done before wrapping in `ObjModule` so the Rc gets shared,
-        // not cloned per-struct.
+        // Wire module-owned definitions back so imported functions reach their file-local helpers.
         let globals_rc = Rc::new(sub_vm.globals);
         for value in globals_rc.values() {
             match value.repr() {
                 ValueRepr::Closure(closure) => {
-                    *closure.module_globals.borrow_mut() = Some(Rc::clone(&globals_rc));
+                    closure.module_globals.set(Some(Rc::clone(&globals_rc)));
                 }
                 ValueRepr::StructDef(def) => {
-                    *def.module_globals.borrow_mut() = Some(Rc::clone(&globals_rc));
+                    def.module_globals.set(Some(Rc::clone(&globals_rc)));
                 }
                 _ => {}
             }
@@ -4064,6 +4440,7 @@ impl VM {
         let module = Rc::new(ObjModule {
             name: path_str.to_string(),
             globals: globals_rc,
+            hidden: module_hidden,
         });
 
         self.module_cache.insert(module_path, Rc::clone(&module));
@@ -4085,6 +4462,12 @@ impl VM {
         } else {
             // Selective import
             for name in selective_names {
+                if module.hidden.contains(name) {
+                    return Err(self.runtime_error_hint(
+                        &format!("'{}' is hidden inside module '{}'", name, path_str),
+                        "it is declared `hide fun` and cannot be imported",
+                    ));
+                }
                 if let Some(val) = module.globals.get(name) {
                     self.globals.insert(name.clone(), val.clone());
                     self.jit.bump_global_version(name);
@@ -4163,16 +4546,7 @@ impl VM {
             let has_value = parts.contains(&"VALUE");
             let has_error = parts.iter().any(|p| p.starts_with("ERROR"));
             if has_value && has_error {
-                // Idempotency (V4): a value already normalized to the SUCCESS
-                // side of the union must not be wrapped again. The canonical
-                // idiom `res <Error || Value> := <Value>("hi")` feeds an
-                // already-`Wrapped` value into this declaration-position
-                // TypeWrap; re-wrapping produced `Value(Value(hi))` so that
-                // `res.value` returned `Value(hi)` instead of `hi`. Return it
-                // untouched. (An incoming `ErrorValue`/`Error` still flows
-                // through `error_info_from_value` below so the union's default
-                // tag, per B16, is applied — that path is already content-
-                // idempotent.)
+                // A value already on the success side must not be wrapped again.
                 if let Value::Wrapped(_) = value {
                     return Ok(value);
                 }
@@ -4302,11 +4676,7 @@ impl VM {
                         .runtime_error(&format!("cannot convert {} to FLOAT", value.type_name()))),
                 }
             }
-            // None is NOT stringifiable: `t <str> := os.env_get("X")` on an
-            // unset var used to bind the 4-char string "None", which is
-            // truthy and never `== None`, so every absence check silently
-            // failed. Every other target already rejects None; STRING was the
-            // outlier. Use `str(x)` for an explicit "None" rendering.
+            // None is not stringifiable: binding the 4-char string "None" made every absence check silently fail.
             "STRING" => match value.repr() {
                 ValueRepr::None => Err(self.runtime_error("cannot convert NONE to STRING")),
                 _ => Ok(Value::String(rc_str(format!("{}", value)))),
@@ -4434,6 +4804,32 @@ mod tests {
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use std::path::PathBuf;
+
+    #[test]
+    fn diagnostic_paths_are_relative_only_inside_the_working_directory() {
+        let cwd = PathBuf::from("/home/u/proj");
+
+        // Under cwd: shortened, so a trace reads `src/app.oxi:8`.
+        assert_eq!(
+            display_path(Path::new("/home/u/proj/src/app.oxi"), Some(&cwd)),
+            "src/app.oxi"
+        );
+        // Outside cwd: left absolute rather than turned into `../../..`.
+        assert_eq!(
+            display_path(Path::new("/usr/local/lib/oxigen/stdlib/os.oxi"), Some(&cwd)),
+            "/usr/local/lib/oxigen/stdlib/os.oxi"
+        );
+        // A sibling directory sharing a name prefix must not be mistaken for a child.
+        assert_eq!(
+            display_path(Path::new("/home/u/proj-other/a.oxi"), Some(&cwd)),
+            "/home/u/proj-other/a.oxi"
+        );
+        // No cwd available: fall back to whatever we were given.
+        assert_eq!(
+            display_path(Path::new("/home/u/proj/src/app.oxi"), None),
+            "/home/u/proj/src/app.oxi"
+        );
+    }
 
     #[test]
     fn execution_mode_constructors_are_explicit() {

@@ -19,7 +19,6 @@ fn test_brace_mode_unchanged() {
     let input = "x := 5\nif y {\n  print(x)\n}";
     let tokens = collect_tokens(input);
 
-    // Should have LBrace and RBrace as literals
     let has_lbrace = tokens
         .iter()
         .any(|t| t.token_type == TokenType::LBrace && t.literal == "{");
@@ -35,7 +34,6 @@ fn test_indent_mode_colon_becomes_lbrace() {
     let input = "#[indent]\neach num in x:\n  print(num)\n";
     let tokens = collect_tokens(input);
 
-    // Colon at EOL should become LBrace
     let has_lbrace = tokens.iter().any(|t| t.token_type == TokenType::LBrace);
     assert!(
         has_lbrace,
@@ -48,7 +46,6 @@ fn test_indent_mode_dedent_becomes_rbrace() {
     let input = "#[indent]\neach num in x:\n  print(num)\ny := 5\n";
     let tokens = collect_tokens(input);
 
-    // Dedent should produce RBrace
     let has_rbrace = tokens.iter().any(|t| t.token_type == TokenType::RBrace);
     assert!(has_rbrace, "Dedent should produce RBrace in indent mode");
 }
@@ -82,7 +79,6 @@ fn test_indent_directive_stripped() {
     let input = "#[indent]\nx := 5";
     let tokens = collect_tokens(input);
 
-    // Should not have Hash or the indent directive tokens
     let has_hash_indent = tokens
         .iter()
         .any(|t| t.literal == "#" || t.literal == "indent");
@@ -95,7 +91,7 @@ fn test_location_directive_is_stripped() {
     let tokens = collect_tokens(input);
 
     let x_tok = tokens.iter().find(|t| t.literal == "x").unwrap();
-    assert_eq!(x_tok.span.line, 2);
+    assert_eq!(x_tok.span.line(), 2);
 
     let has_location_tokens = tokens
         .iter()
@@ -108,7 +104,6 @@ fn test_location_directive_is_stripped() {
 
 #[test]
 fn test_indent_and_brace_produce_same_structure() {
-    // Simple equivalent programs
     let indent_input = "#[indent]\neach x:\n  print(x)\n";
     let brace_input = "each x {\n  print(x)\n}";
 
@@ -140,7 +135,7 @@ fn test_shebang_line_is_stripped() {
     let tokens = collect_tokens(input);
 
     assert_eq!(tokens[0].literal, "x");
-    assert_eq!(tokens[0].span.line, 2);
+    assert_eq!(tokens[0].span.line(), 2);
     assert!(
         tokens
             .iter()
@@ -189,14 +184,12 @@ fn test_span_tracking() {
     let input = "x := 5\ny := 10";
     let tokens = collect_tokens(input);
 
-    // 'x' should be at line 1, col 1
-    assert_eq!(tokens[0].span.line, 1);
-    assert_eq!(tokens[0].span.column, 1);
+    assert_eq!(tokens[0].span.line(), 1);
+    assert_eq!(tokens[0].span.column(), 1);
 
-    // 'y' should be at line 2, col 1
     let y_tok = tokens.iter().find(|t| t.literal == "y").unwrap();
-    assert_eq!(y_tok.span.line, 2);
-    assert_eq!(y_tok.span.column, 1);
+    assert_eq!(y_tok.span.line(), 2);
+    assert_eq!(y_tok.span.column(), 1);
 }
 
 #[test]
@@ -204,17 +197,14 @@ fn test_span_column_tracking() {
     let input = "abc := 42";
     let tokens = collect_tokens(input);
 
-    // 'abc' at col 1
     assert_eq!(tokens[0].literal, "abc");
-    assert_eq!(tokens[0].span.column, 1);
+    assert_eq!(tokens[0].span.column(), 1);
 
-    // ':=' at col 5
     assert_eq!(tokens[1].literal, ":=");
-    assert_eq!(tokens[1].span.column, 5);
+    assert_eq!(tokens[1].span.column(), 5);
 
-    // '42' at col 8
     assert_eq!(tokens[2].literal, "42");
-    assert_eq!(tokens[2].span.column, 8);
+    assert_eq!(tokens[2].span.column(), 8);
 }
 
 #[test]
@@ -240,8 +230,7 @@ fn test_interpolated_string_escape_sequences_include_ansi_escape() {
 
 #[test]
 fn test_unterminated_string_at_eof_is_illegal() {
-    // No closing quote, end of input: must report an unterminated string,
-    // not silently produce a String token.
+    // Must report unterminated, not silently produce a String token.
     let tokens = collect_tokens(r#"x := "hello"#);
 
     let illegal = tokens
@@ -262,8 +251,7 @@ fn test_unterminated_string_at_eof_is_illegal() {
 
 #[test]
 fn test_unterminated_string_anchored_at_opening_quote() {
-    // The opening quote is on line 1 at column 6 (1-based). The Illegal token
-    // must point THERE, not at the next line where lexing recovers.
+    // The Illegal token must point at the opening quote, not where lexing recovers.
     let src = "x := \"hello\ny := 5\n";
     let tokens = collect_tokens(src);
 
@@ -272,19 +260,18 @@ fn test_unterminated_string_anchored_at_opening_quote() {
         .find(|t| t.token_type == TokenType::Illegal)
         .expect("unterminated string should emit an Illegal token");
     assert_eq!(
-        illegal.span.line, 1,
+        illegal.span.line(), 1,
         "error should be anchored at the opening quote's line"
     );
     assert_eq!(
-        illegal.span.column, 6,
+        illegal.span.column(), 6,
         "error should be anchored at the opening quote's column"
     );
 }
 
 #[test]
 fn test_unterminated_string_does_not_swallow_following_line() {
-    // After the unterminated string the lexer must keep making progress and
-    // still tokenize the next line, so we should see a Newline then `y`.
+    // The lexer must keep progressing and still tokenize the next line.
     let src = "x := \"hello\ny := 5\n";
     let tokens = collect_tokens(src);
 
@@ -310,9 +297,7 @@ fn test_unterminated_single_quote_string_is_illegal() {
 
 #[test]
 fn test_unterminated_interpolated_string_is_illegal() {
-    // Interpolation that never closes its outer quote (raw newline before the
-    // closing delimiter). Should be one clean unterminated error anchored at
-    // the opening quote, not a cascade of interpolation part tokens.
+    // One clean error at the opening quote, not a cascade of interpolation errors.
     let src = "msg := \"hi {name}\nx := 1\n";
     let tokens = collect_tokens(src);
 
@@ -321,7 +306,7 @@ fn test_unterminated_interpolated_string_is_illegal() {
         .find(|t| t.token_type == TokenType::Illegal)
         .expect("unterminated interpolated string should emit an Illegal token");
     assert!(illegal.literal.contains("unterminated"));
-    assert_eq!(illegal.span.line, 1);
+    assert_eq!(illegal.span.line(), 1);
     // No interpolation part tokens should leak out for the broken string.
     assert!(
         !tokens
@@ -339,8 +324,7 @@ fn test_unterminated_interpolated_string_is_illegal() {
 
 #[test]
 fn test_triple_quoted_string_spans_lines() {
-    // A `"""` string spans raw newlines and produces a single MultilineString
-    // token whose literal contains the embedded newlines verbatim.
+    // A `"""` string spans raw newlines as one MultilineString with newlines verbatim.
     let tokens = collect_tokens("\"\"\"line1\nline2\nline3\"\"\"");
 
     assert_eq!(tokens[0].token_type, TokenType::MultilineString);
@@ -359,8 +343,7 @@ fn test_triple_single_quoted_string_spans_lines() {
 
 #[test]
 fn test_triple_quoted_string_interpolation() {
-    // Interpolation works inside a multi-line string exactly as in a
-    // single-line one; literal parts keep their embedded newlines.
+    // Interpolation works the same inside a multi-line string.
     let tokens = collect_tokens("\"\"\"\nHello {name}\n\"\"\"");
 
     assert_eq!(tokens[0].token_type, TokenType::MultilineInterpStart);
@@ -378,8 +361,7 @@ fn test_triple_quoted_string_interpolation() {
 
 #[test]
 fn test_triple_quoted_interpolation_expression_spans_lines() {
-    // An interpolation expression inside a `"""` string may itself span
-    // multiple physical lines; the inner tokens are lexed normally.
+    // An interpolation expression may span physical lines; inner tokens lex normally.
     let tokens = collect_tokens("\"\"\"sum {\n  x +\n  y\n}\"\"\"");
 
     assert_eq!(tokens[0].token_type, TokenType::MultilineInterpStart);
@@ -397,8 +379,7 @@ fn test_triple_quoted_interpolation_expression_spans_lines() {
         "y should be lexed inside the multi-line interpolation"
     );
     assert!(tokens.iter().any(|t| t.token_type == TokenType::InterpEnd));
-    // No Illegal tokens: the newlines inside `{ }` must be skipped, not
-    // tokenized as stray characters.
+    // Newlines inside `{ }` must be skipped, not tokenized as stray characters.
     assert!(
         !tokens.iter().any(|t| t.token_type == TokenType::Illegal),
         "newlines inside a multi-line interpolation must not become Illegal tokens"
@@ -417,8 +398,7 @@ fn test_empty_triple_quoted_string() {
 
 #[test]
 fn test_empty_single_line_string_is_not_triple() {
-    // `""` is an empty single-line string and must NOT be mistaken for the
-    // start of a triple-quoted string.
+    // `""` is an empty string, not the start of a triple-quoted one.
     let tokens = collect_tokens("\"\" \"after\"");
 
     assert_eq!(tokens[0].token_type, TokenType::String);
@@ -429,8 +409,7 @@ fn test_empty_single_line_string_is_not_triple() {
 
 #[test]
 fn test_escape_sequences_work_in_triple_quoted_string() {
-    // Escapes are still processed inside a multi-line string, including an
-    // escaped quote that does not close the fence.
+    // Escapes still process inside a multi-line string, including an escaped quote.
     let tokens = collect_tokens("\"\"\"tab\\tnext\nquote \\\" done\"\"\"");
 
     assert_eq!(tokens[0].token_type, TokenType::MultilineString);
@@ -439,8 +418,7 @@ fn test_escape_sequences_work_in_triple_quoted_string() {
 
 #[test]
 fn test_unterminated_triple_quoted_string_is_illegal() {
-    // A `"""` opened but never closed before EOF is unterminated and reported
-    // as an Illegal token anchored at the opening fence — no String token.
+    // Unterminated at EOF is an Illegal token at the opening fence, with no String token.
     let tokens = collect_tokens("x := \"\"\"hello\nworld\n");
 
     let illegal = tokens
@@ -449,11 +427,11 @@ fn test_unterminated_triple_quoted_string_is_illegal() {
         .expect("unterminated triple-quoted string should emit an Illegal token");
     assert!(illegal.literal.contains("unterminated"));
     assert_eq!(
-        illegal.span.line, 1,
+        illegal.span.line(), 1,
         "error should be anchored at the opening fence's line"
     );
     assert_eq!(
-        illegal.span.column, 6,
+        illegal.span.column(), 6,
         "error should be anchored at the opening fence's column"
     );
     assert!(
@@ -466,8 +444,7 @@ fn test_unterminated_triple_quoted_string_is_illegal() {
 
 #[test]
 fn test_well_terminated_strings_still_lex() {
-    // Regression guard: normal strings, escaped quotes, escaped newlines, and
-    // interpolation must all keep working unchanged.
+    // Regression guard for normal strings, escapes and interpolation.
     let tokens = collect_tokens(r#""hello world""#);
     assert_eq!(tokens[0].token_type, TokenType::String);
     assert_eq!(tokens[0].literal, "hello world");

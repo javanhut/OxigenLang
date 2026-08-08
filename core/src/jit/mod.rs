@@ -56,6 +56,23 @@ pub(crate) struct CompiledEntries {
     pub specialized: Option<SpecializedThunkRaw>,
     pub specialized_arity: u8,
     pub specialized_kind: Option<engine::SpecializedEntryKind>,
+    /// Phase 2.2 lean integer entry, when the function qualified.
+    pub lean: Option<*const ()>,
+    pub lean_arity: u8,
+}
+
+/// What `maybe_compile_entries_for` hands back for installation on a closure.
+///
+/// A named struct rather than a tuple: it grew to six positional fields as the
+/// specialized and lean entries landed, at which point the call site could no
+/// longer be read without counting commas.
+pub(crate) struct InstalledEntries {
+    pub generic: CompiledThunk,
+    pub specialized: Option<SpecializedThunkRaw>,
+    pub specialized_arity: u8,
+    pub specialized_kind: u8,
+    pub lean: Option<*const ()>,
+    pub lean_arity: u8,
 }
 
 /// Outcome of invoking a JIT-compiled function.
@@ -191,7 +208,6 @@ impl JitEngine {
 
         #[cfg(feature = "jit")]
         {
-            // Lazy-init the Cranelift module on first hot function.
             let inner = self.inner.get_or_insert_with(engine::JitInner::new);
             inner.maybe_compile(func)
         }
@@ -210,7 +226,7 @@ impl JitEngine {
         &mut self,
         func: &Rc<Function>,
         call_count: u32,
-    ) -> Option<(CompiledThunk, Option<SpecializedThunkRaw>, u8, u8)> {
+    ) -> Option<InstalledEntries> {
         if call_count < self.threshold {
             return None;
         }
@@ -225,7 +241,14 @@ impl JitEngine {
                 crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE
             }
         };
-        Some((e.generic, e.specialized, e.specialized_arity, kind_u8))
+        Some(InstalledEntries {
+            generic: e.generic,
+            specialized: e.specialized,
+            specialized_arity: e.specialized_arity,
+            specialized_kind: kind_u8,
+            lean: e.lean,
+            lean_arity: e.lean_arity,
+        })
     }
 
     #[cfg(not(feature = "jit"))]
@@ -233,7 +256,7 @@ impl JitEngine {
         &mut self,
         func: &Rc<Function>,
         call_count: u32,
-    ) -> Option<(CompiledThunk, Option<SpecializedThunkRaw>, u8, u8)> {
+    ) -> Option<InstalledEntries> {
         let _ = (func, call_count);
         None
     }

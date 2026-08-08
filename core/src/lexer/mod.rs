@@ -1,6 +1,26 @@
-use crate::token::{Span, Token, TokenType, token_map};
+use crate::diagnostics::registry as codes;
+use crate::diagnostics::Diagnostic;
+use crate::token::{Pos, Span, Token, TokenType, token_map};
 use std::collections::HashMap;
 use std::collections::VecDeque;
+
+/// A comment seen while lexing.
+///
+/// Comments carry no semantics, so they never become tokens and never reach the
+/// AST — but `fmt` reprints from the AST, so without this record it would drop
+/// every comment in the file. `line`/`column` are where the comment started and
+/// `own_line` distinguishes a comment sitting alone on its line from one
+/// trailing code, which is all the formatter needs to put it back where the
+/// author wrote it. `column` is what separates a comment indented inside a
+/// block from one written past the block's closing delimiter — a distinction
+/// the AST cannot make, since it stores no span for a `}`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Comment {
+    pub line: usize,
+    pub column: usize,
+    pub text: String,
+    pub own_line: bool,
+}
 
 pub struct Lexer {
     input: Vec<char>,
@@ -16,11 +36,38 @@ pub struct Lexer {
     // Source location tracking
     line: usize,
     column: usize,
+    /// Byte offset of each char in `input`, plus a final entry for EOF, so a
+    /// position can be reported as a byte index without rescanning. `input` is
+    /// `Vec<char>`, and diagnostics/edits need byte offsets into the original
+    /// source text.
+    char_byte_offsets: Vec<usize>,
+    /// Bytes `preprocess_input` stripped (shebang, `#[...]` directives). Added
+    /// to every offset so they index the ORIGINAL source, matching the
+    /// line numbers, which are already original-relative via `start_line`.
+    base_offset: usize,
+    comments: Vec<Comment>,
+    /// Real diagnostics for lexical problems.
+    ///
+    /// These used to be smuggled through `TokenType::Illegal`'s `literal`
+    /// field — the error text stored where a token's *text* belongs — leaving
+    /// the parser to guess whether a literal was a message or a stray
+    /// character. `Illegal` is now only a recovery placeholder.
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl Lexer {
     pub fn new(input: &str) -> Self {
         let (effective_input, start_line, indent_mode) = Self::preprocess_input(input);
+
+        // preprocess_input returns a suffix, so the byte-length delta is exactly what it stripped.
+        let base_offset = input.len() - effective_input.len();
+        let mut char_byte_offsets = Vec::with_capacity(effective_input.len() + 1);
+        let mut running = 0usize;
+        for c in effective_input.chars() {
+            char_byte_offsets.push(running);
+            running += c.len_utf8();
+        }
+        char_byte_offsets.push(running); // EOF
 
         let mut l = Self {
             input: effective_input.chars().collect(),
@@ -34,9 +81,24 @@ impl Lexer {
             at_line_start: true, // We start at the beginning of input
             line: start_line,
             column: 0,
+            char_byte_offsets,
+            base_offset,
+            comments: Vec::new(),
+            diagnostics: Vec::new(),
         };
         l.read_char();
         l
+    }
+
+    /// Lexical diagnostics collected so far. Complete once driven to EOF.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    /// Comments collected so far, in source order. Only complete once the lexer
+    /// has been driven to EOF (which `Parser::parse_program` does).
+    pub fn comments(&self) -> &[Comment] {
+        &self.comments
     }
 
     fn preprocess_input(input: &str) -> (&str, usize, bool) {
@@ -90,9 +152,21 @@ impl Lexer {
         Some((&input[start..], newlines, enables_indent))
     }
 
-    /// Returns the current span (line, column) for the character being processed.
+    /// Current source position, including the byte offset into the original
+    /// source.
+    fn pos(&self) -> Pos {
+        let offset = self
+            .char_byte_offsets
+            .get(self.position)
+            .copied()
+            .unwrap_or_else(|| self.char_byte_offsets.last().copied().unwrap_or(0));
+        Pos::new(self.line, self.column, self.base_offset + offset)
+    }
+
+    /// Zero-width span at the character being processed. `next_token` widens
+    /// the returned token's span to the text it actually consumed.
     fn span(&self) -> Span {
-        Span::new(self.line, self.column)
+        Span::point(self.pos())
     }
 
     pub fn next_token(&mut self) -> Token {
@@ -101,13 +175,11 @@ impl Lexer {
             return tok;
         }
 
-        // Handle indentation at line start (indent mode only)
         if self.indent_mode && self.at_line_start {
             self.at_line_start = false;
             let indent_level = self.measure_indentation();
             self.handle_indentation(indent_level);
 
-            // Check if we queued any dedent tokens
             if let Some(tok) = self.pending_tokens.pop_front() {
                 return tok;
             }
@@ -127,14 +199,30 @@ impl Lexer {
         }
 
         let span = self.span();
+        let mut token = self.lex_token_at(span);
+        // read_string anchors an unterminated string at its opening quote, so only the end moves.
+        token.span.end = self.pos();
+        token
+    }
 
-        
+    /// Lexes exactly one token starting at the current character.
+    ///
+    /// Split out of `next_token` so string interpolation can reuse the real
+    /// lexer for the expression inside `{ ... }`. That used to be a separate
+    /// hand-written scanner accepting only a whitelist of characters
+    /// (identifiers, numbers, strings, and `( ) , + - * / . [ ]`), which made
+    /// `"{a == b}"`, `"{x % 2}"` and every other operator a syntax error while
+    /// the parser behind it was perfectly capable of handling them.
+    ///
+    /// Callers are responsible for the parts of `next_token` NOT included here:
+    /// the pending-token queue, indent-mode bookkeeping, leading whitespace and
+    /// the newline token.
+    fn lex_token_at(&mut self, span: Span) -> Token {
         match self.ch {
             '\0' => {
                 // At EOF in indent mode, emit RBrace for any remaining open blocks
                 if self.indent_mode && self.indent_stack.len() > 1 {
                     self.indent_stack.pop();
-                    // Queue remaining closes
                     while self.indent_stack.len() > 1 {
                         self.indent_stack.pop();
                         self.pending_tokens.push_back(Token {
@@ -143,7 +231,6 @@ impl Lexer {
                             span,
                         });
                     }
-                    // Queue the final EOF
                     self.pending_tokens.push_back(Token {
                         token_type: TokenType::Eof,
                         literal: "".into(),
@@ -248,7 +335,7 @@ impl Lexer {
             ':' => {
                 // In indent mode, colon at end of line becomes LBrace
                 if self.indent_mode && self.is_colon_at_eol() {
-                    self.read_char(); // consume ':'
+                    self.read_char();
                     Token {
                         token_type: TokenType::LBrace,
                         literal: "{".into(),
@@ -301,9 +388,23 @@ impl Lexer {
                 }
                 _ => self.single_with_span(TokenType::Pipe, span),
             },
+            // Oxigen has no statement terminator; Illegal carries its own message so the parser reports the fix.
+            ';' => {
+                self.read_char();
+                let span = Span::range(span.start, self.pos());
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        codes::ILLEGAL_TOKEN,
+                        span,
+                        "`;` is not an Oxigen statement terminator",
+                    )
+                    .label("remove this")
+                    .note("Oxigen ends a statement at the newline"),
+                );
+                self.illegal(";", span)
+            }
             '^' => self.single_with_span(TokenType::Caret, span),
             '~' => self.single_with_span(TokenType::Tilde, span),
-            ';' => self.single_with_span(TokenType::Semicolon, span),
             '[' => self.single_with_span(TokenType::LBracket, span),
             ']' => self.single_with_span(TokenType::RBracket, span),
             '{' => self.single_with_span(TokenType::LBrace, span),
@@ -337,11 +438,16 @@ impl Lexer {
             _ => {
                 let lit = self.ch.to_string();
                 self.read_char();
-                Token {
-                    token_type: TokenType::Illegal,
-                    literal: lit,
-                    span,
+                let span = Span::range(span.start, self.pos());
+                // `?` marks optional parameters and is consumed by the parser, so it is not an error.
+                if lit != "?" {
+                    self.diagnostics.push(Diagnostic::error(
+                        codes::ILLEGAL_TOKEN,
+                        span,
+                        format!("unexpected character {lit:?}"),
+                    ));
                 }
+                self.illegal(&lit, span)
             }
         }
     }
@@ -388,28 +494,75 @@ impl Lexer {
     }
 
     fn skip_line_comment(&mut self) {
-        self.read_char(); // skip first '/'
-        self.read_char(); // skip second '/'
+        let (span, own_line, start) = self.comment_start();
+        self.read_char();
+        self.read_char();
         while self.ch != '\n' && self.ch != '\0' {
             self.read_char();
         }
+        self.record_comment(span, own_line, start);
         // Leave self.ch at '\n' or '\0' so next_token handles it
     }
 
     fn skip_block_comment(&mut self) {
-        self.read_char(); // skip '/'
-        self.read_char(); // skip '*'
+        let (span, own_line, start) = self.comment_start();
+        self.read_char();
+        self.read_char();
+        let mut closed = false;
         loop {
             if self.ch == '\0' {
                 break;
             }
             if self.ch == '*' && self.peek_char() == '/' {
-                self.read_char(); // skip '*'
-                self.read_char(); // skip '/'
+                self.read_char();
+                self.read_char();
+                closed = true;
                 break;
             }
             self.read_char();
         }
+        if !closed {
+            // Running to EOF used to be silent: everything after `/*` was swallowed and the file exited 0.
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::UNTERMINATED_BLOCK_COMMENT,
+                    span,
+                    "unterminated block comment",
+                )
+                .label("this comment is never closed")
+                .note("everything after this point was treated as a comment")
+                .help("close it with `*/`"),
+            );
+        }
+        self.record_comment(span, own_line, start);
+    }
+
+    /// Snapshot taken before a comment is consumed: its span, whether anything
+    /// but whitespace precedes it on that line, and where its text begins.
+    fn comment_start(&self) -> (Span, bool, usize) {
+        let mut i = self.position;
+        let own_line = loop {
+            if i == 0 {
+                break true;
+            }
+            i -= 1;
+            match self.input[i] {
+                '\n' => break true,
+                c if c.is_whitespace() => {}
+                _ => break false,
+            }
+        };
+        (self.span(), own_line, self.position)
+    }
+
+    fn record_comment(&mut self, span: Span, own_line: bool, start: usize) {
+        let text: String = self.input[start..self.position].iter().collect();
+        self.comments.push(Comment {
+            line: span.line(),
+            column: span.column(),
+            text: text.trim_end().to_string(),
+            own_line,
+        });
     }
 
     fn read_ident(&mut self, span: Span) -> Token {
@@ -438,13 +591,31 @@ impl Lexer {
             self.read_char();
         }
 
-        // Check for decimal point followed by digits
         if self.ch == '.' && self.peek_char().is_ascii_digit() {
             is_float = true;
-            self.read_char(); // consume '.'
+            self.read_char();
             while self.ch.is_ascii_digit() {
                 self.read_char();
             }
+        }
+
+        // `1.2.3` used to lex as `1.2` then `.3`, surfacing as a field access on FLOAT.
+        if is_float && self.ch == '.' && self.peek_char().is_ascii_digit() {
+            while self.ch == '.' || self.ch.is_ascii_digit() {
+                self.read_char();
+            }
+            let literal: String = self.input[start..self.position].iter().collect();
+            let span = Span::range(span.start, self.pos());
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::MALFORMED_NUMBER,
+                    span,
+                    format!("malformed number literal `{literal}`"),
+                )
+                .label("more than one decimal point")
+                .help("a number may contain at most one `.`"),
+            );
+            return self.illegal(&literal, span);
         }
 
         let literal: String = self.input[start..self.position].iter().collect();
@@ -501,16 +672,10 @@ impl Lexer {
     fn read_string(&mut self, delimiter: char, triple: bool, span: Span) -> Token {
         self.consume_quote_fence(triple); // opening quote(s)
 
-        // Check if this string contains interpolation
         let has_interp = self.string_has_interpolation(delimiter, triple);
 
         if !has_interp {
-            // Simple string, no interpolation — process escape sequences.
-            // A single-line string stops at the closing delimiter, EOF, or a
-            // raw newline (newlines are written with the `\n` escape, so a raw
-            // newline before the closing quote means the string is
-            // unterminated). A triple-quoted string spans raw newlines and
-            // only ends at its closing fence or EOF.
+            // A single-line string stops at the delimiter, EOF, or a raw newline.
             let mut literal = std::string::String::new();
             while !self.at_string_body_end(delimiter, triple) {
                 if self.ch == '\\' {
@@ -521,9 +686,7 @@ impl Lexer {
                 }
             }
             if !self.at_closing_delimiter(delimiter, triple) {
-                // Unterminated: do NOT consume the newline/EOF sentinel so the
-                // lexer keeps making forward progress and the rest of the line
-                // is still tokenized (avoiding a misleading cascade).
+                // Do not consume the sentinel, so the rest of the line still tokenizes without a cascade.
                 return self.unterminated_string_token(span);
             }
             self.consume_quote_fence(triple); // closing quote(s)
@@ -538,15 +701,11 @@ impl Lexer {
             };
         }
 
-        // String has interpolation — emit InterpStart, then queue all parts
-        // Collect literal parts and expression tokens. Remember how many
-        // pending tokens existed before so we can roll back cleanly if the
-        // string turns out to be unterminated.
+        // Remember the pending-token count so the queue can roll back cleanly.
         let pending_mark = self.pending_tokens.len();
         let mut literal_buf = std::string::String::new();
 
-        // Stop at the closing fence, EOF, or — for single-line strings — a raw
-        // newline (see the non-interpolation branch above).
+        // Stop at the closing fence, EOF, or a raw newline for single-line strings.
         while !self.at_string_body_end(delimiter, triple) {
             if self.ch == '{' {
                 // Emit any accumulated literal as a String token
@@ -567,24 +726,12 @@ impl Lexer {
                     span: expr_span,
                 });
 
-                self.read_char(); // skip '{'
+                self.read_char();
 
                 // Lex tokens inside {} using a brace depth counter
                 let mut brace_depth = 1;
-                while brace_depth > 0 && self.ch != '\0' {
-                    if self.ch == '{' {
-                        brace_depth += 1;
-                    } else if self.ch == '}' {
-                        brace_depth -= 1;
-                        if brace_depth == 0 {
-                            break;
-                        }
-                    }
-
-                    // Skip whitespace inside the interpolation expression.
-                    // Newlines are only valid here inside a triple-quoted
-                    // string, where `{ ... }` may span lines; single-line
-                    // strings keep their existing behavior.
+                loop {
+                    // Newlines are only valid here inside a triple-quoted string.
                     loop {
                         self.skip_whitespace_except_newline();
                         if triple && self.ch == '\n' {
@@ -593,43 +740,34 @@ impl Lexer {
                         }
                         break;
                     }
+
+                    if self.ch == '\0' {
+                        break;
+                    }
+
+                    // Depth counts from the first significant character so a nested map brace is not read as the end.
                     if self.ch == '}' {
+                        brace_depth -= 1;
+                        if brace_depth == 0 {
+                            break; // caller consumes the closing brace
+                        }
+                    } else if self.ch == '{' {
+                        brace_depth += 1;
+                    }
+
+                    // The comment arms restart via next_token, which would pop the interpolation tokens queued below.
+                    if self.ch == '/' && matches!(self.peek_char(), '/' | '*') {
+                        if self.peek_char() == '/' {
+                            self.skip_line_comment();
+                        } else {
+                            self.skip_block_comment();
+                        }
                         continue;
                     }
 
+                    // Use the real lexer so `{ ... }` supports the whole language, not a hand-maintained subset.
                     let inner_span = self.span();
-                    // Lex one token from inside the interpolation
-                    let inner_tok = match self.ch {
-                        c if c.is_ascii_digit() => self.read_number(inner_span),
-                        c if is_ident_start(c) => self.read_ident(inner_span),
-                        '"' => {
-                            let inner_triple = self.at_triple_quote('"');
-                            self.read_string('"', inner_triple, inner_span)
-                        }
-                        '\'' => {
-                            let inner_triple = self.at_triple_quote('\'');
-                            self.read_string('\'', inner_triple, inner_span)
-                        }
-                        '(' => self.single_with_span(TokenType::LParen, inner_span),
-                        ')' => self.single_with_span(TokenType::RParen, inner_span),
-                        ',' => self.single_with_span(TokenType::Comma, inner_span),
-                        '+' => self.single_with_span(TokenType::Plus, inner_span),
-                        '-' => self.single_with_span(TokenType::Minus, inner_span),
-                        '*' => self.single_with_span(TokenType::Asterisk, inner_span),
-                        '/' => self.single_with_span(TokenType::FSlash, inner_span),
-                        '.' => self.single_with_span(TokenType::FullStop, inner_span),
-                        '[' => self.single_with_span(TokenType::LBracket, inner_span),
-                        ']' => self.single_with_span(TokenType::RBracket, inner_span),
-                        _ => {
-                            let lit = self.ch.to_string();
-                            self.read_char();
-                            Token {
-                                token_type: TokenType::Illegal,
-                                literal: lit,
-                                span: inner_span,
-                            }
-                        }
-                    };
+                    let inner_tok = self.lex_token_at(inner_span);
                     self.pending_tokens.push_back(inner_tok);
                 }
 
@@ -641,7 +779,7 @@ impl Lexer {
                     span: end_span,
                 });
 
-                self.read_char(); // skip closing '}'
+                self.read_char();
             } else if self.ch == '\\' {
                 self.push_escape_sequence(&mut literal_buf, delimiter);
             } else {
@@ -651,9 +789,7 @@ impl Lexer {
         }
 
         if !self.at_closing_delimiter(delimiter, triple) {
-            // Unterminated interpolated string: discard the partial part tokens
-            // we queued and report a single error anchored at the opening quote.
-            // Leave the newline/EOF sentinel unconsumed for forward progress.
+            // Discard the queued part tokens and report one error at the opening quote.
             self.pending_tokens.truncate(pending_mark);
             return self.unterminated_string_token(span);
         }
@@ -676,8 +812,7 @@ impl Lexer {
 
         self.consume_quote_fence(triple); // closing quote(s)
 
-        // Return InterpStart as the first token (a multi-line variant when the
-        // string was triple-quoted, so the formatter can round-trip it).
+        // A multi-line variant when triple-quoted, so the formatter can round-trip it.
         Token {
             token_type: if triple {
                 TokenType::MultilineInterpStart
@@ -701,16 +836,26 @@ impl Lexer {
     /// location of the mistake — instead of letting the lexer swallow the rest
     /// of the file and produce a misleading cascade of parser errors. The
     /// parser turns this `Illegal` token into a reported diagnostic.
-    fn unterminated_string_token(&self, span: Span) -> Token {
+    fn unterminated_string_token(&mut self, span: Span) -> Token {
+        self.diagnostics.push(
+            Diagnostic::error(codes::UNTERMINATED_STRING, span, "unterminated string literal")
+                .label("this string is never closed")
+                .help("close it on the same line, or use a triple-quoted string to span lines"),
+        );
+        self.illegal("unterminated string literal", span)
+    }
+
+    /// A recovery placeholder. The diagnostic is recorded separately.
+    fn illegal(&self, literal: &str, span: Span) -> Token {
         Token {
             token_type: TokenType::Illegal,
-            literal: "unterminated string literal".to_string(),
+            literal: literal.to_string(),
             span,
         }
     }
 
     fn push_escape_sequence(&mut self, literal: &mut std::string::String, delimiter: char) {
-        self.read_char(); // consume '\'
+        self.read_char();
         match self.ch {
             'n' => {
                 literal.push('\n');
@@ -731,9 +876,9 @@ impl Lexer {
             'x' if self.peek_hex_byte().is_some() => {
                 let value = self.peek_hex_byte().unwrap();
                 literal.push(value as char);
-                self.read_char(); // consume 'x'
-                self.read_char(); // consume first hex digit
-                self.read_char(); // consume second hex digit
+                self.read_char();
+                self.read_char();
+                self.read_char();
             }
             '\\' => {
                 literal.push('\\');
@@ -745,6 +890,11 @@ impl Lexer {
             }
             c if c == delimiter => {
                 literal.push(c);
+                self.read_char();
+            }
+            // `\{` and `\}` are the only way to write a literal brace; a bare `{` starts an interpolation.
+            '{' | '}' => {
+                literal.push(self.ch);
                 self.read_char();
             }
             other => {
@@ -801,21 +951,26 @@ impl Lexer {
     }
 
     fn read_char_literal(&mut self, span: Span) -> Token {
-        self.read_char(); // opening `
+        self.read_char();
         let start = self.position;
         while self.ch != '`' && self.ch != '\0' {
             self.read_char();
         }
         let literal: String = self.input[start..self.position].iter().collect();
-        self.read_char(); // closing `
+        self.read_char();
 
-        // Validate it's exactly one character
         if literal.chars().count() != 1 {
-            return Token {
-                token_type: TokenType::Illegal,
-                literal: format!("invalid char literal: `{}`", literal),
-                span,
-            };
+            let span = Span::range(span.start, self.pos());
+            self.diagnostics.push(
+                Diagnostic::error(
+                    codes::INVALID_CHAR_LITERAL,
+                    span,
+                    format!("invalid character literal `{literal}`"),
+                )
+                .note("a character literal holds exactly one character")
+                .help("use a string literal for zero or more than one character"),
+            );
+            return self.illegal(&format!("invalid char literal: `{}`", literal), span);
         }
 
         Token {
@@ -853,7 +1008,6 @@ impl Lexer {
         let mut indent = 0;
         let mut pos = self.position;
 
-        // If we're past a newline, start from read_position
         if self.ch == '\n' {
             pos = self.read_position;
         }

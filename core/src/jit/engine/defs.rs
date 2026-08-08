@@ -38,6 +38,16 @@ pub(super) fn vm_jit_frame_view_len_offset() -> i32 {
     (VM::jit_frame_view_offset() + JitFrameView::OFFSET_LEN as usize) as i32
 }
 
+/// Byte offset of a closure's owning-module globals from the base of
+/// `ObjClosure`. `ModuleGlobals` is `#[repr(C)]` with its raw pointer view
+/// first, so this loads as a plain pointer — null for a closure defined in
+/// the main script. Pinned by `module_globals_ptr_is_first_field`.
+#[allow(dead_code)]
+#[inline(always)]
+pub(super) fn obj_closure_module_globals_offset() -> i32 {
+    std::mem::offset_of!(crate::vm::value::ObjClosure, module_globals) as i32
+}
+
 // ── Compile-function state machine ─────────────────────────────────────
 
 /// Cache slot for `JitInner::compiled` — either a successful compile

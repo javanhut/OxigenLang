@@ -10,14 +10,20 @@ fun check_os() {
     arch <str> = os.arch()
     println("System: {system}, Architecture: {arch}")
     op_sys <str> := option {
-        system == "macos" -> "darwin"
-        system == "linux" -> "linux"
-        system == "windows" -> "windows"
-        "unknown"
+        system == "macos" -> {
+            "darwin"
+        }
+        system == "linux" -> {
+            "linux"
+        }
+        system == "windows" -> {
+            "windows"
+        }
+        {
+            "unknown"
+        }
     }
-    unless op_sys == "unknown" {
-        println("Operating system is known: {strings.upper(op_sys)}")
-    }
+    println("Operating system is known: {strings.upper(op_sys)}") unless op_sys == "unknown"
     (system, arch, op_sys)
 }
 
@@ -29,9 +35,11 @@ fun check_installation(package <str>) {
     success := option {
         code != 0 -> {
             println("[Error] system code: {code}")
-            fail unsuccessful_system_call
+            <fail>(unsuccessful_system_call)
         }
-        True
+        {
+            True
+        }
     }
     println("{strings.upper(package)} is installed at: {out}") unless not success then println("{strings.upper(package)} is not installed")
     True
@@ -45,9 +53,11 @@ fun check_oxigen_version() {
     success := option {
         code != 0 -> {
             println("[Error] system code: {code}")
-            fail unsuccessful_system_call
+            <fail>(unsuccessful_system_call)
         }
-        True
+        {
+            True
+        }
     }
     (True, strings.split(out, " ")[1]) unless not success then (False, "")
 }
@@ -57,7 +67,7 @@ fun cleanup_tmp_dir(home_dir <str>, total_path <str>) {
     option {
         os.is_dir(total_path) -> {
             os.rmdir(total_path)
-            <log<cleanup>>("Removed temp dir: {total_path}") unless os.is_dir(total_path) == True then fail "Failed to remove temp directory"
+            <log<cleanup>>("Removed temp dir: {total_path}") unless os.is_dir(total_path) == True then <fail>("Failed to remove temp directory")
         }
     }
 }
@@ -71,42 +81,42 @@ fun update_oxigen(home_dir <str>, total_path <str>) {
     u_out, u_err, u_code := (uninstall["stdout"], uninstall["stderr"], uninstall["code"])
     option {
         u_code != 0 -> {
-            unless strings.trim(u_err) == "" {
-                <log>(u_err)
-            }
+            <log>(u_err) unless strings.trim(u_err) == ""
             cleanup_tmp_dir(home_dir, total_path)
             <log<Error>>("Failed to uninstall with code: {u_code}")
-            fail unsuccessful_system_call
+            <fail>(unsuccessful_system_call)
         }
-        <log<debug>>(u_out)
+        {
+            <log<debug>>(u_out)
+        }
     }
     <log<build>>("Building updated version....")
     build := os.exec(build_command)
     b_out, b_err, b_code := (build["stdout"], build["stderr"], build["code"])
     option {
         b_code != 0 -> {
-            unless strings.trim(b_err) == "" {
-                <log>(b_err)
-            }
+            <log>(b_err) unless strings.trim(b_err) == ""
             cleanup_tmp_dir(home_dir, total_path)
             <log<Error>>("Failed to build with code: {b_code}")
-            fail unsuccessful_system_call
+            <fail>(unsuccessful_system_call)
         }
-        <log<debug>>(b_out)
+        {
+            <log<debug>>(b_out)
+        }
     }
     <log<install>>("Installing updated version....")
     install := os.exec(install_command)
     i_out, i_err, i_code := (install["stdout"], install["stderr"], install["code"])
     option {
         i_code != 0 -> {
-            unless strings.trim(i_err) == "" {
-                <log>(i_err)
-            }
+            <log>(i_err) unless strings.trim(i_err) == ""
             cleanup_tmp_dir(home_dir, total_path)
             <log<Error>>("Failed to install with code: {i_code}")
-            fail unsuccessful_system_call
+            <fail>(unsuccessful_system_call)
         }
-        <log<debug>>(i_out)
+        {
+            <log<debug>>(i_out)
+        }
     }
     cleanup_tmp_dir(home_dir, total_path)
     <log<finished>>("Update has finished. Refresh your shell or reopen the terminal for the updated version.")
@@ -129,16 +139,14 @@ main {
     is_oxigen_installed := check_installation(package="oxigen")
     installed_oxigen_ver <str>
     option {
-        is_rust_installed and is_git_installed -> println("All dependencies are installed")
+        is_rust_installed and is_git_installed -> {
+            println("All dependencies are installed")
+        }
         {
             println("Missing dependencies:")
-            unless not is_git_installed {
-                println("Missing Git")
-            }
-            unless not is_rust_installed {
-                println("Missing Rust")
-            }
-            fail "Missing dependencies"
+            println("Missing Git") unless not is_git_installed
+            println("Missing Rust") unless not is_rust_installed
+            <fail>("Missing dependencies")
         }
     }
     home_dir <str>
@@ -147,15 +155,21 @@ main {
             println("Oxigen is installed! Checking version number....")
             has_version, ver := check_oxigen_version()
             option {
-                has_version == False -> println("Oxigen is either out of date or missing from system binaries. Install Oxigen to update.")
+                has_version == False -> {
+                    println("Oxigen is either out of date or missing from system binaries. Install Oxigen to update.")
+                }
                 {
                     println("Version Check: {ver}")
                     installed_oxigen_ver := strings.trim(ver)
                     println("Downloading oxigen into temp dir....")
                     maybe_home := os.env_get("HOME")
                     home_dir = option {
-                        maybe_home == None -> fail "HOME is not set"
-                        maybe_home
+                        maybe_home == None -> {
+                            <fail>("HOME is not set")
+                        }
+                        {
+                            maybe_home
+                        }
                     }
                 }
             }
@@ -169,29 +183,29 @@ main {
         os.is_dir(total_path) -> {
             println("Directory exists. Removing...")
             os.rmdir(total_path)
-            <log>("Successfully removed: {total_path}") unless os.is_dir(total_path) == True then fail "Failed to remove directory"
+            <log>("Successfully removed: {total_path}") unless os.is_dir(total_path) == True then <fail>("Failed to remove directory")
         }
     }
     os.mkdir(total_path)
     option {
-        os.is_dir(total_path) -> <log>("Successfully created tmp path at: {total_path}")
-        fail "Failed to create new directory."
+        os.is_dir(total_path) -> {
+            <log>("Successfully created tmp path at: {total_path}")
+        }
+        {
+            <fail>("Failed to create new directory.")
+        }
     }
     os.chdir(total_path)
     results := os.exec("git clone {oxigen_repo_url}")
     out, err, code := (results["stdout"], results["stderr"], results["code"])
     option {
         code != 0 -> {
-            unless strings.trim(err) == "" {
-                <log>(err)
-            }
+            <log>(err) unless strings.trim(err) == ""
             cleanup_tmp_dir(home_dir, total_path)
-            fail "Failed to run command {code}"
+            <fail>("Failed to run command {code}")
         }
         {
-            unless strings.trim(out) == "" {
-                <log<debug>>(out)
-            }
+            <log<debug>>(out) unless strings.trim(out) == ""
         }
     }
     os.chdir("OxigenLang")
@@ -219,22 +233,34 @@ main {
                     <log<update>>("Update is available. Version: v{package_ver}. Installing new Oxigen version...")
                     update_oxigen(home_dir, total_path)
                 }
-                p_major == i_major -> option {
-                    p_minor > i_minor -> {
-                        <log<update>>("Update is available. Version: v{package_ver}. Installing new Oxigen version...")
-                        update_oxigen(home_dir, total_path)
-                    }
-                    p_minor == i_minor -> option {
-                        p_patch > i_patch -> {
+                p_major == i_major -> {
+                    option {
+                        p_minor > i_minor -> {
                             <log<update>>("Update is available. Version: v{package_ver}. Installing new Oxigen version...")
                             update_oxigen(home_dir, total_path)
                         }
-                        p_patch == i_patch -> log_no_update_and_cleanup(home_dir, total_path)
-                        log_regression_and_cleanup(home_dir, total_path)
+                        p_minor == i_minor -> {
+                            option {
+                                p_patch > i_patch -> {
+                                    <log<update>>("Update is available. Version: v{package_ver}. Installing new Oxigen version...")
+                                    update_oxigen(home_dir, total_path)
+                                }
+                                p_patch == i_patch -> {
+                                    log_no_update_and_cleanup(home_dir, total_path)
+                                }
+                                {
+                                    log_regression_and_cleanup(home_dir, total_path)
+                                }
+                            }
+                        }
+                        {
+                            log_regression_and_cleanup(home_dir, total_path)
+                        }
                     }
+                }
+                {
                     log_regression_and_cleanup(home_dir, total_path)
                 }
-                log_regression_and_cleanup(home_dir, total_path)
             }
         }
     }

@@ -12,4 +12,4 @@ function nestedSum(n: number): number {
     return total;
 }
 
-nestedSum(500);
+nestedSum(3000);

@@ -9,9 +9,7 @@ use std::rc::Rc;
 pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("print".to_string(), Value::Builtin(builtin_print));
     globals.insert("println".to_string(), Value::Builtin(builtin_println));
-    // Concurrency primitives are internal: the public surface is the
-    // `diverge` / `converge` keywords, which desugar to these. `cancel` stays
-    // public — it has no keyword form.
+    // Internal: the public surface is the diverge/converge keywords. `cancel` has no keyword form.
     globals.insert("__spawn".to_string(), Value::Builtin(crate::concurrent::builtin_spawn));
     globals.insert("__join_task".to_string(), Value::Builtin(crate::concurrent::builtin_join));
     globals.insert("cancel".to_string(), Value::Builtin(crate::concurrent::builtin_cancel));
@@ -131,6 +129,7 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
 
     // OS builtins
     globals.insert("__exec".to_string(), Value::Builtin(builtin_exec));
+    globals.insert("__exec_argv".to_string(), Value::Builtin(builtin_exec_argv));
     globals.insert("__os_name".to_string(), Value::Builtin(builtin_os_name));
     globals.insert("__os_arch".to_string(), Value::Builtin(builtin_os_arch));
     globals.insert("__env_get".to_string(), Value::Builtin(builtin_env_get));
@@ -187,6 +186,14 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
         "__path_is_absolute".to_string(),
         Value::Builtin(builtin_path_is_absolute),
     );
+    globals.insert(
+        "__path_normalize".to_string(),
+        Value::Builtin(builtin_path_normalize),
+    );
+    globals.insert(
+        "__path_is_within".to_string(),
+        Value::Builtin(builtin_path_is_within),
+    );
 
     // JSON / TOML
     globals.insert(
@@ -224,6 +231,10 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("__net_tcp_accept".to_string(), Value::Builtin(builtin_net_tcp_accept));
     globals.insert("__net_send".to_string(), Value::Builtin(builtin_net_send));
     globals.insert("__net_receive".to_string(), Value::Builtin(builtin_net_receive));
+    globals.insert(
+        "__net_set_timeout".to_string(),
+        Value::Builtin(builtin_net_set_timeout),
+    );
     globals.insert("__net_close".to_string(), Value::Builtin(builtin_net_close));
     globals.insert("__net_udp_bind".to_string(), Value::Builtin(builtin_net_udp_bind));
     globals.insert("__net_udp_send".to_string(), Value::Builtin(builtin_net_udp_send));
@@ -235,8 +246,7 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
 fn builtin_print(args: &[Value]) -> Value {
     use std::io::Write;
     let parts: Vec<String> = args.iter().map(|a| format!("{}", a)).collect();
-    // Flush so `print` (no trailing newline) shows immediately — needed for
-    // token-by-token streaming output, where nothing else triggers a flush.
+    // print has no trailing newline, so flush or streaming output never appears.
     let mut out = std::io::stdout().lock();
     let _ = write!(out, "{}", parts.join(" "));
     let _ = out.flush();
@@ -341,8 +351,7 @@ fn builtin_int(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Integer(n) => Value::Integer(n),
         ValueRepr::Float(f) => Value::Integer(f as i64),
-        // Trim surrounding whitespace before parsing, matching the
-        // tree-walker (int(" 5 ") == 5).
+        // Trim first, matching the tree-walker's int(" 5 ") == 5.
         ValueRepr::String(s) => match s.trim().parse::<i64>() {
             Ok(n) => Value::Integer(n),
             Err(_) => match s.trim().parse::<f64>() {
@@ -368,8 +377,7 @@ fn builtin_float(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Float(f) => Value::Float(f),
         ValueRepr::Integer(n) => Value::Float(n as f64),
-        // Trim surrounding whitespace before parsing, matching the
-        // tree-walker (float(" 1.5 ") == 1.5).
+        // Trim first, matching the tree-walker's float(" 1.5 ") == 1.5.
         ValueRepr::String(s) => match s.trim().parse::<f64>() {
             Ok(f) => Value::Float(f),
             Err(_) => Value::Error(rc_str(format!("cannot convert '{}' to float", s))),
@@ -386,18 +394,34 @@ fn builtin_float(args: &[Value]) -> Value {
 }
 
 fn builtin_range(args: &[Value]) -> Value {
-    let (start, end) = match args.len() {
-        1 => match args[0].repr() {
-            ValueRepr::Integer(n) => (0i64, n),
+    let mut ints = Vec::with_capacity(args.len());
+    for arg in args {
+        match arg.repr() {
+            ValueRepr::Integer(n) => ints.push(n),
             _ => return Value::Error(rc_str("range() requires integer arguments")),
-        },
-        2 => match (&args[0], &args[1]) {
-            (Value::Integer(s), Value::Integer(e)) => (*s, *e),
-            _ => return Value::Error(rc_str("range() requires integer arguments")),
-        },
-        _ => return Value::Error(rc_str("range() takes 1 or 2 arguments")),
+        }
+    }
+    // A negative step counts down, so the bound is exclusive from whichever side it is approached.
+    let (start, end, step) = match ints[..] {
+        [end] => (0, end, 1),
+        [start, end] => (start, end, 1),
+        [start, end, step] => (start, end, step),
+        _ => return Value::Error(rc_str("range() takes 1 to 3 arguments")),
     };
-    let arr: Vec<Value> = (start..end).map(Value::Integer).collect();
+    if step == 0 {
+        return Value::Error(rc_str("range() step must not be zero"));
+    }
+
+    let mut arr = Vec::new();
+    let mut i = start;
+    while if step > 0 { i < end } else { i > end } {
+        arr.push(Value::Integer(i));
+        match i.checked_add(step) {
+            Some(next) => i = next,
+            // A step past i64 bounds ends the range rather than wrapping back into it.
+            None => break,
+        }
+    }
     Value::Array(Rc::new(RefCell::new(arr)))
 }
 
@@ -481,15 +505,34 @@ fn builtin_insert(args: &[Value]) -> Value {
     }
     match args[0].repr() {
         ValueRepr::Map(m) => {
+            if let Some(e) = non_hashable_key_error(&args[1], "map key") {
+                return e;
+            }
             m.borrow_mut().insert(args[1].clone(), args[2].clone());
             args[0].clone()
         }
         ValueRepr::Set(s) => {
+            if let Some(e) = non_hashable_key_error(&args[1], "set element") {
+                return e;
+            }
             s.borrow_mut().insert(args[1].clone());
             args[0].clone()
         }
         _ => Value::Error(rc_str("insert() requires a map or set")),
     }
+}
+
+/// `Some(error)` when `v` cannot be a map key or set element. Mirrors
+/// `VM::require_hashable_key` for the builtin path, which reports through
+/// `Value::Error` rather than `VMError`.
+fn non_hashable_key_error(v: &Value, what: &str) -> Option<Value> {
+    if v.try_hash_key().is_some() {
+        return None;
+    }
+    Some(Value::Error(rc_str(format!(
+        "{} is not hashable and cannot be used as a {what}; hashable kinds are int, uint, float, bool, char, byte, str, None, and tuples of those",
+        v.type_name()
+    ))))
 }
 
 fn builtin_remove(args: &[Value]) -> Value {
@@ -527,6 +570,11 @@ fn builtin_tuple(args: &[Value]) -> Value {
 }
 
 fn builtin_set(args: &[Value]) -> Value {
+    for a in args {
+        if let Some(e) = non_hashable_key_error(a, "set element") {
+            return e;
+        }
+    }
     Value::Set(Rc::new(RefCell::new(
         crate::vm::collections::OxSet::from_iter_dedup(args.iter().cloned()),
     )))
@@ -558,7 +606,18 @@ fn builtin_byte(args: &[Value]) -> Value {
                 Value::Byte(n as u8)
             }
         }
-        ValueRepr::Char(c) => Value::Byte(c as u8),
+        // Range-checked like the Integer and Uint arms: `c as u8` made byte(`€`) 172.
+        ValueRepr::Char(c) => {
+            let code = c as u32;
+            if code > 255 {
+                Value::Error(rc_str(format!(
+                    "byte() argument out of range (0-255): {} (U+{:04X})",
+                    code, code
+                )))
+            } else {
+                Value::Byte(code as u8)
+            }
+        }
         _ => Value::Error(rc_str(format!(
             "cannot convert {} to byte",
             args[0].type_name()
@@ -603,7 +662,8 @@ fn builtin_chr(args: &[Value]) -> Value {
         return Value::Error(rc_str("chr() takes exactly 1 argument"));
     }
     match args[0].repr() {
-        ValueRepr::Integer(n) => match char::from_u32(n as u32) {
+        // try_from, not `as u32`: the cast wraps back into valid range and chr(4294967393) returned `a`.
+        ValueRepr::Integer(n) => match u32::try_from(n).ok().and_then(char::from_u32) {
             Some(c) => Value::Char(c),
             None => Value::Error(rc_str(format!("invalid char code: {}", n))),
         },
@@ -646,8 +706,7 @@ fn builtin_join(args: &[Value]) -> Value {
     match (&args[0], &args[1]) {
         (Value::Array(arr), Value::String(sep)) => {
             use std::fmt::Write as _;
-            // Accumulate into one buffer instead of building a Vec<String>
-            // of N throwaway `format!` allocations and then joining.
+            // One buffer instead of N throwaway format! allocations joined at the end.
             let arr = arr.borrow();
             let mut result = String::new();
             for (i, v) in arr.iter().enumerate() {
@@ -1260,19 +1319,40 @@ fn builtin_file_exists(args: &[Value]) -> Value {
 
 // ── OS builtins ────────────────────────────────────────────────────────
 
+/// Turns a finished process into the `{stdout, stderr, code}` map both exec
+/// builtins return, so the shell and argv forms stay drop-in comparable.
+fn process_output_map(output: std::process::Output) -> Value {
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    // A signal-killed process has no exit code; -1 stands in for "died".
+    let code = output.status.code().unwrap_or(-1);
+    let entries: Vec<(Value, Value)> = vec![
+        (
+            Value::String(rc_str("stdout")),
+            Value::String(rc_str(stdout)),
+        ),
+        (
+            Value::String(rc_str("stderr")),
+            Value::String(rc_str(stderr)),
+        ),
+        (Value::String(rc_str("code")), Value::Integer(code as i64)),
+    ];
+    Value::Map(Rc::new(RefCell::new(
+        crate::vm::collections::OxMap::from_pairs(entries),
+    )))
+}
+
+// Runs through a shell, so every metacharacter is live; use __exec_argv with untrusted input.
 fn builtin_exec(args: &[Value]) -> Value {
-    if args.is_empty() {
-        return Value::Error(rc_str("__exec() takes at least 1 argument"));
+    if args.len() != 1 {
+        return Value::Error(rc_str(
+            "__exec() takes 1 argument (a shell command string); \
+             to pass arguments safely use __exec_argv(program, [args])",
+        ));
     }
-    let cmd = match args[0].repr() {
+    let full_cmd = match args[0].repr() {
         ValueRepr::String(s) => s.to_string(),
         _ => return Value::Error(rc_str("__exec() requires a string command")),
-    };
-    let extra_args: Vec<String> = args[1..].iter().map(|a| format!("{}", a)).collect();
-    let full_cmd = if extra_args.is_empty() {
-        cmd
-    } else {
-        format!("{} {}", cmd, extra_args.join(" "))
     };
 
     let shell = if cfg!(target_os = "windows") {
@@ -1291,26 +1371,29 @@ fn builtin_exec(args: &[Value]) -> Value {
         .arg(&full_cmd)
         .output()
     {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let code = output.status.code().unwrap_or(-1);
-            let entries: Vec<(Value, Value)> = vec![
-                (
-                    Value::String(rc_str("stdout")),
-                    Value::String(rc_str(stdout)),
-                ),
-                (
-                    Value::String(rc_str("stderr")),
-                    Value::String(rc_str(stderr)),
-                ),
-                (Value::String(rc_str("code")), Value::Integer(code as i64)),
-            ];
-            Value::Map(Rc::new(RefCell::new(
-                crate::vm::collections::OxMap::from_pairs(entries),
-            )))
-        }
+        Ok(output) => process_output_map(output),
         Err(e) => Value::Error(rc_str(format!("__exec: {}", e))),
+    }
+}
+
+// Shell-free: each argv element is one verbatim argument, so "x; rm -rf /" is a filename.
+fn builtin_exec_argv(args: &[Value]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(rc_str("__exec_argv() takes 2 arguments (program, array)"));
+    }
+    let program = match args[0].repr() {
+        ValueRepr::String(s) => s.to_string(),
+        _ => return Value::Error(rc_str("__exec_argv() requires a string program")),
+    };
+    let argv: Vec<String> = match args[1].repr() {
+        ValueRepr::Array(arr) => arr.borrow().iter().map(|a| format!("{}", a)).collect(),
+        _ => return Value::Error(rc_str("__exec_argv() requires an array of arguments")),
+    };
+
+    match std::process::Command::new(&program).args(&argv).output() {
+        Ok(output) => process_output_map(output),
+        // A missing program fails here; the shell form reports that as exit code 127 instead.
+        Err(e) => Value::Error(rc_str(format!("__exec_argv({}): {}", program, e))),
     }
 }
 
@@ -1385,7 +1468,16 @@ fn builtin_exit(args: &[Value]) -> Value {
         0
     } else {
         match args[0].repr() {
-            ValueRepr::Integer(n) => n as i32,
+            // Reject out of range: `n as i32` plus the OS's 8-bit truncation made os.exit(256) exit 0.
+            ValueRepr::Integer(n) if (0..=255).contains(&n) => n as i32,
+            ValueRepr::Integer(n) => {
+                return Value::Error(rc_str(format!(
+                    "exit() code out of range (0-255): {} — the OS keeps only \
+                     the low 8 bits, so this would have exited {}",
+                    n,
+                    (n as u8) as i64
+                )));
+            }
             _ => 1,
         }
     };
@@ -1620,6 +1712,7 @@ fn builtin_rand_float(_args: &[Value]) -> Value {
 
 // ── Path builtins ──────────────────────────────────────────────────────
 
+// Deliberate PathBuf::push semantics; use __path_is_within for containment.
 fn builtin_path_join(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__path_join() takes 1 argument (array)"));
@@ -1711,6 +1804,126 @@ fn builtin_path_is_absolute(args: &[Value]) -> Value {
     }
 }
 
+/// Resolves `.` and `..` purely lexically — no filesystem access, so it works
+/// on paths that do not exist yet. `..` pops the preceding name; above the root
+/// it is dropped (the root has no parent), and in a relative path with nothing
+/// left to pop it is kept, because `../x` genuinely names a sibling.
+fn normalize_lexical(p: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    let mut rooted = false;
+    for component in p.components() {
+        match component {
+            Component::Prefix(_) => out.push(component.as_os_str()),
+            Component::RootDir => {
+                rooted = true;
+                out.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let pops_a_name =
+                    matches!(out.components().next_back(), Some(Component::Normal(_)));
+                if pops_a_name {
+                    out.pop();
+                } else if !rooted {
+                    // Nothing to clamp against, so the `..` is meaningful and must survive.
+                    out.push("..");
+                }
+            }
+            Component::Normal(s) => out.push(s),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    out
+}
+
+/// Best-effort absolute resolution used for containment checks.
+///
+/// Canonicalises when the path exists (which is the only way to see through a
+/// symlink); when it does not, canonicalises the longest existing ancestor and
+/// appends the remaining components lexically, so a path that has not been
+/// created yet still resolves against the real parents it will live under.
+fn resolve_for_containment(p: &std::path::Path) -> std::path::PathBuf {
+    let absolute = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(p),
+            Err(_) => p.to_path_buf(),
+        }
+    };
+    // Canonicalise first: on an existing path that resolves symlinks and `..` together.
+    if let Ok(real) = absolute.canonicalize() {
+        return real;
+    }
+    let lexical = normalize_lexical(&absolute);
+    let mut trailing = Vec::new();
+    let mut probe = lexical.clone();
+    loop {
+        if let Ok(real) = probe.canonicalize() {
+            let mut resolved = real;
+            for name in trailing.iter().rev() {
+                resolved.push(name);
+            }
+            return resolved;
+        }
+        match (probe.file_name(), probe.parent()) {
+            (Some(name), Some(parent)) => {
+                trailing.push(name.to_os_string());
+                probe = parent.to_path_buf();
+            }
+            // Out of ancestors, so lexical is all we have.
+            _ => return lexical,
+        }
+    }
+}
+
+fn builtin_path_normalize(args: &[Value]) -> Value {
+    if args.len() != 1 {
+        return Value::Error(rc_str("__path_normalize() takes 1 argument"));
+    }
+    match args[0].repr() {
+        ValueRepr::String(path) => Value::String(rc_str(
+            normalize_lexical(std::path::Path::new(path.as_ref()))
+                .display()
+                .to_string(),
+        )),
+        _ => Value::Error(rc_str("__path_normalize() requires a string")),
+    }
+}
+
+/// Is `candidate` the same as, or inside, `base`?
+///
+/// Both sides go through resolve_for_containment(), then the comparison is
+/// component-wise (`Path::starts_with`) rather than string-prefix, so the
+/// sibling case — base `/srv/up` vs candidate `/srv/uploaded/x` — is correctly
+/// rejected instead of passing on a shared character prefix.
+///
+/// CAVEAT, and it is a real one: this is only as strong as the filesystem state
+/// at the moment of the call. Symlinks are followed for the part of the path
+/// that already exists; components that do not exist yet are resolved lexically
+/// only, so a symlink created there afterwards escapes, as does any symlink
+/// swapped in between this check and the eventual open (TOCTOU). Use it to
+/// reject obvious traversal, not as the sole barrier around secrets — for that
+/// you still want an OS-level sandbox or an openat-style resolved handle.
+fn builtin_path_is_within(args: &[Value]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(rc_str(
+            "__path_is_within() takes 2 arguments (base, candidate)",
+        ));
+    }
+    match (args[0].repr(), args[1].repr()) {
+        (ValueRepr::String(base), ValueRepr::String(candidate)) => {
+            let base = resolve_for_containment(std::path::Path::new(base.as_ref()));
+            let candidate = resolve_for_containment(std::path::Path::new(candidate.as_ref()));
+            Value::Boolean(candidate.starts_with(&base))
+        }
+        _ => Value::Error(rc_str("__path_is_within() requires two strings")),
+    }
+}
+
 // ── JSON builtins ──────────────────────────────────────────────────────
 
 fn builtin_json_parse(args: &[Value]) -> Value {
@@ -1722,7 +1935,17 @@ fn builtin_json_parse(args: &[Value]) -> Value {
             let chars: Vec<char> = s.chars().collect();
             let mut pos = 0;
             match json_parse_value(&chars, &mut pos) {
-                Ok(val) => val,
+                Ok(val) => {
+                    // Trailing content used to be ignored, so a truncated document parsed successfully.
+                    json_skip_ws(&chars, &mut pos);
+                    if pos < chars.len() {
+                        let rest: String = chars[pos..].iter().take(20).collect();
+                        return Value::Error(rc_str(format!(
+                            "trailing content after JSON value: `{rest}`"
+                        )));
+                    }
+                    val
+                }
                 Err(e) => Value::Error(rc_str(format!("json parse error: {}", e))),
             }
         }
@@ -2166,7 +2389,16 @@ fn builtin_http_request(args: &[Value]) -> Value {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     let (_, mut resp_body) = resp.into_parts();
-                    let body_str = resp_body.read_to_string().unwrap_or_default();
+                    // A failed read used to default to "", indistinguishable from a legitimately empty body.
+                    let body_str = match resp_body.read_to_string() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return Value::Error(rc_str(format!(
+                                "http error: reading response body: {}",
+                                e
+                            )));
+                        }
+                    };
                     let entries: Vec<(Value, Value)> = vec![
                         (
                             Value::String(rc_str("status")),
@@ -2337,8 +2569,7 @@ fn builtin_net_http_read(args: &[Value]) -> Value {
     let max = net_try!(net_int(&args[1], "read_chunk max"));
     let timeout = net_try!(net_int(&args[2], "read_chunk timeout_ms"));
     match crate::netres::http_read(id as u64, max, timeout) {
-        // None = timed out with no data yet (only when timeout_ms > 0); the
-        // caller distinguishes this from "" (EOF) and an error value.
+        // None means timed out with no data yet; distinct from "" (EOF) and an error value.
         Ok(Some(s)) => Value::String(rc_str(s)),
         Ok(None) => Value::None,
         Err(e) => Value::Error(rc_str(e)),
@@ -2400,6 +2631,18 @@ fn builtin_net_receive(args: &[Value]) -> Value {
     let max = net_try!(net_int(&args[1], "receive max"));
     match crate::netres::tcp_receive(id as u64, max) {
         Ok(s) => Value::String(rc_str(s)),
+        Err(e) => Value::Error(rc_str(e)),
+    }
+}
+
+fn builtin_net_set_timeout(args: &[Value]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(rc_str("set_timeout: expected (conn, ms)"));
+    }
+    let id = net_try!(net_int(&args[0], "set_timeout conn"));
+    let ms = net_try!(net_int(&args[1], "set_timeout ms"));
+    match crate::netres::tcp_set_read_timeout(id as u64, ms) {
+        Ok(()) => Value::None,
         Err(e) => Value::Error(rc_str(e)),
     }
 }

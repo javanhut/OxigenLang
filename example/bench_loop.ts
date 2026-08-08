@@ -8,4 +8,4 @@ function loopSum(n: number): number {
     return total;
 }
 
-loopSum(1_000_000);
+loopSum(20_000_000);

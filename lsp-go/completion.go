@@ -210,7 +210,6 @@ func detectCompletionContext(source string, pos Position, idx *docIndex, stdlibP
 		}
 	}
 
-	// Check for type annotation — last non-space char is '<'
 	trimmedRight := strings.TrimRight(textBefore, " \t")
 	if len(trimmedRight) > 0 && trimmedRight[len(trimmedRight)-1] == '<' {
 		return contextTypeAnnotation, ""
@@ -290,7 +289,7 @@ func inStringLiteralText(source string, pos Position) bool {
 		// Inside string literal text.
 		switch {
 		case c == '\\':
-			i += 2 // skip the escaped character
+			i += 2
 		case c == '{':
 			interpDepth = 1
 			i++

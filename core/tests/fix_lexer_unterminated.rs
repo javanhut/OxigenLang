@@ -20,7 +20,7 @@ fn parse_errors(src: &str) -> Vec<(usize, usize, String)> {
     parser
         .errors()
         .iter()
-        .map(|d| (d.span.line, d.span.column, d.message.to_lowercase()))
+        .map(|d| (d.span().line(), d.span().column(), d.message.to_lowercase()))
         .collect()
 }
 

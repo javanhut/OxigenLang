@@ -10,8 +10,7 @@
 //!
 //! Raw mode is toggled per call so the terminal is always restored even if the
 //! caller crashes between keys.
-//! ponytail: per-call raw toggle, not a held session — fine at human typing
-//! speed; add raw_enable/raw_disable builtins if a redraw-heavy TUI needs it.
+//! Raw mode toggles per call; add raw_enable/raw_disable builtins if a TUI needs it held.
 
 #[cfg(unix)]
 pub fn read_key() -> std::io::Result<String> {
@@ -19,8 +18,7 @@ pub fn read_key() -> std::io::Result<String> {
 
     let fd = std::io::stdin().as_raw_fd();
 
-    // Not a TTY (piped/redirected/tests) → degrade to a line read instead of
-    // erroring, so scripts stay runnable in non-interactive contexts.
+    // Not a TTY: degrade to a line read so scripts stay runnable non-interactively.
     if unsafe { libc::isatty(fd) } == 0 {
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
@@ -56,8 +54,7 @@ fn read_one(fd: i32) -> Option<u8> {
     if n == 1 { Some(b[0]) } else { None }
 }
 
-// After ESC, stop blocking forever: read remaining sequence bytes with a short
-// timer so a lone ESC press returns promptly.
+// Read the rest of an escape sequence on a short timer so a lone ESC returns promptly.
 #[cfg(unix)]
 fn arm_escape_timeout(fd: i32) {
     let mut t: libc::termios = unsafe { std::mem::zeroed() };
@@ -161,8 +158,7 @@ fn decode_line(line: &str) -> String {
     }
 }
 
-// ponytail: Windows reads a line instead of a raw key — real raw mode there
-// needs the console API. macOS/Linux (the target here) get the full version above.
+// Windows has no raw mode here; real raw input needs the console API.
 #[cfg(not(unix))]
 pub fn read_key() -> std::io::Result<String> {
     let mut line = String::new();

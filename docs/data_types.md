@@ -16,6 +16,10 @@ z := 0
 
 Type keyword: `int`. Zero value: `0`.
 
+Range is `-9223372036854775808` to `9223372036854775807`. `+`, `-`, and `*` wrap
+around on overflow; `/` and `%` raise an error instead. See
+[Integer Overflow](operators.md#integer-overflow) for the exact rules.
+
 ### Float
 
 64-bit floating-point numbers. Supports arithmetic and comparison operations.
@@ -115,6 +119,18 @@ Both `"""` and `'''` behave identically; choose whichever lets you embed the oth
   println("Type: {type(42)}")
   ```
 
+  "Any valid expression" includes comparisons, `%`, and the logical keywords —
+  there is no need to compute them into a variable first:
+
+  ```oxi
+  a := 1
+  b := 2
+  println("{a == b}")             // False
+  println("{a < b and b % 2 == 0}")  // True
+  println("{not (a == b)}")       // True
+  println("{ {"k": 7}["k"] }")    // 7 — nested braces are fine
+  ```
+
   Strings without `{}` remain plain strings — no special syntax is needed to opt out. Both double-quoted and single-quoted strings support interpolation.
 
 - **Escape Sequences**: Strings support the following escape sequences:
@@ -130,6 +146,8 @@ Both `"""` and `'''` behave identically; choose whichever lets you embed the oth
   | `\"` | Double quote (inside `"..."`) |
   | `\'` | Single quote (inside `'...'`) |
   | `\0` | Null character |
+  | `\{` | Literal `{` (a bare `{` would start an interpolation) |
+  | `\}` | Literal `}` |
 
   ```oxi
   println("line one\nline two")
@@ -137,6 +155,7 @@ Both `"""` and `'''` behave identically; choose whichever lets you embed the oth
   println("she said \"hello\"")
   println('it\'s fine')
   println("\e[31mred\e[0m")
+  println("\{not an interpolation\}")   // {not an interpolation}
   ```
 
   Escape sequences work in both plain strings and interpolated strings.
@@ -265,6 +284,20 @@ Type keyword: `array`. Zero value: `[]`.
   println(arr)        // [99, 20, 77]
   ```
 
+- **Out-of-range indices are an error**, for both reads and writes. This applies
+  to arrays, tuples, and strings; negative indices are valid down to `-len`:
+
+  ```oxi
+  arr := [10, 20, 30]
+  arr[3]              // error: index 3 out of range for ARRAY of length 3
+  arr[-4]             // error: index -4 out of range for ARRAY of length 3
+  arr[3] = 1          // error — an out-of-range write does not append
+  ```
+
+  Use `len(arr)` to bounds-check, or `push(arr, value)` to grow an array.
+  Slicing clamps instead of erroring, so `arr[0:99]` is the whole array. Maps
+  are unaffected: a missing key is a lookup miss, and still returns `None`.
+
 - **Slicing**: Extract a sub-array with `[start:end]`:
 
   ```oxi
@@ -321,17 +354,29 @@ Note: A single-element tuple requires a trailing comma to distinguish it from a 
 
 ### Map
 
-Key-value pairs, enclosed in curly braces. Keys and values can be any type:
+Key-value pairs, enclosed in curly braces. A value can be any type; a key must
+be **hashable**:
 
 ```oxi
 person := {"name": "Alice", "age": 30}
 mixed := {1: "one", "two": 2}
+tuple_key := {(1, 2): "point"}
 empty := {}
+```
+
+The hashable kinds are `int`, `uint`, `float`, `bool`, `char`, `byte`, `str`,
+`None`, and tuples whose elements are all hashable. Arrays, maps, sets, struct
+instances, and functions are not — they are mutable, so a key could be changed
+after insertion and no longer match its own entry. Using one is an error
+(`E0035`), not a silent fallback:
+
+```oxi
+m := {[1, 2]: "v"}   // error[E0035]: ARRAY is not hashable
 ```
 
 Type keyword: `map`. Zero value: `{}`.
 
-Note: An empty map `{}` and an empty block `{}` use the same syntax. The parser distinguishes them by context — at the expression level, `{}` is a map literal.
+Note: An empty map `{}` and an empty block `{}` use the same syntax. The parser distinguishes them by context — at the expression level, and in an `option`/`choose` arm, `{}` is a map literal.
 
 #### Map Operations
 
@@ -359,10 +404,26 @@ Note: An empty map `{}` and an empty block `{}` use the same syntax. The parser 
   y <map> := {"name": "oxigen"}
   y.name              // "oxigen"  (same as y["name"])
   y.version = "0.1"   // inserts the key
-  y.missing           // None (missing keys return None)
   ```
 
   Dot access is limited to string keys. Non-string keys still require bracket syntax.
+
+  **Reading a missing key with the dot form is an error**, the same as a missing
+  struct field — so a mistyped key does not pass silently:
+
+  ```oxi
+  y.mising            // error: key 'mising' not found on map
+  ```
+
+  Bracket access is a lookup and still answers `None` for an absent key, so use
+  it (or `has`) whenever a key may legitimately be missing. Writing through the
+  dot form still inserts:
+
+  ```oxi
+  y["mising"]         // None
+  has(y, "mising")    // False
+  y.author = "ada"    // inserts, no error
+  ```
 
 - **Insert**: Returns a new map with the key-value pair added or updated:
 
@@ -401,6 +462,9 @@ empty := set()
 Type keyword: `set`. Zero value: `set()`.
 
 Duplicates are automatically removed on creation.
+
+Set elements must be hashable, by the same rule and for the same reason as map
+keys — see [Map](#map) above.
 
 #### Set Operations
 
@@ -448,6 +512,10 @@ uint(byte(255))
 ```
 
 Negative values produce an error.
+
+Range is `0` to `18446744073709551615`. `+` and `*` wrap around on overflow, but
+a subtraction that would go below zero is an error rather than a wrap. See
+[Unsigned Integer Overflow](operators.md#unsigned-integer-overflow).
 
 ## Enums
 

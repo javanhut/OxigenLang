@@ -87,6 +87,12 @@ impl TypeAnnotation {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub statements: Vec<Statement>,
+    /// Top-level names declared with `hide`. Collected by the parser rather
+    /// than carried on each statement so `hide` stays a declaration modifier
+    /// and no existing `Statement` match arm has to change. The compiler
+    /// copies this onto the script `Function`, and `import_module` turns it
+    /// into the module's private set.
+    pub hidden: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -98,7 +104,12 @@ pub enum Statement {
     Expr(Expression),
     Each {
         token: Token,
+        /// The element binding — always the value, in both the one- and
+        /// two-name forms.
         variable: Identifier,
+        /// Present for `each k, v in coll`: the leading name, bound to the
+        /// map key or the sequence index. `None` is the plain `each v in coll`.
+        index_variable: Option<Identifier>,
         iterable: Expression,
         body: Vec<Statement>,
     },
@@ -124,8 +135,15 @@ pub enum Statement {
         consequence: Vec<Statement>,
         alternative: Option<Vec<Statement>>,
     },
-    Skip,
-    Stop,
+    /// `skip` / `stop` carry their keyword token purely for the span: without
+    /// one, a diagnostic about them had no location (`--> file:0:0`) and the
+    /// formatter could not place a comment written above them.
+    Skip {
+        token: Token,
+    },
+    Stop {
+        token: Token,
+    },
     Give {
         token: Token,
         value: Expression,
@@ -403,11 +421,7 @@ pub enum Expression {
         parts: Vec<StringInterpPart>,
     },
 
-    // Concurrency surface syntax. Kept as first-class nodes (rather than
-    // desugared at parse time) so tooling — the formatter especially — can
-    // round-trip `diverge`/`converge` instead of seeing the lowered builtins.
-    // The compiler and evaluator lower them via `desugar_*` below; there is no
-    // new runtime concept.
+    // First-class nodes so the formatter can round-trip diverge/converge instead of the lowered call.
     Diverge {
         token: Token,
         body: Vec<Statement>,
@@ -431,16 +445,7 @@ pub enum StringInterpPart {
     Expr(Expression),
 }
 
-// ── diverge / converge lowering ─────────────────────────────────────────────
-// `diverge`/`converge` are surface syntax for fork-join. They lower to the
-// `__spawn`/`__join_task` builtins — the compiler and VM never need a new
-// concept. The lowering lives here (not in the parser) so the parser can keep
-// the high-level node for the formatter while the compiler and evaluator share
-// one desugaring:
-//   diverge { B }              -> __spawn(fun() { B })
-//   diverge each X in XS { B } -> (fun(){ spawn each, then join each in order })()
-//   converge T                 -> __join_task(T)
-//   converge T within ms       -> __join_task(T, ms)
+// diverge/converge lower to the __spawn/__join_task builtins.
 
 fn syn_ident(tok: &Token, name: &str) -> Expression {
     Expression::Ident(Identifier {
@@ -490,6 +495,7 @@ pub fn desugar_diverge_each(
     let spawn_loop = Statement::Each {
         token: tok.clone(),
         variable: variable.clone(),
+        index_variable: None,
         iterable: iterable.clone(),
         body: vec![Statement::Expr(syn_call(
             tok,
@@ -503,6 +509,7 @@ pub fn desugar_diverge_each(
     let join_loop = Statement::Each {
         token: tok.clone(),
         variable: id("__dv_h"),
+        index_variable: None,
         iterable: syn_ident(tok, "__dv_hs"),
         body: vec![Statement::Expr(syn_call(
             tok,

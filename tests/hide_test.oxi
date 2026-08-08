@@ -1,0 +1,111 @@
+// `hide` enforcement: struct fields and module-level functions.
+//
+// Module privacy needs a second file, so those cases live in
+// tests/hide_module.oxi (run directly, not as <test> blocks) — a selective
+// import that must FAIL cannot be expressed inside a test block, since the
+// import is what fails.
+struct Account {
+    hide balance <int>
+    owner <str>
+}
+
+Account includes {
+    fun open(o <str>, b <int>) {
+        self.owner = o
+        self.balance = b
+    }
+
+    fun total() { self.balance }
+
+    fun richer_than(other <Account>) { self.balance > other.balance }
+
+    fun clone_with(b <int>) { Account(balance=b, owner=self.owner) }
+}
+
+struct Savings(Account) {
+    rate <int>
+}
+
+Savings includes {
+    // reaches a hidden field it inherited
+    fun projected() { self.balance * self.rate }
+}
+
+struct Intruder {
+    x <int>
+}
+
+Intruder includes {
+    fun peek(a <Account>) { a.balance }
+
+    fun poke(a <Account>) {
+        a.balance = 0
+    }
+}
+
+// A plain top-level function is "outside" every struct.
+fun poke_outside(a <Account>) {
+    a.balance = 5
+}
+
+fun read_outside(a <Account>) { a.balance }
+
+fun make() {
+    a <Account>
+    a.open("ada", 100)
+    a
+}
+
+<test>("a method reads and writes its own hidden field") {
+    expect(make().total()).eq(100)
+}
+
+<test>("a method reads another instance of the same struct") {
+    a := make()
+    b <Account>
+    b.open("bo", 10)
+    expect(a.richer_than(b)).truthy()
+}
+
+<test>("a subclass method reaches an inherited hidden field") {
+    s <Savings>
+    s.open("ada", 50)
+    s.rate = 2
+    expect(s.projected()).eq(100)
+}
+
+<test>("a factory inside the struct may build one with a literal") {
+    expect(make().clone_with(7).total()).eq(7)
+}
+
+<test>("public fields are unaffected") {
+    expect(make().owner).eq("ada")
+}
+
+<test>("reading a hidden field from outside fails") {
+    expect(read_outside(make()) guard _err -> "blocked").eq("blocked")
+    expect(make().balance guard _err -> "blocked").eq("blocked")
+}
+
+<test>("writing a hidden field from outside fails") {
+    expect(poke_outside(make()) guard _err -> "blocked").eq("blocked")
+}
+
+<test>("an unrelated struct's method cannot read it") {
+    i <Intruder>
+    expect(i.peek(make()) guard _err -> "blocked").eq("blocked")
+}
+
+<test>("an unrelated struct's method cannot write it") {
+    i <Intruder>
+    expect(i.poke(make()) guard _err -> "blocked").eq("blocked")
+}
+
+<test>("construction from outside cannot supply a hidden field") {
+    expect(Account(balance=1, owner="x") guard _err -> "blocked").eq("blocked")
+}
+
+<test>("zero-value construction is still allowed") {
+    a <Account>
+    expect(a.total()).eq(0)
+}

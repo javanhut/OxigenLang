@@ -1,19 +1,30 @@
 fun split(s <str>, delim <str>) { __split(s, delim) }
+
 fun join(arr <array>, delim <str>) { __join(arr, delim) }
+
 fun trim(s <str>) { __trim(s) }
+
 fun strip(s <str>, chars <str>) { __strip(s, chars) }
+
 fun strip_left(s <str>, chars <str>) { __strip_left(s, chars) }
+
 fun strip_right(s <str>, chars <str>) { __strip_right(s, chars) }
+
 fun upper(s <str>) { __upper(s) }
+
 fun lower(s <str>) { __lower(s) }
+
 fun replace(s <str>, old <str>, new_str <str>) { __replace(s, old, new_str) }
+
 fun starts_with(s <str>, prefix <str>) { __starts_with(s, prefix) }
+
 fun ends_with(s <str>, suffix <str>) { __ends_with(s, suffix) }
+
 fun contains_str(s <str>, sub <str>) { __contains_str(s, sub) }
+
 fun contains(s <str>, sub <str>) { __contains_str(s, sub) }
 
 // ── Slicing & characters ──
-
 fun slice(s <str>, start <int>, end <int>) { s[start:end] }
 
 fun char_at(s <str>, i <int>) { str(s[i]) }
@@ -29,12 +40,11 @@ fun reverse(s <str>) {
 }
 
 // ── Building ──
-
 // `repeat` is a reserved loop keyword, so the string repeater is `repeated`.
 fun repeated(s <str>, n <int>) {
     result <str> := ""
     i <int>
-    repeat unless i >= n {
+    repeat when i < n {
         result = result + s
         i = i + 1
     }
@@ -43,7 +53,7 @@ fun repeated(s <str>, n <int>) {
 
 fun pad_left(s <str>, width <int>, fill <str>) {
     result <str> := s
-    repeat unless len(result) >= width {
+    repeat when len(result) < width {
         result = fill + result
     }
     result
@@ -51,7 +61,7 @@ fun pad_left(s <str>, width <int>, fill <str>) {
 
 fun pad_right(s <str>, width <int>, fill <str>) {
     result <str> := s
-    repeat unless len(result) >= width {
+    repeat when len(result) < width {
         result = result + fill
     }
     result
@@ -59,20 +69,27 @@ fun pad_right(s <str>, width <int>, fill <str>) {
 
 fun capitalize(s <str>) {
     option {
-        len(s) == 0 -> s,
-        upper(s[0:1]) + s[1:]
+        len(s) == 0 -> {
+            s
+        }
+        {
+            upper(s[0:1]) + s[1:]
+        }
     }
 }
 
 // ── Searching ──
-
 fun index_of(s <str>, sub <str>) {
     n <int> := len(sub)
     last <int> := len(s) - n
     found <int> := -1
     i <int>
     repeat unless (i > last) or (found != -1) {
-        option { s[i:i + n] == sub -> found = i }
+        option {
+            s[i:i + n] == sub -> {
+                found = i
+            }
+        }
         i = i + 1
     }
     found

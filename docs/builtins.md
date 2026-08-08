@@ -69,13 +69,19 @@ len(set(1, 2, 3))
 
 ### `push(array, element)`
 
-Returns a **new** array with the element appended to the end. The original array is not modified.
+Appends the element to the end of the array and returns **that same array** — arrays are shared references, so the original is modified too.
 
 ```oxi
 arr := [1, 2]
 arr := push(arr, 3)
-println(arr)
+println(arr)          // [1, 2, 3]
+
+a := [1, 2]
+b := push(a, 3)
+println(a)            // [1, 2, 3]  <- a changed as well
 ```
+
+Assigning the result back (`arr := push(arr, x)`) is the idiomatic form and is always correct. If you need the original left alone, copy it first — for example `array.slice(a, 0, len(a))`.
 
 **Argument types:** First argument must be an Array.
 
@@ -131,14 +137,23 @@ has((10, 20), 10)
 
 ## Iteration
 
-### `range(n)`
+### `range(end)` / `range(start, end)` / `range(start, end, step)`
 
-Returns an array of integers from `0` up to (but not including) `n`.
+Returns an array of integers from `start` (default `0`) up to but not including
+`end`, advancing by `step` (default `1`).
 
 ```oxi
-range(5)
-range(0)
-range(1)
+range(5)            // [0, 1, 2, 3, 4]
+range(2, 5)         // [2, 3, 4]
+range(0, 10, 3)     // [0, 3, 6, 9]
+```
+
+A negative step counts down. The bound stays exclusive from whichever side it is
+approached:
+
+```oxi
+range(5, 0, -1)     // [5, 4, 3, 2, 1]
+range(10, 0, -3)    // [10, 7, 4, 1]
 ```
 
 Commonly used with `each` for counted iteration:
@@ -147,9 +162,19 @@ Commonly used with `each` for counted iteration:
 each i in range(10) {
     println(i)
 }
+
+each i in range(10, 0, -2) {
+    println(i)
+}
 ```
 
-**Argument types:** Integer only. Negative values produce an empty array.
+**Argument types:** Integer only.
+
+**Empty results:** the range is empty when the step points away from the bound —
+`range(0, 5, -1)` and `range(5, 0)` both yield `[]`. A two-argument range is
+never auto-reversed; pass a negative step to count down.
+
+**Errors:** a `step` of `0` is an error, since the range could never terminate.
 
 ## Type Conversion
 
@@ -502,7 +527,7 @@ option {
 | `print`     | `(args...)`            | `None`       | Print args separated by spaces        |
 | `println`   | `(args...)`            | `None`       | Print args separated by spaces        |
 | `len`       | `(collection)`         | `Integer`    | Length of string/array/tuple/map/set  |
-| `push`      | `(array, element)`     | `Array`      | New array with element appended       |
+| `push`      | `(array, element)`     | `Array`      | Appends in place; returns same array  |
 | `first`     | `(array)`              | `any`/`None` | First element or None                 |
 | `last`      | `(array)`              | `any`/`None` | Last element or None                  |
 | `rest`      | `(array)`              | `Array`/`None`| All elements except first            |
@@ -534,4 +559,4 @@ See also:
 - [Type System](type_system.md) — type conversion and introspection details
 - [Variables and Assignments](variables.md) — mutability model used by `is_mut` and `is_type_mut`
 - [Imports and Modules](imports.md) — the `introduce` keyword and module system
-- [Standard Library](stdlib.md) — full reference for all stdlib modules (math, strings, array, io, os, time, random, path, json, toml, net)
+- [Standard Library](stdlib/README.md) — one page per stdlib module, every function documented

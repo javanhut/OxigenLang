@@ -225,8 +225,7 @@ impl VirtStack {
         if self.slots.is_empty() {
             return;
         }
-        // Pushes are processed in stack order so writes land at
-        // sequentially increasing `stack_view.len`.
+        // Processed in stack order so writes land at increasing stack_view.len.
         for slot in self.slots.drain(..) {
             match slot {
                 VirtSlot::IntSsa(payload) => {
@@ -252,7 +251,7 @@ fn emit_inline_push_integer(
     vm_val: ir::Value,
     payload: ir::Value,
 ) {
-    let flags = ir::MemFlags::trusted();
+    let flags = ir::MemFlagsData::trusted();
     let stack_ptr = load_stack_ptr(builder, vm_val);
     let top = load_stack_len(builder, vm_val);
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
@@ -272,7 +271,7 @@ fn emit_inline_push_integer(
 
 /// Inline `jit_push_float_inline`.
 fn emit_inline_push_float(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value, bits: ir::Value) {
-    let flags = ir::MemFlags::trusted();
+    let flags = ir::MemFlagsData::trusted();
     let stack_ptr = load_stack_ptr(builder, vm_val);
     let top = load_stack_len(builder, vm_val);
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
@@ -294,7 +293,7 @@ fn emit_inline_push_float(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value, 
 /// by `value_bool_tag_and_payload_are_pinned` and
 /// `value_none_layout_is_pinned` tests in `vm/value.rs`.
 fn emit_inline_push_const(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value, k: VirtConst) {
-    let flags = ir::MemFlags::trusted();
+    let flags = ir::MemFlagsData::trusted();
     let stack_ptr = load_stack_ptr(builder, vm_val);
     let top = load_stack_len(builder, vm_val);
     let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
@@ -305,18 +304,14 @@ fn emit_inline_push_const(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value, 
         VirtConst::None => {
             let tag = builder.ins().iconst(types::I8, VALUE_TAG_NONE as i64);
             builder.ins().store(flags, tag, slot_ptr, 0);
-            // Zero the payload word for a clean bit pattern (matches
-            // Value::None's freshly constructed shape; defensive for
-            // any whole-slot byte compare, of which there are none
-            // today but future code may add).
+            // Zero the payload for a clean bit pattern matching a freshly constructed Value::None.
             let zero64 = builder.ins().iconst(types::I64, 0);
             builder
                 .ins()
                 .store(flags, zero64, slot_ptr, VALUE_INT_PAYLOAD_OFFSET as i32);
         }
         VirtConst::True | VirtConst::False => {
-            // Boolean tag is 3 (4th variant); payload byte at offset 1.
-            // Pinned by `value_bool_tag_and_payload_are_pinned`.
+            // Boolean tag is 3, payload at offset 1; pinned by value_bool_tag_and_payload_are_pinned.
             const VALUE_TAG_BOOLEAN: u8 = 3;
             let tag = builder.ins().iconst(types::I8, VALUE_TAG_BOOLEAN as i64);
             builder.ins().store(flags, tag, slot_ptr, 0);
@@ -334,14 +329,14 @@ fn emit_inline_push_const(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value, 
 }
 
 fn load_stack_ptr(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value) -> ir::Value {
-    let flags = ir::MemFlags::trusted();
+    let flags = ir::MemFlagsData::trusted();
     builder
         .ins()
         .load(types::I64, flags, vm_val, vm_stack_view_ptr_offset())
 }
 
 fn load_stack_len(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value) -> ir::Value {
-    let flags = ir::MemFlags::trusted();
+    let flags = ir::MemFlagsData::trusted();
     builder
         .ins()
         .load(types::I64, flags, vm_val, vm_stack_view_len_offset())
@@ -368,8 +363,5 @@ mod tests {
         assert_eq!(s.pending_depth(), 0);
     }
 
-    // The pop variants and IR emission are exercised end-to-end by
-    // the JIT integration tests in core/tests/jit_fallback.rs and by
-    // the bench suite. Constructing a Cranelift FunctionBuilder for
-    // a unit test would be heavier than the test surface justifies.
+    // Exercised end-to-end by core/tests/jit_fallback.rs and the bench suite.
 }

@@ -14,4 +14,4 @@ def run(n):
     return total
 
 
-run(500_000)
+run(12_000_000)

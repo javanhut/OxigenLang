@@ -7,7 +7,6 @@
 //
 // Targets a local Ollama (`ollama run llama3`). Change url / model / body for
 // another NDJSON streaming API.  Run:  oxigen example/llm_stream_spinner.oxi
-
 introduce net
 introduce json
 introduce strings
@@ -16,32 +15,36 @@ introduce ansi
 main {
     payload := json.stringify({"model": "llama3", "prompt": "Say hello in five words."})
     s := net.stream_post("http://localhost:11434/api/generate", payload)
-
     frames := ["|", "/", "-", "\\"]
     text <str> := ""
     fidx := 0
     done := False
     streaming := False
-
     print(ansi.hide_cursor())
     repeat unless done {
-        line := net.read_line(s, 80)             // wait up to 80ms for a line
+        line := net.read_line(s, 80)  // wait up to 80ms for a line
         option {
             // None = nothing yet -> animate the spinner (only before tokens flow,
             // so a mid-stream pause never erases text already printed).
             line == None -> {
-                option { streaming == False -> {
-                    frame := frames[fidx % len(frames)]
-                    print(ansi.clear_line() + ansi.add_color(frame, ansi.ForeGroundColors.Cyan) + " thinking...")
-                    fidx = fidx + 1
-                }}
-            },
-            line == "" -> { done = True },        // end of stream
+                option {
+                    streaming == False -> {
+                        frame := frames[fidx % len(frames)]
+                        print(ansi.clear_line() + ansi.add_color(frame, ansi.ForeGroundColors.Cyan) + " thinking...")
+                        fidx = fidx + 1
+                    }
+                }
+            }
+            line == "" -> {
+                done = True  // end of stream
+            }
             {
-                option { streaming == False -> {
-                    print(ansi.clear_line())
-                    streaming = True
-                }}
+                option {
+                    streaming == False -> {
+                        print(ansi.clear_line())
+                        streaming = True
+                    }
+                }
                 obj := json.parse(strings.trim(line))
                 text = text + obj["response"]
                 print(obj["response"])

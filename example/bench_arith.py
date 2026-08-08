@@ -8,4 +8,4 @@ def work(n):
     return work(n - 1) + work(n - 2) * 3 - n
 
 
-work(28)
+work(34)

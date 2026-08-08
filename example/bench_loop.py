@@ -7,4 +7,4 @@ def loop_sum(n):
     return total
 
 
-loop_sum(1_000_000)
+loop_sum(20_000_000)

@@ -1,30 +1,22 @@
 enum HttpMethod {
-  post: "POST"
-  get: "GET"
-  put: "PUT"
-  patch: "PATCH"
-  delete: "DELETE"
-
+    post: "POST"
+    get: "GET"
+    put: "PUT"
+    patch: "PATCH"
+    delete: "DELETE"
 }
-
 
 // HTTP GET request. Returns map with "status" and "body".
 fun get(url <str>) { __http_request("GET", url) }
 
 // HTTP POST request with body. Returns map with "status" and "body".
-fun post(url <str>, body <str>, headers <map> = {"Content-Type": "application/json"}) {
-    __http_request(HttpMethod.post.value, url, headers, body)
-}
+fun post(url <str>, body <str>, headers <map> = {"Content-Type": "application/json"}) { __http_request(HttpMethod.post.value, url, headers, body) }
 
 // HTTP PUT request with body. Returns map with "status" and "body".
-fun put(url <str>, body <str>, headers <map> = {"Content-Type": "application/json"}) {
-    __http_request(HttpMethod.put.value, url, headers, body)
-}
+fun put(url <str>, body <str>, headers <map> = {"Content-Type": "application/json"}) { __http_request(HttpMethod.put.value, url, headers, body) }
 
 // HTTP PATCH request with body. Returns map with "status" and "body".
-fun patch(url <str>, body <str>, headers <map> = {"Content-Type": "application/json"}) {
-    __http_request(HttpMethod.patch.value, url, headers, body)
-}
+fun patch(url <str>, body <str>, headers <map> = {"Content-Type": "application/json"}) { __http_request(HttpMethod.patch.value, url, headers, body) }
 
 // HTTP DELETE request. Returns map with "status" and "body".
 fun delete(url <str>) { __http_request(HttpMethod.delete.value, url) }
@@ -33,21 +25,16 @@ fun delete(url <str>) { __http_request(HttpMethod.delete.value, url) }
 fun head(url <str>) { __http_request("HEAD", url) }
 
 // Generic HTTP request with full control.
-fun request(method <HttpMethod>, url <str>, headers <generic>, body <generic>) {
-    __http_request(method.value, url, headers, body)
-}
+fun request(method <HttpMethod>, url <str>, headers <generic>, body <generic>) { __http_request(method.value, url, headers, body) }
 
 // ── Streaming HTTP ────────────────────────────────────────────────────────
-
 // Stream a GET response body to a file without buffering it in memory.
 // Returns the HTTP status code.
 fun download(url <str>, path <str>) { __net_download(url, path) }
 
 // Stream a file as the request body without buffering it in memory.
 // Returns a map with "status" and "body".
-fun upload(method <str>, url <str>, file_path <str>, headers <map> = {}) {
-    __net_upload(method, url, file_path, headers)
-}
+fun upload(method <str>, url <str>, file_path <str>, headers <map> = {}) { __net_upload(method, url, file_path, headers) }
 
 // Open a streaming HTTP request. Returns a stream handle; read it with
 // read_line (or read_chunk) and free it with close. The body is never buffered
@@ -56,24 +43,16 @@ fun upload(method <str>, url <str>, file_path <str>, headers <map> = {}) {
 //
 //   net.open_stream(url)                                  // GET
 //   net.open_stream(url, "POST", headers, body)           // e.g. an LLM API
-fun open_stream(url <str>, method <str> = "GET", headers <map> = {}, body <str> = "") {
-    __net_http_open(method, url, headers, body)
-}
+fun open_stream(url <str>, method <str> = "GET", headers <map> = {}, body <str> = "") { __net_http_open(method, url, headers, body) }
 
 // Method shorthands mirroring get/post/put/patch — the common streaming calls.
 fun stream_get(url <str>, headers <map> = {}) { open_stream(url, "GET", headers, "") }
 
-fun stream_post(url <str>, body <str>, headers <map> = {"Content-Type": "application/json"}) {
-    open_stream(url, "POST", headers, body)
-}
+fun stream_post(url <str>, body <str>, headers <map> = {"Content-Type": "application/json"}) { open_stream(url, "POST", headers, body) }
 
-fun stream_put(url <str>, body <str>, headers <map> = {"Content-Type": "application/json"}) {
-    open_stream(url, "PUT", headers, body)
-}
+fun stream_put(url <str>, body <str>, headers <map> = {"Content-Type": "application/json"}) { open_stream(url, "PUT", headers, body) }
 
-fun stream_patch(url <str>, body <str>, headers <map> = {"Content-Type": "application/json"}) {
-    open_stream(url, "PATCH", headers, body)
-}
+fun stream_patch(url <str>, body <str>, headers <map> = {"Content-Type": "application/json"}) { open_stream(url, "PATCH", headers, body) }
 
 // Read the next line from a stream (newline-delimited), WITHOUT the newline.
 // This is the easy way to consume NDJSON / SSE token streams — each call returns
@@ -87,23 +66,18 @@ fun stream_patch(url <str>, body <str>, headers <map> = {"Content-Type": "applic
 //   timeout_ms = 0  -> block until a line or end of stream
 //   timeout_ms > 0  -> returns None if no full line arrived yet (spin and retry)
 // Returns "" at end of stream.
-fun read_line(stream <int>, timeout_ms <int> = 0) {
-    __net_http_read_line(stream, timeout_ms)
-}
+fun read_line(stream <int>, timeout_ms <int> = 0) { __net_http_read_line(stream, timeout_ms) }
 
 // Lower-level: read up to `max` raw bytes (for binary or non-line protocols).
 //   timeout_ms = 0 blocks; > 0 returns None if nothing arrived yet.
 // Returns "" at end of stream. Prefer read_line for text/NDJSON streams.
-fun read_chunk(stream <int>, max <int> = 4096, timeout_ms <int> = 0) {
-    __net_http_read(stream, max, timeout_ms)
-}
+fun read_chunk(stream <int>, max <int> = 4096, timeout_ms <int> = 0) { __net_http_read(stream, max, timeout_ms) }
 
 // ── TCP sockets ───────────────────────────────────────────────────────────
 //
 // A handle is an opaque ticket number for an open socket. Pass it to
 // send/receive/close. Always close a handle when done — a forgotten handle
 // leaks one connection until the program exits, like a file you never close.
-
 // Open a TCP connection. Returns a connection handle.
 fun connect(host <str>, port <int>) { __net_tcp_connect(host, port) }
 
@@ -116,21 +90,30 @@ fun accept(server <int>) { __net_tcp_accept(server) }
 // Send text on a connection. Returns the number of bytes written.
 fun send(conn <int>, data <str>) { __net_send(conn, data) }
 
-// Receive up to `max` bytes from a connection. Returns "" on a clean close.
+// Receive up to `max` bytes from a connection. Returns "" on a clean close, and
+// also when a set_timeout deadline passes with nothing to read.
 fun receive(conn <int>, max <int> = 4096) { __net_receive(conn, max) }
+
+// Bound how long `receive` waits on this connection; 0 restores waiting forever.
+// A timed-out read returns "", the same as a closed peer. Set this on any
+// connection a remote peer can hold open — otherwise one idle client keeps its
+// reader parked for the life of the process.
+fun set_timeout(conn <int>, ms <int>) { __net_set_timeout(conn, ms) }
 
 // Close a socket handle (connection or server). Idempotent.
 fun close(handle <int>) { __net_close(handle) }
 
 // ── UDP sockets ───────────────────────────────────────────────────────────
-
 // Bind a UDP socket. Returns a socket handle.
 fun udp_bind(host <str>, port <int>) { __net_udp_bind(host, port) }
 
 // Send a UDP datagram to host:port. Returns the number of bytes sent.
-fun udp_send(sock <int>, data <str>, host <str>, port <int>) {
-    __net_udp_send(sock, data, host, port)
-}
+fun udp_send(sock <int>, data <str>, host <str>, port <int>) { __net_udp_send(sock, data, host, port) }
 
-// Receive a datagram (up to `max` bytes). Returns a (data, sender_address) tuple.
+// Receive one datagram (up to `max` bytes). Returns a (data, sender_address) tuple.
+//
+// A datagram LARGER than `max` is an error, not a short read: UDP has no stream
+// to resume from, so the overflow is discarded by the OS and gone for good.
+// Raise `max` (up to 65536, which no datagram can exceed) if you would rather
+// always take whatever arrives.
 fun udp_receive(sock <int>, max <int> = 4096) { __net_udp_receive(sock, max) }

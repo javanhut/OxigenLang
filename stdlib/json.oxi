@@ -1,5 +1,6 @@
 introduce io
 introduce strings
+introduce array
 
 // Parse a JSON string into Oxigen values.
 // Objects become maps, arrays stay arrays, null becomes None.
@@ -22,7 +23,7 @@ fun get_in(obj <map>, path <str>) {
     i <int>
     repeat when i < len(parts) {
         give None when type(current) != "MAP"
-        give None when not has(current, parts[i])
+        give None unless has(current, parts[i])
         current = current[parts[i]]
         i++
     }
@@ -36,7 +37,14 @@ fun set_in(obj <map>, path <str>, val <generic>) {
     give insert(obj, parts[0], val) when len(parts) == 1
     first := parts[0]
     rest := strings.join(parts[1:], ".")
-    child := option { has(obj, first) and type(obj[first]) == "MAP" -> obj[first], {} }
+    child := option {
+        has(obj, first) and type(obj[first]) == "MAP" -> {
+            obj[first]
+        }
+        {
+            {}
+        }
+    }
     insert(obj, first, set_in(child, rest, val))
 }
 
@@ -47,7 +55,11 @@ fun del_in(obj <map>, path <str>) {
     give remove(obj, parts[0]) when len(parts) == 1
     first := parts[0]
     rest := strings.join(parts[1:], ".")
-    child := option { has(obj, first) and type(obj[first]) == "MAP" -> obj[first] }
+    child := option {
+        has(obj, first) and type(obj[first]) == "MAP" -> {
+            obj[first]
+        }
+    }
     give obj when type(child) != "MAP"
     insert(obj, first, del_in(child, rest))
 }
@@ -59,11 +71,31 @@ fun has_key_in(obj <map>, path <str>) {
     i <int>
     repeat when i < len(parts) {
         give False when type(current) != "MAP"
-        give False when not has(current, parts[i])
+        give False unless has(current, parts[i])
         current = current[parts[i]]
         i++
     }
     True
+}
+
+// ── Arrays of records ──
+// Update the first element whose `key` equals `val` by deep-merging `fields`
+// into it; append a new record when there is none:
+//
+//     data["information"] = json.set_where(data["information"], "person", "john",
+//                                          {"info": {"job": "developer"}})
+//
+// Fields not named survive the update — the merge is recursive, so setting
+// info.job leaves info.age alone. Appending builds {key: val} + fields.
+//
+// Returns the array, edited in place either way (arrays are shared
+// references). Assigning the result back is the clearer form and costs
+// nothing.
+fun set_where(arr <array>, key <generic>, val <generic>, fields <map>) {
+    found := array.find_where(arr, key, val)
+    give push(arr, deep_merge(insert({}, key, val), fields)) when found == None
+    deep_merge(found, fields)
+    arr
 }
 
 // Merge two maps. Keys in `b` overwrite keys in `a`.
@@ -88,12 +120,21 @@ fun deep_merge(a <map>, b <map>) {
     repeat when i < len(b_keys) {
         k := b_keys[i]
         b_val := b[k]
-        a_val := option { has(result, k) -> result[k], None }
+        a_val := option {
+            has(result, k) -> {
+                result[k]
+            }
+            {
+                None
+            }
+        }
         option {
             type(a_val) == "MAP" and type(b_val) == "MAP" -> {
                 result = insert(result, k, deep_merge(a_val, b_val))
-            },
-            { result = insert(result, k, b_val) }
+            }
+            {
+                result = insert(result, k, b_val)
+            }
         }
         i++
     }

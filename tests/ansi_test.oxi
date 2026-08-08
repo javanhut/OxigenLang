@@ -1,0 +1,38 @@
+introduce ansi
+
+<test>("foreground colors wrap and reset") {
+    expect(ansi.add_color("x", ansi.ForeGroundColors.Red)).eq("[31mx[0m")
+    expect(ansi.add_color("x", ansi.ForeGroundColors.Green)).eq("[32mx[0m")
+    expect(ansi.add_color("", ansi.ForeGroundColors.Blue)).eq("[34m[0m")
+}
+
+<test>("background colors wrap and reset") {
+    expect(ansi.add_color("x", ansi.BackGroundColors.Black)).eq("[40mx[0m")
+    expect(ansi.add_color("x", ansi.BackGroundColors.White)).eq("[47mx[0m")
+}
+
+<test>("modifiers wrap and reset") {
+    expect(ansi.add_modifier("x", ansi.ModCodes.Bold)).eq("[1mx[0m")
+    expect(ansi.add_modifier("x", ansi.ModCodes.Underline)).eq("[4mx[0m")
+}
+
+<test>("enum variants carry their escape codes") {
+    expect(ansi.ModCodes.Reset.value).eq("[0m")
+    expect(ansi.ForeGroundColors.Cyan.value).eq("[36m")
+    expect(ansi.BackGroundColors.Magenta.value).eq("[45m")
+}
+
+<test>("cursor and line controls") {
+    expect(ansi.clear_line()).eq("\r[K")
+    expect(ansi.line_start()).eq("\r")
+    expect(ansi.hide_cursor()).eq("[?25l")
+    expect(ansi.show_cursor()).eq("[?25h")
+}
+
+<test>("coloring is composable") {
+    // Nesting reinstates a reset in the middle; the outer color still opens
+    // and the whole string still ends reset.
+    inner := ansi.add_color("x", ansi.ForeGroundColors.Red)
+    outer := ansi.add_modifier(inner, ansi.ModCodes.Bold)
+    expect(outer).eq("[1m[31mx[0m[0m")
+}

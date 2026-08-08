@@ -172,7 +172,7 @@ mod layout_tests {
         let obj = Rc::new(ObjClosure {
             function: func,
             upvalues: Vec::new(),
-            module_globals: RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
@@ -181,6 +181,8 @@ mod layout_tests {
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
             specialized_kind: Cell::new(0),
+            lean_thunk: Cell::new(None),
+            lean_arity: Cell::new(0),
             upvalue_int_kinds: kinds,
             upvalue_int_values: values,
         });
@@ -203,6 +205,26 @@ mod layout_tests {
         drop(obj);
     }
 
+    /// JIT-emitted call sequences read a callee's owning module with a single
+    /// pointer load at `offset_of!(ObjClosure, module_globals)`, so the raw
+    /// mirror must stay the first field of the `#[repr(C)]` `ModuleGlobals`.
+    /// If it moves, every call under a module frame stores a garbage pointer
+    /// into the new `JitFrame` and global lookups read freed memory.
+    #[test]
+    fn module_globals_ptr_is_first_field() {
+        let dict = Rc::new(HashMap::from([("x".to_string(), Value::Integer(1))]));
+        let mg = ModuleGlobals::from(Some(Rc::clone(&dict)));
+
+        let first_word = unsafe { *(&mg as *const ModuleGlobals as *const *const HashMap<String, Value>) };
+        assert_eq!(first_word, Rc::as_ptr(&dict), "raw view must be at offset 0");
+        assert_eq!(first_word, mg.as_ptr());
+        assert!(mg.get().unwrap().contains_key("x"));
+
+        mg.set(None);
+        assert!(mg.as_ptr().is_null(), "clearing must clear both views");
+        assert!(mg.get().is_none());
+    }
+
     /// The JIT's inline MethodCall fast path relies on `Rc<T>` being
     /// `NonNull<RcBox<T>>` with `strong: Cell<usize>` at RcBox offset 0.
     /// If a future Rust reorders `RcBox` or changes the `Cell<usize>`
@@ -217,7 +239,7 @@ mod layout_tests {
         let obj = Rc::new(ObjClosure {
             function: func,
             upvalues: Vec::new(),
-            module_globals: RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
@@ -226,11 +248,12 @@ mod layout_tests {
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
             specialized_kind: Cell::new(0),
+            lean_thunk: Cell::new(None),
+            lean_arity: Cell::new(0),
             upvalue_int_kinds: kinds,
             upvalue_int_values: values,
         });
-        // Read the RcBox pointer the same way the JIT does: raw bit
-        // pattern of the `Rc`, which is `NonNull<RcBox<T>>`.
+        // Read the raw Rc bit pattern the way the JIT does: NonNull<RcBox<T>>.
         let rcbox_ptr: *const usize =
             unsafe { *(&obj as *const Rc<ObjClosure> as *const *const usize) };
         let before = unsafe { *rcbox_ptr };
@@ -280,7 +303,7 @@ mod layout_tests {
             methods: RefCell::new(HashMap::new()),
             parent: None,
             layout: std::cell::OnceCell::new(),
-            module_globals: RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
         });
         let inst = ObjStructInstance::new(
             "Pair".to_string(),
@@ -341,9 +364,7 @@ pub enum Value {
     Uint(u64),
     None,
 
-    // Heap-allocated. `String` holds `Rc<String>` (not `Rc<str>`) so the
-    // pointer stays thin (8 B); the fat variant wasted 8 B per Value
-    // across every stack slot. See roadmap A1.1b.
+    // Rc<String> not Rc<str>, so the pointer stays thin; the fat variant cost 8 B per Value.
     String(Rc<String>),
     Array(Rc<RefCell<Vec<Value>>>),
     Tuple(Rc<Vec<Value>>),
@@ -444,6 +465,20 @@ pub fn rc_str(s: impl Into<String>) -> Rc<String> {
     Rc::new(s.into())
 }
 
+/// The file a function's code was compiled from.
+///
+/// A frame's line number only means something alongside the source it indexes
+/// into. Without this, every frame rendered against whichever file the VM
+/// happened to be started with, so an error raised inside an imported function
+/// underlined an unrelated line of the entry script.
+///
+/// One instance is shared by every function compiled from the same file.
+#[derive(Debug)]
+pub struct ModuleOrigin {
+    pub file: String,
+    pub source: String,
+}
+
 /// A compiled function (not yet a closure — no captured upvalues).
 #[derive(Debug, Clone)]
 pub struct Function {
@@ -461,6 +496,19 @@ pub struct Function {
     /// closure's code across threads — a worker rebuilds the same id→Function
     /// table by compiling the same source (ids are deterministic per source).
     pub id: u32,
+    /// Which file this was compiled from. Stamped after compilation by
+    /// `set_module_origin` — the same post-hoc wiring `module_globals` uses,
+    /// since the compiler itself has no notion of files. `None` means the
+    /// entry script, whose source the VM already holds.
+    pub origin: RefCell<Option<Rc<ModuleOrigin>>>,
+    /// Top-level names this file declared with `hide`. Only ever non-empty on
+    /// a script function (the whole-file body); `import_module` reads it to
+    /// build the module's private set.
+    pub hidden_globals: Vec<String>,
+    /// When this function is a struct method, the name of the struct whose
+    /// `includes` block defined it — nested closures inherit it. Hidden-field
+    /// access is permitted only from code carrying the owning struct's name.
+    pub method_of: Option<String>,
 }
 
 impl Function {
@@ -474,6 +522,27 @@ impl Function {
             locals: Vec::new(),
             has_loop: false,
             id: 0,
+            origin: RefCell::new(None),
+            hidden_globals: Vec::new(),
+            method_of: None,
+        }
+    }
+}
+
+/// Stamp `origin` onto a function and every function nested inside it.
+///
+/// Nested functions live in the constant pool as template closures, so the
+/// walk has to recurse through constants rather than just the top level —
+/// otherwise a helper defined inside an imported function still renders
+/// against the wrong file.
+pub fn set_module_origin(function: &Function, origin: &Rc<ModuleOrigin>) {
+    if function.origin.borrow().is_some() {
+        return; // already stamped — also stops cycles through shared constants
+    }
+    *function.origin.borrow_mut() = Some(Rc::clone(origin));
+    for constant in &function.chunk.constants {
+        if let ValueRepr::Closure(closure) = constant.repr() {
+            set_module_origin(&closure.function, origin);
         }
     }
 }
@@ -495,12 +564,67 @@ pub struct LocalInfo {
     pub type_constraint: Option<String>,
 }
 
+/// The globals of the module a closure or struct def was defined in — the
+/// scope its free names resolve against. `None` for definitions in the main
+/// script, which resolve against the VM's own globals.
+///
+/// Wired post-hoc: a module runs in a sub-VM, so its definitions are tagged
+/// once it finishes loading (`VM::import_module`).
+///
+/// `ptr` mirrors `rc` so JIT-emitted code can read the dict with one
+/// pointer-sized load at a pinned offset — it cannot walk a
+/// `RefCell<Option<Rc<_>>>`, whose layout is not guaranteed. `#[repr(C)]`
+/// keeps `ptr` at offset 0, and `set` is the only writer, so the two views
+/// cannot drift apart.
+#[repr(C)]
+#[derive(Debug, Default)]
+pub struct ModuleGlobals {
+    ptr: Cell<*const HashMap<String, Value>>,
+    rc: RefCell<Option<Rc<HashMap<String, Value>>>>,
+}
+
+impl ModuleGlobals {
+    /// Defined in the main script — no owning module.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self) -> Option<Rc<HashMap<String, Value>>> {
+        self.rc.borrow().clone()
+    }
+
+    pub fn set(&self, globals: Option<Rc<HashMap<String, Value>>>) {
+        self.ptr.set(
+            globals
+                .as_ref()
+                .map_or(std::ptr::null(), Rc::as_ptr),
+        );
+        *self.rc.borrow_mut() = globals;
+    }
+
+    /// Raw view for the JIT, which stores it into a `JitFrame`. Null = none.
+    pub fn as_ptr(&self) -> *const HashMap<String, Value> {
+        self.ptr.get()
+    }
+}
+
+impl From<Option<Rc<HashMap<String, Value>>>> for ModuleGlobals {
+    fn from(globals: Option<Rc<HashMap<String, Value>>>) -> Self {
+        let mg = Self::none();
+        mg.set(globals);
+        mg
+    }
+}
+
 /// A closure: a compiled function + captured upvalues.
 #[derive(Debug)]
 pub struct ObjClosure {
     pub function: Rc<Function>,
     pub upvalues: Vec<Rc<RefCell<Upvalue>>>,
-    pub module_globals: RefCell<Option<std::rc::Rc<HashMap<String, Value>>>>,
+    /// The module this closure was defined in. Inherited at *creation* time
+    /// by nested closures, never at call time — a callback handed to another
+    /// module still resolves its names in the file it was written in.
+    pub module_globals: ModuleGlobals,
     /// How many times this closure has been called. Used by the JIT engine
     /// for hot-function detection. Interior mutability keeps closures
     /// cheaply shareable through `Rc`.
@@ -544,6 +668,13 @@ pub struct ObjClosure {
     /// A3 direct-call dispatch gates on `== 2`; trampolines never
     /// receive direct-call traffic.
     pub specialized_kind: Cell<u8>,
+    /// Phase 2.2: pointer to the lean integer entry
+    /// (`fn(i64 args.., i64 budget) -> i64`), when the function qualified.
+    /// Opaque — only the JIT boundary knows the real signature.
+    pub lean_thunk: Cell<Option<*const ()>>,
+    /// Arity the lean entry expects, so the boundary can read exactly that many
+    /// integer arguments before committing to the call.
+    pub lean_arity: Cell<u8>,
     /// B2.2: JIT-visible parallel cache for the `Closed(Integer)`
     /// upvalue shape. `upvalue_int_kinds[i] == 1` means upvalue `i` is
     /// currently `Upvalue::Closed(Value::Integer(_))` and the i64 is in
@@ -591,7 +722,7 @@ impl ObjClosure {
         ObjClosure {
             function,
             upvalues,
-            module_globals: RefCell::new(None),
+            module_globals: crate::vm::value::ModuleGlobals::none(),
             call_count: Cell::new(0),
             loop_count: Cell::new(0),
             jit_state: Cell::new(0),
@@ -600,6 +731,8 @@ impl ObjClosure {
             specialized_thunk: Cell::new(None),
             specialized_arity: Cell::new(0),
             specialized_kind: Cell::new(0),
+            lean_thunk: Cell::new(None),
+            lean_arity: Cell::new(0),
             upvalue_int_kinds,
             upvalue_int_values,
         }
@@ -644,7 +777,7 @@ pub struct ObjStructDef {
     /// their own module's top-level functions (e.g. `Parser` in
     /// stdlib/parse_args.oxi calling its file-local `normalize_array`).
     /// `None` for structs defined in the main script.
-    pub module_globals: RefCell<Option<std::rc::Rc<HashMap<String, Value>>>>,
+    pub module_globals: ModuleGlobals,
 }
 
 /// Flattened field layout for a struct (including inherited fields).
@@ -752,8 +885,7 @@ impl ObjStructInstance {
 impl Drop for ObjStructInstance {
     fn drop(&mut self) {
         if !self.fields.ptr.is_null() {
-            // Reconstitute the original `Vec<Value>` so its allocator
-            // frees the buffer and Drops each contained `Value`.
+            // Reconstitute the Vec so its allocator frees the buffer and Drops each Value.
             unsafe {
                 let _ = Vec::from_raw_parts(
                     self.fields.ptr,
@@ -804,15 +936,17 @@ pub struct ObjEnumInstance {
 pub struct ObjModule {
     pub name: String,
     pub globals: Rc<HashMap<String, Value>>,
+    /// Names the module declared with `hide`. They stay in `globals` so the
+    /// module's own functions can still call them; what they are barred from
+    /// is crossing the module boundary — `mod.name` and
+    /// `introduce {name} from mod` both refuse.
+    pub hidden: std::collections::HashSet<String>,
 }
 
 // ── Value methods ──────────────────────────────────────────────────────
 
 impl Value {
-    // ── Variant accessors (A1.2.5 flag-day prep) ─────────────────────
-    // Mirror NanValue's accessor surface so call sites can stop relying
-    // on the enum's pattern shape. Primitives return by value; Rc
-    // variants borrow the existing Rc to stay allocation-free.
+    // Mirror NanValue's accessors so call sites stop relying on the enum's pattern shape.
 
     #[inline] pub fn as_integer(&self) -> Option<i64> {
         if let Value::Integer(n) = self { Some(*n) } else { None }
@@ -947,12 +1081,7 @@ impl Value {
                 }
                 Value::Set(Rc::new(RefCell::new(fresh)))
             }
-            // Tuples are immutable (`Rc<Vec<Value>>` with no interior
-            // mutability) so sharing the Rc is observationally identical to a
-            // deep copy — a plain clone is correct and cheaper. Strings,
-            // closures, struct/enum instances, etc. are likewise either
-            // immutable at this default-materialization point or intentionally
-            // shared by identity.
+            // Tuples are immutable, so sharing the Rc is observationally identical to a deep copy.
             other => other.clone(),
         }
     }
@@ -1167,10 +1296,7 @@ impl PartialEq for Value {
             (Value::Integer(a), Value::Integer(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Char(a), Value::Char(b)) => a == b,
-            // Pointer-equal ⇒ content-equal (always correct). With
-            // interned constant-pool strings (see vm::intern) the common
-            // case — comparing two identifiers / literals / map keys — is
-            // a single pointer compare instead of a byte-wise memcmp.
+            // Interned constant-pool strings make the common comparison a single pointer check.
             (Value::String(a), Value::String(b)) => Rc::ptr_eq(a, b) || a == b,
             (Value::Boolean(a), Value::Boolean(b)) => a == b,
             (Value::None, Value::None) => true,

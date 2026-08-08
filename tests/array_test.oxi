@@ -57,3 +57,68 @@ introduce array
     })
     expect(len(seen)).eq(2)
 }
+
+// ── Searching an array of records ──
+// The records below are deliberately ragged: one entry has no "person" key at
+// all, which every *_where function must skip rather than error on.
+fun sample_people() { [
+    {"person": "john", "info": {"age": 32, "job": "unemployed"}},
+    {"person": "jane"},
+    {"info": {"age": 28, "job": "engineer"}},
+] }
+
+<test>("find_where returns the matching record") {
+    people <array> := sample_people()
+    expect(array.find_where(people, "person", "john").info.age).eq(32)
+    expect(array.find_where(people, "person", "jane")).ne(None)
+}
+
+<test>("find_where returns None rather than an error on a miss") {
+    expect(array.find_where(sample_people(), "person", "nobody")).eq(None)
+    expect(array.find_where([], "person", "john")).eq(None)
+}
+
+<test>("find_where skips records without the key and non-maps") {
+    expect(array.find_where([5, "str", None, {"id": 1}], "id", 1).id).eq(1)
+    expect(array.find_where([5, "str", None], "id", 1)).eq(None)
+}
+
+<test>("find_where hands back the record itself, not a copy") {
+    people <array> := sample_people()
+    john := array.find_where(people, "person", "john")
+    john.info.job = "developer"
+    expect(people[0].info.job).eq("developer")
+}
+
+<test>("index_where reports position or -1") {
+    people <array> := sample_people()
+    expect(array.index_where(people, "person", "john")).eq(0)
+    expect(array.index_where(people, "person", "jane")).eq(1)
+    expect(array.index_where(people, "person", "zz")).eq(-1)
+}
+
+<test>("filter_where collects every match") {
+    rows <array> := [{"s": "open"}, {"s": "shut"}, {"s": "open"}, {"nope": 1}]
+    expect(len(array.filter_where(rows, "s", "open"))).eq(2)
+    expect(array.filter_where(rows, "s", "gone")).eq([])
+}
+
+<test>("remove_where drops matches and leaves the original alone") {
+    people <array> := sample_people()
+    trimmed <array> := array.remove_where(people, "person", "john")
+    expect(len(trimmed)).eq(2)
+    expect(array.find_where(trimmed, "person", "john")).eq(None)
+    expect(len(people)).eq(3)
+}
+
+<test>("where functions distinguish a stored None from a missing key") {
+    // A missing key reads as None, so without the has() guard every keyless
+    // record would match a search for None. Only an explicit null matches.
+    // The keyless record comes first, so an unguarded index_where would
+    // report 0 instead of 1.
+    recs <array> := [{"other": 1}, {"person": None}]
+    expect(array.index_where(recs, "person", None)).eq(1)
+    expect(len(array.filter_where(recs, "person", None))).eq(1)
+    expect(len(array.remove_where(recs, "person", None))).eq(1)
+    expect(array.find_where([{"other": 1}], "person", None)).eq(None)
+}

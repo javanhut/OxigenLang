@@ -120,7 +120,7 @@ fn cli_version_flag_still_works_before_script_path() {
         .output()
         .unwrap();
     assert!(output.status.success(), "stderr:\n{}", stderr(&output));
-    assert!(stdout(&output).starts_with("oxigen "));
+    assert!(stdout(&output).starts_with("Oxigen Version: "));
 }
 
 #[test]
@@ -183,8 +183,7 @@ fn executable_script_runs_via_shebang() {
     perms.set_mode(0o755);
     fs::set_permissions(&script, perms).unwrap();
 
-    // ponytail: sibling tests fork while we hold a writable fd to the script, so exec
-    // can hit ETXTBSY. Retry until that fd is gone.
+    // Sibling tests fork while we hold a writable fd, so exec can hit ETXTBSY; retry.
     let output = loop {
         match Command::new(&script)
             .current_dir(workspace_root())
@@ -303,4 +302,191 @@ fn vm_generic_enum_param_accepts_specific_enum() {
     let output = run_oxigen(&script, &[]);
     assert!(output.status.success(), "stderr:\n{}", stderr(&output));
     assert_eq!(stdout(&output), "2\n");
+}
+
+// ── command-line handling ───────────────────────────────────────────────────
+// Anything that wasn't a recognised subcommand or a `.oxi` path used to fall
+// through to the REPL, so a typo'd command silently opened an interactive
+// prompt instead of reporting the mistake. Exit code 2 now means "the command
+// line was wrong", separate from 1 ("the code failed").
+
+const EXIT_USAGE: i32 = 2;
+
+/// Runs oxigen with raw arguments (no implicit script path).
+fn run_args(args: &[&str]) -> Output {
+    Command::new(oxigen_bin())
+        .current_dir(workspace_root())
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn unknown_subcommand_is_an_error_not_a_repl() {
+    let output = run_args(&["run", "app.oxi"]);
+    assert_eq!(output.status.code(), Some(EXIT_USAGE), "{}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("unknown subcommand `run`"), "{err}");
+    // `oxigen run` was in the docs once; point at the real spelling.
+    assert!(err.contains("oxigen <file.oxi>"), "{err}");
+}
+
+#[test]
+fn unknown_bare_word_is_an_error() {
+    let output = run_args(&["nonsense"]);
+    assert_eq!(output.status.code(), Some(EXIT_USAGE), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("unknown subcommand `nonsense`"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn non_oxi_file_is_an_error_not_a_repl() {
+    let dir = temp_dir("cli-ext");
+    let path = write_script(&dir, "app.txt", "hello\n");
+    let output = run_args(&[path.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(EXIT_USAGE), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("not an Oxigen source file"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn missing_script_is_an_error() {
+    let output = run_args(&["definitely-missing.oxi"]);
+    assert_eq!(output.status.code(), Some(EXIT_USAGE), "{}", stderr(&output));
+    assert!(stderr(&output).contains("no such file"), "{}", stderr(&output));
+}
+
+#[test]
+fn subcommands_require_their_argument() {
+    for sub in ["check", "fmt"] {
+        let output = run_args(&[sub]);
+        assert_eq!(
+            output.status.code(),
+            Some(EXIT_USAGE),
+            "`{sub}` with no argument: {}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn bare_invocation_still_starts_the_repl() {
+    // The REPL is reachable only with no arguments at all. Feed it EOF so it
+    // exits immediately rather than blocking the test.
+    use std::process::Stdio;
+    let mut child = Command::new(oxigen_bin())
+        .current_dir(workspace_root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(stdout(&output).contains("Oxigen REPL"), "{}", stdout(&output));
+}
+
+#[test]
+fn check_exits_nonzero_when_the_file_has_errors() {
+    let dir = temp_dir("cli-check");
+
+    let broken = write_script(&dir, "broken.oxi", "main {\n  x :=\n}\n");
+    let output = run_args(&["check", broken.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    // The JSON still goes to stdout — the LSP parses it regardless of status.
+    assert!(stdout(&output).contains("\"severity\":\"error\""), "{}", stdout(&output));
+
+    let good = write_script(&dir, "good.oxi", "main {\n  x := 1\n}\n");
+    let output = run_args(&["check", good.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output).trim(), "[]");
+}
+
+#[test]
+fn jit_flags_before_the_path_are_consumed_by_oxigen() {
+    let dir = temp_dir("cli-flags-pre");
+    let script = write_script(
+        &dir,
+        "args.oxi",
+        "introduce os\n\nmain {\n    println(len(os.args()))\n}\n",
+    );
+    for flag in ["--jit", "--no-jit"] {
+        let output = run_args(&[flag, script.to_str().unwrap()]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert_eq!(stdout(&output).trim(), "0", "{flag} leaked into script args");
+    }
+}
+
+#[test]
+fn arguments_after_the_path_belong_to_the_script() {
+    // Regression: `--no-jit` was stripped from anywhere in argv, so a script
+    // could never receive it as its own argument.
+    let dir = temp_dir("cli-flags-post");
+    let script = write_script(
+        &dir,
+        "args.oxi",
+        "introduce os\n\nmain {\n    each a in os.args() { println(a) }\n}\n",
+    );
+    let output = run_args(&[script.to_str().unwrap(), "--no-jit", "extra"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "--no-jit\nextra\n");
+}
+
+// ── diagnostics reach the editor ────────────────────────────────────────────
+// `check` used to parse and stop, and the LSP is `oxigen check` read back out,
+// so a compile error had never once appeared in an editor.
+
+#[test]
+fn check_reports_compile_errors_not_just_parse_errors() {
+    let dir = temp_dir("check-compile");
+    // Parses fine; fails to compile — `skip` needs an enclosing loop.
+    let script = write_script(&dir, "c.oxi", "main {\n    skip\n}\n");
+    let output = run_args(&["check", script.to_str().unwrap()]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("\"code\""), "diagnostic has no code:\n{out}");
+    assert!(out.contains("skip"), "{out}");
+    // A real location, not the `0:0` a line-only error would give.
+    assert!(!out.contains("\"line\":0"), "compile error has no location:\n{out}");
+}
+
+#[test]
+fn check_json_keeps_the_fields_the_lsp_reads() {
+    let dir = temp_dir("check-shape");
+    let script = write_script(&dir, "s.oxi", "main {\n  y :=\n}\n");
+    let output = run_args(&["check", script.to_str().unwrap()]);
+    let out = stdout(&output);
+    for field in ["\"line\"", "\"column\"", "\"message\"", "\"severity\"", "\"suggestion\""] {
+        assert!(out.contains(field), "missing {field} in:\n{out}");
+    }
+}
+
+#[test]
+fn explain_prints_a_codes_long_form() {
+    let output = run_args(&["explain", "E0003"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("E0003"), "{}", stdout(&output));
+
+    let unknown = run_args(&["explain", "E9999"]);
+    assert_eq!(unknown.status.code(), Some(EXIT_USAGE));
+}
+
+#[test]
+fn compile_errors_render_like_parse_errors() {
+    // They used to print as `[line N] Compile error: ...`, so the same file
+    // produced two visually unrelated kinds of error.
+    let dir = temp_dir("compile-render");
+    let script = write_script(&dir, "c.oxi", "main {\n    skip\n}\n");
+    let output = run_oxigen(&script, &[]);
+    let err = stderr(&output);
+    assert!(err.contains("error[E"), "no code:\n{err}");
+    assert!(err.contains("-->"), "no location line:\n{err}");
+    assert!(!err.contains("Compile error:"), "old format survived:\n{err}");
 }

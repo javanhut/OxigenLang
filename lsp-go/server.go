@@ -237,7 +237,6 @@ func (s *Server) handleDidClose(msg Request) {
 		return
 	}
 
-	// Stop any pending debounce timer for this URI
 	s.diagMu.Lock()
 	if t, ok := s.diagTimers[params.TextDocument.URI]; ok {
 		t.Stop()

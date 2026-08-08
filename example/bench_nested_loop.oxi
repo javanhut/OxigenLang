@@ -13,5 +13,4 @@ fun nested_sum(n) {
     }
     total
 }
-
-nested_sum(500)
+nested_sum(3000)

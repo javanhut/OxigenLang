@@ -1,6 +1,5 @@
 // Tests for type conversion and the time, random, path, and json stdlib modules.
 // Run with:  oxigen test example/new_stdlib_test.oxi
-
 introduce time
 introduce random
 introduce path
@@ -49,7 +48,6 @@ introduce os
     expect(read_back[0]).eq(1)
     expect(read_back[3]).eq("hello")
     os.remove_file("/tmp/oxigen_test.json")
-
     parsed <array> := json.parse("[10, 20, 30]")
     expect(parsed[1]).eq(20)
 }

@@ -1,0 +1,151 @@
+introduce json
+introduce array
+
+<test>("parse scalars and nesting") {
+    m := json.parse("\{\"i\": 1, \"f\": 1.5, \"s\": \"x\", \"t\": true, \"n\": null}")
+    expect(type(m)).eq("MAP")
+    expect(m["i"]).eq(1)
+    expect(m["f"]).eq(1.5)
+    expect(m["s"]).eq("x")
+    expect(m["t"]).truthy()
+    expect(m["n"]).eq(None)
+}
+
+<test>("parse arrays and nested objects") {
+    m := json.parse("\{\"a\": [1, 2, 3], \"o\": \{\"deep\": \"yes\"}}")
+    expect(len(m["a"])).eq(3)
+    expect(m["a"][2]).eq(3)
+    expect(m["o"]["deep"]).eq("yes")
+}
+
+<test>("stringify scalars") {
+    expect(json.stringify(1)).eq("1")
+    expect(json.stringify(1.5)).eq("1.5")
+    expect(json.stringify("hi")).eq("\"hi\"")
+    expect(json.stringify(None)).eq("null")
+    expect(json.stringify([1, 2, 3])).eq("[1,2,3]")
+}
+
+<test>("stringify round-trips through parse") {
+    // stringify emits compact form: parse tolerates the spaces, output drops them.
+    compact := "\{\"z\":[1,\{\"q\":false}]}"
+    expect(json.stringify(json.parse("\{\"z\": [1, \{\"q\": false}]}"))).eq(compact)
+    expect(json.stringify(json.parse(compact))).eq(compact)
+}
+
+<test>("parse failure is a propagating error") {
+    // json.parse raises rather than returning an error value, so it needs
+    // <guard> to be observed — unlike encoding.base64_decode, which is
+    // catchable with is_error().
+    expect(json.parse("\{nope") guard _err -> "recovered").eq("recovered")
+}
+
+<test>("get_in walks dotted paths") {
+    m := json.parse("\{\"user\": \{\"addr\": \{\"city\": \"Boise\"}}}")
+    expect(json.get_in(m, "user.addr.city")).eq("Boise")
+    expect(json.get_in(m, "user.addr")).ne(None)
+    expect(json.get_in(m, "user.missing")).eq(None)
+    expect(json.get_in(m, "user.addr.city.toodeep")).eq(None)
+}
+
+<test>("has_key_in reports path presence") {
+    m := json.parse("\{\"a\": \{\"b\": 1}}")
+    expect(json.has_key_in(m, "a")).truthy()
+    expect(json.has_key_in(m, "a.b")).truthy()
+    expect(json.has_key_in(m, "a.c")).falsy()
+    expect(json.has_key_in(m, "nope.at.all")).falsy()
+}
+
+<test>("set_in writes a top-level key") {
+    expect(json.stringify(json.set_in({}, "x", 7))).eq("\{\"x\":7}")
+}
+
+<test>("set_in writes through an existing parent") {
+    parent := json.parse("\{\"x\": \{}}")
+    expect(json.stringify(json.set_in(parent, "x.y", 7))).eq("\{\"x\":\{\"y\":7}}")
+}
+
+<test>("set_in creates missing intermediate objects") {
+    expect(json.stringify(json.set_in({}, "x.y", 7))).eq("\{\"x\":\{\"y\":7}}")
+    expect(json.stringify(json.set_in({}, "a.b.c", 1))).eq("\{\"a\":\{\"b\":\{\"c\":1}}}")
+}
+
+<test>("set_in keeps siblings and replaces a non-object segment") {
+    grown := json.stringify(json.set_in(json.parse("\{\"keep\": 1}"), "n.deep", 2))
+    expect(grown).eq("\{\"keep\":1,\"n\":\{\"deep\":2}}")
+    replaced := json.stringify(json.set_in(json.parse("\{\"n\": 5}"), "n.deep", 2))
+    expect(replaced).eq("\{\"n\":\{\"deep\":2}}")
+}
+
+<test>("del_in removes nested and top-level keys") {
+    m := json.parse("\{\"x\": \{\"y\": 7, \"k\": 1}}")
+    expect(json.stringify(json.del_in(m, "x.y"))).eq("\{\"x\":\{\"k\":1}}")
+    expect(json.stringify(json.del_in(json.parse("\{\"a\": 1}"), "a"))).eq("\{}")
+}
+
+<test>("merge is shallow, b wins") {
+    expect(json.stringify(json.merge({"a": 1}, {"b": 2}))).eq("\{\"a\":1,\"b\":2}")
+    expect(json.stringify(json.merge({"a": 1}, {"a": 9}))).eq("\{\"a\":9}")
+}
+
+<test>("deep_merge recurses into nested objects") {
+    a := json.parse("\{\"n\": \{\"a\": 1}}")
+    b := json.parse("\{\"n\": \{\"b\": 2}}")
+    expect(json.stringify(json.deep_merge(a, b))).eq("\{\"n\":\{\"a\":1,\"b\":2}}")
+}
+
+<test>("deep_merge overwrites when b is not an object") {
+    a := json.parse("\{\"n\": \{\"a\": 1}}")
+    b := json.parse("\{\"n\": 5}")
+    expect(json.stringify(json.deep_merge(a, b))).eq("\{\"n\":5}")
+}
+
+// ── Arrays of records ──
+// The third record has no "person" key, which set_where must skip rather than
+// error on.
+fun sample_records() { json.parse("\{\"information\": [\{\"person\": \"john\", \"info\": \{\"age\": 32, \"job\": \"unemployed\"}}, \{\"person\": \"jane\"}, \{\"info\": \{\"age\": 28}}]}").information }
+
+<test>("set_where updates a matching record and keeps its other fields") {
+    people <array> := json.set_where(sample_records(), "person", "john", {"info": {"job": "developer"}})
+    john := array.find_where(people, "person", "john")
+    expect(john.info.job).eq("developer")
+    expect(john.info.age).eq(32)
+    expect(len(people)).eq(3)
+}
+
+<test>("set_where appends when nothing matches") {
+    people <array> := json.set_where(sample_records(), "person", "ada", {"info": {"age": 36}})
+    expect(len(people)).eq(4)
+    expect(array.find_where(people, "person", "ada").info.age).eq(36)
+}
+
+<test>("set_where creates a field the record did not have") {
+    people <array> := json.set_where(sample_records(), "person", "jane", {"info": {"age": 41}})
+    expect(array.find_where(people, "person", "jane").info.age).eq(41)
+}
+
+<test>("set_where skips records without the key") {
+    // The keyless record must neither match nor be disturbed.
+    people <array> := json.set_where(sample_records(), "person", "john", {"info": {"job": "developer"}})
+    expect(people[2].info.age).eq(28)
+    expect(has(people[2], "person")).falsy()
+}
+
+<test>("set_where only updates the first match") {
+    rows <array> := json.set_where([{"id": 1, "n": "a"}, {"id": 1, "n": "b"}], "id", 1, {"n": "z"})
+    expect(rows[0].n).eq("z")
+    expect(rows[1].n).eq("b")
+}
+
+<test>("set_where appends onto an empty array") {
+    rows <array> := json.set_where([], "id", 1, {"n": "first"})
+    expect(len(rows)).eq(1)
+    expect(rows[0].id).eq(1)
+    expect(rows[0].n).eq("first")
+}
+
+<test>("set_where survives non-map elements") {
+    rows <array> := json.set_where([5, "str", {"id": 1, "n": "a"}], "id", 1, {"n": "b"})
+    expect(rows[2].n).eq("b")
+    expect(len(rows)).eq(3)
+}

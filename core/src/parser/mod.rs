@@ -6,7 +6,6 @@ use crate::lexer::Lexer;
 use crate::token::{Span, Token, TokenType};
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Precedence {
@@ -57,66 +56,23 @@ fn precedence_of(tt: &TokenType) -> Precedence {
 type PrefixParseFn = fn(&mut Parser) -> Option<Expression>;
 type InfixParseFn = fn(&mut Parser, Expression) -> Option<Expression>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum Severity {
-    Error,
-    Warning,
+pub use crate::diagnostics::{Diagnostic, Severity};
+use crate::diagnostics::registry as codes;
+use crate::diagnostics::{Code, SourceFile, render};
+
+/// Builds a parser diagnostic. Every call site names a code so the message text
+/// stays free to change without breaking tests or tooling.
+fn diag(code: Code, span: Span, message: impl Into<String>) -> Diagnostic {
+    Diagnostic::error(code, span, message)
 }
 
-impl fmt::Display for Severity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Severity::Error => write!(f, "error"),
-            Severity::Warning => write!(f, "warning"),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Diagnostic {
-    pub span: Span,
-    pub message: String,
-    pub suggestion: Option<String>,
-    pub severity: Severity,
-}
-
-impl fmt::Display for Diagnostic {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}: {} [{}:{}]",
-            self.severity, self.message, self.span.line, self.span.column
-        )?;
-        if let Some(ref hint) = self.suggestion {
-            write!(f, "\n  hint: {}", hint)?;
-        }
-        Ok(())
-    }
-}
-
-impl Diagnostic {
-    fn error(span: Span, message: impl Into<String>) -> Self {
-        Self {
-            span,
-            message: message.into(),
-            suggestion: None,
-            severity: Severity::Error,
-        }
-    }
-
-    fn error_with_hint(
-        span: Span,
-        message: impl Into<String>,
-        suggestion: impl Into<String>,
-    ) -> Self {
-        Self {
-            span,
-            message: message.into(),
-            suggestion: Some(suggestion.into()),
-            severity: Severity::Error,
-        }
-    }
+fn diag_hint(
+    code: Code,
+    span: Span,
+    message: impl Into<String>,
+    hint: impl Into<String>,
+) -> Diagnostic {
+    Diagnostic::error(code, span, message).help(hint)
 }
 
 pub struct Parser {
@@ -125,12 +81,28 @@ pub struct Parser {
     peek_token: Token,
     errors: Vec<Diagnostic>,
     source: String,
+    file_name: Option<String>,
     prefix_fns: HashMap<TokenType, PrefixParseFn>,
     infix_fns: HashMap<TokenType, InfixParseFn>,
     lookahead_buffer: VecDeque<Token>,
 }
 
 impl Parser {
+    /// Parser that knows the file it is reading, so diagnostics can name it.
+    pub fn with_file(lexer: Lexer, source: &str, file_name: impl Into<String>) -> Self {
+        let mut p = Self::new(lexer, source);
+        p.file_name = Some(file_name.into());
+        p
+    }
+
+    /// The source these diagnostics refer to, for the renderer.
+    pub fn source_file(&self) -> SourceFile {
+        match &self.file_name {
+            Some(name) => SourceFile::named(name.clone(), self.source.clone()),
+            None => SourceFile::new(self.source.clone()),
+        }
+    }
+
     pub fn new(lexer: Lexer, source: &str) -> Self {
         let dummy = Token {
             token_type: TokenType::Illegal,
@@ -144,6 +116,7 @@ impl Parser {
             peek_token: dummy,
             errors: Vec::new(),
             source: source.to_string(),
+            file_name: None,
             prefix_fns: HashMap::new(),
             infix_fns: HashMap::new(),
             lookahead_buffer: VecDeque::new(),
@@ -200,10 +173,7 @@ impl Parser {
         p.register_infix(TokenType::FSlash, Parser::parse_infix_expression);
         p.register_infix(TokenType::Mod, Parser::parse_infix_expression);
 
-        // Bitwise (precedence: | < ^ < & < equality, shifts between < and +
-        // — matches C/Rust). The compiler/interpreter already handle these
-        // (vm/mod.rs binary_b{and,or,xor,shl,shr} + unary_bnot); we only
-        // had to wire them through the parser.
+        // Precedence | < ^ < & < equality, shifts between < and + — matches C and Rust.
         p.register_infix(TokenType::Pipe, Parser::parse_infix_expression);
         p.register_infix(TokenType::Caret, Parser::parse_infix_expression);
         p.register_infix(TokenType::Ampersand, Parser::parse_infix_expression);
@@ -232,60 +202,35 @@ impl Parser {
         &self.errors
     }
 
+    /// Comments stripped during lexing. Valid after `parse_program`, which
+    /// drives the lexer to EOF. Only `fmt` needs these.
+    pub fn comments(&self) -> &[crate::lexer::Comment] {
+        self.lexer.comments()
+    }
+
+    /// Renders every diagnostic, most important first.
+    ///
+    /// The old renderer capped output at three and appended
+    /// `... and N more error(s)` — a workaround for cascade noise that also hid
+    /// genuinely independent errors. Same-line repeats are deduplicated
+    /// instead, and everything that survives is shown.
     pub fn format_errors(&self) -> String {
-        let displayed: Vec<_> = self
-            .errors
+        let src = self.source_file();
+        let mut sink = crate::diagnostics::DiagnosticSink::new();
+        sink.extend(self.errors.iter().cloned());
+        sink.deduplicate();
+        sink.diagnostics()
             .iter()
-            .map(|d| self.format_diagnostic(d))
-            .collect();
-        if displayed.len() > 1 {
-            let mut out = displayed[0].clone();
-            // Show up to 3 additional errors, skip noise
-            let rest: Vec<_> = displayed[1..].iter().take(2).collect();
-            for d in rest {
-                out.push_str("\n\n");
-                out.push_str(d);
-            }
-            if displayed.len() > 3 {
-                out.push_str(&format!(
-                    "\n\n... and {} more error(s)",
-                    displayed.len() - 3
-                ));
-            }
-            out
-        } else {
-            displayed.join("\n\n")
-        }
+            .map(|d| render::render_human(d, &src))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
+    #[allow(dead_code)]
     fn format_diagnostic(&self, diag: &Diagnostic) -> String {
-        let mut out = String::new();
-        let line_num = diag.span.line;
-        let col = diag.span.column;
-
-        // Header
-        out.push_str(&format!("{}: {}\n", diag.severity, diag.message));
-        out.push_str(&format!("  --> line {}:{}\n", line_num, col));
-
-        // Source context
-        if let Some(source_line) = self.source.lines().nth(line_num.saturating_sub(1)) {
-            let line_str = format!("{}", line_num);
-            let padding = " ".repeat(line_str.len());
-            out.push_str(&format!("{} |\n", padding));
-            out.push_str(&format!("{} | {}\n", line_str, source_line));
-            if col > 0 {
-                let caret_padding = " ".repeat(col.saturating_sub(1));
-                out.push_str(&format!("{} | {}^", padding, caret_padding));
-            }
-        }
-
-        // Suggestion
-        if let Some(ref hint) = diag.suggestion {
-            out.push_str(&format!("\n  = hint: {}", hint));
-        }
-
-        out
+        render::render_human(diag, &self.source_file())
     }
+
 
     fn negate_expression(expr: Expression) -> Expression {
         Expression::Prefix {
@@ -352,7 +297,7 @@ impl Parser {
             if self.peek_token.token_type == TokenType::Lt {
                 self.next_token(); // consume inner '<'
                 if self.peek_token.token_type != TokenType::Ident {
-                    self.errors.push(Diagnostic::error_with_hint(
+                    self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                         self.peek_token.span,
                         format!("expected error tag name, got {:?}", self.peek_token.literal),
                         "provide a tag name like Error<MyTag>",
@@ -380,7 +325,7 @@ impl Parser {
 
     fn parse_type_union_member(&mut self) -> Option<TypeAnnotation> {
         if !Self::is_type_name_token(&self.curr_token.token_type) {
-            self.errors.push(Diagnostic::error_with_hint(
+            self.errors.push(diag_hint(codes::EXPECTED_TYPE_NAME, 
                 self.curr_token.span,
                 format!("expected type name, got {:?}", self.curr_token.literal),
                 "valid types: int, str, float, char, bool, array, byte, uint, tuple, map, set",
@@ -394,7 +339,7 @@ impl Parser {
     /// Supports both `<A || B>` and legacy `<A> || <B>` unions.
     fn parse_type_annotation(&mut self) -> Option<TypeAnnotation> {
         if !Self::is_type_name_token(&self.peek_token.token_type) {
-            self.errors.push(Diagnostic::error_with_hint(
+            self.errors.push(diag_hint(codes::EXPECTED_TYPE_NAME, 
                 self.peek_token.span,
                 format!(
                     "expected type name after `<`, got {:?}",
@@ -420,7 +365,7 @@ impl Parser {
                         self.next_token(); // consume legacy '<'
                     }
                     if !Self::is_type_name_token(&self.peek_token.token_type) {
-                        self.errors.push(Diagnostic::error_with_hint(
+                        self.errors.push(diag_hint(codes::EXPECTED_TYPE_NAME, 
                             self.peek_token.span,
                             format!(
                                 "expected type name in union, got {:?}",
@@ -438,7 +383,7 @@ impl Parser {
                     break;
                 }
                 _ => {
-                    self.errors.push(Diagnostic::error_with_hint(
+                    self.errors.push(diag_hint(codes::EXPECTED_TYPE_NAME, 
                         self.peek_token.span,
                         format!(
                             "expected `>` or `||` in type annotation, got {:?}",
@@ -461,25 +406,52 @@ impl Parser {
     pub fn parse_program(&mut self) -> Program {
         let mut program = Program {
             statements: Vec::new(),
+            hidden: Vec::new(),
         };
+        // Extents of statements the parser dropped without emitting anything.
+        let mut dropped: Vec<Span> = Vec::new();
         while self.curr_token.token_type != TokenType::Eof {
             if self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
                 continue;
             }
 
-            let err_count = self.errors.len();
+            let stmt_span = self.curr_token.span;
+            let errors_before = self.errors.len();
+
+            // `hide fun name() {...}` — a top-level declaration modifier. The
+            // statement compiles exactly like an ordinary one; only the name is
+            // recorded, so nothing downstream has to know about `hide`.
+            let hidden_decl = if self.curr_token.token_type == TokenType::Hide {
+                if self.peek_token.token_type != TokenType::Function {
+                    self.errors.push(diag_hint(
+                        codes::UNEXPECTED_TOKEN,
+                        self.peek_token.span,
+                        "`hide` must be followed by a top-level `fun`".to_string(),
+                        "only functions can be hidden at module level; struct fields take `hide` inside the struct body",
+                    ));
+                    self.synchronize();
+                    continue;
+                }
+                self.next_token(); // consume `hide`, now at `fun`
+                true
+            } else {
+                false
+            };
+
             if let Some(stmt) = self.parse_statement() {
+                if hidden_decl && let Statement::Let { name, .. } = &stmt {
+                    program.hidden.push(name.value.clone());
+                }
                 program.statements.push(stmt);
-            } else if self.errors.len() > err_count {
-                // A new error was added — synchronize to recover and continue parsing.
+            } else {
+                // A rise in the error count means it was reported; otherwise it is only a candidate for the gave-up note.
+                if self.errors.len() == errors_before {
+                    dropped.push(stmt_span.to(self.peek_token.span));
+                }
                 let before = self.curr_token.span;
                 self.synchronize();
-                // Guarantee forward progress. `synchronize()` stops *at* a
-                // statement-starting keyword without consuming it, so if the
-                // error occurred on such a keyword (e.g. `fun <keyword>`) the
-                // position would not move and the outer loop would spin
-                // forever. Force-consume one token in that case.
+                // synchronize() stops at a statement keyword without consuming it, so force progress or the loop spins.
                 if self.curr_token.span == before && self.curr_token.token_type != TokenType::Eof {
                     self.next_token();
                 }
@@ -487,7 +459,70 @@ impl Parser {
             }
             self.next_token();
         }
+        self.absorb_lexer_diagnostics();
+        self.assert_nothing_dropped_silently(dropped);
         program
+    }
+
+    /// Guarantees a dropped statement is never silent.
+    ///
+    /// `Option` cannot distinguish "I reported an error" from "I gave up
+    /// quietly", so a quiet `None` used to drop the statement and carry on —
+    /// the file compiled and ran, minus a line nobody was told about.
+    ///
+    /// A proof-carrying `Result<T, Bailed>` would enforce this at the type
+    /// level, but that is 71 signatures and ~197 `?` sites. This closes the
+    /// same hole for every path, present and future, at the cost of a generic
+    /// message.
+    ///
+    /// The property enforced is per-statement, not per-file: for each dropped
+    /// statement, either the parser's error count rose while parsing it (the
+    /// caller only passes on the ones where it did not), or some diagnostic —
+    /// including the lexical ones folded in just beforehand — lands inside its
+    /// extent. This used to check only that `self.errors` was non-empty at the
+    /// end, which is the much weaker "something, somewhere, was reported": a
+    /// statement dropped quietly after any earlier statement had failed
+    /// vanished unmentioned. Only the first survivor is reported; one "this is
+    /// a bug in Oxigen" note per file is enough.
+    fn assert_nothing_dropped_silently(&mut self, dropped: Vec<Span>) {
+        let Some(span) = dropped.into_iter().find(|extent| {
+            // Compared by (line, column), the same ordering absorb_lexer_diagnostics sorts by.
+            let (lo, hi) = (
+                (extent.start.line, extent.start.column),
+                (extent.end.line, extent.end.column),
+            );
+            !self.errors.iter().any(|d| {
+                let at = (d.span().line(), d.span().column());
+                at >= lo && at <= hi
+            })
+        }) else {
+            return;
+        };
+        self.errors.push(
+            diag(
+                codes::PARSER_GAVE_UP,
+                span,
+                "the parser stopped here without reporting why",
+            )
+            .label("could not parse this statement")
+            .note("this is a bug in Oxigen — the statement would otherwise be dropped silently")
+            .help("please report this with the source that triggered it"),
+        );
+    }
+
+    /// Folds the lexer's diagnostics in, ordered with the parser's by position.
+    ///
+    /// The lexer reports lexical problems itself now; the parser used to invent
+    /// a message from an `Illegal` token's text, which meant it could not tell
+    /// a smuggled message from a genuinely stray character.
+    fn absorb_lexer_diagnostics(&mut self) {
+        let lexical: Vec<Diagnostic> = self.lexer.diagnostics().to_vec();
+        if lexical.is_empty() {
+            return;
+        }
+        self.errors.extend(lexical);
+        self.errors
+            .sort_by_key(|d| (d.span().line(), d.span().column()));
     }
 
     pub fn parse_statement(&mut self) -> Option<Statement> {
@@ -520,9 +555,7 @@ impl Parser {
             if self.peek_token.token_type == TokenType::Assign {
                 return self.parse_assign_statement();
             }
-            // `includes` is a contextual keyword: `StructName includes { ... }`.
-            // It only introduces a method block when the identifier `includes`
-            // is immediately followed by `{`; otherwise it is a normal name.
+            // `includes` is contextual: it opens a method block only when immediately followed by `{`.
             if self.peek_token.token_type == TokenType::Ident
                 && self.peek_token.literal == "includes"
                 && self.peek_nth(1).token_type == TokenType::LBrace
@@ -537,9 +570,7 @@ impl Parser {
             return self.parse_main_block();
         }
 
-        // `<test>("name") { ... }` test-case block. Recognized at statement
-        // start before the generic angle-form/expression machinery so the
-        // trailing `{ ... }` is parsed as a statement block, not a map literal.
+        // Recognized before the angle-form machinery so the trailing block is not parsed as a map literal.
         if self.curr_token.token_type == TokenType::Lt
             && self.peek_token.token_type == TokenType::Ident
             && self.peek_token.literal == "test"
@@ -556,8 +587,8 @@ impl Parser {
             TokenType::Choose => self.parse_choose_statement(),
             TokenType::Unless => self.parse_unless_statement(),
             TokenType::OptionKw => self.parse_expression_statement(),
-            TokenType::Skip => Some(Statement::Skip),
-            TokenType::Stop => Some(Statement::Stop),
+            TokenType::Skip => Some(Statement::Skip { token: self.curr_token.clone() }),
+            TokenType::Stop => Some(Statement::Stop { token: self.curr_token.clone() }),
             TokenType::Function => {
                 if self.peek_token.token_type == TokenType::Ident {
                     self.parse_named_function_statement()
@@ -578,10 +609,8 @@ impl Parser {
             value: name_token.literal.clone(),
         };
 
-        // consume ':='
         self.expect_peek(TokenType::Walrus)?;
 
-        // move to expression start
         self.next_token();
 
         let value = self.parse_expression(Precedence::Lowest)?;
@@ -596,7 +625,6 @@ impl Parser {
             let tt = self.peek_nth(idx).token_type.clone();
             match tt {
                 TokenType::Comma => {
-                    // Next should be an ident
                     let next = self.peek_nth(idx + 1).token_type.clone();
                     if next != TokenType::Ident {
                         return false;
@@ -612,7 +640,6 @@ impl Parser {
     fn parse_unpack_statement(&mut self) -> Option<Statement> {
         let mut names = Vec::new();
 
-        // First identifier (curr_token)
         names.push(Identifier {
             token: self.curr_token.clone(),
             value: self.curr_token.literal.clone(),
@@ -623,7 +650,7 @@ impl Parser {
             self.next_token(); // consume ','
             self.next_token(); // move to next ident
             if self.curr_token.token_type != TokenType::Ident {
-                self.errors.push(Diagnostic::error_with_hint(
+                self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                     self.curr_token.span,
                     format!(
                         "expected identifier in unpack, got {:?}",
@@ -639,10 +666,8 @@ impl Parser {
             });
         }
 
-        // consume ':='
         self.expect_peek(TokenType::Walrus)?;
 
-        // move to expression
         self.next_token();
         let first_value = self.parse_expression(Precedence::Lowest)?;
 
@@ -692,7 +717,6 @@ impl Parser {
     fn parse_unpack_reassign_statement(&mut self) -> Option<Statement> {
         let mut names = Vec::new();
 
-        // First identifier (curr_token)
         names.push(Identifier {
             token: self.curr_token.clone(),
             value: self.curr_token.literal.clone(),
@@ -703,7 +727,7 @@ impl Parser {
             self.next_token(); // consume ','
             self.next_token(); // move to next ident
             if self.curr_token.token_type != TokenType::Ident {
-                self.errors.push(Diagnostic::error_with_hint(
+                self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                     self.curr_token.span,
                     format!(
                         "expected identifier in unpack, got {:?}",
@@ -719,10 +743,8 @@ impl Parser {
             });
         }
 
-        // consume '='
         self.expect_peek(TokenType::Assign)?;
 
-        // move to expression
         self.next_token();
         let first_value = self.parse_expression(Precedence::Lowest)?;
 
@@ -761,7 +783,6 @@ impl Parser {
         self.expect_peek(TokenType::Lt)?;
         let type_ann = self.parse_type_annotation()?;
 
-        // determine walrus or strict assign
         let walrus = self.peek_token.token_type == TokenType::Walrus;
         if walrus {
             self.expect_peek(TokenType::Walrus)?;
@@ -769,7 +790,6 @@ impl Parser {
             self.expect_peek(TokenType::Assign)?;
         }
 
-        // move to expression start
         self.next_token();
         let value = self.parse_expression(Precedence::Lowest)?;
 
@@ -788,7 +808,6 @@ impl Parser {
             value: name_token.literal.clone(),
         };
 
-        // consume 'as'
         self.expect_peek(TokenType::As)?;
 
         // consume '<type>' (and any || continuations)
@@ -820,10 +839,8 @@ impl Parser {
             value: name_token.literal.clone(),
         };
 
-        // consume '='
         self.expect_peek(TokenType::Assign)?;
 
-        // move to expression start
         self.next_token();
         let value = self.parse_expression(Precedence::Lowest)?;
 
@@ -878,16 +895,13 @@ impl Parser {
         let mut left = match prefix {
             Some(f) => f(self)?,
             None => {
+                // The lexer already recorded a diagnostic for an Illegal token; `?` is a live marker, not an error.
                 if self.curr_token.token_type == TokenType::Illegal
                     && self.curr_token.literal != "?"
                 {
-                    self.errors.push(Diagnostic::error(
-                        self.curr_token.span,
-                        self.curr_token.literal.clone(),
-                    ));
                     return None;
                 }
-                self.errors.push(Diagnostic::error(
+                self.errors.push(diag(codes::UNEXPECTED_TOKEN, 
                     self.curr_token.span,
                     format!("unexpected token {:?}", self.curr_token.literal),
                 ));
@@ -969,7 +983,26 @@ impl Parser {
 
     fn parse_integer(&mut self) -> Option<Expression> {
         let tok = self.curr_token.clone();
-        let value = tok.literal.parse::<i64>().ok()?;
+        let value = match tok.literal.parse::<i64>() {
+            Ok(v) => v,
+            Err(_) => {
+                // This was `.ok()?`: a None with no diagnostic, so the statement silently vanished.
+                self.errors.push(
+                    diag(
+                        codes::INTEGER_OUT_OF_RANGE,
+                        tok.span,
+                        "integer literal out of range",
+                    )
+                    .label("does not fit in a 64-bit signed integer")
+                    .note(
+                        "integers range from -9223372036854775808 to \
+                         9223372036854775807",
+                    )
+                    .help("use a float if you need a larger magnitude"),
+                );
+                return None;
+            }
+        };
         Some(Expression::Int { token: tok, value })
     }
 
@@ -1015,7 +1048,7 @@ impl Parser {
                     self.next_token(); // move past InterpExprEnd
                 }
                 TokenType::Eof => {
-                    self.errors.push(Diagnostic::error_with_hint(
+                    self.errors.push(diag_hint(codes::BAD_STRING_INTERPOLATION, 
                         self.curr_token.span,
                         "unterminated string interpolation",
                         "make sure the string is properly closed with a matching quote",
@@ -1023,7 +1056,7 @@ impl Parser {
                     break;
                 }
                 _ => {
-                    self.errors.push(Diagnostic::error(
+                    self.errors.push(diag(codes::BAD_STRING_INTERPOLATION, 
                         self.curr_token.span,
                         format!(
                             "unexpected token in string interpolation: {:?}",
@@ -1073,7 +1106,7 @@ impl Parser {
     fn parse_effect_header(&mut self) -> Option<(Token, String, Option<String>)> {
         self.next_token(); // move to effect name after '<'
         if !Self::is_angle_effect_name_token(&self.curr_token) {
-            self.errors.push(Diagnostic::error_with_hint(
+            self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                 self.curr_token.span,
                 format!(
                     "expected effect name after `<`, got {:?}",
@@ -1094,7 +1127,7 @@ impl Parser {
             if self.curr_token.token_type != TokenType::Ident
                 && self.curr_token.token_type != TokenType::None
             {
-                self.errors.push(Diagnostic::error(
+                self.errors.push(diag(codes::UNSUPPORTED_EFFECT_FILTER, 
                     self.curr_token.span,
                     format!(
                         "expected effect filter name, got {:?}",
@@ -1106,7 +1139,7 @@ impl Parser {
             if self.curr_token.literal == "Error" && self.peek_token.token_type == TokenType::Lt {
                 self.next_token(); // consume tag '<'
                 if self.peek_token.token_type != TokenType::Ident {
-                    self.errors.push(Diagnostic::error_with_hint(
+                    self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                         self.peek_token.span,
                         format!("expected error tag name, got {:?}", self.peek_token.literal),
                         "provide a tag name like Error<MyTag>",
@@ -1126,7 +1159,7 @@ impl Parser {
                 self.expect_peek(TokenType::Gt)?; // close Error<tag>
             } else {
                 if self.curr_token.literal != "Error" {
-                    self.errors.push(Diagnostic::error_with_hint(
+                    self.errors.push(diag_hint(codes::UNSUPPORTED_EFFECT_FILTER, 
                         self.curr_token.span,
                         format!("unsupported effect filter '{}'", self.curr_token.literal),
                         "only `Error` is supported as a filter for guard/fail",
@@ -1180,7 +1213,7 @@ impl Parser {
             self.next_token(); // consume inner '<'
             self.next_token(); // move to tag name
             if self.curr_token.token_type != TokenType::Ident {
-                self.errors.push(Diagnostic::error_with_hint(
+                self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                     self.curr_token.span,
                     format!(
                         "expected tag name after <log<, got {:?}",
@@ -1197,7 +1230,7 @@ impl Parser {
                 self.next_token(); // consume sub '<'
                 self.next_token(); // move to sub_tag name
                 if self.curr_token.token_type != TokenType::Ident {
-                    self.errors.push(Diagnostic::error_with_hint(
+                    self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                         self.curr_token.span,
                         format!("expected sub-tag name, got {:?}", self.curr_token.literal),
                         "use like: <log<Error<network>>>(\"message\")",
@@ -1230,7 +1263,7 @@ impl Parser {
             }
         } else {
             // <log> — no tags
-            self.expect_peek(TokenType::Gt)?; // close '>'
+            self.expect_peek(TokenType::Gt)?;
         }
 
         // Optional parenthesized message
@@ -1266,7 +1299,7 @@ impl Parser {
                 if self.peek_token.token_type == TokenType::LParen {
                     let fallback = self.parse_single_parenthesized_expression()?;
                     let Some(value) = value else {
-                        self.errors.push(Diagnostic::error_with_hint(
+                        self.errors.push(diag_hint(codes::UNEXPECTED_TOKEN, 
                             token.span,
                             "<guard>(...) requires a target expression",
                             "use like: value <guard>(fallback)",
@@ -1283,7 +1316,7 @@ impl Parser {
                 } else {
                     self.next_token(); // move to binding identifier
                     if self.curr_token.token_type != TokenType::Ident {
-                        self.errors.push(Diagnostic::error_with_hint(
+                        self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                             self.curr_token.span,
                             format!(
                                 "expected identifier after <guard>, got {:?}",
@@ -1301,7 +1334,7 @@ impl Parser {
                     self.next_token(); // move to fallback
                     let fallback = self.parse_expression(Precedence::Lowest)?;
                     let Some(value) = value else {
-                        self.errors.push(Diagnostic::error_with_hint(
+                        self.errors.push(diag_hint(codes::UNEXPECTED_TOKEN, 
                             token.span,
                             "<guard> err -> ... requires a target expression",
                             "use like: value <guard> err -> fallback",
@@ -1337,7 +1370,7 @@ impl Parser {
                 }
             }
             "log" => {
-                self.errors.push(Diagnostic::error_with_hint(
+                self.errors.push(diag_hint(codes::UNEXPECTED_TOKEN, 
                     token.span,
                     "<log> is no longer a postfix effect",
                     "use <log>(\"message\") or <log<tag>>(\"message\") as a standalone expression",
@@ -1345,7 +1378,7 @@ impl Parser {
                 None
             }
             _ => {
-                self.errors.push(Diagnostic::error_with_hint(
+                self.errors.push(diag_hint(codes::UNKNOWN_ANGLE_EFFECT, 
                     token.span,
                     format!("unknown angle effect '{}'", effect_name),
                     "valid effects: guard, fail, log, type, Error, Value",
@@ -1385,7 +1418,7 @@ impl Parser {
                 let tag = if self.peek_token.token_type == TokenType::Lt {
                     self.next_token(); // consume inner '<'
                     if self.peek_token.token_type != TokenType::Ident {
-                        self.errors.push(Diagnostic::error_with_hint(
+                        self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                             self.peek_token.span,
                             format!("expected error tag name, got {:?}", self.peek_token.literal),
                             "provide a tag name like Error<MyTag>",
@@ -1489,7 +1522,6 @@ impl Parser {
         let tok = self.curr_token.clone(); // '{'
         let mut entries = Vec::new();
 
-        // Skip newlines
         while self.peek_token.token_type == TokenType::Newline {
             self.next_token();
         }
@@ -1506,7 +1538,6 @@ impl Parser {
         loop {
             self.next_token(); // move to key
 
-            // Skip newlines
             while self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -1521,12 +1552,10 @@ impl Parser {
             let value = self.parse_expression(Precedence::Lowest)?;
             entries.push((key, value));
 
-            // Skip comma if present
             if self.peek_token.token_type == TokenType::Comma {
                 self.next_token();
             }
 
-            // Skip newlines
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -1559,11 +1588,7 @@ impl Parser {
         })
     }
 
-    // ── diverge / converge ──────────────────────────────────────────────
-    // Surface syntax for fork-join. `diverge` splits work off the current flow;
-    // `converge` rejoins it. These parse into first-class AST nodes so the
-    // formatter can round-trip them; the compiler and evaluator lower them to
-    // the `__spawn`/`__join_task` builtins via `ast::desugar_*`.
+    // Surface syntax for fork-join; these parse into first-class AST nodes.
 
     fn parse_diverge_expression(&mut self) -> Option<Expression> {
         let tok = self.curr_token.clone(); // 'diverge'
@@ -1571,7 +1596,7 @@ impl Parser {
             self.next_token(); // curr = 'each'
             return self.parse_diverge_each(tok);
         }
-        self.expect_peek(TokenType::LBrace)?; // '{'
+        self.expect_peek(TokenType::LBrace)?;
         let body = self.parse_block()?;
         Some(Expression::Diverge { token: tok, body })
     }
@@ -1598,7 +1623,7 @@ impl Parser {
     fn parse_converge_expression(&mut self) -> Option<Expression> {
         let tok = self.curr_token.clone(); // 'converge'
         if self.peek_token.token_type == TokenType::LBrace {
-            self.errors.push(Diagnostic::error(
+            self.errors.push(diag(codes::UNEXPECTED_TOKEN, 
                 tok.span,
                 "structured `converge { ... }` blocks aren't supported yet; use `converge <task>`"
                     .to_string(),
@@ -1680,7 +1705,7 @@ impl Parser {
         // Validate ordering: once we see an optional/default param, all following must be too
         let has_default = optional || default.is_some();
         if *seen_optional && !has_default {
-            self.errors.push(Diagnostic::error_with_hint(
+            self.errors.push(diag_hint(codes::REQUIRED_AFTER_OPTIONAL, 
                 ident.token.span,
                 format!(
                     "required parameter '{}' cannot follow optional/default parameters",
@@ -1757,8 +1782,8 @@ impl Parser {
                     });
                 }
             }
-            self.expect_peek(TokenType::RBrace)?; // consume '}'
-            self.expect_peek(TokenType::From)?; // consume 'from'
+            self.expect_peek(TokenType::RBrace)?;
+            self.expect_peek(TokenType::From)?;
             let path = self.parse_module_path()?;
             Some(Statement::Introduce {
                 token,
@@ -1784,15 +1809,12 @@ impl Parser {
         // Count leading dots
         if self.peek_token.token_type == TokenType::FullStop {
             is_relative = true;
-            // Count dots: first dot means current dir (parent_levels=0)
-            // additional dots increment parent_levels
+            // First dot means the current directory; each additional dot adds a parent level.
             let mut dot_count = 0;
             while self.peek_token.token_type == TokenType::FullStop {
                 self.next_token(); // consume '.'
                 dot_count += 1;
-                // Check if next is also a dot (consecutive dots)
-                // But we need to distinguish ".name" from "..name"
-                // After consuming a dot, if peek is Ident, we stop counting dots
+                // Stop counting dots once peek is an Ident, so `.name` and `..name` are distinguishable.
                 if self.peek_token.token_type == TokenType::Ident {
                     break;
                 }
@@ -1813,7 +1835,7 @@ impl Parser {
                     self.next_token(); // consume next ident
                     segments.push(self.curr_token.literal.clone());
                 } else {
-                    self.errors.push(Diagnostic::error(
+                    self.errors.push(diag(codes::EXPECTED_MODULE_PATH, 
                         self.peek_token.span,
                         "expected identifier after `.` in module path",
                     ));
@@ -1821,7 +1843,7 @@ impl Parser {
                 }
             }
         } else {
-            self.errors.push(Diagnostic::error_with_hint(
+            self.errors.push(diag_hint(codes::EXPECTED_MODULE_PATH, 
                 self.peek_token.span,
                 format!("expected module name, got {:?}", self.peek_token.literal),
                 "use like: introduce math or introduce .utils",
@@ -1843,7 +1865,7 @@ impl Parser {
 
         self.next_token(); // move to binding identifier
         if self.curr_token.token_type != TokenType::Ident {
-            self.errors.push(Diagnostic::error_with_hint(
+            self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
                 self.curr_token.span,
                 format!(
                     "expected identifier after guard, got {:?}",
@@ -1912,10 +1934,7 @@ impl Parser {
         })
     }
 
-    // Postfix: x++
-    //
-    // Pratt trick: register it as an "infix" function with high precedence,
-    // but it doesn't parse a right-hand expression.
+    // Registered as a high-precedence infix that parses no right-hand expression.
     fn parse_postfix_expression(&mut self, left: Expression) -> Option<Expression> {
         let tok = self.curr_token.clone(); // '++'
         Some(Expression::Postfix {
@@ -1925,8 +1944,7 @@ impl Parser {
         })
     }
 
-    // Call: f(arg1, arg2, ...) or f(name=val, ...)
-    // Trigger token is '(' *after* the function expression.
+    // Trigger token is `(` after the function expression.
     fn parse_call_expression(&mut self, function: Expression) -> Option<Expression> {
         let tok = self.curr_token.clone(); // '('
         let (args, named_args) = self.parse_call_args()?;
@@ -1972,7 +1990,7 @@ impl Parser {
                 in_named = true;
             } else {
                 if in_named {
-                    self.errors.push(Diagnostic::error_with_hint(
+                    self.errors.push(diag_hint(codes::POSITIONAL_AFTER_NAMED, 
                         self.curr_token.span,
                         "positional argument cannot follow named arguments",
                         "put all positional arguments before named ones",
@@ -1983,7 +2001,6 @@ impl Parser {
                 args.push(expr);
             }
 
-            // Skip newlines between an argument and the following comma or ')'.
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2076,10 +2093,7 @@ impl Parser {
             value: self.curr_token.literal.clone(),
         };
 
-        // Struct-variant construction: `EnumName.Variant { field: value, ... }`.
-        // Only recognized when LHS is a plain Ident and the braces contain a
-        // struct-literal shape (Ident Colon ... or empty). Prevents grabbing
-        // any `{` that happens to follow an expression-level dot access.
+        // Only when the LHS is a plain Ident and the braces hold a struct-literal shape.
         if let Expression::Ident(ref ident) = left
             && self.peek_token.token_type == TokenType::LBrace {
                 let mut idx = 1;
@@ -2173,7 +2187,6 @@ impl Parser {
 
         let mut field_values = Vec::new();
 
-        // Skip newlines after '{'
         while self.peek_token.token_type == TokenType::Newline {
             self.next_token();
         }
@@ -2191,7 +2204,6 @@ impl Parser {
         loop {
             self.next_token(); // move to field name
 
-            // Skip newlines
             while self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2201,17 +2213,15 @@ impl Parser {
             }
 
             let field_name = self.curr_token.literal.clone();
-            self.expect_peek(TokenType::Colon)?; // ':'
+            self.expect_peek(TokenType::Colon)?;
             self.next_token(); // move to value expression
             let value = self.parse_expression(Precedence::Lowest)?;
             field_values.push((field_name, value));
 
-            // Skip comma if present
             if self.peek_token.token_type == TokenType::Comma {
                 self.next_token();
             }
 
-            // Skip newlines
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2232,7 +2242,6 @@ impl Parser {
     fn parse_expression_list(&mut self, end: TokenType) -> Option<Vec<Expression>> {
         let mut args = Vec::new();
 
-        // Skip newlines after the opening bracket.
         while self.peek_token.token_type == TokenType::Newline {
             self.next_token();
         }
@@ -2247,7 +2256,6 @@ impl Parser {
         args.push(self.parse_expression(Precedence::Lowest)?);
 
         loop {
-            // Skip newlines between an element and the following comma or `]`.
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2257,7 +2265,6 @@ impl Parser {
             }
             self.next_token(); // consume comma
 
-            // Skip newlines after the comma.
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2280,7 +2287,7 @@ impl Parser {
     // each num in x { ... }
     fn parse_main_block(&mut self) -> Option<Statement> {
         let token = self.curr_token.clone(); // 'main'
-        self.expect_peek(TokenType::LBrace)?; // curr is now '{'
+        self.expect_peek(TokenType::LBrace)?;
         let body = self.parse_block()?;
         Some(Statement::Main { token, body })
     }
@@ -2289,12 +2296,12 @@ impl Parser {
     fn parse_test_statement(&mut self) -> Option<Statement> {
         let token = self.curr_token.clone(); // '<'
         self.next_token(); // move to 'test'
-        self.expect_peek(TokenType::Gt)?; // curr is now '>'
-        self.expect_peek(TokenType::LParen)?; // curr is now '('
+        self.expect_peek(TokenType::Gt)?;
+        self.expect_peek(TokenType::LParen)?;
         self.next_token(); // move to the name expression
         let name = self.parse_expression(Precedence::Lowest)?;
-        self.expect_peek(TokenType::RParen)?; // curr is now ')'
-        self.expect_peek(TokenType::LBrace)?; // curr is now '{'
+        self.expect_peek(TokenType::RParen)?;
+        self.expect_peek(TokenType::LBrace)?;
         let body = self.parse_block()?;
         Some(Statement::Test { token, name, body })
     }
@@ -2303,22 +2310,35 @@ impl Parser {
         let token = self.curr_token.clone(); // 'each'
 
         self.next_token(); // move to variable name
-        let variable = Identifier {
+        let mut variable = Identifier {
             token: self.curr_token.clone(),
             value: self.curr_token.literal.clone(),
         };
 
-        self.expect_peek(TokenType::In)?; // 'in'
+        // The leading name binds the map key or sequence index, the second the element.
+        let mut index_variable = None;
+        if self.peek_token.token_type == TokenType::Comma {
+            self.next_token(); // curr is ','
+            self.next_token(); // move to the value name
+            index_variable = Some(variable);
+            variable = Identifier {
+                token: self.curr_token.clone(),
+                value: self.curr_token.literal.clone(),
+            };
+        }
+
+        self.expect_peek(TokenType::In)?;
         self.next_token(); // move to iterable
 
         let iterable = self.parse_expression(Precedence::Lowest)?;
 
-        self.expect_peek(TokenType::LBrace)?; // '{'
+        self.expect_peek(TokenType::LBrace)?;
         let body = self.parse_block()?;
 
         Some(Statement::Each {
             token,
             variable,
+            index_variable,
             iterable,
             body,
         })
@@ -2364,7 +2384,7 @@ impl Parser {
             value: self.curr_token.literal.clone(),
         };
 
-        self.expect_peek(TokenType::LParen)?; // '('
+        self.expect_peek(TokenType::LParen)?;
 
         // Parse parameters
         let mut params = Vec::new();
@@ -2384,9 +2404,9 @@ impl Parser {
                 });
             }
         }
-        self.expect_peek(TokenType::RParen)?; // ')'
+        self.expect_peek(TokenType::RParen)?;
 
-        self.expect_peek(TokenType::When)?; // 'when'
+        self.expect_peek(TokenType::When)?;
         self.next_token(); // move to condition
 
         let condition = self.parse_expression(Precedence::Lowest)?;
@@ -2406,22 +2426,19 @@ impl Parser {
         self.next_token(); // move to subject
         let subject = self.parse_expression(Precedence::Lowest)?;
 
-        self.expect_peek(TokenType::LBrace)?; // '{'
+        self.expect_peek(TokenType::LBrace)?;
 
         let mut arms = Vec::new();
 
-        // Skip newlines after opening brace
         while self.peek_token.token_type == TokenType::Newline {
             self.next_token();
         }
 
-        // Parse arms until we hit '}'
         while self.peek_token.token_type != TokenType::RBrace
             && self.peek_token.token_type != TokenType::Eof
         {
             self.next_token(); // move to pattern name or 'else'
 
-            // Skip newlines
             while self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2435,7 +2452,7 @@ impl Parser {
                 self.next_token(); // move to pattern name
                 let pattern_name = self.curr_token.literal.clone();
 
-                self.expect_peek(TokenType::LParen)?; // '('
+                self.expect_peek(TokenType::LParen)?;
 
                 let mut params = Vec::new();
                 if self.peek_token.token_type != TokenType::RParen {
@@ -2453,18 +2470,22 @@ impl Parser {
                         });
                     }
                 }
-                self.expect_peek(TokenType::RParen)?; // ')'
+                self.expect_peek(TokenType::RParen)?;
 
-                self.expect_peek(TokenType::When)?; // 'when'
+                self.expect_peek(TokenType::When)?;
                 self.next_token(); // move to condition
 
                 let condition = self.parse_expression(Precedence::Lowest)?;
 
-                self.expect_peek(TokenType::Arrow)?; // '->'
+                self.expect_peek(TokenType::Arrow)?;
                 self.next_token(); // move to body expression
 
                 let body = if self.curr_token.token_type == TokenType::LBrace {
-                    self.parse_block()?
+                    if self.brace_opens_map_literal() {
+                        vec![Statement::Expr(self.parse_expression(Precedence::Lowest)?)]
+                    } else {
+                        self.parse_block()?
+                    }
                 } else {
                     let stmt = self.parse_statement()?;
                     vec![stmt]
@@ -2480,11 +2501,15 @@ impl Parser {
                 // Reference to pre-defined pattern
                 let pattern_name = self.curr_token.literal.clone();
 
-                self.expect_peek(TokenType::Arrow)?; // '->'
+                self.expect_peek(TokenType::Arrow)?;
                 self.next_token(); // move to body expression
 
                 let body = if self.curr_token.token_type == TokenType::LBrace {
-                    self.parse_block()?
+                    if self.brace_opens_map_literal() {
+                        vec![Statement::Expr(self.parse_expression(Precedence::Lowest)?)]
+                    } else {
+                        self.parse_block()?
+                    }
                 } else {
                     let stmt = self.parse_statement()?;
                     vec![stmt]
@@ -2498,18 +2523,16 @@ impl Parser {
                 });
             }
 
-            // Skip comma if present
             if self.peek_token.token_type == TokenType::Comma {
                 self.next_token();
             }
 
-            // Skip newlines
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
         }
 
-        self.expect_peek(TokenType::RBrace)?; // '}'
+        self.expect_peek(TokenType::RBrace)?;
 
         Some(Statement::Choose {
             token,
@@ -2520,13 +2543,12 @@ impl Parser {
 
     fn parse_option_expression(&mut self) -> Option<Expression> {
         let token = self.curr_token.clone(); // 'option'
-        self.expect_peek(TokenType::LBrace)?; // '{'
+        self.expect_peek(TokenType::LBrace)?;
 
         let mut arms = Vec::new();
         let mut default: Option<Vec<Statement>> = None;
         let mut error_default: Option<Vec<Statement>> = None;
 
-        // Skip newlines after '{'
         while self.peek_token.token_type == TokenType::Newline {
             self.next_token();
         }
@@ -2536,7 +2558,6 @@ impl Parser {
         {
             self.next_token(); // move to condition/default expression
 
-            // Skip newlines
             while self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2552,12 +2573,16 @@ impl Parser {
                 && self.peek_nth(2).token_type == TokenType::Arrow
             {
                 self.next_token(); // move to Error
-                self.expect_peek(TokenType::Gt)?; // close '>'
-                self.expect_peek(TokenType::Arrow)?; // '->'
+                self.expect_peek(TokenType::Gt)?;
+                self.expect_peek(TokenType::Arrow)?;
                 self.next_token(); // move to body
 
                 let body = if self.curr_token.token_type == TokenType::LBrace {
-                    self.parse_block()?
+                    if self.brace_opens_map_literal() {
+                        vec![Statement::Expr(self.parse_expression(Precedence::Lowest)?)]
+                    } else {
+                        self.parse_block()?
+                    }
                 } else {
                     let stmt = self.parse_statement()?;
                     vec![stmt]
@@ -2574,15 +2599,14 @@ impl Parser {
                 continue;
             }
 
-            // If current token is '{', treat as a block default arm
-            // (not a map literal) since bare '{' in option position is a block.
-            if self.curr_token.token_type == TokenType::LBrace {
+            // A `{` default arm is a block unless it opens a map literal, which falls through to the expression path below.
+            if self.curr_token.token_type == TokenType::LBrace
+                && !self.brace_opens_map_literal()
+            {
                 default = Some(self.parse_block()?);
-                // Skip comma if present
                 if self.peek_token.token_type == TokenType::Comma {
                     self.next_token();
                 }
-                // Skip newlines
                 while self.peek_token.token_type == TokenType::Newline {
                     self.next_token();
                 }
@@ -2597,7 +2621,11 @@ impl Parser {
                 self.next_token(); // move to body
 
                 let body = if self.curr_token.token_type == TokenType::LBrace {
-                    self.parse_block()?
+                    if self.brace_opens_map_literal() {
+                        vec![Statement::Expr(self.parse_expression(Precedence::Lowest)?)]
+                    } else {
+                        self.parse_block()?
+                    }
                 } else {
                     let stmt = self.parse_statement()?;
                     vec![stmt]
@@ -2609,7 +2637,7 @@ impl Parser {
                 });
             } else if self.peek_token.token_type == TokenType::LBrace {
                 // User likely forgot '->' before the block
-                self.errors.push(Diagnostic::error_with_hint(
+                self.errors.push(diag_hint(codes::MISSING_ARROW_IN_OPTION_ARM, 
                     self.peek_token.span,
                     "missing `->` before block in option arm",
                     "add `->` between the condition and its body: condition -> { ... }",
@@ -2625,11 +2653,9 @@ impl Parser {
                         _ => {}
                     }
                 }
-                // Skip comma if present
                 if self.peek_token.token_type == TokenType::Comma {
                     self.next_token();
                 }
-                // Skip newlines
                 while self.peek_token.token_type == TokenType::Newline {
                     self.next_token();
                 }
@@ -2640,7 +2666,7 @@ impl Parser {
                 self.next_token(); // move to true value
                 let true_expr = self.parse_expression(Precedence::Lowest)?;
 
-                self.expect_peek(TokenType::Comma)?; // ','
+                self.expect_peek(TokenType::Comma)?;
                 self.next_token(); // move to false value
                 let false_expr = self.parse_expression(Precedence::Lowest)?;
 
@@ -2653,29 +2679,25 @@ impl Parser {
             } else {
                 // bare default (no ->)
                 default = Some(vec![Statement::Expr(expr)]);
-                // Skip comma if present
                 if self.peek_token.token_type == TokenType::Comma {
                     self.next_token();
                 }
-                // Skip newlines
                 while self.peek_token.token_type == TokenType::Newline {
                     self.next_token();
                 }
                 break;
             }
 
-            // Skip comma if present
             if self.peek_token.token_type == TokenType::Comma {
                 self.next_token();
             }
 
-            // Skip newlines
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
         }
 
-        self.expect_peek(TokenType::RBrace)?; // '}'
+        self.expect_peek(TokenType::RBrace)?;
 
         Some(Expression::Option {
             token,
@@ -2693,7 +2715,7 @@ impl Parser {
 
         let negated = Self::negate_expression(condition);
 
-        self.expect_peek(TokenType::LBrace)?; // '{'
+        self.expect_peek(TokenType::LBrace)?;
         let consequence = self.parse_block()?;
 
         Some(Statement::If {
@@ -2710,8 +2732,8 @@ impl Parser {
             &stmt,
             Statement::Expr(_)
                 | Statement::Give { .. }
-                | Statement::Skip
-                | Statement::Stop
+                | Statement::Skip { .. }
+                | Statement::Stop { .. }
                 | Statement::Assign { .. }
                 | Statement::DotAssign { .. }
                 | Statement::IndexAssign { .. }
@@ -2772,7 +2794,6 @@ impl Parser {
         let open_brace_span = self.curr_token.span;
         self.next_token(); // move past '{'
 
-        // Skip leading newlines
         while self.curr_token.token_type == TokenType::Newline {
             self.next_token();
         }
@@ -2785,14 +2806,13 @@ impl Parser {
             }
             self.next_token();
 
-            // Skip newlines
             while self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
             }
         }
 
         if self.curr_token.token_type == TokenType::Eof {
-            self.errors.push(Diagnostic::error_with_hint(
+            self.errors.push(diag_hint(codes::UNCLOSED_DELIMITER, 
                 open_brace_span,
                 "unclosed block: expected '}' before end of file",
                 "add a closing '}' to match this opening brace",
@@ -2814,13 +2834,7 @@ impl Parser {
             value: self.curr_token.literal.clone(),
         };
 
-        // Optional parent (struct inheritance). Two surface forms are accepted:
-        //   struct American(Person) { ... }          parenthesized form
-        //   struct Dog includes Animal { ... }        `includes ParentName` form
-        // The `includes` here is the same CONTEXTUAL keyword used for method
-        // blocks (`Name includes { ... }`), but in the struct-declaration
-        // position it is followed by the parent's NAME (an identifier) rather
-        // than `{`, which keeps the two unambiguous.
+        // Two forms: `struct American(Person)` and `struct Dog includes Animal`.
         let parent = if self.peek_token.token_type == TokenType::LParen {
             self.next_token(); // consume '('
             self.next_token(); // move to parent name
@@ -2828,7 +2842,7 @@ impl Parser {
                 token: self.curr_token.clone(),
                 value: self.curr_token.literal.clone(),
             };
-            self.expect_peek(TokenType::RParen)?; // consume ')'
+            self.expect_peek(TokenType::RParen)?;
             Some(parent_ident)
         } else if self.peek_token.token_type == TokenType::Ident
             && self.peek_token.literal == "includes"
@@ -2845,11 +2859,10 @@ impl Parser {
             None
         };
 
-        self.expect_peek(TokenType::LBrace)?; // '{'
+        self.expect_peek(TokenType::LBrace)?;
 
         let mut fields = Vec::new();
 
-        // Skip newlines after '{'
         while self.peek_token.token_type == TokenType::Newline {
             self.next_token();
         }
@@ -2860,7 +2873,6 @@ impl Parser {
         {
             self.next_token(); // move to field name
 
-            // Skip newlines
             while self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -2874,12 +2886,7 @@ impl Parser {
                 });
             }
 
-            // A field may be marked private with a leading visibility modifier:
-            //   hide secret <int>      (the `hide` keyword)
-            //   hidden secret <int>    (`hidden`, a contextual keyword)
-            // `hidden` lexes as a plain identifier, so it is only treated as a
-            // modifier when it is followed by another identifier (the real field
-            // name); `hidden <int>` is still a field literally named `hidden`.
+            // `hide` is a keyword; `hidden` is contextual and lexes as a plain identifier.
             let hidden = if self.curr_token.token_type == TokenType::Hide {
                 self.next_token(); // consume 'hide', now at field name
                 true
@@ -2898,7 +2905,7 @@ impl Parser {
                 value: self.curr_token.literal.clone(),
             };
 
-            self.expect_peek(TokenType::Lt)?; // '<'
+            self.expect_peek(TokenType::Lt)?;
             let type_ann = self.parse_type_annotation()?;
 
             fields.push(crate::ast::StructField {
@@ -2907,13 +2914,12 @@ impl Parser {
                 hidden,
             });
 
-            // Skip newlines
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
         }
 
-        self.expect_peek(TokenType::RBrace)?; // '}'
+        self.expect_peek(TokenType::RBrace)?;
 
         Some(Statement::StructDef {
             token,
@@ -2932,11 +2938,10 @@ impl Parser {
             value: self.curr_token.literal.clone(),
         };
 
-        self.expect_peek(TokenType::LBrace)?; // '{'
+        self.expect_peek(TokenType::LBrace)?;
 
         let mut variants: Vec<crate::ast::EnumVariant> = Vec::new();
 
-        // Skip newlines after '{'
         while self.peek_token.token_type == TokenType::Newline {
             self.next_token();
         }
@@ -2946,7 +2951,6 @@ impl Parser {
         {
             self.next_token(); // move to variant name (or a separator we skip)
 
-            // Skip newlines and commas between variants
             while self.curr_token.token_type == TokenType::Newline
                 || self.curr_token.token_type == TokenType::Comma
             {
@@ -2988,7 +2992,7 @@ impl Parser {
                                 token: self.curr_token.clone(),
                                 value: self.curr_token.literal.clone(),
                             };
-                            self.expect_peek(TokenType::Lt)?; // '<'
+                            self.expect_peek(TokenType::Lt)?;
                             let type_ann = self.parse_type_annotation()?;
                             params.push((param_name, type_ann));
                             if self.peek_token.token_type == TokenType::Comma {
@@ -3049,7 +3053,6 @@ impl Parser {
                 kind,
             });
 
-            // Skip trailing newlines or commas between variants
             while self.peek_token.token_type == TokenType::Newline
                 || self.peek_token.token_type == TokenType::Comma
             {
@@ -3074,11 +3077,10 @@ impl Parser {
         let token = self.curr_token.clone();
 
         self.next_token(); // consume the `includes` identifier (contextual keyword)
-        self.expect_peek(TokenType::LBrace)?; // '{'
+        self.expect_peek(TokenType::LBrace)?;
 
         let mut methods = Vec::new();
 
-        // Skip newlines after '{'
         while self.peek_token.token_type == TokenType::Newline {
             self.next_token();
         }
@@ -3089,7 +3091,6 @@ impl Parser {
         {
             self.next_token(); // move to 'fun'
 
-            // Skip newlines
             while self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
             }
@@ -3099,7 +3100,7 @@ impl Parser {
             }
 
             if self.curr_token.token_type != TokenType::Function {
-                self.errors.push(Diagnostic::error_with_hint(
+                self.errors.push(diag_hint(codes::EXPECTED_FUN_IN_INCLUDES, 
                     self.curr_token.span,
                     format!(
                         "expected `fun` inside includes block, got {:?}",
@@ -3132,13 +3133,12 @@ impl Parser {
 
             methods.push((method_name, func_expr));
 
-            // Skip newlines
             while self.peek_token.token_type == TokenType::Newline {
                 self.next_token();
             }
         }
 
-        self.expect_peek(TokenType::RBrace)?; // '}'
+        self.expect_peek(TokenType::RBrace)?;
 
         Some(Statement::IncludesDef {
             token,
@@ -3211,6 +3211,25 @@ impl Parser {
         } else {
             self.peek_token = self.lexer.next_token();
         }
+    }
+
+    /// With the current token on `{` in arm or default-arm position, does it open a map literal rather than a block?
+    ///
+    /// A brace there had always meant "block", which made map literals unreachable and, worse, turned a bare `{}` into an
+    /// empty block yielding `None` instead of an empty map — the bug behind `json.set_in`/`toml.set_in`. The two forms are
+    /// separable by lookahead, the same way struct-literal-vs-block already is: `{}` is the empty map (an empty block arm is
+    /// indistinguishable from omitting the arm, so the reading that carries information wins), and `{ <key> :` is a map entry
+    /// (`:=` is its own token, so `{ x := 1 }` is not mistaken for one). Anything else stays a block, so every existing arm
+    /// keeps its meaning. A compound key (`{a + b: 1}`) still reads as a block and still needs parenthesising.
+    fn brace_opens_map_literal(&mut self) -> bool {
+        let mut idx = 0;
+        while self.peek_nth(idx).token_type == TokenType::Newline {
+            idx += 1;
+        }
+        if self.peek_nth(idx).token_type == TokenType::RBrace {
+            return true;
+        }
+        self.peek_nth(idx + 1).token_type == TokenType::Colon
     }
 
     fn peek_nth(&mut self, n: usize) -> &Token {
@@ -3332,15 +3351,18 @@ impl Parser {
             Some(())
         } else {
             let suggestion = Self::suggest_for_expected(&tt, &self.peek_token);
-            self.errors.push(Diagnostic {
-                span: self.peek_token.span,
-                message: format!(
+            let mut d = diag(
+                codes::UNEXPECTED_TOKEN,
+                self.peek_token.span,
+                format!(
                     "expected {:?}, got {:?} ({:?})",
                     tt, self.peek_token.token_type, self.peek_token.literal
                 ),
-                suggestion,
-                severity: Severity::Error,
-            });
+            );
+            if let Some(hint) = suggestion {
+                d = d.help(hint);
+            }
+            self.errors.push(d);
             None
         }
     }

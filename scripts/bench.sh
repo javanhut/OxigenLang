@@ -96,6 +96,33 @@ PYTHON_BIN="${PYTHON_BIN:-$(command -v python3)}"
 BUN_BIN="${BUN_BIN:-$(command -v bun 2>/dev/null || true)}"
 NODE_BIN="${NODE_BIN:-$(command -v node 2>/dev/null || true)}"
 
+# CPython's copy-and-patch JIT (3.13+) only exists if the interpreter was
+# built with --enable-experimental-jit, and the `yes-off` build variant
+# ships it compiled in but disabled until PYTHON_JIT=1. Ask for it
+# unconditionally — builds without the JIT ignore the variable — so a
+# JIT-capable python is always measured with its JIT on. Set PYTHON_JIT=0
+# to compare against the pure interpreter; that override is honoured.
+export PYTHON_JIT="${PYTHON_JIT:-1}"
+
+# Then ask the interpreter what it actually ended up doing, with the
+# variable already exported so this reports the real run condition rather
+# than the default one. `sys._jit` is 3.14+; older builds can't self-report.
+PYTHON_JIT_STATE="unknown"
+if [[ -n "$PYTHON_BIN" && -x "$PYTHON_BIN" ]]; then
+    PYTHON_JIT_STATE="$("$PYTHON_BIN" -c '
+import sys
+jit = getattr(sys, "_jit", None)
+if jit is None:
+    print("unknown (needs python 3.14+ to self-report)")
+elif jit.is_enabled():
+    print("enabled")
+elif jit.is_available():
+    print("built in, disabled")
+else:
+    print("not built in")
+' 2>/dev/null || echo unknown)"
+fi
+
 # Node ≥ 22 runs .ts files with built-in type-stripping. Older versions
 # require --experimental-strip-types. Default to off; probe at runtime.
 NODE_TS_ARGS=()
@@ -273,8 +300,10 @@ run_one_benchmark() {
     if [[ $WARMUPS -gt 0 ]]; then
         printf "  warmup:"
         for ((round=1; round<=WARMUPS; round++)); do
-            for spec in "${specs[@]}"; do
-                local cmd="${spec#*$'\t'}"
+            # Rotate here too, so the state the first measured round inherits
+            # isn't itself a fixed-order artifact.
+            for ((i=0; i<n_variants; i++)); do
+                local cmd="${specs[$(( (i + round) % n_variants ))]#*$'\t'}"
                 eval "$cmd" >/dev/null 2>&1 || true
             done
             printf " %d" "$round"
@@ -291,11 +320,20 @@ run_one_benchmark() {
 
     printf "  measure:"
     for ((round=1; round<=RUNS; round++)); do
-        for i in $(seq 0 $((n_variants - 1))); do
-            local cmd="${specs[$i]#*$'\t'}"
+        # Rotate the starting variant each round. Interleaving alone equalizes
+        # thermal state but not POSITION: with a fixed order the first variant
+        # always runs right after the previous round's last one, which here is
+        # `oxigen --no-jit` — the slowest, most cache-disruptive variant in the
+        # rotation. That cost a fixed ~0.5ms, invisible at 200ms but a 4-6%
+        # penalty at 10ms, enough to invent a regression that isn't there.
+        # Rotating gives every variant an equal share of every slot.
+        for ((i=0; i<n_variants; i++)); do
+            local idx=$(( (i + round) % n_variants ))
+            local cmd="${specs[$idx]#*$'\t'}"
             local t
             t="$(time_one "$cmd")"
-            printf "%s\n" "$t" >> "${sample_files[$i]}"
+            # Sample stays keyed by variant; only execution order rotates.
+            printf "%s\n" "$t" >> "${sample_files[$idx]}"
         done
         printf " %d" "$round"
     done
@@ -498,7 +536,7 @@ done < <(discover_benchmarks "$@")
 [[ ${#benchmarks[@]} -gt 0 ]] || die "no benchmarks found"
 
 echo "Oxigen binary: $OXIGEN_BIN"
-echo "Python binary: $PYTHON_BIN"
+echo "Python binary: $PYTHON_BIN (JIT: $PYTHON_JIT_STATE)"
 echo "Benchmarks:    ${#benchmarks[@]} (${benchmarks[*]})"
 echo "Warmups:       $WARMUPS"
 echo "Runs:          $RUNS"
@@ -524,7 +562,7 @@ latest_md="$REPORT_DIR/latest-native.md"
     echo "- Host:      \`${HOSTNAME:-$(uname -n)}\`"
     echo "- Kernel:    \`$(uname -srm)\`"
     echo "- Oxigen:    \`$("$OXIGEN_BIN" --version 2>/dev/null | head -1 || echo unknown)\`"
-    echo "- Python:    \`$("$PYTHON_BIN" --version 2>&1)\`"
+    echo "- Python:    \`$("$PYTHON_BIN" --version 2>&1)\` (JIT: $PYTHON_JIT_STATE)"
     if [[ -n "$BUN_BIN" && -x "$BUN_BIN" ]]; then
         echo "- Bun:       \`$("$BUN_BIN" --version 2>&1 | head -1)\`"
     fi

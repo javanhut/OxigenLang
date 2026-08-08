@@ -21,4 +21,4 @@ function run(limit: number): number {
     return total;
 }
 
-run(50000);
+run(200_000);

@@ -11,7 +11,6 @@
 
 #![cfg(feature = "jit")]
 
-use cranelift_codegen::ir;
 use cranelift_codegen::ir::InstBuilder;
 use cranelift_codegen::ir::types;
 use cranelift_frontend::FunctionBuilder;
@@ -274,6 +273,14 @@ pub(crate) struct JitCounters {
     /// arity / thunk-non-null / RC fail tail.
     pub closure_aware_call_dispatch: std::cell::Cell<u64>,
 
+    /// Phase 1: calls whose callee body was evaluated inline at the call site —
+    /// no JitFrame, no operand-stack argument, no dispatch.
+    pub closure_inline_hit: std::cell::Cell<u64>,
+    /// Calls where the cache recorded an inlinable body but a runtime guard
+    /// (non-integer argument, or an upvalue not cached as a closed integer)
+    /// sent it down the normal path anyway.
+    pub closure_inline_guard_miss: std::cell::Cell<u64>,
+
     /// Step 0 attribution: per-helper FFI call counts. Indexed by
     /// `HelperCounter`; bumped from each helper's entry. Tells us
     /// "this benchmark spent N FFI crossings into op_call_hit, M into
@@ -313,9 +320,7 @@ pub(crate) struct JitCounters {
 
 impl JitCounters {
     pub(super) fn new() -> Self {
-        // [Cell<u64>; N] doesn't impl Default in older toolchains;
-        // build it explicitly with std::array::from_fn so
-        // HelperCounter::COUNT can grow without touching this site.
+        // [Cell<u64>; N] has no Default on older toolchains, so build it with std::array::from_fn.
         let helper_calls: [std::cell::Cell<u64>; HelperCounter::COUNT] =
             std::array::from_fn(|_| std::cell::Cell::new(0));
         Self {
@@ -344,6 +349,8 @@ impl JitCounters {
             ic_callee_has_spec_entry: std::cell::Cell::new(0),
             ic_callee_has_closure_aware_spec: std::cell::Cell::new(0),
             closure_aware_call_dispatch: std::cell::Cell::new(0),
+            closure_inline_hit: std::cell::Cell::new(0),
+            closure_inline_guard_miss: std::cell::Cell::new(0),
             helper_calls,
             spec_entry_eligible: std::cell::Cell::new(0),
             spec_entry_rejected_zero_arity: std::cell::Cell::new(0),
@@ -470,6 +477,14 @@ impl JitCounters {
             "  closure_aware_call_dispatch:       {}",
             self.closure_aware_call_dispatch.get()
         );
+        eprintln!(
+            "  closure_inline_hit:                {}",
+            self.closure_inline_hit.get()
+        );
+        eprintln!(
+            "  closure_inline_guard_miss:         {}",
+            self.closure_inline_guard_miss.get()
+        );
 
         // Step 0 spec-entry eligibility outcome breakdown.
         eprintln!("[jit stats] spec-entry eligibility");
@@ -510,9 +525,7 @@ impl JitCounters {
             self.spec_entry_rejected_return_unreachable.get()
         );
 
-        // Step 0 helper-call counts. Print only non-zero entries to
-        // keep the dump signal-dense; widths are aligned with the
-        // longest helper name in HELPER_NAMES.
+        // Print only non-zero entries; widths align with the longest name in HELPER_NAMES.
         eprintln!("[jit stats] helper FFI calls (non-zero)");
         for (i, &name) in HELPER_NAMES.iter().enumerate() {
             let n = self.helper_calls[i].get();
@@ -533,12 +546,12 @@ pub(super) fn emit_counter_bump(
     counters_ptr: *const JitCounters,
     offset: isize,
 ) {
-    use ir::MemFlags;
+    
     let addr = unsafe { (counters_ptr as *const u8).offset(offset) } as i64;
     let ptr = builder.ins().iconst(types::I64, addr);
-    let flags = MemFlags::trusted();
+    let flags = cranelift_codegen::ir::MemFlagsData::trusted();
     let cur = builder.ins().load(types::I64, flags, ptr, 0);
-    let next = builder.ins().iadd_imm(cur, 1);
+    let next = builder.ins().iadd_imm_s(cur, 1);
     builder.ins().store(flags, next, ptr, 0);
 }
 
@@ -586,4 +599,7 @@ pub(super) mod counter_offsets {
         offset_of!(JitCounters, ic_callee_has_closure_aware_spec) as isize;
     pub const CLOSURE_AWARE_CALL_DISPATCH: isize =
         offset_of!(JitCounters, closure_aware_call_dispatch) as isize;
+    pub const CLOSURE_INLINE_HIT: isize = offset_of!(JitCounters, closure_inline_hit) as isize;
+    pub const CLOSURE_INLINE_GUARD_MISS: isize =
+        offset_of!(JitCounters, closure_inline_guard_miss) as isize;
 }

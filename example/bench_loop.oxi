@@ -10,5 +10,4 @@ fun loop_sum(n) {
     }
     total
 }
-
-loop_sum(1000000)
+loop_sum(20000000)

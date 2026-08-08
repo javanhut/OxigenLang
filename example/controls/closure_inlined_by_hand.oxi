@@ -1,0 +1,19 @@
+// Control for bench_closure: identical loop with the closure call replaced by
+// the body it would inline to. Isolates call mechanics from loop/arithmetic
+// performance — the gap between this and bench_closure IS the call overhead.
+//
+// Lives outside example/bench_*.oxi so the normal report never picks it up.
+//
+// Must print 72000054000000, the same value bench_closure produces. If it ever
+// differs, the comparison is invalid — the two are no longer the same work.
+fun run(n <int>) {
+    x <int> := 5
+    total <int> := 0
+    i <int> := 0
+    repeat when i < n {
+        total = total + (x + i)
+        i = i + 1
+    }
+    total
+}
+run(12000000)

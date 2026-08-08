@@ -18,7 +18,7 @@ jobs:
     name: Rust suite (cargo test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
@@ -31,7 +31,7 @@ jobs:
     name: Oxigen suite (oxigen test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p oxigen
@@ -42,3 +42,35 @@ jobs:
       # self-asserting program directly; it exits non-zero on any mismatch.
       - name: Run concurrency smoke test
         run: ./target/debug/oxigen tests/concurrency.oxi
+      # Same constraint, plus it needs a real socket: the api module's wire
+      # format (request parsing, Content-Length bodies, the request limits) is
+      # only reachable over a connection, not from a <test> block.
+      - name: Run api wire-format test
+        run: ./target/debug/oxigen tests/api_wire.oxi
+      # Formatting is only enforced if something checks it. `--check` writes
+      # nothing and exits 1 listing the files that would change.
+      - name: Check formatting
+        run: ./target/debug/oxigen fmt --check example tests stdlib update
+
+  # Suite 3 — Rust lints. A separate job on purpose: a lint failure should not
+  # hide the test results, and vice versa.
+  clippy:
+    name: Rust lints (cargo clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # `--all-targets` covers tests and benches, not just the library. Without
+      # it, lints in core/tests/ go unreported — which is how deprecated
+      # cranelift calls survived there after the rest of the tree was migrated.
+      #
+      # `-D warnings` is what makes this a gate rather than a suggestion; the
+      # tree is clean under it today, so anything new is genuinely new.
+      #
+      # JIT is a default feature on both crates, so this lints the Cranelift
+      # backend without naming it.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings

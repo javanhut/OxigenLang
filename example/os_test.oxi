@@ -1,7 +1,6 @@
 // Tests for the os stdlib module.
 // Filesystem checks below are relative to the current working directory, so run
 // this from the repository root:  oxigen test example/os_test.oxi
-
 introduce os
 
 <test>("environment variables") {

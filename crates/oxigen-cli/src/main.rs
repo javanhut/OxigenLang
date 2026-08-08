@@ -5,13 +5,19 @@ use std::path::PathBuf;
 
 mod repl;
 
+/// Single source of truth for the version banner — `--version`, `--help` and
+/// the REPL's `version` command all route here so they can't drift apart.
+pub fn print_version() {
+    println!("Oxigen Version: {}", env!("CARGO_PKG_VERSION"));
+}
+
 use oxigen_core::compiler::Compiler;
+use oxigen_core::diagnostics::{DiagnosticSink, SourceFile, render};
 use oxigen_core::formatter::Formatter;
 use oxigen_core::lexer::Lexer;
 use oxigen_core::parser::Parser;
 use oxigen_core::vm::VM;
 
-use serde_json::json;
 
 fn read_source(file_path: &str) -> String {
     match fs::read_to_string(file_path) {
@@ -77,11 +83,7 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
         .canonicalize()
         .expect("Could not resolve file path");
 
-    // Run parse/compile/VM execution on a large-stack thread so all FRAMES_MAX
-    // (16384) native JIT frames fit on the native stack and the V7 recursion
-    // guard is the graceful limit (instead of the native stack overflowing
-    // first -> rc=134). Parse/compile run inside the thread too so no non-Send
-    // (Rc-backed) value is captured across the thread boundary.
+    // Large stack so all 16384 JIT frames fit natively and the V7 guard is the graceful limit.
     const STACK_SIZE: usize = 256 << 20; // 256 MB
     let run = {
         let script_args: Vec<String> = script_args.to_vec();
@@ -103,8 +105,13 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
             let function = match compiler.compile(&program) {
                 Ok(f) => f,
                 Err(errors) => {
-                    for err in &errors {
-                        eprintln!("{}", err);
+                    // Render through the shared renderer so a compile error looks like every other diagnostic.
+                    let source = SourceFile::named(
+                        file_path_buf.display().to_string(),
+                        contents.clone(),
+                    );
+                    for err in errors {
+                        eprint!("{}", render::render_human(&err.into_diagnostic(), &source));
                     }
                     std::process::exit(1);
                 }
@@ -183,10 +190,10 @@ fn status_marker(passed: bool, color: bool) -> String {
     format!("{}{}", paint(text, code, color), pad)
 }
 
-/// Recursively collect `*_test.oxi` files under `dir`, skipping hidden
+/// Recursively collect files ending in `suffix` under `dir`, skipping hidden
 /// directories and common build/vendor folders. Results are sorted for
-/// deterministic ordering.
-fn discover_test_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+/// deterministic ordering. `test` passes `_test.oxi`; `fmt` passes `.oxi`.
+fn discover_files(dir: &std::path::Path, suffix: &str, out: &mut Vec<PathBuf>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -204,11 +211,11 @@ fn discover_test_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
             if name.starts_with('.') || name == "target" || name == "node_modules" {
                 continue;
             }
-            discover_test_files(&path, out);
+            discover_files(&path, suffix, out);
         } else if path
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.ends_with("_test.oxi"))
+            .map(|n| n.ends_with(suffix))
             .unwrap_or(false)
         {
             out.push(path);
@@ -264,9 +271,7 @@ fn run_test_file(path: &std::path::Path, color: bool) -> FileResult {
         }
     };
 
-    // `oxigen test` runs each `<test>` block on the bytecode VM, so tests
-    // observe the same semantics as `oxigen file.oxi` — notably in-place
-    // `push`/`insert`.
+    // `oxigen test` runs on the bytecode VM so tests see the same semantics as running the file.
     let outcomes = oxigen_core::test_runner::run_vm_tests(&program, &contents, Some(file_path_buf));
 
     if outcomes.is_empty() {
@@ -315,12 +320,12 @@ fn run_tests_command(paths: &[String]) {
 
     if paths.is_empty() {
         let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        discover_test_files(&cwd, &mut files);
+        discover_files(&cwd, "_test.oxi", &mut files);
     } else {
         for arg in paths {
             let p = PathBuf::from(arg);
             if p.is_dir() {
-                discover_test_files(&p, &mut files);
+                discover_files(&p, "_test.oxi", &mut files);
             } else if p.is_file() {
                 files.push(p);
             } else {
@@ -381,37 +386,69 @@ fn check_file(file_path: &str) {
     let contents = read_source(file_path);
 
     let lexer = Lexer::new(&contents);
-    let mut parser = Parser::new(lexer, &contents);
-    let _program = parser.parse_program();
+    let mut parser = Parser::with_file(lexer, &contents, file_path);
+    let program = parser.parse_program();
 
-    let diagnostics: Vec<serde_json::Value> = parser
-        .errors()
+    let source = parser.source_file();
+    let mut sink = DiagnosticSink::new();
+    sink.extend(parser.errors().iter().cloned());
+
+    // check used to parse and stop, so a compile error never reached an editor.
+    if !sink.has_errors()
+        && let Err(errors) = Compiler::new().compile(&program)
+    {
+        sink.extend(errors.into_iter().map(|e| e.into_diagnostic()));
+    }
+
+    sink.deduplicate();
+    let payload: Vec<serde_json::Value> = sink
+        .diagnostics()
         .iter()
-        .map(|d| {
-            let severity = match d.severity {
-                oxigen_core::parser::Severity::Error => "error",
-                oxigen_core::parser::Severity::Warning => "warning",
-            };
-            json!({
-                "line": d.span.line,
-                "column": d.span.column,
-                "message": d.message,
-                "suggestion": d.suggestion,
-                "severity": severity
-            })
-        })
+        .map(|d| render::render_json(d, &source))
         .collect();
+    println!("{}", serde_json::to_string(&payload).unwrap());
 
-    println!("{}", serde_json::to_string(&diagnostics).unwrap());
+    // Non-zero only on real failure, so check works as a CI gate; warnings still exit 0.
+    if sink.has_errors() {
+        std::process::exit(1);
+    }
 }
 
-fn fmt_files(paths: &[String]) {
-    for path in paths {
-        if !path.ends_with(".oxi") {
-            eprintln!("Skipping non-.oxi file: {}", path);
-            continue;
+/// `check` reports what would change and exits 1 without writing, so CI can
+/// gate on formatting. Without it a formatted tree silently drifts back out.
+fn fmt_files(args: &[String], check: bool) {
+    // A directory used to fall into the non-.oxi branch below, print "Skipping"
+    // and exit 0 — so `oxigen fmt .` formatted nothing and reported success.
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for arg in args {
+        let p = PathBuf::from(arg);
+        if p.is_dir() {
+            discover_files(&p, ".oxi", &mut paths);
+        } else if p.is_file() {
+            if !arg.ends_with(".oxi") {
+                usage_error(
+                    &format!("not an Oxigen source file: {arg}"),
+                    Some("fmt only formats .oxi files"),
+                );
+            }
+            paths.push(p);
+        } else {
+            usage_error(
+                &format!("no such file or directory: {arg}"),
+                Some("fmt takes .oxi files or directories; `oxigen fmt .` walks the tree"),
+            );
         }
+    }
 
+    if paths.is_empty() {
+        println!("No .oxi files found.");
+        return;
+    }
+
+    let mut changed = 0;
+    for path in &paths {
+        let path = path.display().to_string();
+        let path = &path;
         let contents = match fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => {
@@ -431,9 +468,19 @@ fn fmt_files(paths: &[String]) {
             std::process::exit(1);
         }
 
-        let formatted = restore_header(&contents, Formatter::format(&program));
+        // restore_header puts #[indent] back, so the body must be emitted in indent style.
+        let indent_style = header_prefix(&contents)
+            .lines()
+            .any(|l| l.trim() == "#[indent]");
+        let body = Formatter::format_source(&program, parser.comments(), indent_style);
+        let formatted = restore_header(&contents, body);
 
         if formatted != contents {
+            changed += 1;
+            if check {
+                println!("Would reformat {}", path);
+                continue;
+            }
             if let Err(e) = fs::write(path, &formatted) {
                 eprintln!("Error writing {}: {}", path, e);
                 std::process::exit(1);
@@ -441,17 +488,103 @@ fn fmt_files(paths: &[String]) {
             println!("Formatted {}", path);
         }
     }
+
+    // Say how many files were considered: silence after walking a tree is
+    // ambiguous between "already formatted" and "found nothing".
+    if changed == 0 {
+        println!("{} file(s) already formatted.", paths.len());
+        return;
+    }
+
+    if check {
+        eprintln!(
+            "\n{changed} of {} file(s) need formatting. Run `oxigen fmt` to fix.",
+            paths.len()
+        );
+        std::process::exit(1);
+    }
+}
+
+/// Exit code for a malformed command line, kept distinct from `1` (which means
+/// the tool ran and the *code* was bad) so scripts can tell the two apart.
+const EXIT_USAGE: i32 = 2;
+
+const SUBCOMMANDS: [&str; 4] = ["check", "fmt", "test", "explain"];
+
+fn print_usage() {
+    print_version();
+    println!();
+    println!("Usage:");
+    println!("  oxigen [options] <file.oxi> [script args...]   Run a script");
+    println!("  oxigen [options]                               Start the REPL");
+    println!("  oxigen check <file.oxi>                        Report syntax errors as JSON");
+    println!("  oxigen fmt [--check] <file.oxi|dir>...         Format files in place");
+    println!("                                                 --check: report and exit 1 instead");
+    println!("  oxigen test [file.oxi|dir]                     Run *_test.oxi suites");
+    println!("  oxigen explain <CODE>                          Explain an error code");
+    println!();
+    println!("Options (must come BEFORE the file; anything after it goes to the script):");
+    println!("  --jit          Compile eagerly instead of tiering up");
+    println!("  --no-jit       Interpreter only");
+    println!("  --version/-v   Print version");
+    println!("  --help/-h      Print this help");
+    println!();
+    println!("Exit codes: 0 success, 1 the code failed, {EXIT_USAGE} the command line was wrong.");
+}
+
+/// Reports a bad command line and exits. `hint` is a suggested fix.
+fn usage_error(message: &str, hint: Option<&str>) -> ! {
+    eprintln!("error: {message}");
+    if let Some(hint) = hint {
+        eprintln!("  hint: {hint}");
+    }
+    eprintln!("  run `oxigen --help` for usage");
+    std::process::exit(EXIT_USAGE);
+}
+
+/// Rejects a leading argument that is neither a subcommand nor a `.oxi` script,
+/// instead of silently falling through to the REPL.
+fn reject_leading_arg(arg: &str) -> ! {
+    // A .oxi path is handled by the caller, so any other extension is the wrong kind of file.
+    let looks_like_path = arg.contains('/') || arg.contains('.');
+
+    if !looks_like_path {
+        // There is no `run` subcommand; scripts are passed directly.
+        let hint = if arg == "run" {
+            "run a script with `oxigen <file.oxi>` — there is no `run` subcommand".to_string()
+        } else {
+            format!("expected a .oxi file or one of: {}", SUBCOMMANDS.join(", "))
+        };
+        usage_error(&format!("unknown subcommand `{arg}`"), Some(&hint));
+    }
+
+    if !PathBuf::from(arg).exists() {
+        usage_error(&format!("no such file: `{arg}`"), None);
+    }
+    usage_error(
+        &format!("not an Oxigen source file: `{arg}`"),
+        Some("Oxigen scripts must end in `.oxi`"),
+    )
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // The bytecode VM is the only backend. `--jit` compiles eagerly (threshold
-    // 1), `--no-jit` disables compilation; default is lazy tiering.
-    let no_jit = args.iter().any(|a| a == "--no-jit");
+    // Recognised only before the subcommand or script path, or a script's own --no-jit is swallowed.
+    let mut no_jit = false;
+    let mut want_eager = false;
+    let mut cursor = 1;
+    while let Some(arg) = args.get(cursor) {
+        match arg.as_str() {
+            "--no-jit" => no_jit = true,
+            "--jit" => want_eager = true,
+            _ => break,
+        }
+        cursor += 1;
+    }
+
     let eager_jit = !no_jit
-        && (args.iter().any(|a| a == "--jit")
-            || env::var("OXIGEN_JIT").map(|v| v != "0").unwrap_or(false));
+        && (want_eager || env::var("OXIGEN_JIT").map(|v| v != "0").unwrap_or(false));
     let jit_mode = if no_jit {
         JitMode::Disabled
     } else if eager_jit {
@@ -459,42 +592,46 @@ fn main() {
     } else {
         JitMode::Default
     };
-    let filtered_args: Vec<String> = args
-        .iter()
-        .filter(|a| {
-            let s = a.as_str();
-            s != "--jit" && s != "--no-jit"
-        })
-        .cloned()
-        .collect();
 
-    match filtered_args.get(1).map(|s| s.as_str()) {
-        Some("--version") | Some("-v") => {
-            println!("oxigen {}", env!("CARGO_PKG_VERSION"));
-        }
-        Some("check") => {
-            if let Some(path) = filtered_args.get(2) {
-                check_file(path);
-            } else {
-                eprintln!("Usage: oxigen check <file.oxi>");
-                std::process::exit(1);
+    let rest = &args[cursor..];
+    let tail = rest.get(1..).unwrap_or(&[]);
+
+    match rest.first().map(|s| s.as_str()) {
+        None => repl::run_repl(),
+        Some("--version" | "-v") => print_version(),
+        Some("--help" | "-h") => print_usage(),
+        Some("check") => match rest.get(1) {
+            Some(path) => check_file(path),
+            None => usage_error("`check` needs a file", Some("oxigen check <file.oxi>")),
+        },
+        Some("fmt") => {
+            let check = tail.first().is_some_and(|a| a == "--check");
+            let paths = if check { &tail[1..] } else { tail };
+            if paths.is_empty() {
+                usage_error(
+                    "`fmt` needs a file or directory",
+                    Some("oxigen fmt <file.oxi|dir>... (add --check to report instead of write)"),
+                );
             }
+            fmt_files(paths, check);
         }
-        Some("fmt") => fmt_files(&filtered_args[2..]),
-        Some("test") => run_tests_command(&filtered_args[2..]),
-        Some("--help") | Some("-h") => {
-            println!("Oxigen Version: {}", env!("CARGO_PKG_VERSION"));
-            println!();
-            println!("--version/-v:  Get Oxigen Version");
-            println!("fmt [name of file/directory]:  Formats the Oxigen File with proper Syntax");
-            println!("check [name of file/directory]:  Checks the file for Syntax errors.");
-            println!("test [name of file/directory]:  Runs test suite on file or directory");
-            println!("--help/-h:  Get help information");
-            println!("[empty]:  Runs Oxigen Repl");
-        }
+        Some("test") => run_tests_command(tail),
+        Some("explain") => match rest.get(1) {
+            Some(code) => match render::explain(code) {
+                Some(text) => println!("{text}"),
+                None => usage_error(
+                    &format!("unknown error code `{code}`"),
+                    Some("run `oxigen explain --list` to see every code"),
+                ),
+            },
+            None => usage_error("`explain` needs an error code", Some("oxigen explain E0003")),
+        },
         Some(path) if path.ends_with(".oxi") => {
-            run_file_vm(path, &filtered_args[2..], jit_mode);
+            if !PathBuf::from(path).exists() {
+                usage_error(&format!("no such file: `{path}`"), None);
+            }
+            run_file_vm(path, tail, jit_mode);
         }
-        _ => repl::run_repl(),
+        Some(other) => reject_leading_arg(other),
     }
 }

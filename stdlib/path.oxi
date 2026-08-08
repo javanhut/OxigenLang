@@ -1,4 +1,9 @@
 // Join path components: path.join(["home", "user", "file.txt"])
+//
+// WARNING: join is not a sandbox. An absolute component replaces everything
+// before it — join(["/srv/uploads", "/etc/passwd"]) is "/etc/passwd" — and ".."
+// is kept as-is. If any component comes from user input, check the result with
+// path.is_within(base, result) before opening it.
 fun join(parts <array>) { __path_join(parts) }
 
 // Get file extension: path.ext("file.txt") -> "txt"
@@ -18,5 +23,32 @@ fun is_absolute(p <str>) { __path_is_absolute(p) }
 
 // Check if path is relative
 fun is_relative(p <str>) {
-    option { is_absolute(p) -> False, True }
+    option {
+        is_absolute(p) -> {
+            False
+        }
+        {
+            True
+        }
+    }
 }
+
+// Resolve "." and ".." lexically, without touching the filesystem, so it also
+// works on paths that do not exist yet:
+//   path.normalize("/srv/uploads/../../etc/passwd") -> "/etc/passwd"
+// Being lexical, it does not follow symlinks — use is_within below for a
+// security decision.
+fun normalize(p <str>) { __path_normalize(p) }
+
+// Does `candidate` resolve to `base` itself or something inside it?
+//   path.is_within("/srv/uploads", path.join(["/srv/uploads", user_input]))
+// Compares whole path components, so the sibling "/srv/up" vs "/srv/uploaded/x"
+// is correctly False. Canonicalises the parts of each path that exist (which
+// follows symlinks) and falls back to lexical normalisation for the parts that
+// do not.
+//
+// CAVEAT: not airtight. A symlink planted later inside `base`, or swapped
+// between this check and the open, escapes it (TOCTOU) — and components that do
+// not exist yet are only checked lexically. Good enough to reject traversal
+// input; not a substitute for an OS sandbox around real secrets.
+fun is_within(base <str>, candidate <str>) { __path_is_within(base, candidate) }

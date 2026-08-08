@@ -8,9 +8,11 @@ Counter includes {
     fun inc() {
         self.val = self.val + 1
     }
+
     fun add(amount <int>) {
         self.val = self.val + amount
     }
+
     fun get() { self.val }
 }
 
@@ -24,5 +26,4 @@ fun run(n <int>) {
     }
     c.get()
 }
-
-run(500000)
+run(8000000)

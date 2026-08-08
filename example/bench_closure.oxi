@@ -9,10 +9,9 @@ fun run(n <int>) {
     total <int> := 0
     i <int> := 0
     repeat when i < n {
-        total = total + add5(i)
-        i = i + 1
+        total := total + add5(i)
+        i := i + 1
     }
     total
 }
-
-run(500000)
+run(12000000)

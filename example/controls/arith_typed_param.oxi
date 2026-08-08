@@ -1,0 +1,17 @@
+// Control for bench_arith: same recursion with an explicitly typed parameter.
+// bench_arith's `fun work(n)` is untyped, so the analyzer reaches Int64 only
+// through the int-mirror demand heuristic; this pins it directly and shows what
+// the annotation alone is worth before any call-path work.
+//
+// Must print -646393729142, the same value bench_arith produces.
+fun work(n <int>) {
+    option {
+        n < 2 -> {
+            n
+        }
+        {
+            work(n - 1) + work(n - 2) * 3 - n
+        }
+    }
+}
+work(34)

@@ -1,0 +1,139 @@
+introduce api
+introduce strings
+
+// A router with no live socket: handle 0 is never accepted on, so every routing
+// and rendering check runs without opening a port.
+fun router() { api.app({"server": 0, "keep_alive": False, "idle_timeout": 0}) }
+
+fun request(method <str>, path <str>) {
+    {"method": method, "path": path, "params": {}, "query": {}, "headers": {}, "body": "", "version": "HTTP/1.1"}
+}
+
+fun echo_id(req) {
+    {"id": req.params["id"]}
+}
+
+fun greet(req) { api.text("hi") }
+
+fun explode(req) { <fail>("handler is broken") }
+
+<test>("static routes dispatch by method and path") {
+    app := router()
+    app.get("/health", greet)
+    app.post("/health", echo_id)
+    expect(app.dispatch(request("GET", "/health")).body).eq("hi")
+    expect(app.dispatch(request("GET", "/health")).status).eq(200)
+    expect(app.dispatch(request("GET", "/missing")).status).eq(404)
+    // The path exists, just not for DELETE — 404 would send the caller looking
+    // for a typo in a URL that is correct.
+    expect(app.dispatch(request("DELETE", "/health")).status).eq(405)
+}
+
+<test>("a known path under the wrong method is 405 with an Allow header") {
+    app := router()
+    app.post("/echo", greet)
+    app.put("/users/:id", greet)
+    missed := app.dispatch(request("GET", "/echo"))
+    expect(missed.status).eq(405)
+    expect(missed.headers["Allow"]).eq("POST")
+    // Parameterized routes report their methods too.
+    dynamic_missed := app.dispatch(request("GET", "/users/42"))
+    expect(dynamic_missed.status).eq(405)
+    expect(dynamic_missed.headers["Allow"]).eq("PUT")
+    // A path registered nowhere stays a 404.
+    expect(app.dispatch(request("GET", "/absent")).status).eq(404)
+}
+
+<test>("path params are captured and percent-decoded") {
+    app := router()
+    app.get("/users/:id/posts", echo_id)
+    expect(app.dispatch(request("GET", "/users/42/posts")).body).eq("\{\"id\":\"42\"}")
+    expect(app.dispatch(request("GET", "/users/a%20b/posts")).body).eq("\{\"id\":\"a b\"}")
+    // Wrong segment count and wrong literal segment both miss.
+    expect(app.dispatch(request("GET", "/users/42")).status).eq(404)
+    expect(app.dispatch(request("GET", "/users/42/comments")).status).eq(404)
+}
+
+<test>("a raising handler answers 500 instead of propagating") {
+    app := router()
+    app.get("/boom", explode)
+    result := app.dispatch(request("GET", "/boom"))
+    expect(result.status).eq(500)
+    // The internal message must not reach the client.
+    expect(result.body).eq("\{\"error\":\"internal server error\"}")
+}
+
+<test>("handler return values become responses") {
+    expect(api.to_res("plain").headers["Content-Type"]).eq("text/plain; charset=utf-8")
+    expect(api.to_res({"a": 1}).body).eq("\{\"a\":1}")
+    expect(api.to_res({"a": 1}).status).eq(200)
+    expect(api.to_res(api.respond(204, "")).status).eq(204)
+}
+
+<test>("query strings decode keys and values") {
+    parsed := api.parse_query("page=2&q=hello%20world&flag&empty=")
+    expect(parsed["page"]).eq("2")
+    expect(parsed["q"]).eq("hello world")
+    expect(parsed["flag"]).eq("")
+    expect(parsed["empty"]).eq("")
+    expect(len(api.parse_query(""))).eq(0)
+}
+
+<test>("responses render a well-formed HTTP message") {
+    rendered := api.render(api.text("hi"), False)
+    expect(rendered).eq("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi")
+    // Content-Length counts bytes, not characters — a wrong count desyncs the
+    // connection for every request after it.
+    expect(strings.contains_str(api.render(api.text("é"), False), "Content-Length: 2")).truthy()
+    expect(strings.contains_str(api.render(api.text("hi"), True), "Connection: keep-alive")).truthy()
+}
+
+<test>("keep-alive follows the version and the Connection header") {
+    expect(api.wants_keep_alive({"version": "HTTP/1.1", "headers": {}})).truthy()
+    expect(api.wants_keep_alive({"version": "HTTP/1.0", "headers": {}})).falsy()
+    expect(api.wants_keep_alive({"version": "HTTP/1.1", "headers": {"connection": "close"}})).falsy()
+    expect(api.wants_keep_alive({"version": "HTTP/1.0", "headers": {"connection": "keep-alive"}})).truthy()
+}
+
+<test>("content_type maps extensions, and defaults to octet-stream") {
+    expect(api.content_type("site/index.html")).eq("text/html; charset=utf-8")
+    expect(api.content_type("a/style.css")).eq("text/css; charset=utf-8")
+    expect(api.content_type("a/app.js")).eq("text/javascript; charset=utf-8")
+    expect(api.content_type("a/logo.svg")).eq("image/svg+xml")
+    // Case in the extension must not decide the type.
+    expect(api.content_type("A/PAGE.HTML")).eq("text/html; charset=utf-8")
+    // Unknown and extension-less both download rather than being guessed at.
+    expect(api.content_type("a/archive.tar.zst")).eq("application/octet-stream")
+    expect(api.content_type("a/LICENSE")).eq("application/octet-stream")
+}
+
+<test>("file serves from disk with the right type, and 404s when absent") {
+    res := api.file("example/website/index.html")
+    expect(res.status).eq(200)
+    expect(res.headers["Content-Type"]).eq("text/html; charset=utf-8")
+    expect(strings.contains_str(res.body, "<h1>")).truthy()
+    // A missing file is an answer, not a crash — handlers call this on paths
+    // that may not exist.
+    expect(api.file("example/website/nope.html").status).eq(404)
+}
+
+<test>("static_dir serves under the root and refuses everything outside it") {
+    ok := api.static_dir(request("GET", "/about.html"), "example/website")
+    expect(ok.status).eq(200)
+    expect(ok.headers["Content-Type"]).eq("text/html; charset=utf-8")
+    // A trailing slash means index.html, the convention every static host uses.
+    expect(api.static_dir(request("GET", "/"), "example/website").status).eq(200)
+    // Nested assets resolve too.
+    css := api.static_dir(request("GET", "/css/style.css"), "example/website")
+    expect(css.status).eq(200)
+    expect(css.headers["Content-Type"]).eq("text/css; charset=utf-8")
+    // The request path is attacker-controlled. Traversal out of the root must
+    // be refused BEFORE the read, whether written with .. or as an absolute
+    // path — `path.join` alone would follow both.
+    expect(api.static_dir(request("GET", "/../../Cargo.toml"), "example/website").status).eq(404)
+    expect(api.static_dir(request("GET", "/../README.md"), "example/website").status).eq(404)
+    expect(api.static_dir(request("GET", "/etc/passwd"), "example/website").status).eq(404)
+    // A sibling directory sharing a name prefix is outside the root, and a
+    // prefix-string comparison would wrongly let it through.
+    expect(api.static_dir(request("GET", "/../website-backup/x.html"), "example/website").status).eq(404)
+}

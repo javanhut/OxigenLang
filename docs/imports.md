@@ -74,9 +74,39 @@ println(strings.upper("hello"))
 
 ### Exports
 
-All top-level bindings (functions, variables, structs, and patterns) in a module file are automatically exported. There is no explicit export mechanism.
+Top-level bindings (functions, variables, structs, and patterns) are exported by default — public unless you say otherwise. There is no export list; the exception is marked at the declaration with `hide`.
 
 Use top-level definitions for reusable module APIs, and put script-only work inside `main`. The `main` block is skipped when the file is imported with `introduce`.
+
+### `hide` — module-private functions
+
+A top-level `fun` marked `hide` stays callable inside its own file and is refused across the module boundary:
+
+```oxi
+// text.oxi
+hide fun __normalize(s <str>) { strings.trim(strings.lower(s)) }
+
+fun matches(a <str>, b <str>) { __normalize(a) == __normalize(b) }
+```
+
+```oxi
+introduce .text
+
+text.matches(" Ada ", "ada")   // True — the public face
+text.__normalize(" Ada ")      // error: '__normalize' is hidden inside module './text'
+```
+
+Both routes in are closed, and the error names the reason rather than pretending the function does not exist:
+
+```oxi
+introduce {__normalize} from .text
+// error: '__normalize' is hidden inside module './text'
+//   hint: it is declared `hide fun` and cannot be imported
+```
+
+`hide` applies to top-level functions only — `hide x <int> = 1` is a parse error. For struct fields, `hide` goes inside the struct body; see [structs.md](structs.md#hidden-fields).
+
+The stdlib uses it: `array.oxi` marks `_min_index_by` and `_remove_at` hidden, since they are the selection sort behind `sort_by` rather than part of the module's API.
 
 ```oxi
 // mylib.oxi
@@ -114,19 +144,30 @@ OxigenLang ships with the following standard library modules:
 
 | Module     | Description                                          |
 |------------|------------------------------------------------------|
-| `math`     | Math functions (abs, sqrt, pow, floor, ceil, etc.)   |
-| `strings`  | String manipulation (split, join, trim, upper, etc.) |
-| `array`    | Array operations (map, filter, reduce, sort, etc.)   |
-| `io`       | File I/O (read_file, write_file, etc.)               |
-| `os`       | OS interaction (exec, env vars, directories, etc.)   |
-| `time`     | Timestamps, sleep, elapsed time measurement          |
-| `random`   | Random number generation                             |
-| `path`     | File path manipulation                               |
-| `json`     | JSON parsing, serialization, dotted-path access, and merging |
-| `toml`     | TOML parsing, serialization, dotted-path access, and merging |
-| `net`      | HTTP client (GET, POST, PUT, DELETE, etc.)           |
+| [`math`](stdlib/math.md) | Math functions (abs, sqrt, pow, floor, ceil, etc.)   |
+| [`strings`](stdlib/strings.md) | String manipulation (split, join, trim, upper, etc.) |
+| [`array`](stdlib/array.md) | Array operations (map, filter, reduce, sort, etc.)   |
+| [`io`](stdlib/io.md) | File I/O (read_file, write_file, etc.)               |
+| [`os`](stdlib/os.md) | OS interaction (exec, env vars, directories, etc.)   |
+| [`path`](stdlib/path.md) | File path manipulation and containment checks        |
+| [`time`](stdlib/time.md) | Timestamps, sleep, elapsed time measurement          |
+| [`datetime`](stdlib/datetime.md) | UTC calendar dates: format, parse, components |
+| [`random`](stdlib/random.md) | Random number generation                             |
+| [`regex`](stdlib/regex.md) | Regular expressions (Rust regex syntax)              |
+| [`json`](stdlib/json.md) | JSON parsing, serialization, dotted-path access, and merging |
+| [`toml`](stdlib/toml.md) | TOML parsing, serialization, dotted-path access, and merging |
+| [`encoding`](stdlib/encoding.md) | Base64, hex, and URL percent-encoding          |
+| [`hash`](stdlib/hash.md) | SHA-256, SHA-1, MD5 hex digests                      |
+| [`net`](stdlib/net.md) | HTTP client, streaming HTTP, TCP and UDP sockets     |
+| [`api`](stdlib/api.md) | HTTP server: routing, JSON responses, accept loop    |
+| [`result`](stdlib/result.md) | Helpers for the `Error \|\| Value` system      |
+| [`test`](stdlib/test.md) | `expect(...)` matchers used by `oxigen test`         |
+| [`ansi`](stdlib/ansi.md) | Terminal colour, modifiers, cursor control           |
+| [`env`](stdlib/env.md) | Load a `.env` file into a map                        |
+| [`parse_args`](stdlib/parse_args.md) | Command-line flag parsing                |
 
-See the [Standard Library Reference](stdlib.md) for full details on each module.
+See the [Standard Library Reference](stdlib/README.md) for full details on each
+module.
 
 ## Examples
 

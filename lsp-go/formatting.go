@@ -33,7 +33,6 @@ func formatDocument(content, oxigenBin string) []TextEdit {
 		return nil
 	}
 
-	// Replace entire document
 	lines := strings.Split(content, "\n")
 	lineCount := uint32(len(lines))
 	lastLineLen := uint32(0)

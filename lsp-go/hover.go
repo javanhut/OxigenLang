@@ -68,7 +68,6 @@ func stdlibHover(source string, pos Position, word, stdlibPath string) string {
 		return ""
 	}
 
-	// Bare module name.
 	if funcs, ok := funcMap[word]; ok {
 		var b strings.Builder
 		b.WriteString("**" + word + "** — Oxigen standard library module\n\n```oxigen\nintroduce " + word + "\n```\n\nFunctions:\n")

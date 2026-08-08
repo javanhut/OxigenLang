@@ -1,16 +1,16 @@
 # Oxigen vs Python — native harness (interleaved A/B)
 
-- Generated: `2026-07-19T19:30:09Z`
-- Host:      `Javans-MacBook-Pro.local`
+- Generated: `2026-08-08T00:58:18Z`
+- Host:      `L6VW6YWMJ2`
 - Kernel:    `Darwin 25.5.0 arm64`
-- Oxigen:    `oxigen 0.1.3`
-- Python:    `Python 3.14.6`
+- Oxigen:    `Oxigen Version: 0.1.3`
+- Python:    `Python 3.14.5` (JIT: not built in)
 - Bun:       `1.3.14`
-- Node:      `v26.5.0` (built-in type-stripping)
+- Node:      `v25.7.0` (built-in type-stripping)
 - Warmups:   `3`
 - Runs:      `5`
-- Git commit: `f98a304`
-- Git branch: `jit_and_vm_optimizations`
+- Git commit: `5310457`
+- Git branch: `feature_enhancements_for_0_1_4`
 
 ## Min times (ms)
 
@@ -24,30 +24,30 @@ throttle after sustained full-CPU work. See
 
 | benchmark | no-jit | default | jit | python | bun (ts) | node (ts) | jit vs py | jit vs bun | jit vs node |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| bench_arith | 66 | 12 | 14 | 28 | 9 | 39 | 2x | 0.64x | 2.79x |
-| bench_closure | 78 | 10 | 13 | 24 | 8 | 38 | 1.85x | 0.62x | 2.92x |
-| bench_collatz | 731 | 13 | 15 | 154 | 18 | 43 | 10.27x | 1.2x | 2.87x |
-| bench_fib | 161 | 20 | 24 | 46 | 11 | 41 | 1.92x | 0.46x | 1.71x |
-| bench_loop | 56 | 4 | 5 | 29 | 9 | 39 | 5.8x | 1.8x | 7.8x |
-| bench_nested_loop | 17 | 4 | 5 | 15 | 8 | 38 | 3x | 1.6x | 7.6x |
-| bench_nested_loop_big | 217 | 6 | 6 | 82 | 11 | 43 | 13.67x | 1.83x | 7.17x |
-| bench_primes_parallel | 21 | 23 | 23 | 288 | - | - | 12.52x | - | - |
-| bench_primes_serial | 7918 | 124 | 128 | 1394 | - | - | 10.89x | - | - |
-| bench_struct_method | 143 | 10 | 11 | 34 | 10 | 40 | 3.09x | 0.91x | 3.64x |
+| bench_arith | 1414.1 | 142.8 | 34.7 | 514.1 | 40.8 | 109.6 | 14.83x | 1.18x | 3.16x |
+| bench_closure | 2037 | 62.4 | 62.8 | 432.7 | 18 | 84.6 | 6.89x | 0.29x | 1.35x |
+| bench_collatz | 4116.6 | 53.6 | 53.7 | 866.1 | 81.3 | 188.6 | 16.14x | 1.52x | 3.51x |
+| bench_fib | 2167.4 | 198.5 | 51.3 | 608.4 | 42.7 | 126.8 | 11.86x | 0.83x | 2.47x |
+| bench_loop | 1223.7 | 13.9 | 15.5 | 467.8 | 23 | 94.9 | 30.25x | 1.48x | 6.13x |
+| bench_nested_loop | 552.2 | 8.8 | 10.4 | 223.3 | 15.6 | 79.3 | 21.52x | 1.51x | 7.64x |
+| bench_nested_loop_big | 2202.6 | 21.5 | 22.7 | 839.4 | 34 | 116.7 | 37.04x | 1.5x | 5.15x |
+| bench_primes_parallel | 32.7 | 33.3 | 33.5 | 369.9 | - | - | 11.04x | - | - |
+| bench_primes_serial | 9242.8 | 182.2 | 158.2 | 1749 | - | - | 11.06x | - | - |
+| bench_struct_method | 2658.7 | 66.5 | 67.8 | 577.1 | 24 | 119.6 | 8.51x | 0.35x | 1.76x |
 
 ## JIT min / p50 (ms)
 
 | benchmark | jit min | jit p50 |
 | --- | ---: | ---: |
-| bench_arith | 14 | 16 |
-| bench_closure | 13 | 13 |
-| bench_collatz | 15 | 16 |
-| bench_fib | 24 | 25 |
-| bench_loop | 5 | 6 |
-| bench_nested_loop | 5 | 5 |
-| bench_nested_loop_big | 6 | 6 |
-| bench_primes_parallel | 23 | 26 |
-| bench_primes_serial | 128 | 128 |
-| bench_struct_method | 11 | 12 |
+| bench_arith | 34.7 | 35.3 |
+| bench_closure | 62.8 | 63.5 |
+| bench_collatz | 53.7 | 54.9 |
+| bench_fib | 51.3 | 51.5 |
+| bench_loop | 15.5 | 16.5 |
+| bench_nested_loop | 10.4 | 11 |
+| bench_nested_loop_big | 22.7 | 24.4 |
+| bench_primes_parallel | 33.5 | 35.7 |
+| bench_primes_serial | 158.2 | 215.1 |
+| bench_struct_method | 67.8 | 71.4 |
 
-Per-benchmark JSON (per-round samples + summary stats) in `/Users/javanhutchinson/Development/ToolsForRaven/OxigenLang/benchmark_reports/`.
+Per-benchmark JSON (per-round samples + summary stats) in `/Users/jhutchinson/Development/OxigenLang/benchmark_reports/`.

@@ -195,6 +195,12 @@ pub enum OpCode {
     /// Get element at iteration index.
     /// Stack: [iterable, index] -> [element].
     IterGet,
+    /// Get both halves of an iteration step, for `each k, v in coll`.
+    /// Operand: none. Stack: [iterable, index] -> [key, value].
+    /// Maps yield the entry's key; every other iterable yields the ordinal
+    /// index. `IterGet` on a map yields the whole `(k, v)` tuple instead, which
+    /// is what the one-name form still binds.
+    IterEntry,
     /// Type wrap / convert. Operand: u16 type name constant.
     /// Stack: [value] -> [converted_value].
     /// Handles Error/Value union wrapping, type conversion, etc.
@@ -356,6 +362,7 @@ impl OpCode {
             | OpCode::IndexAssign
             | OpCode::IterLen
             | OpCode::IterGet
+            | OpCode::IterEntry
             | OpCode::ValueConstruct
             | OpCode::PopHandler
             | OpCode::Fail => OperandLayout::None,
@@ -459,6 +466,7 @@ impl OpCode {
             PopJumpIfFalse => StackEffect::Fixed { pops: 1, pushes: 0, peeks: 0 },
             Closure => StackEffect::Fixed { pops: 0, pushes: 1, peeks: 0 },
             IterLen => StackEffect::Fixed { pops: 1, pushes: 1, peeks: 0 },
+            IterEntry => StackEffect::Fixed { pops: 2, pushes: 2, peeks: 0 },
             IndexAssign => StackEffect::Fixed { pops: 3, pushes: 0, peeks: 0 },
             SetField => StackEffect::Fixed { pops: 2, pushes: 0, peeks: 0 },
             PushHandler => StackEffect::Fixed { pops: 0, pushes: 0, peeks: 0 },
@@ -499,7 +507,7 @@ impl OpCode {
                 | SetField | MethodCall | MethodCallNamed | TypeWrap | Import | GetModuleField
                 | GetUpvalue | SetUpvalue | CloseUpvalue | GetGlobal | SetGlobal | Call
                 | CallNamed | ErrorConstruct | ValueConstruct | Guard | Fail | IterLen | IterGet
-                | Unpack | Log
+                | IterEntry | Unpack | Log
         );
         let may_allocate = matches!(
             self,
@@ -525,7 +533,8 @@ impl OpCode {
         if matches!(
             self,
             Constant | None | True | False | Pop | Dup | BuildArray | Index | IndexAssign
-                | IterLen | IterGet | TypeWrap | Add | Subtract | Multiply | Divide | Modulo
+                | IterLen | IterGet | IterEntry | TypeWrap | Add | Subtract | Multiply | Divide
+                | Modulo
                 | Equal | NotEqual | Less | LessEqual | Greater | GreaterEqual | Not | Negate
                 | BitAnd | BitOr | BitXor | BitNot | ShiftLeft | ShiftRight | Log | GetLocal
                 | SetLocal | GetGlobal | SetGlobal | DefineGlobal | DefineGlobalTyped

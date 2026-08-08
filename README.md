@@ -1,11 +1,13 @@
-# OxigenLang
+# The Oxigen Language - A new Modern Scripting and Programming Language 
+
+[![CI](https://github.com/javanhut/OxigenLang/actions/workflows/ci.yml/badge.svg)](https://github.com/javanhut/OxigenLang/actions/workflows/ci.yml)
 
 OxigenLang is a modern, lightweight programming language implemented in Rust. It runs on a bytecode virtual machine with a baseline Cranelift JIT, and features a clean, expressive syntax, pattern matching, enums, a two-tier error model, a built-in test runner, a module system with a standard library, and an optional indentation-based block syntax.
 
 ## Features
 
 - **Module System**: Import standard library modules or local files with `introduce`/`intro`. Namespace imports, selective imports, and module caching.
-- **Standard Library**: 18 modules — math, strings, array, io, os, path, time, datetime, random, json, toml, encoding, hash, regex, net (HTTP/HTTPS client with streaming download/upload, plus TCP and UDP sockets), ansi (terminal colors), parse_args (CLI flag parsing), and result (Error/Value helpers).
+- **Standard Library**: 19 modules — math, strings, array, io, os, path, time, datetime, random, json, toml, encoding, hash, regex, net (HTTP/HTTPS client with streaming download/upload, plus TCP and UDP sockets), api (HTTP servers — routing, JSON/HTML/static-file responses, and a threaded server in one module), ansi (terminal colors), parse_args (CLI flag parsing), and result (Error/Value helpers).
 - **Flexible Block Styles**: Choose between traditional brace-based blocks or Python-style indentation blocks with the `#[indent]` directive.
 - **Conditional Expressions**: Multi-arm `option` blocks, ternary shorthand, `unless` inverse conditionals, `unless ... then ...` fallback expressions, `when`/`unless` postfix guards, and short-circuit `and`/`or` logical operators.
 - **Pattern Matching**: Define reusable patterns with the `pattern` keyword and match against them with `choose`.
@@ -332,6 +334,6 @@ For detailed information, see the [docs](docs/) directory:
 | [Type System](docs/type_system.md) | Type annotations, conversions, mutability control |
 | [Imports and Modules](docs/imports.md) | The `introduce` keyword and module system |
 | [Built-in Functions](docs/builtins.md) | Complete reference for all built-ins |
-| [Standard Library](docs/stdlib.md) | Full reference for the stdlib modules |
+| [Standard Library](docs/stdlib/README.md) | One page per stdlib module, every function documented |
 | [Testing](docs/testing.md) | The built-in test runner, `expect` matchers, `oxigen test` |
 | [JIT Architecture](docs/JIT_ARCHITECTURE.md) | **Experimental** — baseline Cranelift JIT: runtime flags, build options, supported opcodes, safety invariants, benchmark status vs CPython |

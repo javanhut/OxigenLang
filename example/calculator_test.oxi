@@ -2,23 +2,20 @@
 //
 // `<test>` blocks are only executed by `oxigen test`. `expect` is provided
 // automatically by the runner, so no `introduce` is needed.
+fun add(a <int>, b <int>) { a + b }
 
-fun add(a <int>, b <int>) {
-    a + b
-}
+fun sub(a <int>, b <int>) { a - b }
 
-fun sub(a <int>, b <int>) {
-    a - b
-}
-
-fun mul(a <int>, b <int>) {
-    a * b
-}
+fun mul(a <int>, b <int>) { a * b }
 
 fun safe_div(a <int>, b <int>) {
     option {
-        b == 0 -> <Error<div_by_zero>>("cannot divide by zero"),
-        <Value>(a / b)
+        b == 0 -> {
+            <Error<div_by_zero>>("cannot divide by zero")
+        }
+        {
+            <Value>(a / b)
+        }
     }
 }
 

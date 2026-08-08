@@ -1,0 +1,110 @@
+introduce os
+introduce path
+introduce strings
+
+fun tmp_dir(leaf <str>) {
+    env_tmp := os.env_get("TMPDIR")
+    base := option {
+        env_tmp != None and env_tmp != "" -> {
+            env_tmp
+        }
+        {
+            "/tmp"
+        }
+    }
+    path.join([base, leaf])
+}
+
+<test>("args is an array under the test runner") {
+    // __args is defined on every VM, not just the script entry point, so this
+    // is an empty argv here rather than `undefined variable: __args`.
+    expect(type(os.args())).eq("ARRAY")
+}
+
+<test>("platform identifiers are non-empty strings") {
+    expect(type(os.name())).eq("STRING")
+    expect(type(os.arch())).eq("STRING")
+    expect(len(os.name())).gt(0)
+    expect(len(os.arch())).gt(0)
+}
+
+<test>("cwd is an absolute path") {
+    expect(type(os.cwd())).eq("STRING")
+    expect(path.is_absolute(os.cwd())).truthy()
+}
+
+<test>("pid is a positive integer") {
+    expect(type(os.pid())).eq("INTEGER")
+    expect(os.pid()).gt(0)
+}
+
+<test>("env set then get round-trips") {
+    os.env_set("OXI_TEST_VAR", "v1")
+    expect(os.env_get("OXI_TEST_VAR")).eq("v1")
+    os.env_set("OXI_TEST_VAR", "v2")
+    expect(os.env_get("OXI_TEST_VAR")).eq("v2")
+}
+
+<test>("unset env var reads as None") {
+    expect(os.env_get("OXI_DEFINITELY_UNSET_VAR_XYZ")).eq(None)
+}
+
+<test>("env_vars exposes what env_set wrote") {
+    os.env_set("OXI_TEST_VISIBLE", "yes")
+    vars := os.env_vars()
+    expect(type(vars)).eq("MAP")
+    expect(has(vars, "OXI_TEST_VISIBLE")).truthy()
+    expect(vars["OXI_TEST_VISIBLE"]).eq("yes")
+}
+
+<test>("exec captures stdout and a zero exit code") {
+    r := os.exec("echo hi")
+    expect(type(r)).eq("MAP")
+    expect(r["code"]).eq(0)
+    // .contains() is has()-based and collection-only, so a string needs strings.contains_str.
+    expect(strings.contains_str(r["stdout"], "hi")).truthy()
+}
+
+<test>("exec reports a non-zero exit code") {
+    expect(os.exec("exit 3")["code"]).eq(3)
+}
+
+<test>("mkdir, is_dir and rmdir") {
+    dir := tmp_dir("oxi_os_dir")
+    expect(os.is_dir(dir)).falsy()
+    os.mkdir(dir)
+    expect(os.is_dir(dir)).truthy()
+    expect(os.is_file(dir)).falsy()
+    os.rmdir(dir)
+    expect(os.is_dir(dir)).falsy()
+}
+
+<test>("list_dir sees a created file") {
+    dir := tmp_dir("oxi_os_list")
+    os.mkdir(dir)
+    f := path.join([dir, "a.txt"])
+    os.exec("touch " + f)
+    entries := os.list_dir(dir)
+    expect(type(entries)).eq("ARRAY")
+    expect(len(entries)).eq(1)
+    expect(path.filename(entries[0])).eq("a.txt")
+    os.rmdir(dir)
+}
+
+<test>("is_file and is_dir disagree on a file") {
+    dir := tmp_dir("oxi_os_isfile")
+    os.mkdir(dir)
+    f := path.join([dir, "a.txt"])
+    os.exec("touch " + f)
+    expect(os.is_file(f)).truthy()
+    expect(os.is_dir(f)).falsy()
+    os.rmdir(dir)
+}
+
+<test>("rmdir removes a non-empty directory") {
+    dir := tmp_dir("oxi_os_rmtree")
+    os.mkdir(dir)
+    os.exec("touch " + path.join([dir, "a.txt"]))
+    os.rmdir(dir)
+    expect(os.is_dir(dir)).falsy()
+}

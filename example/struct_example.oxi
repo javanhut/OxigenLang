@@ -9,6 +9,7 @@ Person includes {
         self.fname = fname
         self.lname = lname
     }
+
     fun set_age(age <int>) {
         self.age = age
     }
@@ -23,6 +24,7 @@ Nationality includes {
     fun set_country(country <str>) {
         self.country = country
     }
+
     fun set_title(title <str>) {
         self.title = title
     }

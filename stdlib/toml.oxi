@@ -1,5 +1,6 @@
 introduce io
 introduce strings
+introduce array
 
 // Parse a TOML string into Oxigen values.
 // Tables become maps, arrays stay arrays, and date/time values become strings.
@@ -23,7 +24,7 @@ fun get_in(tbl <map>, path <str>) {
     i <int>
     repeat when i < len(parts) {
         give None when type(current) != "MAP"
-        give None when not has(current, parts[i])
+        give None unless has(current, parts[i])
         current = current[parts[i]]
         i++
     }
@@ -37,7 +38,14 @@ fun set_in(tbl <map>, path <str>, val <generic>) {
     give insert(tbl, parts[0], val) when len(parts) == 1
     first := parts[0]
     rest := strings.join(parts[1:], ".")
-    child := option { has(tbl, first) and type(tbl[first]) == "MAP" -> tbl[first], {} }
+    child := option {
+        has(tbl, first) and type(tbl[first]) == "MAP" -> {
+            tbl[first]
+        }
+        {
+            {}
+        }
+    }
     insert(tbl, first, set_in(child, rest, val))
 }
 
@@ -48,7 +56,11 @@ fun del_in(tbl <map>, path <str>) {
     give remove(tbl, parts[0]) when len(parts) == 1
     first := parts[0]
     rest := strings.join(parts[1:], ".")
-    child := option { has(tbl, first) and type(tbl[first]) == "MAP" -> tbl[first] }
+    child := option {
+        has(tbl, first) and type(tbl[first]) == "MAP" -> {
+            tbl[first]
+        }
+    }
     give tbl when type(child) != "MAP"
     insert(tbl, first, del_in(child, rest))
 }
@@ -60,11 +72,29 @@ fun has_key_in(tbl <map>, path <str>) {
     i <int>
     repeat when i < len(parts) {
         give False when type(current) != "MAP"
-        give False when not has(current, parts[i])
+        give False unless has(current, parts[i])
         current = current[parts[i]]
         i++
     }
     True
+}
+
+// ── Arrays of tables ──
+// Update the first table whose `key` equals `val` by deep-merging `fields`
+// into it; append a new table when there is none. This is the [[array of
+// tables]] editor:
+//
+//     cfg["products"] = toml.set_where(cfg["products"], "name", "hammer",
+//                                      {"sku": 738594937})
+//
+// Fields not named survive the update. Returns the array, edited in place
+// either way (arrays are shared references); assigning the result back is the
+// clearer form and costs nothing.
+fun set_where(arr <array>, key <generic>, val <generic>, fields <map>) {
+    found := array.find_where(arr, key, val)
+    give push(arr, deep_merge(insert({}, key, val), fields)) when found == None
+    deep_merge(found, fields)
+    arr
 }
 
 // Merge two maps. Keys in `b` overwrite keys in `a`.
@@ -89,12 +119,21 @@ fun deep_merge(a <map>, b <map>) {
     repeat when i < len(b_keys) {
         k := b_keys[i]
         b_val := b[k]
-        a_val := option { has(result, k) -> result[k], None }
+        a_val := option {
+            has(result, k) -> {
+                result[k]
+            }
+            {
+                None
+            }
+        }
         option {
             type(a_val) == "MAP" and type(b_val) == "MAP" -> {
                 result = insert(result, k, deep_merge(a_val, b_val))
-            },
-            { result = insert(result, k, b_val) }
+            }
+            {
+                result = insert(result, k, b_val)
+            }
         }
         i++
     }

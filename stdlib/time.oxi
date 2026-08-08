@@ -11,11 +11,7 @@ fun sleep(ms <int>) { __time_sleep(ms) }
 fun monotonic() { __time_monotonic() }
 
 // Measure elapsed time in milliseconds between two monotonic values
-fun elapsed_ms(start <int>, end <int>) {
-    (end - start) / 1000000
-}
+fun elapsed_ms(start <int>, end <int>) { (end - start) / 1000000 }
 
 // Measure elapsed time in seconds between two monotonic values
-fun elapsed_s(start <int>, end <int>) {
-    float((end - start)) / 1000000000.0
-}
+fun elapsed_s(start <int>, end <int>) { float((end - start)) / 1000000000.0 }

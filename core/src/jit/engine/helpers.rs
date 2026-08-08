@@ -35,6 +35,7 @@ pub(super) struct HelperIds {
     pub index_fast_array_int: FuncId,      // (vm) -> u32
     pub iter_len: FuncId,                  // (vm) -> u32
     pub iter_get: FuncId,                  // (vm) -> u32
+    pub iter_entry: FuncId,                // (vm) -> u32
     pub index_assign: FuncId,              // (vm) -> u32
     pub type_wrap: FuncId,                 // (vm, u32) -> u32
     pub local_add_array_mod_index: FuncId, // (vm, u32, u32, u32, i64, u32) -> u32
@@ -141,6 +142,7 @@ pub(super) struct HelperRefs {
     pub index_fast_array_int: FuncRef,
     pub iter_len: FuncRef,
     pub iter_get: FuncRef,
+    pub iter_entry: FuncRef,
     pub index_assign: FuncRef,
     pub type_wrap: FuncRef,
     pub local_add_array_mod_index: FuncRef,
@@ -198,10 +200,7 @@ pub(super) struct HelperRefs {
     #[allow(dead_code)]
     pub op_method_call: FuncRef,
     pub op_method_call_ic: FuncRef,
-    // `stack_as_mut_ptr` and `stack_len` are still registered as
-    // runtime helpers for backwards compatibility, but the hot JIT
-    // paths now read `vm.stack_view.{ptr, len}` directly via
-    // `emit_load_stack_*` — no FFI crossing.
+    // Still registered for compatibility, but hot paths read vm.stack_view directly.
     #[allow(dead_code)]
     pub stack_as_mut_ptr: FuncRef,
     #[allow(dead_code)]
@@ -224,6 +223,10 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
         };
     }
 
+    // Phase 2.2: the lean entry's cold exit. Never returns — it longjmps to the
+    // boundary's thread-local unwind target.
+    reg!("oxigen_lean_overflow", crate::jit::runtime::jit_lean_overflow);
+
     reg!("jit_run_via_interpreter", runtime::jit_run_via_interpreter);
     reg!("jit_push_constant", runtime::jit_push_constant);
     reg!("jit_push_integer_inline", runtime::jit_push_integer_inline);
@@ -237,6 +240,7 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
     );
     reg!("jit_op_iter_len", runtime::jit_op_iter_len);
     reg!("jit_op_iter_get", runtime::jit_op_iter_get);
+    reg!("jit_op_iter_entry", runtime::jit_op_iter_entry);
     reg!("jit_op_index_assign", runtime::jit_op_index_assign);
     reg!("jit_type_wrap", runtime::jit_type_wrap);
     reg!(
@@ -329,8 +333,7 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
     sig_vm_u32.params.push(AbiParam::new(ptr_ty));
     sig_vm_u32.params.push(AbiParam::new(types::I32));
 
-    // Signature for inline primitive pushes: fn(*mut VM, i64).
-    // Floats are passed as their u64 bit pattern reinterpreted as i64.
+    // fn(*mut VM, i64); floats pass as their u64 bit pattern reinterpreted as i64.
     let mut sig_vm_i64 = module.make_signature();
     sig_vm_i64.params.push(AbiParam::new(ptr_ty));
     sig_vm_i64.params.push(AbiParam::new(types::I64));
@@ -344,9 +347,7 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
     sig_vm_u32_to_u32.params.push(AbiParam::new(types::I32));
     sig_vm_u32_to_u32.returns.push(AbiParam::new(types::I32));
 
-    // B2.2.f debug helper: (vm, cache_ptr, closure_ptr, phase: u32,
-    // expected_slot_offset: i64, expected_jit_frame_len: i64,
-    // arg_count: u32) -> u32
+    // (vm, cache_ptr, closure_ptr, phase, expected_slot_offset, expected_jit_frame_len, arg_count) -> u32
     let mut sig_dbg_spec_call = module.make_signature();
     sig_dbg_spec_call.params.push(AbiParam::new(ptr_ty));
     sig_dbg_spec_call.params.push(AbiParam::new(ptr_ty));
@@ -498,6 +499,7 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         index_fast_array_int: decl(module, "jit_op_index_fast_array_int", &sig_vm_to_u32),
         iter_len: decl(module, "jit_op_iter_len", &sig_vm_to_u32),
         iter_get: decl(module, "jit_op_iter_get", &sig_vm_to_u32),
+        iter_entry: decl(module, "jit_op_iter_entry", &sig_vm_to_u32),
         index_assign: decl(module, "jit_op_index_assign", &sig_vm_to_u32),
         type_wrap: decl(module, "jit_type_wrap", sig_vm_u32_fallible),
         local_add_array_mod_index: decl(
@@ -589,6 +591,7 @@ pub(super) fn declare_helper_refs(
         index_fast_array_int: r(ids.index_fast_array_int),
         iter_len: r(ids.iter_len),
         iter_get: r(ids.iter_get),
+        iter_entry: r(ids.iter_entry),
         index_assign: r(ids.index_assign),
         type_wrap: r(ids.type_wrap),
         local_add_array_mod_index: r(ids.local_add_array_mod_index),
