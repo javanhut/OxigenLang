@@ -1,4 +1,6 @@
-# OxigenLang
+# The Oxigen Language - A new Modern Scripting and Programming Language 
+
+[![CI](https://github.com/javanhut/OxigenLang/actions/workflows/ci.yml/badge.svg)](https://github.com/javanhut/OxigenLang/actions/workflows/ci.yml)
 
 OxigenLang is a modern, lightweight programming language implemented in Rust. It runs on a bytecode virtual machine with a baseline Cranelift JIT, and features a clean, expressive syntax, pattern matching, enums, a two-tier error model, a built-in test runner, a module system with a standard library, and an optional indentation-based block syntax.
 
