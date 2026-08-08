@@ -1,0 +1,28 @@
+// A website served from .html files on disk.
+//
+//     oxigen example/website_server.oxi        # then open http://localhost:8000
+//
+// Run it from the repo root: the paths below are relative to the working
+// directory, and `introduce api` resolves ./stdlib the same way.
+introduce api
+
+// One named page. `api.file` picks the Content-Type from the extension, so the
+// browser renders it instead of showing the source.
+fun home(req <map>) { api.file("example/website/index.html") }
+
+// Everything else — other pages, CSS, images — comes from the site directory.
+// `api.static_dir` resolves the request path and refuses anything that escapes
+// the root, so "/../../etc/passwd" is a 404 rather than a file read.
+fun assets(req <map>) { api.static_dir(req, "example/website") }
+
+fun routes(cfg <map>) {
+    app := api.app(cfg)
+    app.get("/", home)
+    app.get("/:page", assets)
+    app.get("/css/:file", assets)
+    app.listen()
+}
+
+main {
+    api.serve(routes, port=8000)
+}

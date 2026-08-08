@@ -1,8 +1,12 @@
 # api
 
-An HTTP API server: routing, JSON, and the accept loop in one module. It plays
+An HTTP server: routing, responses and the accept loop in one module. It plays
 the part of a web framework and its server at once, so there is nothing to
 install alongside it.
+
+It serves JSON APIs and it serves websites — `.html` pages, stylesheets and
+images straight off disk. See [Serving files](#serving-files) for the file
+helpers and [Build a website](#build-a-website) for a whole site.
 
 ```oxi
 introduce api
@@ -17,6 +21,7 @@ introduce api
 - [Routes](#routes) — `app.get`/`post`/`put`/`patch`/`delete`/`route`, `app.listen`
 - [Handlers and the request](#handlers-and-the-request)
 - [Responses](#responses) — `json`, `text`, `html`, `redirect`, `respond`, `fail_with`
+- [Serving files](#serving-files) — `file`, `static_dir`, `content_type`
 - [Reading the request](#reading-the-request) — `body_json`, `form`, `parse_query`, `decode`
 - [Concurrency and limits](#concurrency-and-limits)
 - [Structs and constants](#structs-and-constants)
@@ -373,6 +378,60 @@ fun show(req <map>) {
 
 ---
 
+## Serving files
+
+Handlers can return files from disk as well as values built in memory. This is
+what makes the module serve a *website* and not only an API.
+
+| Function | Signature | What it does |
+|----------|-----------|--------------|
+| [`file`](#filepath-status) | `file(path, status = 200)` | one file, Content-Type from its extension |
+| [`static_dir`](#static_dirreq-root) | `static_dir(req, root)` | the request path, resolved under `root` |
+| [`content_type`](#content_typepath) | `content_type(path)` | the Content-Type a path maps to |
+
+### `file(path, status)`
+
+Reads the file and sets `Content-Type` from its extension, so a browser renders
+a page instead of showing its source. A missing file is a `404`, not a crash.
+
+```oxi
+fun home(req <map>) { api.file("site/index.html") }
+```
+
+Paths are relative to the working directory the server was started from.
+
+### `static_dir(req, root)`
+
+Serves whatever the request asked for, from under `root` — pages, stylesheets,
+scripts, images. A path ending in `/` serves `index.html` from that directory.
+
+```oxi
+fun assets(req <map>) { api.static_dir(req, "site") }
+```
+
+A request path comes from the caller, so it is resolved and then checked to be
+inside `root` before anything is read: `/../../etc/passwd` returns `404`. Do not
+hand-roll this with `path.join` — join follows `PathBuf` semantics, where an
+absolute component discards the base and `..` is never resolved, so a joined
+path can point anywhere on disk. `static_dir` uses `path.normalize` to resolve
+the traversal and `path.is_within` to decide containment component-wise.
+
+### `content_type(path)`
+
+The Content-Type `file` would use. Exposed so you can special-case one:
+
+```oxi
+fun dl(req <map>) {
+    api.respond(200, io.read_file("report.csv"), {"Content-Type": "text/csv"})
+}
+```
+
+Known: `html`, `htm`, `css`, `js`, `mjs`, `json`, `svg`, `png`, `jpg`, `jpeg`,
+`gif`, `webp`, `ico`, `woff`, `woff2`, `txt`, `xml`, `pdf`. Anything else is
+`application/octet-stream`, which browsers download rather than guess at.
+
+---
+
 ## Reading the request
 
 | Function | Signature | Returns |
@@ -579,6 +638,40 @@ fun index(req <map>) { {"service": "oxigen", "method": req.method, "path": req.p
 $ curl localhost:8000/
 {"service":"oxigen","method":"GET","path":"/"}
 ```
+
+### Build a website
+
+A whole site from `.html` files on disk — the runnable version is
+[`example/website_server.oxi`](../../example/website_server.oxi).
+
+```oxi
+introduce api
+
+fun home(req <map>) { api.file("site/index.html") }
+fun assets(req <map>) { api.static_dir(req, "site") }
+
+fun routes(cfg <map>) {
+    app := api.app(cfg)
+    app.get("/", home)
+    app.get("/:page", assets)      // /about.html
+    app.get("/css/:file", assets)  // /css/style.css
+    app.listen()
+}
+
+main { api.serve(routes, port=8000) }
+```
+
+`api.file` and `api.static_dir` set the Content-Type from the file extension, so
+pages render and stylesheets apply. Returning a **bare string** does not:
+
+```oxi
+fun page(req <map>) { "<h1>hi</h1>" }        // text/plain — browser shows the source
+fun page(req <map>) { api.html("<h1>hi</h1>") }  // text/html — browser renders it
+```
+
+A handler that returns a plain string gets `text/plain`, because a string is far
+more often a message than markup. Use `api.html` for inline markup and
+`api.file` for a page on disk.
 
 ### Non-JSON responses
 

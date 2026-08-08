@@ -53,7 +53,7 @@ examples:
 | Module | What it covers |
 |--------|----------------|
 | [net](net.md) | HTTP client, streaming HTTP, TCP and UDP sockets |
-| [api](api.md) | HTTP server: routing, JSON responses, the accept loop |
+| [api](api.md) | HTTP server: routing, JSON and HTML responses, static files, the accept loop |
 
 ## Language support
 

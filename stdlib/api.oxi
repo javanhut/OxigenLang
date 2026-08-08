@@ -1,4 +1,5 @@
-// api — HTTP API servers: routing, JSON, and the server itself in one module.
+// api — HTTP servers: routing, responses (JSON, HTML, files), and the server
+// itself in one module.
 //
 // The FastAPI half is the routing and the response helpers; the uvicorn half is
 // `serve`, which binds the socket and runs N accept loops on real threads.
@@ -35,6 +36,8 @@
 // accept loop, and it has to run on the worker. One function per server, and
 // the table is built once per worker rather than once per request.
 introduce net
+introduce path
+introduce io
 
 // Hot-path string and JSON work calls the builtins directly rather than the
 // `strings`/`json` wrappers: one less VM frame per operation on a path that runs
@@ -99,6 +102,54 @@ fun respond(status <int>, body <str>, headers <map> = {}) { Res(status, headers,
 // A JSON error body under the given status, matching what unmatched routes and
 // failed handlers return.
 fun fail_with(status <int>, message <str>) { json({"error": message}, status) }
+
+// ── Serving files ─────────────────────────────────────────────────────────
+// Content-Type for a path, chosen by extension. Everything unrecognized is
+// application/octet-stream, which browsers download rather than guess at.
+//
+// Text formats carry charset=utf-8 because a browser that has to guess an
+// encoding will sometimes guess wrong and render mojibake.
+fun content_type(p <str>) {
+    e <str> := __lower(path.ext(p))
+    types <map> := {"html": "text/html; charset=utf-8", "htm": "text/html; charset=utf-8", "css": "text/css; charset=utf-8", "js": "text/javascript; charset=utf-8", "mjs": "text/javascript; charset=utf-8", "json": "application/json", "svg": "image/svg+xml", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp", "ico": "image/x-icon", "woff2": "font/woff2", "woff": "font/woff", "txt": "text/plain; charset=utf-8", "xml": "application/xml", "pdf": "application/pdf"}
+    // A missing map key is None, so no separate "has key" check is needed.
+    found <generic> := types[e]
+    give found unless found == None
+    "application/octet-stream"
+}
+
+// Serve one file from disk, with its Content-Type inferred from the extension.
+// A missing file is a 404 rather than a crash, so a handler can call this on a
+// path that may not exist.
+//
+//     fun home(req <map>) { api.file("site/index.html") }
+fun file(p <str>, status <int> = 200) {
+    give fail_with(404, "not found") unless io.file_exists(p)
+    Res(status, {"Content-Type": content_type(p)}, io.read_file(p))
+}
+
+// Serve `req["path"]` from under `root` — the whole-site case.
+//
+//     app.get("/*", fun(req) { api.static_dir(req, "site") })
+//
+// A request path is attacker-controlled, so it is resolved and then checked to
+// be inside `root` before anything is read. `path.join` alone is not enough:
+// it follows PathBuf semantics, where an absolute component discards the base
+// and `..` is never resolved, so "/etc/passwd" or "../../secrets" would escape.
+// `path.normalize` resolves the traversal and `path.is_within` decides
+// containment component-wise, which is why a sibling like "site-backup" is not
+// treated as inside "site".
+//
+// A path ending in "/" serves index.html from that directory, the convention
+// every static host follows.
+fun static_dir(req <map>, root <str>) {
+    rel <str> := req["path"]
+    rel = rel + "index.html" when __ends_with(rel, "/")
+    rel = __strip_left(rel, "/")
+    target <str> := path.normalize(path.join([root, rel]))
+    give fail_with(404, "not found") unless path.is_within(root, target)
+    file(target)
+}
 
 // ── Request helpers ───────────────────────────────────────────────────────
 // Parse the request body as JSON.
