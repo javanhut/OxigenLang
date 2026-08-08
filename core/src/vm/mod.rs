@@ -3917,17 +3917,17 @@ impl VM {
                     closure.jit_thunk.set(Some(thunk));
                     closure.jit_state.set(1);
                     Some(thunk)
-                } else if let Some((generic, specialized, spec_arity, spec_kind, lean, lean_arity)) =
+                } else if let Some(e) =
                     self.jit.maybe_compile_entries_for(&closure.function, count)
                 {
-                    closure.jit_thunk.set(Some(generic));
-                    closure.specialized_thunk.set(specialized);
-                    closure.specialized_arity.set(spec_arity);
-                    closure.specialized_kind.set(spec_kind);
-                    closure.lean_thunk.set(lean);
-                    closure.lean_arity.set(lean_arity);
+                    closure.jit_thunk.set(Some(e.generic));
+                    closure.specialized_thunk.set(e.specialized);
+                    closure.specialized_arity.set(e.specialized_arity);
+                    closure.specialized_kind.set(e.specialized_kind);
+                    closure.lean_thunk.set(e.lean);
+                    closure.lean_arity.set(e.lean_arity);
                     closure.jit_state.set(1);
-                    Some(generic)
+                    Some(e.generic)
                 } else {
                     if count >= self.jit.threshold() {
                         closure.jit_state.set(2);

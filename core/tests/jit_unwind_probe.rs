@@ -45,7 +45,7 @@ unsafe extern "C" {
 // stack. Oxigen has spawn/pmap/a threaded server, so a global here would
 // reproduce that in production under concurrency, not just in tests.
 thread_local! {
-    static JUMP_TARGET: UnsafeCell<JmpBuf> = UnsafeCell::new(JmpBuf([0; 64]));
+    static JUMP_TARGET: UnsafeCell<JmpBuf> = const { UnsafeCell::new(JmpBuf([0; 64])) };
     static DEPTH_AT_EXIT: Cell<i64> = const { Cell::new(-1) };
 }
 
@@ -132,10 +132,10 @@ fn build_recursive_jit() -> (JITModule, *const u8) {
         // Recurse: keeps a live frame with a real prologue at every level.
         b.switch_to_block(recurse_block);
         let self_ref = module.declare_func_in_func(func_id, b.func);
-        let n1 = b.ins().iadd_imm(n, -1);
+        let n1 = b.ins().iadd_imm_s(n, -1);
         let rcall = b.ins().call(self_ref, &[n1]);
         let rv = b.inst_results(rcall)[0];
-        let out = b.ins().iadd_imm(rv, 1);
+        let out = b.ins().iadd_imm_s(rv, 1);
         b.ins().return_(&[out]);
 
         b.seal_all_blocks();

@@ -51,3 +51,26 @@ jobs:
       # nothing and exits 1 listing the files that would change.
       - name: Check formatting
         run: ./target/debug/oxigen fmt --check example tests stdlib update
+
+  # Suite 3 — Rust lints. A separate job on purpose: a lint failure should not
+  # hide the test results, and vice versa.
+  clippy:
+    name: Rust lints (cargo clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # `--all-targets` covers tests and benches, not just the library. Without
+      # it, lints in core/tests/ go unreported — which is how deprecated
+      # cranelift calls survived there after the rest of the tree was migrated.
+      #
+      # `-D warnings` is what makes this a gate rather than a suggestion; the
+      # tree is clean under it today, so anything new is genuinely new.
+      #
+      # JIT is a default feature on both crates, so this lints the Cranelift
+      # backend without naming it.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings

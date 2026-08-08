@@ -151,8 +151,8 @@ fn translate_lean_body(
         .collect();
     let mut local_vars: HashMap<u16, Variable> = HashMap::new();
     let zero = b.ins().iconst(types::I64, 0);
-    for i in 0..MAX_LEAN_STACK {
-        b.def_var(stack_vars[i], zero);
+    for &v in &stack_vars {
+        b.def_var(v, zero);
     }
     // Slot 0 is the closure marker; parameters are 1..=arity.
     for slot in 1..=arity as u16 {
