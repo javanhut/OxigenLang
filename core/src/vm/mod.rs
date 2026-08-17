@@ -825,14 +825,22 @@ impl VM {
             return Ok(Rc::clone(layout));
         }
 
-        // Parent lookups go through get_struct_def so module-scoped parents resolve too.
+        // Parent lookups go through parent_struct_def so a child imported without
+        // its parent still inherits the parent's fields.
         let mut chain: Vec<Rc<crate::vm::value::ObjStructDef>> = Vec::new();
         let mut cur = Some(Rc::clone(&def));
         while let Some(d) = cur {
-            cur = match &d.parent {
-                Some(p) => self.get_struct_def(p),
-                None => None,
-            };
+            cur = self.parent_struct_def(&d);
+            if cur.is_none()
+                && let Some(p) = &d.parent {
+                    // Silently dropping an unresolvable parent yields an instance
+                    // missing every inherited field, which surfaces much later as a
+                    // baffling "field not found" — fail here instead.
+                    return Err(self.runtime_error_hint(
+                        &format!("parent struct '{p}' of '{}' is not defined in this scope", d.name),
+                        "import the parent struct, or check it is defined before the child",
+                    ));
+                }
             chain.push(d);
         }
         // chain is [child, ..., root]; reverse for root-first order.
@@ -3658,6 +3666,22 @@ impl VM {
         None
     }
 
+    /// Resolve a struct def's parent def. The parent is looked up in the
+    /// DEFINING module's globals first — a child imported into another module
+    /// brings its parent's fields and methods with it even when the importer
+    /// never named the parent — then in the active scope.
+    pub(crate) fn parent_struct_def(
+        &self,
+        def: &Rc<crate::vm::value::ObjStructDef>,
+    ) -> Option<Rc<crate::vm::value::ObjStructDef>> {
+        let parent = def.parent.as_ref()?;
+        if let Some(mg) = def.module_globals.get()
+            && let Some(Value::StructDef(pd)) = mg.get(parent) {
+                return Some(Rc::clone(pd));
+            }
+        self.get_struct_def(parent)
+    }
+
     /// Look up a method on a struct def, following the inheritance chain.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     /// Resolve a method starting from a struct INSTANCE's carried def, walking
@@ -3676,16 +3700,7 @@ impl VM {
             if let Some(m) = d.methods.borrow().get(method_name).cloned() {
                 return Some(m);
             }
-            cur = d.parent.as_ref().and_then(|p| {
-                if let Some(mg) = d.module_globals.get()
-                    && let Some(Value::StructDef(pd)) = mg.get(p) {
-                        return Some(Rc::clone(pd));
-                    }
-                if let Some(Value::StructDef(pd)) = self.globals.get(p) {
-                    return Some(Rc::clone(pd));
-                }
-                None
-            });
+            cur = self.parent_struct_def(&d);
         }
         None
     }
