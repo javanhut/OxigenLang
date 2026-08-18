@@ -9,3 +9,4 @@ __pycache__/
 .lazy/
 .env
 plan.md
+target/
