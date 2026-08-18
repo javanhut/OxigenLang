@@ -854,18 +854,22 @@ impl Compiler {
         let locals = &mut self.current_frame_mut().function.locals;
         if locals.len() <= slot {
             locals.resize_with(slot + 1, LocalInfo::default);
+            let info = &mut locals[slot];
+            info.mutable = mutable;
+            info.type_constraint = type_constraint;
+            return;
         }
 
         let info = &mut locals[slot];
         info.mutable = mutable;
-        match (&info.type_constraint, type_constraint) {
-            (None, next) => info.type_constraint = next,
-            (Some(current), Some(next)) if current == &next => {}
-            (Some(_), None) => {}
-            (Some(_), Some(_)) => {
-                // Disjoint scopes can reuse a slot; if they disagree on the type lock, stay conservative.
-                info.type_constraint = None;
-            }
+        // Function metadata is indexed by physical stack slot, but disjoint
+        // lexical scopes can reuse that slot for different locals. A runtime
+        // SetLocal cannot tell which lexical binding contributed the metadata,
+        // so retain a lock only when every occupant agrees on it. In
+        // particular, an unconstrained hidden `each` index followed by a typed
+        // branch-local must not retroactively make the index typed.
+        if info.type_constraint != type_constraint {
+            info.type_constraint = None;
         }
     }
 
