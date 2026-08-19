@@ -1,0 +1,178 @@
+name: Release
+
+# Releases are cut exclusively by pushing a version tag, e.g.:
+#   git tag v0.1.4 && git push origin v0.1.4
+# The verify job refuses to build unless the tag sits on main and matches the
+# version in crates/oxigen-cli/Cargo.toml.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Gate for everything else: explicit tag on main, tag matches Cargo version.
+  verify:
+    name: Verify tag (on main, matches Cargo.toml)
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      underscored: ${{ steps.meta.outputs.underscored }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check tag is on main
+        run: |
+          git fetch origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} is not reachable from main. Only tags on main produce releases."
+            exit 1
+          fi
+
+      - name: Check tag matches Cargo.toml version
+        run: |
+          tag="${GITHUB_REF_NAME}"                 # v0.1.4
+          version="${tag#v}"                       # 0.1.4
+          cargo_version=$(grep -m1 '^version' crates/oxigen-cli/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "$version" != "$cargo_version" ]; then
+            echo "::error::Tag version '$version' does not match crates/oxigen-cli/Cargo.toml version '$cargo_version'."
+            exit 1
+          fi
+
+      - name: Export release metadata
+        id: meta
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "underscored=${tag//./_}" >> "$GITHUB_OUTPUT"   # v0.1.4 -> v0_1_4
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86,   os: ubuntu-22.04,     target: x86_64-unknown-linux-musl, suffix: linux_x86 }
+          - { name: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, suffix: linux_arm64 }
+          # macos-13 is retired; macos-15-intel is the last Intel image.
+          - { name: macos-x86,   os: macos-15-intel,   target: x86_64-apple-darwin,        suffix: macos_x86 }
+          - { name: macos-arm64, os: macos-14,         target: aarch64-apple-darwin,       suffix: macos_arm64 }
+    steps:
+      - uses: actions/checkout@v5
+
+      # Static musl builds need the musl toolchain for linking. The arm runner
+      # builds natively (no QEMU/cross), so musl-gcc targets aarch64 there.
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --release -p oxigen --target ${{ matrix.target }}
+
+      - name: Verify binary runs
+        run: |
+          bin="target/${{ matrix.target }}/release/oxigen"
+          "$bin" --version || "$bin" --help
+
+      # Layout: oxigen binary with stdlib/ alongside it — find_stdlib_path()
+      # (core/src/vm/mod.rs) resolves stdlib next to the executable.
+      - name: Package tarball
+        run: |
+          u="${{ needs.verify.outputs.underscored }}"
+          dir="oxigen_lang_${u}_${{ matrix.suffix }}"
+          mkdir -p "pkg/$dir" dist
+          cp "target/${{ matrix.target }}/release/oxigen" "pkg/$dir/oxigen"
+          strip "pkg/$dir/oxigen" || true
+          cp -r stdlib "pkg/$dir/stdlib"
+          cp README.md "pkg/$dir/" || true
+          tar -czf "dist/${dir}.tar.gz" -C pkg "$dir"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.suffix }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.verify.outputs.tag }}
+          name: OxigenLang ${{ needs.verify.outputs.tag }}
+          generate_release_notes: true
+          files: dist/*.tar.gz
+
+  docker:
+    name: Docker Hub push
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      # Reuse the exact release binaries instead of rebuilding under QEMU.
+      - name: Stage per-arch binaries
+        run: |
+          u="${{ needs.verify.outputs.underscored }}"
+          for pair in "linux_x86:amd64" "linux_arm64:arm64"; do
+            suffix="${pair%%:*}"; arch="${pair##*:}"
+            mkdir -p "docker-context/$arch"
+            tar -xzf "dist/oxigen_lang_${u}_${suffix}.tar.gz" -C /tmp
+            cp "/tmp/oxigen_lang_${u}_${suffix}/oxigen" "docker-context/$arch/oxigen"
+          done
+          ls -l docker-context/*/oxigen
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            javanhut/oxigen:${{ needs.verify.outputs.tag }}
+            javanhut/oxigen:${{ needs.verify.outputs.version }}
+            javanhut/oxigen:latest
