@@ -71,8 +71,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Static musl builds need the musl toolchain for linking. The arm runner
-      # builds natively (no QEMU/cross), so musl-gcc targets aarch64 there.
+      # musl-gcc compiles the C in ring (via the cc crate). Do NOT point
+      # CARGO_TARGET_*_LINKER at it: rust's musl targets link self-contained
+      # (own libc.a + crt objects) and musl-gcc's specs turn the x86_64
+      # static-pie link into a dynamic PIE that segfaults before main.
       - name: Install musl tools
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -86,15 +88,13 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release binary
-        env:
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
         run: cargo build --release -p oxigen --target ${{ matrix.target }}
 
       - name: Verify binary runs
         run: |
           bin="target/${{ matrix.target }}/release/oxigen"
-          "$bin" --version || "$bin" --help
+          "$bin" --version
+          "$bin" --help
 
       # Layout: oxigen binary with stdlib/ alongside it — find_stdlib_path()
       # (core/src/vm/mod.rs) resolves stdlib next to the executable.
