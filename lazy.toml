@@ -44,7 +44,7 @@ run = [
   "echo \" Binary: {{bindir}}/oxigen\"",
   "echo \" Stdlib: {{libdir}}/\"",
 ]
-dep = ["build"]
+dep = ["build", "install-lsp"]
 
 [commands.install-with-jit]
 escalate = true
@@ -81,6 +81,7 @@ run = [
 dep = ["build-no-jit"]
 
 [commands.install-lsp]
+escalate = true
 run = [
   "echo \"Installing oxigen-lsp to {{bindir}}...\"",
   "install -d {{bindir}}",
