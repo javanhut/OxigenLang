@@ -30,6 +30,7 @@ run = ["cargo build --release -p oxigen --no-default-features"]
 run = ["cd lsp-go && go build -o ../target/release/oxigen-lsp ."]
 
 [commands.install]
+escalate = true
 run = [
   "echo \"Installing oxigen to {{bindir}}...\"",
   "install -d {{bindir}}",
@@ -46,6 +47,7 @@ run = [
 dep = ["build"]
 
 [commands.install-with-jit]
+escalate = true
 run = [
   "echo \"Installing oxigen with JIT enabled to {{bindir}}...\"",
   "install -d {{bindir}}",
@@ -62,6 +64,7 @@ run = [
 dep = ["build-with-jit"]
 
 [commands.install-no-jit]
+escalate = true
 run = [
   "echo \"Installing oxigen (VM-only, no JIT) to {{bindir}}...\"",
   "install -d {{bindir}}",
@@ -94,7 +97,9 @@ dep = ["build-lsp"]
 
 [commands.install-lsp-nvcrow]
 desc = "One-shot setup for a Neovim / NvChad (\"nvcrow\") user: installs the oxigen-lsp binary (via install-lsp) AND drops the ftdetect, syntax, and lsp config files into the invoking user's Neovim config. Safe to run with sudo — the editor files go to the REAL user's ~/.config/nvim (via $SUDO_USER) and are chowned back to them, never left root-owned. Override the config dir with NVIM_CONFIG=."
-run = ["user=\"$${SUDO_USER:-$$(id -un)}\"; home=\"$$(eval echo ~$$user)\"; cfg=\"{{nvim_config}}\"; [ -z \"$$cfg\" ] && cfg=\"$$home/.config/nvim\"; echo \"Installing Neovim/NvChad editor files for '$$user' to $$cfg...\"; install -d \"$$cfg/ftdetect\" \"$$cfg/syntax\" \"$$cfg/lsp\"; install -m 644 editors/neovim/ftdetect/oxigen.lua \"$$cfg/ftdetect/oxigen.lua\"; install -m 644 editors/neovim/syntax/oxigen.lua \"$$cfg/syntax/oxigen.lua\"; install -m 644 editors/neovim/lsp/oxigen_lsp.lua \"$$cfg/lsp/oxigen_lsp.lua\"; if [ -n \"$$SUDO_USER\" ]; then chown \"$$user\" \"$$cfg/ftdetect\" \"$$cfg/syntax\" \"$$cfg/lsp\" \"$$cfg/ftdetect/oxigen.lua\" \"$$cfg/syntax/oxigen.lua\" \"$$cfg/lsp/oxigen_lsp.lua\" 2>/dev/null || true; fi; echo \"\"; echo \"Oxigen LSP + Neovim files installed.\"; echo \" Binary: {{bindir}}/oxigen-lsp\"; echo \" ftdetect: $$cfg/ftdetect/oxigen.lua\"; echo \" syntax: $$cfg/syntax/oxigen.lua\"; echo \" lsp: $$cfg/lsp/oxigen_lsp.lua\"; echo \"\"; echo \"Enable the server in your NvChad config (lua/configs/lspconfig.lua):\"; echo \" vim.lsp.enable(\\\"oxigen_lsp\\\")\"; echo \"(or add \\\"oxigen_lsp\\\" to your servers list). Then restart Neovim or run\"; echo \":LspRestart and confirm with :LspInfo / :checkhealth lsp.\""]
+run = [
+  "user=\"$${SUDO_USER:-$$(id -un)}\"; home=\"$$(eval echo ~$$user)\"; cfg=\"{{nvim_config}}\"; [ -z \"$$cfg\" ] && cfg=\"$$home/.config/nvim\"; echo \"Installing Neovim/NvChad editor files for '$$user' to $$cfg...\"; install -d \"$$cfg/ftdetect\" \"$$cfg/syntax\" \"$$cfg/lsp\"; install -m 644 editors/neovim/ftdetect/oxigen.lua \"$$cfg/ftdetect/oxigen.lua\"; install -m 644 editors/neovim/syntax/oxigen.lua \"$$cfg/syntax/oxigen.lua\"; install -m 644 editors/neovim/lsp/oxigen_lsp.lua \"$$cfg/lsp/oxigen_lsp.lua\"; if [ -n \"$$SUDO_USER\" ]; then chown \"$$user\" \"$$cfg/ftdetect\" \"$$cfg/syntax\" \"$$cfg/lsp\" \"$$cfg/ftdetect/oxigen.lua\" \"$$cfg/syntax/oxigen.lua\" \"$$cfg/lsp/oxigen_lsp.lua\" 2>/dev/null || true; fi; echo \"\"; echo \"Oxigen LSP + Neovim files installed.\"; echo \" Binary: {{bindir}}/oxigen-lsp\"; echo \" ftdetect: $$cfg/ftdetect/oxigen.lua\"; echo \" syntax: $$cfg/syntax/oxigen.lua\"; echo \" lsp: $$cfg/lsp/oxigen_lsp.lua\"; echo \"\"; echo \"Enable the server in your NvChad config (lua/configs/lspconfig.lua):\"; echo \" vim.lsp.enable(\\\"oxigen_lsp\\\")\"; echo \"(or add \\\"oxigen_lsp\\\" to your servers list). Then restart Neovim or run\"; echo \":LspRestart and confirm with :LspInfo / :checkhealth lsp.\"",
+]
 dep = ["install-lsp"]
 
 [commands.install-all]
@@ -110,10 +115,7 @@ run = [
 ]
 
 [commands.clean]
-run = [
-  "cargo clean",
-  "rm -f lsp-go/oxigen-lsp",
-]
+run = ["cargo clean", "rm -f lsp-go/oxigen-lsp"]
 
 # Migration warnings:
 # - GNU make function in: user="$${SUDO_USER:-$$(id -un)}"; home="$$(eval echo ~$$user)"; cfg="$(NVIM_CONFIG)"; [ -z "$$cfg" ] && cfg="$$home/.config/nvim"; echo "Installing Neovim/NvChad editor files for '$$user' to $$cfg..."; install -d "$$cfg/ftdetect" "$$cfg/syntax" "$$cfg/lsp"; install -m 644 editors/neovim/ftdetect/oxigen.lua "$$cfg/ftdetect/oxigen.lua"; install -m 644 editors/neovim/syntax/oxigen.lua "$$cfg/syntax/oxigen.lua"; install -m 644 editors/neovim/lsp/oxigen_lsp.lua "$$cfg/lsp/oxigen_lsp.lua"; if [ -n "$$SUDO_USER" ]; then chown "$$user" "$$cfg/ftdetect" "$$cfg/syntax" "$$cfg/lsp" "$$cfg/ftdetect/oxigen.lua" "$$cfg/syntax/oxigen.lua" "$$cfg/lsp/oxigen_lsp.lua" 2>/dev/null || true; fi; echo ""; echo "Oxigen LSP + Neovim files installed."; echo " Binary: $(BINDIR)/oxigen-lsp"; echo " ftdetect: $$cfg/ftdetect/oxigen.lua"; echo " syntax: $$cfg/syntax/oxigen.lua"; echo " lsp: $$cfg/lsp/oxigen_lsp.lua"; echo ""; echo "Enable the server in your NvChad config (lua/configs/lspconfig.lua):"; echo " vim.lsp.enable(\"oxigen_lsp\")"; echo "(or add \"oxigen_lsp\" to your servers list). Then restart Neovim or run"; echo ":LspRestart and confirm with :LspInfo / :checkhealth lsp."

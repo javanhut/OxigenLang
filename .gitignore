@@ -1,5 +1,0 @@
-target
-benchmark_reports/
-.lazy/
-lsp-go/oxigen-lsp
-Cargo.lock
