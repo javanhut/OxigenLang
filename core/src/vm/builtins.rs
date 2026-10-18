@@ -1,8 +1,9 @@
 use crate::vm::value::{ErrorValueData, Value, ValueRepr, rc_str};
+use crate::vm::vector;
+use std::collections::HashMap;
 use base64::Engine as _;
 use sha2::Digest as _;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 /// Register all built-in functions into a globals map.
@@ -38,6 +39,15 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("uint".to_string(), Value::Builtin(builtin_uint));
     globals.insert("chr".to_string(), Value::Builtin(builtin_chr));
     globals.insert("ord".to_string(), Value::Builtin(builtin_ord));
+    globals.insert("vec2".to_string(), Value::Builtin(vector::builtin_vec2));
+    globals.insert("vec3".to_string(), Value::Builtin(vector::builtin_vec3));
+    globals.insert("vec4".to_string(), Value::Builtin(vector::builtin_vec4));
+    globals.insert("__vec_dot".to_string(), Value::Builtin(vector::builtin_vec_dot));
+    globals.insert("__vec_cross".to_string(), Value::Builtin(vector::builtin_vec_cross));
+    globals.insert("__vec_length".to_string(), Value::Builtin(vector::builtin_vec_length));
+    globals.insert("__vec_distance".to_string(), Value::Builtin(vector::builtin_vec_distance));
+    globals.insert("__vec_normalize".to_string(), Value::Builtin(vector::builtin_vec_normalize));
+    globals.insert("__vec_lerp".to_string(), Value::Builtin(vector::builtin_vec_lerp));
 
     // Internal builtins (used by stdlib wrappers)
     globals.insert("__split".to_string(), Value::Builtin(builtin_split));

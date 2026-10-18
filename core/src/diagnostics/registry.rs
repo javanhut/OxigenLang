@@ -53,6 +53,8 @@ pub const WRONG_ARGUMENT_COUNT: Code = Code("E0032");
 pub const STRUCT_MISSING_FIELDS: Code = Code("E0033");
 pub const TRAILING_JSON: Code = Code("E0034");
 pub const NON_HASHABLE_KEY: Code = Code("E0035");
+pub const LOOP_BUDGET_EXHAUSTED: Code = Code("E0036");
+pub const INTERRUPTED: Code = Code("E0037");
 
 pub struct Entry {
     pub code: Code,
@@ -489,6 +491,30 @@ Use a hashable projection of the value instead — a tuple of its parts, or a
 string built from them:
 
     m := {(1, 2): \"v\"}
+",
+    },
+    Entry {
+        code: LOOP_BUDGET_EXHAUSTED,
+        title: "loop budget exhausted",
+        explanation: "\
+The program that runs this script limits how many loop iterations it may run,
+and the script used them all. This is how a host such as a game engine keeps a
+script with an endless loop from freezing it.
+
+The error cannot be caught with `<guard>` or `guard`: a script that could catch
+it could keep looping. Make the loop finish sooner, or ask the host for a larger
+budget.
+",
+    },
+    Entry {
+        code: INTERRUPTED,
+        title: "interrupted",
+        explanation: "\
+The program that runs this script stopped it while it was running, for example
+because it took too long or the user cancelled it.
+
+The error cannot be caught with `<guard>` or `guard`, so the script stops
+wherever it was.
 ",
     },
     Entry {

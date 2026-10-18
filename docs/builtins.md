@@ -319,6 +319,19 @@ tuple()
 
 Accepts any number of arguments of any type. This is equivalent to using the literal syntax `(1, 2, 3)`.
 
+### `vec2(x, y)` / `vec3(x, y, z)` / `vec4(x, y, z, w)`
+
+Creates a vector from two, three or four numbers (ints or floats).
+
+```oxi
+v := vec3(1, 0.5, -2)
+v.y          // 0.5
+v * 2        // vec3(2, 1, -4)
+```
+
+The wrong count, or anything that is not a number, is an error. See
+[Vectors](data_types.md#vectors).
+
 ## Map Operations
 
 ### `keys(map)`
@@ -543,6 +556,7 @@ option {
 | `uint`      | `(value)`              | `Uint`       | Create unsigned integer               |
 | `set`       | `(values...)`          | `Set`        | Create set (deduplicates)             |
 | `tuple`     | `(values...)`          | `Tuple`      | Create tuple                          |
+| `vec2`/`vec3`/`vec4` | `(numbers...)` | `Vec2`/`Vec3`/`Vec4` | Create a vector             |
 | `keys`      | `(map)`                | `Array`      | Array of map keys                     |
 | `values`    | `(map)`                | `Array`      | Array of map values                   |
 | `insert`    | `(map, key, value)`    | `Map`        | New map with entry added/updated      |

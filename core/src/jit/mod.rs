@@ -97,6 +97,10 @@ pub struct JitEngine {
     array_index_fast_misses: usize,
     #[cfg(feature = "jit")]
     inner: Option<engine::JitInner>,
+    /// Address of the VM's armed byte (`vm::limits`), compiled into loop
+    /// back-edges as a constant. 0 until the VM sets it.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    limits_armed: usize,
 }
 
 impl Default for JitEngine {
@@ -114,7 +118,21 @@ impl JitEngine {
             array_index_fast_misses: 0,
             #[cfg(feature = "jit")]
             inner: None,
+            limits_armed: 0,
         }
+    }
+
+    /// Tell the engine where its VM's armed byte lives (`vm::limits`). Set
+    /// once, before anything is compiled.
+    pub(crate) fn set_limits_armed(&mut self, addr: usize) {
+        self.limits_armed = addr;
+    }
+
+    /// The compiler, created on first use.
+    #[cfg(feature = "jit")]
+    fn inner(&mut self) -> &mut engine::JitInner {
+        let armed = self.limits_armed;
+        self.inner.get_or_insert_with(|| engine::JitInner::new(armed))
     }
 
     /// Raw pointer to the JIT counters block, if the inner engine has
@@ -159,8 +177,7 @@ impl JitEngine {
     /// helper. Only callable from compiled code, so the engine exists.
     #[cfg(feature = "jit")]
     pub(crate) fn global_version_cell(&mut self, name: &str) -> *mut u64 {
-        self.inner
-            .get_or_insert_with(engine::JitInner::new)
+        self.inner()
             .global_version_cell(name)
     }
 
@@ -208,7 +225,7 @@ impl JitEngine {
 
         #[cfg(feature = "jit")]
         {
-            let inner = self.inner.get_or_insert_with(engine::JitInner::new);
+            let inner = self.inner();
             inner.maybe_compile(func)
         }
     }
@@ -230,7 +247,7 @@ impl JitEngine {
         if call_count < self.threshold {
             return None;
         }
-        let inner = self.inner.get_or_insert_with(engine::JitInner::new);
+        let inner = self.inner();
         let e = inner.maybe_compile_entries(func)?;
         let kind_u8 = match e.specialized_kind {
             None => crate::vm::value::SPECIALIZED_KIND_NONE,
@@ -281,7 +298,7 @@ impl JitEngine {
 
         #[cfg(feature = "jit")]
         {
-            let inner = self.inner.get_or_insert_with(engine::JitInner::new);
+            let inner = self.inner();
             inner.maybe_compile_thunk(func)
         }
     }
@@ -304,7 +321,7 @@ impl JitEngine {
 
         #[cfg(feature = "jit")]
         {
-            let inner = self.inner.get_or_insert_with(engine::JitInner::new);
+            let inner = self.inner();
             inner.maybe_compile_thunk(func)
         }
     }

@@ -1,12 +1,16 @@
 pub mod builtins;
+pub mod capabilities;
 pub mod collections;
 pub mod intern;
+pub mod limits;
 pub mod nanvalue;
 pub mod value;
+pub mod vector;
 
 use crate::compiler::opcode::OpCode;
 use crate::jit::JitEngine;
 use crate::vm::value::*;
+pub use capabilities::Capability;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,6 +18,12 @@ use std::rc::Rc;
 
 pub(crate) const STACK_MAX: usize = 262144; // 256K stack slots
 pub(crate) const FRAMES_MAX: usize = 16384; // 16K call frames — supports deep recursion
+/// Stack slots every call keeps free. A function whose own
+/// [`Chunk::stack_bound`](crate::compiler::opcode::Chunk::stack_bound) is
+/// larger reserves that much instead (see [`Function::stack_reserve`]), and
+/// the JIT, whose inline call paths only check this margin, declines to
+/// compile it.
+pub(crate) const STACK_GUARD_MARGIN: usize = 8192;
 
 /// Checks if `actual` satisfies the type constraint `expected`.
 /// Handles GENERIC (accepts anything) and union types like "INTEGER || STRING".
@@ -188,6 +198,15 @@ pub struct VMError {
     pub tag: Option<String>,
 }
 
+impl VMError {
+    /// A loop budget or interrupt error: the host stopping the script,
+    /// which no handler in the script may catch.
+    pub fn is_host_limit(&self) -> bool {
+        use crate::diagnostics::registry::{INTERRUPTED, LOOP_BUDGET_EXHAUSTED};
+        self.code == INTERRUPTED || self.code == LOOP_BUDGET_EXHAUSTED
+    }
+}
+
 impl std::fmt::Display for VMError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)
@@ -273,6 +292,25 @@ pub struct VM {
     /// Baseline JIT engine. Stub/no-op when the `jit` feature is off.
     pub jit: JitEngine,
     execution_mode: ExecutionMode,
+
+    /// `interrupt`'s armed byte (`limits::Limits::armed_ptr`), cached where
+    /// JIT-compiled back-edges can load it at `VM::limits_armed_offset`. The
+    /// `Arc` in `interrupt` keeps it alive.
+    pub(crate) limits_armed: *const std::sync::atomic::AtomicU8,
+    /// Loop iterations the budget still allows; meaningful only while a
+    /// budget is set. JIT-compiled loops read and decrement it in place, at
+    /// `VM::loop_countdown_offset`.
+    pub(crate) loop_countdown: i64,
+    interrupt: limits::InterruptHandle,
+
+    /// Host-registered natives, registered again in each child VM so
+    /// imported modules can call them.
+    natives: Vec<(String, Value)>,
+    /// What scripts may reach outside the VM; `None` is everything.
+    capabilities: Option<Vec<Capability>>,
+    /// For each cached module, every file it imported, directly or through
+    /// other modules, so invalidating a file also drops what was built on it.
+    module_deps: HashMap<PathBuf, std::collections::HashSet<PathBuf>>,
 }
 
 /// A recoverable-error landing pad installed by `PushHandler`. Records the
@@ -350,7 +388,15 @@ impl VM {
             error_handlers: Vec::new(),
             jit: JitEngine::new(),
             execution_mode: mode,
+            limits_armed: std::ptr::null(),
+            loop_countdown: 0,
+            interrupt: limits::InterruptHandle::default(),
+            natives: Vec::new(),
+            capabilities: None,
+            module_deps: HashMap::new(),
         };
+        vm.limits_armed = vm.interrupt.0.armed_ptr();
+        vm.jit.set_limits_armed(vm.limits_armed as usize);
         match mode {
             ExecutionMode::Interpreter => vm.jit.disable(),
             ExecutionMode::TieredJit => {}
@@ -371,6 +417,18 @@ impl VM {
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub const fn stack_view_offset() -> usize {
         std::mem::offset_of!(VM, stack_view)
+    }
+
+    /// Byte offset of `limits_armed`, the pointer JIT-compiled loops check.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub const fn limits_armed_offset() -> usize {
+        std::mem::offset_of!(VM, limits_armed)
+    }
+
+    /// Byte offset of `loop_countdown`, which JIT-compiled loops decrement in place.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub const fn loop_countdown_offset() -> usize {
+        std::mem::offset_of!(VM, loop_countdown)
     }
 
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
@@ -465,6 +523,17 @@ impl VM {
             upvalue_int_values: uv_values,
         });
 
+        let from_host = self.is_idle();
+        let result = self.run_closure(closure);
+        // A failed run leaves its frames and operands behind. Clear them so
+        // the host's next run or call starts clean.
+        if result.is_err() && from_host {
+            self.reset_exec_state();
+        }
+        result
+    }
+
+    fn run_closure(&mut self, closure: Rc<ObjClosure>) -> Result<Value, VMError> {
         // Slot 0 is the callee slot call_closure expects.
         self.push(Value::Closure(Rc::clone(&closure)));
 
@@ -492,6 +561,135 @@ impl VM {
         self.jit_executing.set(false);
     }
 
+    /// Limit how many loop iterations scripts may run from now on, across
+    /// runs and calls, until the next call. `None` removes the limit.
+    ///
+    /// Running out is a `loop budget exhausted` error that the script cannot
+    /// catch. A host that calls a script every frame sets the budget before
+    /// each call.
+    pub fn set_loop_budget(&mut self, budget: Option<u64>) {
+        self.interrupt.0.set_budget(budget.is_some());
+        self.loop_countdown = budget.map_or(0, |n| i64::try_from(n).unwrap_or(i64::MAX));
+    }
+
+    /// Make `f` callable from scripts as `name`. Unlike a builtin it is a
+    /// closure, so it can hold the host's state. An `Err` is a runtime error
+    /// in the script, which the script can catch.
+    pub fn register_native(
+        &mut self,
+        name: &str,
+        f: impl Fn(&[Value]) -> Result<Value, String> + 'static,
+    ) {
+        let native = Value::Native(Rc::new(NativeFunction {
+            name: name.to_string(),
+            func: Box::new(f),
+        }));
+        self.natives.retain(|(existing, _)| existing != name);
+        self.natives.push((name.to_string(), native.clone()));
+        self.set_host_global(name, native);
+    }
+
+    /// Keep only the `allowed` capabilities. Builtins behind the others fail
+    /// with an error naming the capability, here and in imported modules.
+    pub fn restrict(&mut self, allowed: &[Capability]) {
+        self.capabilities = Some(allowed.to_vec());
+        for &(name, capability) in capabilities::GATED_BUILTINS {
+            if !allowed.contains(&capability) {
+                self.set_host_global(name, capabilities::refused(name, capability));
+            }
+        }
+    }
+
+    /// The capabilities scripts in this VM may use; `None` is all of them.
+    pub fn capabilities(&self) -> Option<&[Capability]> {
+        self.capabilities.as_deref()
+    }
+
+    /// A global the host sets from outside any script. The JIT caches global
+    /// lookups, so it has to hear about the change.
+    fn set_host_global(&mut self, name: &str, value: Value) {
+        self.jit.bump_global_version(name);
+        self.globals.insert(name.to_string(), value);
+    }
+
+    /// Drop the module at `path`, and every cached module that imported it,
+    /// from the cache, so the next import reads it again. Returns how many
+    /// cache entries this VM dropped.
+    pub fn invalidate_module(&mut self, path: &Path) -> usize {
+        // Cache keys are canonical paths (see `resolve_module_path`).
+        let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let doomed: Vec<PathBuf> = self
+            .module_cache
+            .keys()
+            .filter(|cached| {
+                **cached == target
+                    || self
+                        .module_deps
+                        .get(*cached)
+                        .is_some_and(|deps| deps.contains(&target))
+            })
+            .cloned()
+            .collect();
+        for cached in &doomed {
+            self.module_cache.remove(cached);
+            self.module_deps.remove(cached);
+        }
+        doomed.len()
+    }
+
+    /// A handle that stops this VM's running script from another thread.
+    pub fn interrupt_handle(&self) -> limits::InterruptHandle {
+        self.interrupt.clone()
+    }
+
+    /// One loop iteration's share of the host's limits, taken when the armed
+    /// byte is set: delivers a pending interrupt, or counts the iteration
+    /// against the budget, failing once it is spent.
+    pub(crate) fn loop_limit_step(&mut self) -> Result<(), VMError> {
+        if self.interrupt.0.take_interrupt() {
+            return Err(self.runtime_error_coded(
+                crate::diagnostics::registry::INTERRUPTED,
+                "interrupted",
+                Some("the program running this script stopped it"),
+            ));
+        }
+        if self.interrupt.0.budget_on() {
+            if self.loop_countdown == 0 {
+                return Err(self.runtime_error_coded(
+                    crate::diagnostics::registry::LOOP_BUDGET_EXHAUSTED,
+                    "loop budget exhausted",
+                    Some("the program running this script limits how many loop iterations it may run"),
+                ));
+            }
+            self.loop_countdown -= 1;
+        }
+        Ok(())
+    }
+
+    /// A VM for an imported module's top level, run on the importer's
+    /// behalf: same execution mode, and the same interrupt and budget
+    /// switch. What is left of the budget is lent with [`VM::lend_limits`]
+    /// around the run.
+    fn child_vm(&self) -> VM {
+        let mut child = VM::new_with_mode(self.execution_mode);
+        child.interrupt = self.interrupt.clone();
+        child.limits_armed = child.interrupt.0.armed_ptr();
+        child.jit.set_limits_armed(child.limits_armed as usize);
+        if let Some(allowed) = &self.capabilities {
+            child.restrict(allowed);
+        }
+        for (name, native) in &self.natives {
+            child.natives.push((name.clone(), native.clone()));
+            child.set_host_global(name, native.clone());
+        }
+        child
+    }
+
+    /// Moves the remaining loop budget from `self` to `to`.
+    fn lend_limits(&mut self, to: &mut VM) {
+        to.loop_countdown = std::mem::take(&mut self.loop_countdown);
+    }
+
     /// Look up a global value by name (used by the concurrency worker pool to
     /// resolve a spawned function by name). Returns a clone if present.
     pub fn get_global(&self, name: &str) -> Option<Value> {
@@ -515,6 +713,15 @@ impl VM {
     /// external Rust code, driving the VM to completion and returning the
     /// result. Used by the concurrency worker pool.
     pub fn call_with_args(&mut self, callee: Value, args: Vec<Value>) -> Result<Value, VMError> {
+        let from_host = self.is_idle();
+        let result = self.call_with_args_inner(callee, args);
+        if result.is_err() && from_host {
+            self.reset_exec_state();
+        }
+        result
+    }
+
+    fn call_with_args_inner(&mut self, callee: Value, args: Vec<Value>) -> Result<Value, VMError> {
         let depth = self.frames.len();
         let arg_count = args.len();
         self.push(callee);
@@ -527,6 +734,11 @@ impl VM {
             self.execute_until(depth)?;
         }
         Ok(self.pop())
+    }
+
+    /// No script is running: the host, not a script, is calling in.
+    fn is_idle(&self) -> bool {
+        self.frames.is_empty() && self.jit_frame_view.len == 0
     }
 
     // ── Opcode handlers (shared between interpreter and JIT runtime) ──
@@ -881,6 +1093,14 @@ impl VM {
         };
 
         match object.repr() {
+            ValueRepr::Vector(vector) => match vector.component(fname) {
+                Some(c) => Ok(Value::Float(f64::from(c))),
+                None => Err(self.runtime_error(&format!(
+                    "{} has no component {}",
+                    vector.constructor(),
+                    fname
+                ))),
+            },
             ValueRepr::StructInstance(inst) => {
                 // Direct Vec index via the instance's cached layout, no HashMap in the hot path.
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
@@ -1121,6 +1341,10 @@ impl VM {
             return Err(self.runtime_error("invalid field name"));
         };
         match object.repr() {
+            ValueRepr::Vector(vector) => Err(self.runtime_error_hint(
+                &format!("cannot assign to {}.{}: vectors are values", vector.constructor(), fname),
+                "build a new vector instead, e.g. v = vec2(5, v.y)",
+            )),
             ValueRepr::StructInstance(inst) => {
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
                     if inst.layout.slots[idx].2 && !self.hidden_field_access_allowed(inst) {
@@ -1922,6 +2146,11 @@ impl VM {
     /// push the error as an in-band `ErrorValue`, set `ip` to the catch target,
     /// and return `Ok(())`. Otherwise return the error for propagation.
     fn recover_to_handler(&mut self, stop_depth: usize, err: VMError) -> Result<(), VMError> {
+        // The host's limits stop the script; letting it catch them would let
+        // it carry on.
+        if err.is_host_limit() {
+            return Err(err);
+        }
         match self.error_handlers.last().copied() {
             Some(h) if h.frame_len > stop_depth => {
                 self.error_handlers.pop();
@@ -1998,9 +2227,9 @@ impl VM {
                 }
 
                 // ── Arithmetic ──────────────────────────────────────
-                OpCode::Add => int_fast_binop!(l, r, true, Value::Integer(l + r), binary_add),
-                OpCode::Subtract => int_fast_binop!(l, r, true, Value::Integer(l - r), binary_sub),
-                OpCode::Multiply => int_fast_binop!(l, r, true, Value::Integer(l * r), binary_mul),
+                OpCode::Add => int_fast_binop!(l, r, true, Value::Integer(l.wrapping_add(r)), binary_add),
+                OpCode::Subtract => int_fast_binop!(l, r, true, Value::Integer(l.wrapping_sub(r)), binary_sub),
+                OpCode::Multiply => int_fast_binop!(l, r, true, Value::Integer(l.wrapping_mul(r)), binary_mul),
                 // Excludes -1 as well as 0: Rust traps i64::MIN / -1 unconditionally and panic=abort kills the process.
                 OpCode::Divide => {
                     int_fast_binop!(l, r, r != 0 && r != -1, Value::Integer(l / r), binary_div)
@@ -2085,20 +2314,8 @@ impl VM {
                 // ── Unary ───────────────────────────────────────────
                 OpCode::Negate => {
                     let val = self.pop();
-                    let val = self.force(val);
-                    match val.repr() {
-                        ValueRepr::Integer(n) => self.push(Value::Integer(-n)),
-                        ValueRepr::Float(f) => self.push(Value::Float(-f)),
-                        _ => {
-                            return Err(self.runtime_error_hint(
-                                &format!(
-                                    "negation is only supported for numbers, got {}",
-                                    val.type_name()
-                                ),
-                                "only <int> and <float> values can be negated",
-                            ));
-                        }
-                    }
+                    let negated = self.unary_negate(val)?;
+                    self.push(negated);
                 }
 
                 // ── Postfix ─────────────────────────────────────────
@@ -2116,22 +2333,7 @@ impl VM {
                 }
                 OpCode::SetLocal => {
                     let slot = self.frames[frame_idx].read_u16() as usize;
-                    // A set type stays locked; only <generic> or untyped carries no constraint.
-                    let constraint = self.frames[frame_idx]
-                        .closure
-                        .function
-                        .locals
-                        .get(slot)
-                        .and_then(|li| li.type_constraint.clone());
-                    if let Some(expected) = constraint {
-                        let actual = self.peek(0).effective_type_name();
-                        if !type_matches(&expected, &actual) {
-                            return Err(self.runtime_error_hint(
-                                &format!("type mismatch: expected {}, got {}", expected, actual),
-                                &format!("variable is locked to type {}", expected),
-                            ));
-                        }
-                    }
+                    self.check_local_lock(&self.frames[frame_idx].closure.function, slot)?;
                     let offset = self.frames[frame_idx].slot_offset;
                     let value = self.peek(0).clone();
                     self.stack[offset + slot] = value;
@@ -2192,6 +2394,9 @@ impl VM {
                 }
                 OpCode::Loop => {
                     let offset = self.frames[frame_idx].read_u16() as usize;
+                    if self.interrupt.0.is_armed() {
+                        self.loop_limit_step()?;
+                    }
                     self.maybe_compile_current_loop_hot_function(frame_idx);
                     self.frames[frame_idx].ip -= offset;
                 }
@@ -2910,10 +3115,47 @@ impl VM {
         }
     }
 
+    /// A set type stays locked; only <generic> or untyped carries no
+    /// constraint. Checks the value about to be stored in `slot` (the top of
+    /// the stack) against `function`'s lock for it. Shared by the interpreter
+    /// and the JIT; allocates only to report a mismatch.
+    pub(crate) fn check_local_lock(&self, function: &Function, slot: usize) -> Result<(), VMError> {
+        let Some(expected) = function
+            .locals
+            .get(slot)
+            .and_then(|li| li.type_constraint.as_deref())
+        else {
+            return Ok(());
+        };
+        let value = self.peek(0);
+        if value.effective_type_is(expected) {
+            return Ok(());
+        }
+        let actual = value.effective_type_name();
+        Err(self.runtime_error_hint(
+            &format!("type mismatch: expected {}, got {}", expected, actual),
+            &format!("variable is locked to type {}", expected),
+        ))
+    }
+
+    /// Unary `-`, shared by the interpreter and the JIT.
+    pub(crate) fn unary_negate(&self, v: Value) -> Result<Value, VMError> {
+        let v = self.force(v);
+        match v.repr() {
+            ValueRepr::Integer(n) => Ok(Value::Integer(n.wrapping_neg())),
+            ValueRepr::Float(f) => Ok(Value::Float(-f)),
+            ValueRepr::Vector(vector) => Ok(vector.map(|c| -c).into_value()),
+            _ => Err(self.runtime_error_hint(
+                &format!("negation is only supported for numbers, got {}", v.type_name()),
+                "only <int>, <float> and vector values can be negated",
+            )),
+        }
+    }
+
     pub(crate) fn binary_add(&self, a: Value, b: Value) -> Result<Value, VMError> {
         let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
-            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l + r)),
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l.wrapping_add(*r))),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l + r)),
             (Value::Integer(l), Value::Float(r)) => Ok(Value::Float(*l as f64 + r)),
             (Value::Float(l), Value::Integer(r)) => Ok(Value::Float(l + *r as f64)),
@@ -2923,12 +3165,12 @@ impl VM {
                 s.push_str(r);
                 Ok(Value::String(rc_str(s)))
             }
-            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer(*l as i64 + *r as i64)),
-            (Value::Byte(l), Value::Integer(r)) => Ok(Value::Integer(*l as i64 + r)),
-            (Value::Integer(l), Value::Byte(r)) => Ok(Value::Integer(l + *r as i64)),
+            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer((*l as i64).wrapping_add(*r as i64))),
+            (Value::Byte(l), Value::Integer(r)) => Ok(Value::Integer((*l as i64).wrapping_add(*r))),
+            (Value::Integer(l), Value::Byte(r)) => Ok(Value::Integer((*l).wrapping_add(*r as i64))),
             (Value::Uint(l), Value::Uint(r)) => Ok(Value::Uint(l.wrapping_add(*r))),
-            (Value::Uint(l), Value::Integer(r)) => Ok(Value::Integer(*l as i64 + r)),
-            (Value::Integer(l), Value::Uint(r)) => Ok(Value::Integer(l + *r as i64)),
+            (Value::Uint(l), Value::Integer(r)) => Ok(Value::Integer((*l as i64).wrapping_add(*r))),
+            (Value::Integer(l), Value::Uint(r)) => Ok(Value::Integer((*l).wrapping_add(*r as i64))),
             (Value::Byte(l), Value::Float(r)) => Ok(Value::Float(*l as f64 + r)),
             (Value::Float(l), Value::Byte(r)) => Ok(Value::Float(l + *r as f64)),
             (Value::Uint(l), Value::Float(r)) => Ok(Value::Float(*l as f64 + r)),
@@ -2957,23 +3199,26 @@ impl VM {
                 Ok(Value::Tuple(Rc::new(new)))
             }
             // Wording matches the tree-walker so file and REPL output agree.
-            _ => Err(self.runtime_error_hint(
-                &format!("type mismatch: {} + {}", a.type_name(), b.type_name()),
-                "operands must be the same type for this operator",
-            )),
+            _ => match vector::arithmetic(&a, &b, '+') {
+                Some(result) => result.map_err(|message| self.runtime_error(&message)),
+                None => Err(self.runtime_error_hint(
+                    &format!("type mismatch: {} + {}", a.type_name(), b.type_name()),
+                    "operands must be the same type for this operator",
+                )),
+            },
         }
     }
 
     pub(crate) fn binary_sub(&self, a: Value, b: Value) -> Result<Value, VMError> {
         let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
-            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l - r)),
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l.wrapping_sub(*r))),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l - r)),
             (Value::Integer(l), Value::Float(r)) => Ok(Value::Float(*l as f64 - r)),
             (Value::Float(l), Value::Integer(r)) => Ok(Value::Float(l - *r as f64)),
-            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer(*l as i64 - *r as i64)),
-            (Value::Byte(l), Value::Integer(r)) => Ok(Value::Integer(*l as i64 - r)),
-            (Value::Integer(l), Value::Byte(r)) => Ok(Value::Integer(l - *r as i64)),
+            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer((*l as i64).wrapping_sub(*r as i64))),
+            (Value::Byte(l), Value::Integer(r)) => Ok(Value::Integer((*l as i64).wrapping_sub(*r))),
+            (Value::Integer(l), Value::Byte(r)) => Ok(Value::Integer((*l).wrapping_sub(*r as i64))),
             (Value::Uint(l), Value::Uint(r)) => {
                 if r > l {
                     Err(self.runtime_error("unsigned integer underflow"))
@@ -2981,28 +3226,34 @@ impl VM {
                     Ok(Value::Uint(l - r))
                 }
             }
-            (Value::Uint(l), Value::Integer(r)) => Ok(Value::Integer(*l as i64 - r)),
-            (Value::Integer(l), Value::Uint(r)) => Ok(Value::Integer(l - *r as i64)),
-            _ => Err(self.runtime_error_hint(
-                &format!("type mismatch: {} - {}", a.type_name(), b.type_name()),
-                "operands must be the same type for this operator",
-            )),
+            (Value::Uint(l), Value::Integer(r)) => Ok(Value::Integer((*l as i64).wrapping_sub(*r))),
+            (Value::Integer(l), Value::Uint(r)) => Ok(Value::Integer((*l).wrapping_sub(*r as i64))),
+            _ => match vector::arithmetic(&a, &b, '-') {
+                Some(result) => result.map_err(|message| self.runtime_error(&message)),
+                None => Err(self.runtime_error_hint(
+                    &format!("type mismatch: {} - {}", a.type_name(), b.type_name()),
+                    "operands must be the same type for this operator",
+                )),
+            },
         }
     }
 
     pub(crate) fn binary_mul(&self, a: Value, b: Value) -> Result<Value, VMError> {
         let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
-            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l * r)),
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l.wrapping_mul(*r))),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l * r)),
             (Value::Integer(l), Value::Float(r)) => Ok(Value::Float(*l as f64 * r)),
             (Value::Float(l), Value::Integer(r)) => Ok(Value::Float(l * *r as f64)),
-            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer(*l as i64 * *r as i64)),
+            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer((*l as i64).wrapping_mul(*r as i64))),
             (Value::Uint(l), Value::Uint(r)) => Ok(Value::Uint(l.wrapping_mul(*r))),
-            _ => Err(self.runtime_error_hint(
-                &format!("type mismatch: {} * {}", a.type_name(), b.type_name()),
-                "operands must be the same type for this operator",
-            )),
+            _ => match vector::arithmetic(&a, &b, '*') {
+                Some(result) => result.map_err(|message| self.runtime_error(&message)),
+                None => Err(self.runtime_error_hint(
+                    &format!("type mismatch: {} * {}", a.type_name(), b.type_name()),
+                    "operands must be the same type for this operator",
+                )),
+            },
         }
     }
 
@@ -3080,10 +3331,13 @@ impl VM {
                     Ok(Value::Uint(l / r))
                 }
             }
-            _ => Err(self.runtime_error_hint(
-                &format!("type mismatch: {} / {}", a.type_name(), b.type_name()),
-                "operands must be the same type for this operator",
-            )),
+            _ => match vector::arithmetic(&a, &b, '/') {
+                Some(result) => result.map_err(|message| self.runtime_error(&message)),
+                None => Err(self.runtime_error_hint(
+                    &format!("type mismatch: {} / {}", a.type_name(), b.type_name()),
+                    "operands must be the same type for this operator",
+                )),
+            },
         }
     }
 
@@ -3314,6 +3568,24 @@ impl VM {
             ValueRepr::Closure(closure) => {
                 let module_globals = closure.module_globals.get();
                 self.call_closure(Rc::clone(closure), arg_count, named_args, module_globals)
+            }
+            ValueRepr::Native(native) => {
+                if !named_args.is_empty() {
+                    return Err(self.runtime_error(
+                        "named arguments are not supported for built-in functions",
+                    ));
+                }
+                let start = self.stack.len() - arg_count;
+                let result = (native.func)(&self.stack[start..]);
+                // Drop the args AND the native itself (at start - 1).
+                self.stack_truncate(start - 1);
+                match result {
+                    Ok(value) => {
+                        self.push(value);
+                        Ok(())
+                    }
+                    Err(message) => Err(self.runtime_error(&message)),
+                }
             }
             ValueRepr::Builtin(func) => {
                 if !named_args.is_empty() {
@@ -3878,11 +4150,9 @@ impl VM {
                 if (param.optional || param.has_default) && matches!(val, Value::None) {
                     continue;
                 }
-                let actual = val.effective_type_name();
                 // Match the specific type or the generic category, so <Enum> accepts any enum value.
-                if !type_matches(expected_ty, &actual)
-                    && !type_matches(expected_ty, val.type_name())
-                {
+                if !val.effective_type_is(expected_ty) && !type_matches(expected_ty, val.type_name()) {
+                    let actual = val.effective_type_name();
                     return Err(self.runtime_error_hint(
                         &format!(
                             "type mismatch for parameter '{}': expected {}, got {}",
@@ -3901,9 +4171,9 @@ impl VM {
             ));
         }
 
-        // A recursive frame with many locals exhausts STACK_MAX before FRAMES_MAX, hitting the push abort.
-        const STACK_GUARD_MARGIN: usize = 8192;
-        if self.stack.len() >= STACK_MAX - STACK_GUARD_MARGIN {
+        // Refuse the call unless the callee's own pushes are sure to fit: this,
+        // not a check in `push`, is what keeps the stack in bounds.
+        if self.stack.len() >= STACK_MAX.saturating_sub(closure.function.stack_reserve()) {
             return Err(self.runtime_error_hint(
                 "stack overflow",
                 "check for infinite recursion or deeply nested calls",
@@ -4423,7 +4693,7 @@ impl VM {
         });
         crate::vm::value::set_module_origin(&function, &origin);
 
-        let mut sub_vm = VM::new();
+        let mut sub_vm = self.child_vm();
         sub_vm.set_source(&source);
         sub_vm.set_file(module_path.clone());
         sub_vm.is_main_context = false;
@@ -4433,7 +4703,20 @@ impl VM {
         let module_hidden: std::collections::HashSet<String> =
             function.hidden_globals.iter().cloned().collect();
 
-        let _result = sub_vm.run(function).map_err(|e| {
+        self.lend_limits(&mut sub_vm);
+        let result = sub_vm.run(function);
+        sub_vm.lend_limits(self);
+        // Everything the module imported, so invalidating any of it drops this module too.
+        let mut deps: std::collections::HashSet<PathBuf> =
+            sub_vm.module_cache.keys().cloned().collect();
+        for nested in sub_vm.module_deps.values() {
+            deps.extend(nested.iter().cloned());
+        }
+        let _result = result.map_err(|e| {
+            // The host's limits pass through unchanged, so they stay uncatchable.
+            if e.is_host_limit() {
+                return e;
+            }
             self.runtime_error(&format!("error in module '{}': {}", path_str, e.message))
         })?;
 
@@ -4458,6 +4741,7 @@ impl VM {
             hidden: module_hidden,
         });
 
+        self.module_deps.insert(module_path.clone(), deps);
         self.module_cache.insert(module_path, Rc::clone(&module));
 
         self.bind_module(&module, path_str, selective_names)

@@ -399,6 +399,39 @@ pub enum Value {
     /// Terminal error — stops execution. Thin `Rc<String>` for the same
     /// reason as `String` above.
     Error(Rc<String>),
+
+    // Host embedding. Both are `Rc`s: the JIT treats every tag past `None`
+    // except `Builtin` as an `Rc` it may refcount inline.
+    /// A Rust closure the host registered (see `VM::register_native`).
+    Native(Rc<NativeFunction>),
+    /// A Rust value the host handed to the script (see [`Value::host`]).
+    Host(Rc<HostValue>),
+
+    /// `vec2`/`vec3`/`vec4` (see `vm::vector`). An `Rc` for the same reason.
+    Vector(Rc<crate::vm::vector::Vector>),
+}
+
+/// The closure behind a [`Value::Native`].
+pub type NativeFn = dyn Fn(&[Value]) -> Result<Value, String>;
+
+/// A host-registered function: its name for messages, and the closure.
+pub struct NativeFunction {
+    pub name: String,
+    pub(crate) func: Box<NativeFn>,
+}
+
+/// The payload of a [`Value::Host`]: a Rust value, the name `type()`
+/// reports for it, and how to compare two of them.
+pub struct HostValue {
+    pub type_name: String,
+    data: Box<dyn std::any::Any>,
+    eq: fn(&dyn std::any::Any, &dyn std::any::Any) -> bool,
+}
+
+impl HostValue {
+    fn same_value(&self, other: &HostValue) -> bool {
+        (self.eq)(self.data.as_ref(), other.data.as_ref())
+    }
 }
 
 /// "Read-only view" enum that mirrors the variant structure of
@@ -447,6 +480,9 @@ pub enum ValueRepr<'a> {
     Wrapped(&'a Rc<Value>),
     Error(&'a Rc<String>),
     Task(&'a Rc<crate::concurrent::TaskHandle>),
+    Native(&'a Rc<NativeFunction>),
+    Host(&'a Rc<HostValue>),
+    Vector(&'a Rc<crate::vm::vector::Vector>),
 }
 
 /// Boxed payload of `Value::ErrorValue`. Kept off the enum so `Value`
@@ -511,7 +547,39 @@ pub struct Function {
     pub method_of: Option<String>,
 }
 
+impl Value {
+    /// A Rust value handed to scripts. Scripts can store and pass it but not
+    /// look inside; `type()` reports `type_name`, and two host values are
+    /// equal when they hold equal values of the same Rust type.
+    pub fn host<T: std::any::Any + PartialEq>(type_name: &str, value: T) -> Value {
+        fn eq<T: std::any::Any + PartialEq>(a: &dyn std::any::Any, b: &dyn std::any::Any) -> bool {
+            match (a.downcast_ref::<T>(), b.downcast_ref::<T>()) {
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            }
+        }
+        Value::Host(Rc::new(HostValue {
+            type_name: type_name.to_string(),
+            data: Box::new(value),
+            eq: eq::<T>,
+        }))
+    }
+
+    /// The Rust value inside a host value, if it holds a `T`.
+    pub fn host_ref<T: std::any::Any>(&self) -> Option<&T> {
+        match self {
+            Value::Host(h) => h.data.downcast_ref::<T>(),
+            _ => None,
+        }
+    }
+}
+
 impl Function {
+    /// Stack slots that must be free to call this function.
+    pub(crate) fn stack_reserve(&self) -> usize {
+        self.chunk.stack_bound().max(crate::vm::STACK_GUARD_MARGIN)
+    }
+
     pub fn new(name: Option<String>, arity: u8) -> Self {
         Function {
             name,
@@ -771,7 +839,7 @@ pub struct ObjStructDef {
     /// (parent fields first, then own) and the HashMap maps name → index.
     /// OnceCell: each struct def resolves its layout exactly once.
     pub layout: std::cell::OnceCell<std::rc::Rc<FieldLayout>>,
-    /// Globals of the module that defined this struct. Set after the
+    /// HashMap<String, Value> of the module that defined this struct. Set after the
     /// defining module finishes loading (see `VM::import_module`); read
     /// in `call_method` so methods called from another module still see
     /// their own module's top-level functions (e.g. `Parser` in
@@ -1042,6 +1110,9 @@ impl Value {
             Value::ErrorValue(d) => ValueRepr::ErrorValue(d),
             Value::Wrapped(v) => ValueRepr::Wrapped(v),
             Value::Error(s) => ValueRepr::Error(s),
+            Value::Native(f) => ValueRepr::Native(f),
+            Value::Host(h) => ValueRepr::Host(h),
+            Value::Vector(v) => ValueRepr::Vector(v),
             Value::Task(h) => ValueRepr::Task(h),
         }
     }
@@ -1140,6 +1211,28 @@ impl Value {
             Value::EnumDef(_) => "ENUM_DEF",
             Value::EnumInstance(_) => "ENUM",
             Value::Task(_) => "TASK",
+            Value::Native(_) => "BUILTIN",
+            Value::Host(_) => "HOST",
+            Value::Vector(v) => v.type_name(),
+        }
+    }
+
+    /// `type_matches(expected, &self.effective_type_name())`, without
+    /// building the name. Type locks and typed parameters run this on every
+    /// store and call.
+    pub fn effective_type_is(&self, expected: &str) -> bool {
+        use crate::vm::type_matches;
+        match self {
+            Value::StructInstance(inst) => type_matches(expected, &inst.struct_name),
+            Value::ErrorValue(data) => match &data.tag {
+                Some(_) => type_matches(expected, &self.effective_type_name()),
+                None => type_matches(expected, "ERROR"),
+            },
+            Value::Wrapped(_) => type_matches(expected, "VALUE"),
+            Value::EnumDef(d) => type_matches(expected, &d.name),
+            Value::EnumInstance(i) => type_matches(expected, &i.enum_name),
+            Value::Host(h) => type_matches(expected, &h.type_name),
+            other => type_matches(expected, other.type_name()),
         }
     }
 
@@ -1153,6 +1246,7 @@ impl Value {
             Value::Wrapped(_) => "VALUE".to_string(),
             Value::EnumDef(d) => d.name.clone(),
             Value::EnumInstance(i) => i.enum_name.clone(),
+            Value::Host(h) => h.type_name.clone(),
             other => other.type_name().to_string(),
         }
     }
@@ -1241,6 +1335,9 @@ impl fmt::Display for Value {
                 }
             },
             Value::Task(_) => write!(f, "<task>"),
+            Value::Native(n) => write!(f, "<builtin {}>", n.name),
+            Value::Host(h) => write!(f, "<{}>", h.type_name),
+            Value::Vector(v) => write!(f, "{}", v),
         }
     }
 }
@@ -1277,6 +1374,9 @@ impl fmt::Debug for Value {
             }
             Value::Wrapped(v) => write!(f, "Wrapped({:?})", v),
             Value::Error(msg) => write!(f, "Error({:?})", msg),
+            Value::Native(n) => write!(f, "Native({})", n.name),
+            Value::Host(h) => write!(f, "Host({})", h.type_name),
+            Value::Vector(v) => write!(f, "Vector({})", v),
             Value::EnumDef(d) => write!(f, "EnumDef({})", d.name),
             Value::EnumInstance(i) => {
                 write!(
@@ -1312,6 +1412,9 @@ impl PartialEq for Value {
                 a.struct_name == b.struct_name && a.field_slice() == b.field_slice()
             }
             (Value::Module(a), Value::Module(b)) => a.name == b.name,
+            (Value::Native(a), Value::Native(b)) => Rc::ptr_eq(a, b),
+            (Value::Host(a), Value::Host(b)) => Rc::ptr_eq(a, b) || a.same_value(b),
+            (Value::Vector(a), Value::Vector(b)) => a == b,
             (Value::EnumDef(a), Value::EnumDef(b)) => a.name == b.name,
             (Value::EnumInstance(a), Value::EnumInstance(b)) => {
                 a.enum_name == b.enum_name

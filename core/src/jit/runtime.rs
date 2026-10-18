@@ -13,7 +13,7 @@
 #![cfg(feature = "jit")]
 
 use crate::vm::VM;
-use crate::vm::value::{Upvalue, Value, ValueRepr};
+use crate::vm::value::{Upvalue, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -639,22 +639,9 @@ pub unsafe extern "C" fn jit_set_local_checked(vm: *mut VM, slot: u32) -> u32 {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::SetLocal);
     vm.sync_stack_from_view();
-    let constraint = vm
-        .active_closure()
-        .function
-        .locals
-        .get(slot as usize)
-        .and_then(|li| li.type_constraint.clone());
-    if let Some(expected) = constraint {
-        let actual = vm.peek(0).effective_type_name();
-        if !crate::vm::type_matches(&expected, &actual) {
-            let e = vm.runtime_error_hint(
-                &format!("type mismatch: expected {}, got {}", expected, actual),
-                &format!("variable is locked to type {}", expected),
-            );
-            vm.jit.stash_error(e);
-            return 1;
-        }
+    if let Err(e) = vm.check_local_lock(&vm.active_closure().function, slot as usize) {
+        vm.jit.stash_error(e);
+        return 1;
     }
     let base = vm.current_slot_offset();
     let value = vm.peek(0).clone();
@@ -682,7 +669,7 @@ pub unsafe extern "C" fn jit_check_recursion_depth(vm: *mut VM) -> u32 {
     // The inline recursion paths bypass the VM's frame and push guards, so mirror both bounds here.
     let frame_overflow =
         vm.frames_len().saturating_add(vm.jit_frame_len()) >= crate::vm::FRAMES_MAX;
-    let stack_overflow = vm.stack_view.len >= crate::vm::STACK_MAX - 8192;
+    let stack_overflow = vm.stack_view.len >= crate::vm::STACK_MAX - crate::vm::STACK_GUARD_MARGIN;
     if frame_overflow || stack_overflow {
         let e = vm.runtime_error_hint(
             "stack overflow",
@@ -692,6 +679,22 @@ pub unsafe extern "C" fn jit_check_recursion_depth(vm: *mut VM) -> u32 {
         return 1;
     }
     0
+}
+
+/// Called by a compiled loop back-edge that has to stop: an interrupt is
+/// pending, or the budget is spent. Stashes the error and returns 1; the
+/// back-edge never resumes the loop after calling this.
+pub unsafe extern "C" fn jit_loop_stop(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    let err = match vm.loop_limit_step() {
+        Err(e) => e,
+        // The back-edge saw a limit that the VM's own check no longer does.
+        // Neither the interrupt nor the budget can clear itself in between,
+        // so this does not happen; stop anyway rather than loop unchecked.
+        Ok(()) => vm.runtime_error("internal error: a loop stopped with no limit reached"),
+    };
+    vm.jit.stash_error(err);
+    1
 }
 
 // ── Arithmetic — return 0 on ok, 1 on runtime error ────────────────────
@@ -796,25 +799,12 @@ pub unsafe extern "C" fn jit_op_negate(vm: *mut VM) -> u32 {
     vm.jit.bump_helper(HelperCounter::Negate);
     vm.sync_stack_from_view();
     let v = vm.pop();
-    let v = vm.force(v);
-    match v.repr() {
-        ValueRepr::Integer(n) => {
-            vm.push(Value::Integer(-n));
+    match vm.unary_negate(v) {
+        Ok(negated) => {
+            vm.push(negated);
             0
         }
-        ValueRepr::Float(f) => {
-            vm.push(Value::Float(-f));
-            0
-        }
-        _ => {
-            let other = &v;
-            let err = vm.runtime_error_hint(
-                &format!(
-                    "negation is only supported for numbers, got {}",
-                    other.type_name()
-                ),
-                "only <int> and <float> values can be negated",
-            );
+        Err(err) => {
             vm.jit.stash_error(err);
             1
         }

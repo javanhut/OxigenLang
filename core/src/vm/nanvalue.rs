@@ -766,6 +766,8 @@ impl From<&OldValue> for NanValue {
             OldValue::EnumInstance(i) => NanValue::from_enum_instance(Rc::clone(i)),
             OldValue::Module(m) => NanValue::from_module(Rc::clone(m)),
             OldValue::Task(_) => NanValue::none(), // task handles never NaN-boxed (bridge is test-only)
+            // Nor host-embedding values, for the same reason.
+            OldValue::Native(_) | OldValue::Host(_) | OldValue::Vector(_) => NanValue::none(),
             OldValue::Array(arr) => {
                 let nans: Vec<NanValue> = arr.borrow().iter().map(NanValue::from).collect();
                 NanValue::from_array(Rc::new(RefCell::new(nans)))
@@ -1548,6 +1550,9 @@ mod tests {
             OldValue::ErrorValue(_) => "ErrorValue",
             OldValue::Wrapped(_) => "Wrapped",
             OldValue::Error(_) => "Error",
+            OldValue::Native(_) => "Native",
+            OldValue::Host(_) => "Host",
+            OldValue::Vector(_) => "Vector",
         }
     }
 

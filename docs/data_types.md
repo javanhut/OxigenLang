@@ -517,6 +517,47 @@ Range is `0` to `18446744073709551615`. `+` and `*` wrap around on overflow, but
 a subtraction that would go below zero is an error rather than a wrap. See
 [Unsigned Integer Overflow](operators.md#unsigned-integer-overflow).
 
+## Vectors
+
+`vec2`, `vec3` and `vec4` hold two, three or four numbers: positions,
+directions, velocities and colours. Build one from ints or floats:
+
+```oxi
+position := vec3(0, 1.5, -2)
+velocity := vec3(1, 0, 0)
+```
+
+Read components with `.x`, `.y`, `.z` and `.w`. They come back as floats:
+
+```oxi
+position.y   // 1.5
+```
+
+Vectors are values, like numbers: operators make new vectors, and a component
+cannot be assigned. Build a new vector instead:
+
+```oxi
+position = position + velocity * 0.5
+position = vec3(0, position.y, position.z)   // position.x = 0 is an error
+```
+
+| Expression | Result |
+|---|---|
+| `a + b`, `a - b` | Component by component; both the same size |
+| `a * b` | Component by component; both the same size |
+| `v * n`, `n * v`, `v / n` | Every component scaled by the number `n` |
+| `-v` | Every component negated |
+| `a == b` | Same size and the same components |
+
+Mixing sizes (`vec2(1, 2) + vec3(1, 2, 3)`) is a type mismatch error.
+`type()` reports `VEC2`, `VEC3` or `VEC4`. The `math` module has
+`dot`, `cross`, `length`, `distance`, `normalize` and `lerp` for vectors; see
+[math](stdlib/math.md#vectors).
+
+Components are stored as 32-bit floats, as graphics hardware uses them, so a
+component reads back as the nearest 32-bit value: `vec2(0.1, 0).x` is
+`0.10000000149011612`. Vectors display the shorter form, `vec2(0.1, 0)`.
+
 ## Enums
 
 Enumerations define a fixed set of named variants. See [Enums](enums.md) for the full reference.

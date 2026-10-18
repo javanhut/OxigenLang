@@ -174,6 +174,10 @@ struct Task {
     globals: Vec<(String, Sendable)>,
     reply: mpsc::Sender<Result<Sendable, String>>,
     cancel: Arc<AtomicBool>,
+    /// The spawning VM's restriction (`VM::restrict`), if it had one. The
+    /// task then runs on a VM built and restricted for it, not the worker's
+    /// pooled one.
+    capabilities: Option<Vec<crate::vm::Capability>>,
 }
 
 /// The worker pool: the task sender plus what's needed to grow it on demand.
@@ -401,6 +405,15 @@ fn build_worker_vm(src: &str) -> Result<VM, String> {
     Ok(vm)
 }
 
+/// A worker VM for one task, restricted the way the spawning VM was.
+fn build_task_vm(src: &str, capabilities: Option<&[crate::vm::Capability]>) -> Result<VM, String> {
+    let mut vm = build_worker_vm(src)?;
+    if let Some(allowed) = capabilities {
+        vm.restrict(allowed);
+    }
+    Ok(vm)
+}
+
 /// Run a task synchronously on the given VM and produce a Sendable result.
 fn run_task(
     vm: &mut VM,
@@ -454,9 +467,14 @@ fn spawn_worker(rx: Arc<Mutex<mpsc::Receiver<Task>>>, src: String) {
                 };
                 ANY_TASK_RUN.store(true, Ordering::Relaxed);
                 CUR_CANCEL.with(|c| *c.borrow_mut() = Some(task.cancel.clone()));
-                let result = match &mut built {
-                    Ok(vm) => run_task(vm, task.callee, task.args, task.globals),
-                    Err(e) => Err(e.clone()),
+                let result = match (&task.capabilities, &mut built) {
+                    // A restricted task gets its own VM; the pooled one has every capability.
+                    (Some(allowed), _) => match build_task_vm(&src, Some(allowed)) {
+                        Ok(mut vm) => run_task(&mut vm, task.callee, task.args, task.globals),
+                        Err(e) => Err(e),
+                    },
+                    (None, Ok(vm)) => run_task(vm, task.callee, task.args, task.globals),
+                    (None, Err(e)) => Err(e.clone()),
                 };
                 let _ = task.reply.send(result);
                 OUTSTANDING.fetch_sub(1, Ordering::SeqCst);
@@ -489,7 +507,7 @@ fn ensure_pool() -> &'static Pool {
 /// dispatch (see `call_value`) and the rare direct-call path; the VM routes
 /// real spawns through `spawn_with_vm` so they carry the main thread's globals.
 pub fn builtin_spawn(args: &[Value]) -> Value {
-    spawn_inner(args, Vec::new())
+    spawn_inner(args, Vec::new(), None)
 }
 
 /// `spawn` with VM access: snapshot the main thread's user globals so a spawned
@@ -502,10 +520,14 @@ pub fn spawn_with_vm(vm: &VM, args: &[Value]) -> Value {
         .globals_iter()
         .filter_map(|(k, v)| detach(v).ok().map(|s| (k.clone(), s)))
         .collect();
-    spawn_inner(args, globals)
+    spawn_inner(args, globals, vm.capabilities().map(<[_]>::to_vec))
 }
 
-fn spawn_inner(args: &[Value], globals: Vec<(String, Sendable)>) -> Value {
+fn spawn_inner(
+    args: &[Value],
+    globals: Vec<(String, Sendable)>,
+    capabilities: Option<Vec<crate::vm::Capability>>,
+) -> Value {
     if args.is_empty() {
         return Value::Error(Rc::new("spawn() requires a function argument".to_string()));
     }
@@ -555,7 +577,7 @@ fn spawn_inner(args: &[Value], globals: Vec<(String, Sendable)>) -> Value {
     if is_worker() {
         // No VM reachable here, so build a throwaway one; nested spawn is rare.
         let src = SRC.get().cloned().unwrap_or_default();
-        let result = match build_worker_vm(&src) {
+        let result = match build_task_vm(&src, capabilities.as_deref()) {
             Ok(mut vm) => run_task(&mut vm, callee, sendable_args, globals),
             Err(e) => Err(e),
         };
@@ -568,6 +590,7 @@ fn spawn_inner(args: &[Value], globals: Vec<(String, Sendable)>) -> Value {
             globals,
             reply: reply_tx,
             cancel: cancel.clone(),
+            capabilities,
         };
         let pending = OUTSTANDING.fetch_add(1, Ordering::SeqCst) + 1;
         // Grow when all workers are busy; blocked threads park for free.

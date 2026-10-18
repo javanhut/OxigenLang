@@ -1675,9 +1675,12 @@ fn compute_lean_entry_eligible(
             | OpCode::Jump
             | OpCode::JumpIfFalse
             | OpCode::JumpIfTrue
-            | OpCode::Loop
             | OpCode::Pop
             | OpCode::Return => {}
+            // No `Loop`: a lean entry has no VM pointer, so its back-edges
+            // could not check the host's loop budget or interrupt
+            // (`vm::limits`), and such a loop could never be stopped. Loops
+            // run in the generic entry, whose back-edges poll.
             // Only a self-recursive edge re-enters the same lean entry; any other
             // callee expects a materialized stack.
             OpCode::Call => {

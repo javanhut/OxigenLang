@@ -47,7 +47,9 @@ pub(crate) use counters::{HelperCounter, JitCounters};
 use counters::{counter_offsets, emit_counter_bump};
 use defs::{
     Entry, obj_closure_module_globals_offset, vm_jit_frame_view_len_offset,
-    vm_jit_frame_view_ptr_offset, vm_stack_view_len_offset, vm_stack_view_ptr_offset,
+    vm_jit_frame_view_ptr_offset, vm_limits_armed_offset, vm_loop_countdown_offset,
+    vm_stack_view_len_offset,
+    vm_stack_view_ptr_offset,
 };
 pub(crate) use defs::{EntryKind, InvokeOutcome, SpecializedEntryKind};
 use helpers::{HelperIds, HelperRefs, declare_helper_refs, declare_helpers, register_helpers};
@@ -104,11 +106,13 @@ pub(super) struct JitInner {
     /// read from emitted IR). `SetGlobal`/`DefineGlobal` bump only the
     /// written name's cell, so unrelated ICs stay hot.
     global_version_cells: HashMap<String, Box<u64>>,
+    /// Address of the VM's armed byte, or 0 to load it through the VM.
+    limits_armed: usize,
 }
 
 
 impl JitInner {
-    pub fn new() -> Self {
+    pub fn new(limits_armed: usize) -> Self {
         use cranelift_codegen::settings::Configurable;
         let mut flag_builder = settings::builder();
         // opt_level=speed: matches or beats `none` on every loop bench; other 0.131 knobs regressed.
@@ -140,6 +144,7 @@ impl JitInner {
         };
 
         Self {
+            limits_armed,
             module,
             ctx: Context::new(),
             fbc: FunctionBuilderContext::new(),
@@ -381,6 +386,13 @@ impl JitInner {
     }
 
     fn compile_function(&mut self, func: &Rc<Function>) -> Result<CompiledEntries, ()> {
+        let limits_armed = self.limits_armed;
+        // The inline call paths only check `STACK_GUARD_MARGIN`, so a function
+        // that can push more runs interpreted, where `call_closure` checks its
+        // full reserve.
+        if func.chunk.stack_bound() > crate::vm::STACK_GUARD_MARGIN {
+            return Err(());
+        }
         let chunk = &func.chunk;
         let code = &chunk.code;
 
@@ -1630,6 +1642,7 @@ impl JitInner {
                             let target_ip = (ip + 3) - off;
                             let target = blocks[&target_ip];
                             virt_stack.flush_to_memory(&mut builder, vm_val);
+                            emit_loop_poll(&mut builder, exit_block, &refs, vm_val, limits_armed);
                             builder.ins().jump(target, &[]);
                             terminated = true;
                             ip += 3;
@@ -3912,7 +3925,7 @@ fn emit_inline_recursion_guard(
         .iconst(types::I64, crate::vm::FRAMES_MAX as i64);
     let stack_lim = builder
         .ins()
-        .iconst(types::I64, (crate::vm::STACK_MAX - 8192) as i64);
+        .iconst(types::I64, (crate::vm::STACK_MAX - crate::vm::STACK_GUARD_MARGIN) as i64);
     let frame_of = builder
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, jfl, frame_max);
@@ -3932,6 +3945,69 @@ fn emit_inline_recursion_guard(
         .ins()
         .jump(exit_block, &[status.into(), zero64.into()]);
     builder.switch_to_block(ok_block);
+}
+
+/// A loop back-edge's share of the host's limits (`vm::limits`). The common
+/// path loads the armed byte and branches past. While armed it counts the
+/// iteration against `loop_countdown` inline, and only on the way to
+/// stopping (an interrupt, or the budget spent) calls `loop_stop`, then
+/// leaves the function. No path from a call comes back into the loop, so the
+/// loop's values stay in registers instead of being saved around the call.
+fn emit_loop_poll(
+    builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
+    refs: &HelperRefs,
+    vm_val: cranelift_codegen::ir::Value,
+    limits_armed: usize,
+) {
+    use cranelift_codegen::ir::MemFlagsData;
+    let flags = MemFlagsData::trusted();
+    // The byte's address is fixed for the VM's life, and this code only runs
+    // for that VM, so it is a constant.
+    let armed_ptr = if limits_armed != 0 {
+        builder.ins().iconst(types::I64, limits_armed as i64)
+    } else {
+        builder
+            .ins()
+            .load(types::I64, flags, vm_val, vm_limits_armed_offset())
+    };
+    let armed = builder.ins().load(types::I8, flags, armed_ptr, 0);
+    let armed_block = builder.create_block();
+    let budget_block = builder.create_block();
+    let count_block = builder.create_block();
+    let stop_block = builder.create_block();
+    let done_block = builder.create_block();
+    for cold in [armed_block, budget_block, count_block, stop_block] {
+        builder.set_cold_block(cold);
+    }
+    builder.ins().brif(armed, armed_block, &[], done_block, &[]);
+
+    // An interrupt stops the loop; otherwise only the budget armed it.
+    builder.switch_to_block(armed_block);
+    let interrupt = builder
+        .ins()
+        .band_imm_s(armed, i64::from(crate::vm::limits::INTERRUPT));
+    builder.ins().brif(interrupt, stop_block, &[], budget_block, &[]);
+
+    builder.switch_to_block(budget_block);
+    let offset = vm_loop_countdown_offset();
+    let left = builder.ins().load(types::I64, flags, vm_val, offset);
+    builder.ins().brif(left, count_block, &[], stop_block, &[]);
+
+    builder.switch_to_block(count_block);
+    let left = builder.ins().iadd_imm_s(left, -1);
+    builder.ins().store(flags, left, vm_val, offset);
+    builder.ins().jump(done_block, &[]);
+
+    builder.switch_to_block(stop_block);
+    let call = builder.ins().call(refs.loop_stop, &[vm_val]);
+    let status = builder.inst_results(call)[0];
+    let zero64 = builder.ins().iconst(types::I64, 0);
+    builder
+        .ins()
+        .jump(exit_block, &[status.into(), zero64.into()]);
+
+    builder.switch_to_block(done_block);
 }
 
 // ── Bytecode helpers ───────────────────────────────────────────────────

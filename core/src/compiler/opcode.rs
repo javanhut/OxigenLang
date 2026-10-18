@@ -581,6 +581,9 @@ pub struct Chunk {
     /// (rather than threaded through every `emit_*` signature) so the
     /// existing line-only emit API stays unchanged.
     cur_column: u32,
+    /// Cache for [`Chunk::stack_bound`], filled on first use (after
+    /// compilation has finished writing `code`).
+    stack_bound: std::cell::OnceCell<usize>,
 }
 
 impl Chunk {
@@ -591,7 +594,48 @@ impl Chunk {
             lines: Vec::new(),
             columns: Vec::new(),
             cur_column: 0,
+            stack_bound: std::cell::OnceCell::new(),
         }
+    }
+
+    /// An upper bound on how many operand-stack slots this code can occupy
+    /// above its frame's callee slot.
+    ///
+    /// Compiled code has one stack height per instruction, and a loop body
+    /// leaves the height where it found it, so the peak height is at most
+    /// the pushes along one pass through the code: the sum of every
+    /// instruction's pushes. That over-counts branches but never
+    /// under-counts, which is the direction that matters: calls are refused
+    /// unless this much room is left, so no push can run off the end of the
+    /// stack.
+    pub fn stack_bound(&self) -> usize {
+        *self.stack_bound.get_or_init(|| self.compute_stack_bound())
+    }
+
+    fn compute_stack_bound(&self) -> usize {
+        // One spare slot for the error value a handler pushes on recovery.
+        let mut bound = 1usize;
+        let mut ip = 0usize;
+        while ip < self.code.len() {
+            let Some(op) = OpCode::from_byte(self.code[ip]) else {
+                // Undecodable code fails when it runs; count the byte so the
+                // bound stays an over-estimate until then.
+                bound += 2;
+                ip += 1;
+                continue;
+            };
+            bound += match op.info().stack {
+                StackEffect::Fixed { pushes, .. } => pushes as usize,
+                StackEffect::OperandDependent => match op {
+                    OpCode::Unpack => self.code.get(ip + 1).copied().unwrap_or(u8::MAX) as usize,
+                    // The others push their single result. Two leaves room
+                    // for any that briefly hold one more.
+                    _ => 2,
+                },
+            };
+            ip += self.instruction_len(ip).map_or(1, |len| len.max(1));
+        }
+        bound
     }
 
     /// Set the column to attach to subsequently written bytes. Call before
