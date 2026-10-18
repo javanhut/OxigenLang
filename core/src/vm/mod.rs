@@ -12,6 +12,7 @@ use crate::jit::JitEngine;
 use crate::vm::value::*;
 pub use capabilities::Capability;
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -38,6 +39,74 @@ pub(crate) fn type_matches(expected: &str, actual: &str) -> bool {
         expected.split(" || ").any(|t| t == "GENERIC" || t == actual)
     } else {
         expected == actual
+    }
+}
+
+/// The common type for arithmetic on two different kinds of number, by the
+/// same rule `==` uses: `byte` or `uint` with `int` is `int`, `byte` with
+/// `uint` is `uint`, anything with `float` is `float`, and `byte` with `byte`
+/// is `int`. The operator then runs on the converted pair, so it behaves
+/// exactly as it does for that type with itself. `None` for any other pair,
+/// including two numbers that already share a type.
+fn promote_numeric(a: &Value, b: &Value) -> Option<(Value, Value)> {
+    use Value::{Byte, Float, Integer, Uint};
+    fn to_float(v: &Value) -> Option<f64> {
+        match v {
+            Integer(n) => Some(*n as f64),
+            Uint(n) => Some(*n as f64),
+            Byte(n) => Some(f64::from(*n)),
+            Float(x) => Some(*x),
+            _ => None,
+        }
+    }
+    // A `uint` past `i64::MAX` wraps, as the `+` and `-` arms always did.
+    fn to_int(v: &Value) -> Option<i64> {
+        match v {
+            Integer(n) => Some(*n),
+            Uint(n) => Some(*n as i64),
+            Byte(n) => Some(i64::from(*n)),
+            _ => None,
+        }
+    }
+    match (a, b) {
+        (Integer(_), Integer(_)) | (Uint(_), Uint(_)) | (Float(_), Float(_)) => None,
+        (Float(_), _) | (_, Float(_)) => Some((Float(to_float(a)?), Float(to_float(b)?))),
+        (Byte(x), Uint(y)) => Some((Uint(u64::from(*x)), Uint(*y))),
+        (Uint(x), Byte(y)) => Some((Uint(*x), Uint(u64::from(*y)))),
+        _ => Some((Integer(to_int(a)?), Integer(to_int(b)?))),
+    }
+}
+
+/// How `a` and `b` order, for `<`, `<=`, `>` and `>=`. `None` when they
+/// cannot be compared; `Some(None)` when they can but have no order (a NaN).
+///
+/// Integers of any width (`int`, `uint`, `byte`) compare by exact value: all
+/// of them fit in an `i128`, so a `uint` above `i64::MAX` is still greater
+/// than every `int` instead of wrapping negative. Anything with a float
+/// compares as floats, as `int` with `float` always has. Strings compare with
+/// strings and chars with chars.
+fn order(a: &Value, b: &Value) -> Option<Option<Ordering>> {
+    fn integer(v: &Value) -> Option<i128> {
+        match v {
+            Value::Integer(n) => Some(i128::from(*n)),
+            Value::Uint(n) => Some(i128::from(*n)),
+            Value::Byte(n) => Some(i128::from(*n)),
+            _ => None,
+        }
+    }
+    fn number(v: &Value) -> Option<f64> {
+        match v {
+            Value::Float(x) => Some(*x),
+            other => integer(other).map(|n| n as f64),
+        }
+    }
+    match (a, b) {
+        (Value::String(l), Value::String(r)) => Some(Some(l.cmp(r))),
+        (Value::Char(l), Value::Char(r)) => Some(Some(l.cmp(r))),
+        _ => match (integer(a), integer(b)) {
+            (Some(l), Some(r)) => Some(Some(l.cmp(&r))),
+            _ => Some(number(a)?.partial_cmp(&number(b)?)),
+        },
     }
 }
 
@@ -3199,6 +3268,7 @@ impl VM {
                 Ok(Value::Tuple(Rc::new(new)))
             }
             // Wording matches the tree-walker so file and REPL output agree.
+            _ if let Some((a, b)) = promote_numeric(&a, &b) => self.binary_add(a, b),
             _ => match vector::arithmetic(&a, &b, '+') {
                 Some(result) => result.map_err(|message| self.runtime_error(&message)),
                 None => Err(self.runtime_error_hint(
@@ -3228,6 +3298,7 @@ impl VM {
             }
             (Value::Uint(l), Value::Integer(r)) => Ok(Value::Integer((*l as i64).wrapping_sub(*r))),
             (Value::Integer(l), Value::Uint(r)) => Ok(Value::Integer((*l).wrapping_sub(*r as i64))),
+            _ if let Some((a, b)) = promote_numeric(&a, &b) => self.binary_sub(a, b),
             _ => match vector::arithmetic(&a, &b, '-') {
                 Some(result) => result.map_err(|message| self.runtime_error(&message)),
                 None => Err(self.runtime_error_hint(
@@ -3247,6 +3318,7 @@ impl VM {
             (Value::Float(l), Value::Integer(r)) => Ok(Value::Float(l * *r as f64)),
             (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer((*l as i64).wrapping_mul(*r as i64))),
             (Value::Uint(l), Value::Uint(r)) => Ok(Value::Uint(l.wrapping_mul(*r))),
+            _ if let Some((a, b)) = promote_numeric(&a, &b) => self.binary_mul(a, b),
             _ => match vector::arithmetic(&a, &b, '*') {
                 Some(result) => result.map_err(|message| self.runtime_error(&message)),
                 None => Err(self.runtime_error_hint(
@@ -3331,6 +3403,7 @@ impl VM {
                     Ok(Value::Uint(l / r))
                 }
             }
+            _ if let Some((a, b)) = promote_numeric(&a, &b) => self.binary_div(a, b),
             _ => match vector::arithmetic(&a, &b, '/') {
                 Some(result) => result.map_err(|message| self.runtime_error(&message)),
                 None => Err(self.runtime_error_hint(
@@ -3382,6 +3455,7 @@ impl VM {
                     Ok(Value::Uint(l % r))
                 }
             }
+            _ if let Some((a, b)) = promote_numeric(&a, &b) => self.binary_mod(a, b),
             _ => Err(self.runtime_error_hint(
                 &format!("type mismatch: {} % {}", a.type_name(), b.type_name()),
                 "operands must be the same type for this operator",
@@ -3489,67 +3563,37 @@ impl VM {
     }
 
     pub(crate) fn compare_less(&self, a: Value, b: Value) -> Result<Value, VMError> {
-        let (a, b) = (self.force(a), self.force(b));
-        match (&a, &b) {
-            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l < r)),
-            (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l < r)),
-            (Value::Integer(l), Value::Float(r)) => Ok(Value::Boolean((*l as f64) < *r)),
-            (Value::Float(l), Value::Integer(r)) => Ok(Value::Boolean(*l < (*r as f64))),
-            (Value::String(l), Value::String(r)) => Ok(Value::Boolean(l < r)),
-            (Value::Char(l), Value::Char(r)) => Ok(Value::Boolean(l < r)),
-            (Value::Uint(l), Value::Uint(r)) => Ok(Value::Boolean(l < r)),
-            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Boolean(l < r)),
-            _ => Err(self.runtime_error_hint(
-                &format!("cannot compare {} < {}", a.type_name(), b.type_name()),
-                "comparison requires matching numeric types or chars",
-            )),
-        }
+        self.compare(a, b, "<", Ordering::is_lt)
     }
 
     pub(crate) fn compare_less_equal(&self, a: Value, b: Value) -> Result<Value, VMError> {
-        let (a, b) = (self.force(a), self.force(b));
-        match (&a, &b) {
-            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l <= r)),
-            (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l <= r)),
-            (Value::Integer(l), Value::Float(r)) => Ok(Value::Boolean((*l as f64) <= *r)),
-            (Value::Float(l), Value::Integer(r)) => Ok(Value::Boolean(*l <= (*r as f64))),
-            (Value::Char(l), Value::Char(r)) => Ok(Value::Boolean(l <= r)),
-            (Value::Uint(l), Value::Uint(r)) => Ok(Value::Boolean(l <= r)),
-            _ => Err(self.runtime_error_hint(
-                &format!("cannot compare {} <= {}", a.type_name(), b.type_name()),
-                "comparison requires matching numeric types or chars",
-            )),
-        }
+        self.compare(a, b, "<=", Ordering::is_le)
     }
 
     pub(crate) fn compare_greater(&self, a: Value, b: Value) -> Result<Value, VMError> {
-        let (a, b) = (self.force(a), self.force(b));
-        match (&a, &b) {
-            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l > r)),
-            (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l > r)),
-            (Value::Integer(l), Value::Float(r)) => Ok(Value::Boolean((*l as f64) > *r)),
-            (Value::Float(l), Value::Integer(r)) => Ok(Value::Boolean(*l > (*r as f64))),
-            (Value::Char(l), Value::Char(r)) => Ok(Value::Boolean(l > r)),
-            (Value::Uint(l), Value::Uint(r)) => Ok(Value::Boolean(l > r)),
-            _ => Err(self.runtime_error_hint(
-                &format!("cannot compare {} > {}", a.type_name(), b.type_name()),
-                "comparison requires matching numeric types or chars",
-            )),
-        }
+        self.compare(a, b, ">", Ordering::is_gt)
     }
 
     pub(crate) fn compare_greater_equal(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        self.compare(a, b, ">=", Ordering::is_ge)
+    }
+
+    /// `a symbol b` for the four ordering operators, which all accept the
+    /// same operands (see [`order`]). A float NaN orders with nothing, so
+    /// every comparison involving one is false.
+    fn compare(
+        &self,
+        a: Value,
+        b: Value,
+        symbol: &str,
+        holds: fn(Ordering) -> bool,
+    ) -> Result<Value, VMError> {
         let (a, b) = (self.force(a), self.force(b));
-        match (&a, &b) {
-            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l >= r)),
-            (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l >= r)),
-            (Value::Integer(l), Value::Float(r)) => Ok(Value::Boolean((*l as f64) >= *r)),
-            (Value::Float(l), Value::Integer(r)) => Ok(Value::Boolean(*l >= (*r as f64))),
-            (Value::Char(l), Value::Char(r)) => Ok(Value::Boolean(l >= r)),
-            (Value::Uint(l), Value::Uint(r)) => Ok(Value::Boolean(l >= r)),
-            _ => Err(self.runtime_error_hint(
-                &format!("cannot compare {} >= {}", a.type_name(), b.type_name()),
-                "comparison requires matching numeric types or chars",
+        match order(&a, &b) {
+            Some(ordering) => Ok(Value::Boolean(ordering.is_some_and(holds))),
+            None => Err(self.runtime_error_hint(
+                &format!("cannot compare {} {} {}", a.type_name(), symbol, b.type_name()),
+                "comparison requires numbers, strings or chars on both sides",
             )),
         }
     }
@@ -4233,6 +4277,8 @@ impl VM {
         // stack_view.len, jit_frame_view.len or any Rc, so the state here is
         // still exactly what it was before the call. That is the Phase 2.4
         // reconstruction description for this entry kind.
+        // Lean entries only exist in a JIT build; without one, `lean_thunk` stays None.
+        #[cfg(feature = "jit")]
         if let Some(lean) = closure.lean_thunk.get() {
             let arity = closure.lean_arity.get() as usize;
             let mut args: Vec<i64> = Vec::with_capacity(arity);

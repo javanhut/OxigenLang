@@ -116,8 +116,9 @@ fn negating_the_minimum_wraps_to_itself() {
     assert_both_yield(&format!("{INT_MIN}-m"), "-9223372036854775808");
 }
 
-/// Mixed-width addition and subtraction (`byte`/`uint` with `int`) promote
-/// to `int`, so they wrap the same way. (Mixed-width `*` is a type error.)
+/// Mixed-width arithmetic promotes `byte`/`uint` with `int` to `int`, so it
+/// wraps the same way (`mixed_width_arithmetic.rs` covers the other
+/// operators).
 #[test]
 fn mixed_width_arithmetic_wraps() {
     assert_both_yield("9223372036854775807 + byte(1)", "-9223372036854775808");
@@ -343,6 +344,7 @@ fn a_guarded_import_cannot_catch_the_loop_budget() {
 
 /// The JIT half of the tests above only means something if the loops really
 /// were compiled, not left to the interpreter.
+#[cfg(feature = "jit")]
 #[test]
 fn the_spinning_loops_are_jit_compiled() {
     within_time(|| {

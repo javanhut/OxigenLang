@@ -23,6 +23,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
+  # Suite 1b — the same, with the JIT compiled out: what `imlazy build-no-jit`
+  # builds. Nothing else builds this configuration, which is how it once
+  # stopped compiling unnoticed.
+  rust-tests-no-jit:
+    name: Rust suite without the JIT
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --no-default-features
+
   # Suite 2 — Oxigen: the <test> blocks in tests/*_test.oxi, run by the
   # language's own test runner. stdlib resolves from the repo-root ./stdlib,
   # so the step runs from the checkout root. The runner exits non-zero on any
@@ -74,3 +86,5 @@ jobs:
       # backend without naming it.
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy without the JIT
+        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings

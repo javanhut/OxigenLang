@@ -220,7 +220,7 @@ impl JitEngine {
         #[cfg(not(feature = "jit"))]
         {
             let _ = func;
-            return false;
+            false
         }
 
         #[cfg(feature = "jit")]
