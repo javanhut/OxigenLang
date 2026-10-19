@@ -133,8 +133,8 @@ fn attach(s: Sendable, vm: &VM) -> Result<Value, String> {
         Sendable::Float(f) => Value::Float(f),
         Sendable::Bool(b) => Value::Boolean(b),
         Sendable::Str(s) => Value::String(Rc::new(s)),
-        Sendable::Arr(items) => Value::Array(Rc::new(StdRefCell::new(all(items)?))),
-        Sendable::Tuple(items) => Value::Tuple(Rc::new(all(items)?)),
+        Sendable::Arr(items) => Value::Array(Rc::new(StdRefCell::new(all(items)?.into()))),
+        Sendable::Tuple(items) => Value::Tuple(Rc::new(all(items)?.into())),
         Sendable::Map(pairs) => {
             let mut out = Vec::with_capacity(pairs.len());
             for (k, v) in pairs {
@@ -1176,7 +1176,7 @@ pub fn join_with_vm(vm: &VM, args: &[Value]) -> Value {
                     (other, _) => other.clone(),
                 })
                 .collect();
-            Value::Array(Rc::new(RefCell::new(joined)))
+            Value::Array(Rc::new(RefCell::new(joined.into())))
         }
         _ => Value::Error(Rc::new("join() requires a task handle".to_string())),
     }

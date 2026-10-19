@@ -238,7 +238,7 @@ pub unsafe extern "C" fn jit_build_array(vm: *mut VM, count: u32) {
         elements.push(vm.pop());
     }
     elements.reverse();
-    vm.push(Value::Array(Rc::new(RefCell::new(elements))));
+    vm.push(Value::Array(Rc::new(RefCell::new(elements.into()))));
 }
 
 pub unsafe extern "C" fn jit_op_index_fast_array_int(vm: *mut VM) -> u32 {
@@ -370,6 +370,28 @@ pub unsafe extern "C" fn jit_type_wrap(vm: *mut VM, type_idx: u32) -> u32 {
             vm.push(value);
             0
         }
+        Err(err) => {
+            vm.jit.stash_error(err);
+            1
+        }
+    }
+}
+
+/// `RangeLimit` when its bounds aren't both staged as ints: [start, end] ->
+/// [limit] on the VM stack, or the `range` builtin's error.
+pub unsafe extern "C" fn jit_range_limit(vm: *mut VM, step_idx: u32) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.sync_stack_from_view();
+    let step = match vm.current_constant(step_idx as u16) {
+        Value::Integer(step) => step,
+        _ => {
+            vm.jit
+                .stash_error(vm.runtime_error("invalid step constant in RangeLimit"));
+            return 1;
+        }
+    };
+    match vm.handle_range_limit(step) {
+        Ok(()) => 0,
         Err(err) => {
             vm.jit.stash_error(err);
             1

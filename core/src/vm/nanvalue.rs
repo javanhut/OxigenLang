@@ -876,14 +876,14 @@ impl NanValue {
                         .map(|n| n.clone().into_value())
                         .collect();
                     drop(rc);
-                    OldValue::Array(Rc::new(RefCell::new(owned)))
+                    OldValue::Array(Rc::new(RefCell::new(owned.into())))
                 } else if sub == PointerKindA::Tuple as u8 {
                     let rc =
                         Rc::<Vec<NanValue>>::from_raw(addr as *const Vec<NanValue>);
                     let owned: Vec<OldValue> =
                         rc.iter().map(|n| n.clone().into_value()).collect();
                     drop(rc);
-                    OldValue::Tuple(Rc::new(owned))
+                    OldValue::Tuple(Rc::new(owned.into()))
                 } else if sub == PointerKindA::Map as u8 {
                     let rc = Rc::<RefCell<Vec<(NanValue, NanValue)>>>::from_raw(
                         addr as *const RefCell<Vec<(NanValue, NanValue)>>,
@@ -1480,11 +1480,11 @@ mod tests {
             OldValue::Array(Rc::new(RefCell::new(vec![
                 OldValue::Integer(1),
                 OldValue::Integer(2),
-            ]))),
+            ].into()))),
             OldValue::Tuple(Rc::new(vec![
                 OldValue::Boolean(true),
                 OldValue::Integer(7),
-            ])),
+            ].into())),
             OldValue::Map(Rc::new(RefCell::new(
                 crate::vm::collections::OxMap::from_pairs(vec![(
                     OldValue::String(Rc::new("k".into())),
@@ -1867,15 +1867,15 @@ mod tests {
                 OldValue::Array(Rc::new(RefCell::new(vec![
                     OldValue::Integer(1),
                     OldValue::Integer(2),
-                ]))),
+                ].into()))),
                 OldValue::Array(Rc::new(RefCell::new(vec![
                     OldValue::Integer(1),
                     OldValue::Integer(2),
-                ]))),
+                ].into()))),
             ),
             (
-                OldValue::Tuple(Rc::new(vec![OldValue::Boolean(true)])),
-                OldValue::Tuple(Rc::new(vec![OldValue::Boolean(true)])),
+                OldValue::Tuple(Rc::new(vec![OldValue::Boolean(true)].into())),
+                OldValue::Tuple(Rc::new(vec![OldValue::Boolean(true)].into())),
             ),
             (
                 OldValue::Wrapped(Rc::new(OldValue::Integer(5))),
@@ -1934,10 +1934,10 @@ mod tests {
             OldValue::Tuple(Rc::new(vec![
                 OldValue::Integer(1),
                 OldValue::Integer(2),
-            ])),
+            ].into())),
             OldValue::Boolean(true),
             OldValue::String(Rc::new("nested".into())),
-        ])));
+        ].into())));
         let nan = NanValue::from(&original);
         let back = nan.into_value();
         assert_eq!(original, back);

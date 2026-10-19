@@ -82,14 +82,12 @@ fn typed_method_parameter_is_checked_after_tier_up() {
 }
 
 #[test]
-#[ignore = "needs an overflow-checked counter step in the lowered loop; the native ops wrap"]
 fn lowered_range_loop_does_not_wrap_past_the_end() {
-    let src = "n := 0\neach i in range(9223372036854775800, 9223372036854775807, 5) { n = n + 1 }\nn";
+    let src = "n := 0\neach i in range(9223372036854775800, 9223372036854775807, 5) {\n  n = n + 1\n  stop when n == 20\n}\nn";
     assert_all_ok(src, "2");
 }
 
 #[test]
-#[ignore = "an integer check on the bounds needs an opcode the JIT compiles, or every range loop leaves the JIT"]
 fn lowered_range_loop_rejects_what_the_builtin_rejects() {
     assert_all_err("n := 0\neach i in range(0.5, 3) { n = n + 1 }\nn", "range");
     assert_all_err("n := 0\neach i in range(\"a\", \"c\") { n = n + 1 }\nn", "range");

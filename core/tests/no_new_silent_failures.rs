@@ -52,7 +52,7 @@ const BASELINE: &[(&str, usize)] = &[
     ("core/src/vm/builtins.rs", 5),
     ("core/src/vm/mod.rs", 5),
     ("core/src/vm/nanvalue.rs", 2),
-    ("core/src/vm/value.rs", 3),
+    ("core/src/vm/value.rs", 2),
     ("crates/oxigen-cli/src/main.rs", 5),
     ("crates/oxigen-cli/src/repl/mod.rs", 1),
 ];

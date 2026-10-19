@@ -563,7 +563,7 @@ impl VM {
             .collect();
         self.globals.insert(
             "__args".to_string(),
-            Value::Array(Rc::new(RefCell::new(args_val))),
+            Value::Array(Rc::new(RefCell::new(args_val.into()))),
         );
     }
 
@@ -1004,6 +1004,20 @@ impl VM {
             }
         }
         Ok(())
+    }
+
+    /// `RangeLimit`: [start, end] -> [end - step, saturated]. Both bounds
+    /// must be Integers, as the `range` builtin requires.
+    pub(crate) fn handle_range_limit(&mut self, step: i64) -> Result<(), VMError> {
+        let end = self.pop();
+        let start = self.pop();
+        match (&start, &end) {
+            (Value::Integer(_), Value::Integer(end)) => {
+                self.push(Value::Integer(end.saturating_sub(step)));
+                Ok(())
+            }
+            _ => Err(self.runtime_error("range() requires integer arguments")),
+        }
     }
 
     pub(crate) fn handle_close_upvalue(&mut self) {
@@ -2614,6 +2628,14 @@ impl VM {
                     let value = self.peek(0).clone();
                     self.stack[offset + slot] = value;
                 }
+                OpCode::RangeLimit => {
+                    let idx = self.frames[frame_idx].read_u16();
+                    let step = match self.frames[frame_idx].read_constant(idx) {
+                        Value::Integer(step) => *step,
+                        _ => return Err(self.runtime_error("invalid step constant in RangeLimit")),
+                    };
+                    self.handle_range_limit(step)?;
+                }
                 OpCode::CheckType => {
                     let idx = self.frames[frame_idx].read_u16();
                     let expected = self.frames[frame_idx].read_constant(idx).clone();
@@ -2760,13 +2782,13 @@ impl VM {
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count;
                     let elements: Vec<Value> = self.stack_drain_from(start);
-                    self.push(Value::Array(Rc::new(RefCell::new(elements))));
+                    self.push(Value::Array(Rc::new(RefCell::new(elements.into()))));
                 }
                 OpCode::BuildTuple => {
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count;
                     let elements: Vec<Value> = self.stack_drain_from(start);
-                    self.push(Value::Tuple(Rc::new(elements)));
+                    self.push(Value::Tuple(Rc::new(elements.into())));
                 }
                 OpCode::BuildMap => {
                     let count = self.frames[frame_idx].read_u16() as usize;
@@ -3036,7 +3058,7 @@ impl VM {
                     };
                     match value.repr() {
                         ValueRepr::Array(arr) => {
-                            let items: Vec<Value> = arr.borrow().clone();
+                            let items: Vec<Value> = arr.borrow().to_vec();
                             if items.len() != count {
                                 return Err(mismatch(items.len()));
                             }
@@ -4794,7 +4816,7 @@ impl VM {
                 let borrowed = m.borrow();
                 if let Some((k, v)) = borrowed.entries().get(idx) {
                     // For maps, yield (key, value) tuple
-                    Value::Tuple(Rc::new(vec![k.clone(), v.clone()]))
+                    Value::Tuple(Rc::new(vec![k.clone(), v.clone()].into()))
                 } else {
                     Value::None
                 }
@@ -4923,7 +4945,7 @@ impl VM {
                 } else {
                     Vec::new()
                 };
-                Ok(Value::Array(Rc::new(RefCell::new(sliced))))
+                Ok(Value::Array(Rc::new(RefCell::new(sliced.into()))))
             }
             ValueRepr::String(s) => {
                 // Bounds count characters, like indexing and `len()`; slicing bytes split code points.
@@ -4942,7 +4964,7 @@ impl VM {
                 let s = self.slice_bound(start, 0, len)?;
                 let e = self.slice_bound(end, len, len)?;
                 let sliced: Vec<Value> = if s <= e { t[s..e].to_vec() } else { Vec::new() };
-                Ok(Value::Tuple(Rc::new(sliced)))
+                Ok(Value::Tuple(Rc::new(sliced.into())))
             }
             _ => Err(self.runtime_error_hint(
                 &format!("cannot slice {}", collection.type_name()),
@@ -5153,8 +5175,8 @@ impl VM {
             "CHAR" => Value::Char('\0'),
             "BYTE" => Value::Byte(0),
             "UINT" => Value::Uint(0),
-            "ARRAY" => Value::Array(Rc::new(RefCell::new(Vec::new()))),
-            "TUPLE" => Value::Tuple(Rc::new(Vec::new())),
+            "ARRAY" => Value::Array(Rc::new(RefCell::new(Vec::new().into()))),
+            "TUPLE" => Value::Tuple(Rc::new(Vec::new().into())),
             "MAP" => Value::Map(Rc::new(RefCell::new(crate::vm::collections::OxMap::new()))),
             "SET" => Value::Set(Rc::new(RefCell::new(crate::vm::collections::OxSet::new()))),
             "NONE" => Value::None,
@@ -5394,7 +5416,7 @@ impl VM {
                             .chars()
                             .map(|c| Value::String(rc_str(c.to_string())))
                             .collect();
-                        Ok(Value::Array(Rc::new(RefCell::new(elements))))
+                        Ok(Value::Array(Rc::new(RefCell::new(elements.into()))))
                     }
                     _ => Err(self
                         .runtime_error(&format!("cannot convert {} to ARRAY", value.type_name()))),

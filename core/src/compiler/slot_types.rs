@@ -472,8 +472,9 @@ fn collect_local_inits(
             }
             other => other,
         };
+        // A range loop's limit comes from `RangeLimit`, which yields an Integer or raises.
         let init_ip = producer.filter(|&p| {
-            OpCode::from_byte(code[p]) == Some(OpCode::Constant)
+            matches!(OpCode::from_byte(code[p]), Some(OpCode::Constant | OpCode::RangeLimit))
                 && !forward_targets.contains(&decl_ip)
                 && states
                     .get(&decl_ip)
@@ -609,8 +610,17 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                 }
             }
 
+            // A range loop's limit is declared straight from `RangeLimit`'s result,
+            // so like a Constant it initializes the slot rather than passing through.
+            if matches!(op, OpCode::RangeLimit) && depth_after >= 1 {
+                let new_pos = depth_after - 1;
+                if new_pos < num_slots {
+                    next_state.write_slot(new_pos, SlotType::Int64);
+                }
+            }
+
             // Any op leaving a value in the local range must join its type, not just Constant.
-            if depth_after >= 1 && !matches!(op, OpCode::Constant) {
+            if depth_after >= 1 && !matches!(op, OpCode::Constant | OpCode::RangeLimit) {
                 let new_pos = depth_after - 1;
                 if new_pos < num_slots {
                     // Only join when the slot is already initialized on this path; an earlier push there is a transient.
@@ -1287,6 +1297,14 @@ fn transfer(
         OpCode::Dup => {
             let top = next.stack.last().copied().unwrap_or(SlotType::Value);
             next.stack.push(top);
+        }
+
+        // [start, end] -> [limit]: an Integer whenever it completes, since it
+        // raises on anything else.
+        OpCode::RangeLimit => {
+            next.stack.pop();
+            next.stack.pop();
+            next.stack.push(SlotType::Int64);
         }
 
         // Binary int arith — Int × Int → Int, else Value.
@@ -1988,9 +2006,10 @@ pub type CertifyResult = Result<(), String>;
 ///    real local.** Defensive — the walker shouldn't produce these.
 ///
 /// 5. **No `local_init_result_ip` IP points to a `Closure` opcode.**
-///    B2.1 only virtualizes `Constant(Integer)` initializers in v1;
-///    a Closure-initialized slot should stay on the Value path and
-///    never appear in this map for a virtualizable slot.
+///    B2.1 only virtualizes `Constant(Integer)` initializers, plus a range
+///    loop's `RangeLimit` (an Integer or an error); a Closure-initialized
+///    slot should stay on the Value path and never appear in this map for a
+///    virtualizable slot.
 pub fn certify(func: &Function, types: &FunctionSlotTypes) -> CertifyResult {
     // 1. Captured-slot rule.
     for slot in 0..types.slots.len() as u16 {
@@ -2055,7 +2074,7 @@ pub fn certify(func: &Function, types: &FunctionSlotTypes) -> CertifyResult {
         }
     }
 
-    // 5. No local_init_result_ip entry points at a non-Constant opcode.
+    // 5. No local_init_result_ip entry points at anything but Constant or RangeLimit.
     for (&ip, &slot) in &types.local_init_result_ip {
         if !types.is_virtualizable(slot) {
             continue; // only virtualizable slots need the Constant guard
@@ -2063,10 +2082,10 @@ pub fn certify(func: &Function, types: &FunctionSlotTypes) -> CertifyResult {
         let Some(op) = code.get(ip).copied().and_then(OpCode::from_byte) else {
             continue;
         };
-        if !matches!(op, OpCode::Constant) {
+        if !matches!(op, OpCode::Constant | OpCode::RangeLimit) {
             return Err(format!(
                 "local_init_result_ip[{}] = slot {} but opcode at that IP is {:?}, \
-                 not Constant — B2.1 v1 only supports Constant(Integer) initializers",
+                 not Constant — B2.1 only supports Constant(Integer) and RangeLimit initializers",
                 ip, slot, op
             ));
         }
@@ -2746,8 +2765,12 @@ mod tests {
         "#;
         let f = compile_for_analysis(src, Some("f"));
         let r = analyze(&f);
+        // A range loop's limit is the one non-Constant initializer.
         for &ip in r.local_init_result_ip.keys() {
-            assert_eq!(OpCode::from_byte(f.chunk.code[ip]), Some(OpCode::Constant));
+            assert!(matches!(
+                OpCode::from_byte(f.chunk.code[ip]),
+                Some(OpCode::Constant | OpCode::RangeLimit)
+            ));
         }
         // Every declaration point that follows a plain Constant at the right depth is recorded.
         let decl_slots: HashSet<u16> = f.local_decls.iter().map(|&(_, s)| s).collect();

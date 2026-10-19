@@ -342,6 +342,156 @@ mod layout_tests {
     }
 }
 
+/// The elements of an array or tuple: a `Vec<Value>` (it derefs to one) that
+/// frees deep nesting without recursing.
+///
+/// Dropping `[[[...]]]` through the generated drop glue takes one native frame
+/// per level, so a few hundred thousand levels overflow the stack. `Value`
+/// itself can't implement `Drop` without forbidding hosts from moving out of
+/// it in a `match`, so the containers do: see [`drop_values`].
+/// `repr(transparent)` keeps the layout the JIT reads identical to the `Vec`.
+#[derive(Clone, Default, PartialEq)]
+#[repr(transparent)]
+pub struct ValueVec(pub Vec<Value>);
+
+impl ValueVec {
+    /// The elements, leaving this empty.
+    pub fn into_vec(mut self) -> Vec<Value> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl std::ops::Deref for ValueVec {
+    type Target = Vec<Value>;
+    #[inline(always)]
+    fn deref(&self) -> &Vec<Value> {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ValueVec {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Vec<Value> {
+        &mut self.0
+    }
+}
+
+impl From<Vec<Value>> for ValueVec {
+    #[inline(always)]
+    fn from(v: Vec<Value>) -> Self {
+        ValueVec(v)
+    }
+}
+
+impl FromIterator<Value> for ValueVec {
+    fn from_iter<I: IntoIterator<Item = Value>>(iter: I) -> Self {
+        ValueVec(iter.into_iter().collect())
+    }
+}
+
+impl IntoIterator for ValueVec {
+    type Item = Value;
+    type IntoIter = std::vec::IntoIter<Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_vec().into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a ValueVec {
+    type Item = &'a Value;
+    type IntoIter = std::slice::Iter<'a, Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl fmt::Debug for ValueVec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Drop for ValueVec {
+    fn drop(&mut self) {
+        if self.0.iter().any(Value::may_own_values) {
+            drop_nested(std::mem::take(&mut self.0));
+        }
+    }
+}
+
+/// How many container drops are on the native stack right now.
+thread_local! {
+    static DROP_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Nesting the ordinary recursive drop may take before [`drop_values`] takes
+/// over. Shallow values, the common case, keep the plain drop glue.
+const RECURSIVE_DROP_LIMIT: u32 = 64;
+
+/// Drops the contents of a container that holds other containers: by plain
+/// recursion while shallow, iteratively once deep.
+pub(crate) fn drop_nested(values: Vec<Value>) {
+    DROP_DEPTH.with(|depth| {
+        let d = depth.get();
+        if d < RECURSIVE_DROP_LIMIT {
+            depth.set(d + 1);
+            drop(values);
+            depth.set(d);
+        } else {
+            drop_values(values);
+        }
+    });
+}
+
+/// Drops `pending` and everything only it keeps alive, without recursing.
+///
+/// A container whose last reference is being dropped hands its elements back
+/// to the work list before it goes, so it is freed empty; a shared one only
+/// loses a reference. Native stack use stays constant however deep the value
+/// is, and the work list reuses `pending`'s own buffer.
+pub(crate) fn drop_values(mut pending: Vec<Value>) {
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Array(rc) => {
+                if let Ok(cell) = Rc::try_unwrap(rc) {
+                    pending.append(&mut cell.into_inner().0);
+                }
+            }
+            Value::Tuple(rc) => {
+                if let Ok(mut items) = Rc::try_unwrap(rc) {
+                    pending.append(&mut items.0);
+                }
+            }
+            Value::Map(rc) => {
+                if let Ok(cell) = Rc::try_unwrap(rc) {
+                    cell.into_inner().drain_into(&mut pending);
+                }
+            }
+            Value::Set(rc) => {
+                if let Ok(cell) = Rc::try_unwrap(rc) {
+                    cell.into_inner().drain_into(&mut pending);
+                }
+            }
+            Value::StructInstance(rc) => {
+                if let Ok(mut inst) = Rc::try_unwrap(rc) {
+                    pending.extend(inst.take_fields());
+                }
+            }
+            Value::EnumInstance(rc) => {
+                if let Ok(mut inst) = Rc::try_unwrap(rc) {
+                    inst.take_payload_into(&mut pending);
+                }
+            }
+            Value::Wrapped(rc) => {
+                if let Ok(inner) = Rc::try_unwrap(rc) {
+                    pending.push(inner);
+                }
+            }
+            other => drop(other),
+        }
+    }
+}
+
 /// Runtime value for the OxigenLang VM.
 ///
 /// Unlike the tree-walking interpreter's `Object`, control flow signals
@@ -366,8 +516,8 @@ pub enum Value {
 
     // Rc<String> not Rc<str>, so the pointer stays thin; the fat variant cost 8 B per Value.
     String(Rc<String>),
-    Array(Rc<RefCell<Vec<Value>>>),
-    Tuple(Rc<Vec<Value>>),
+    Array(Rc<RefCell<ValueVec>>),
+    Tuple(Rc<ValueVec>),
     Map(Rc<RefCell<crate::vm::collections::OxMap>>),
     Set(Rc<RefCell<crate::vm::collections::OxSet>>),
 
@@ -465,8 +615,8 @@ pub enum ValueRepr<'a> {
     Uint(u64),
     None,
     String(&'a Rc<String>),
-    Array(&'a Rc<RefCell<Vec<Value>>>),
-    Tuple(&'a Rc<Vec<Value>>),
+    Array(&'a Rc<RefCell<ValueVec>>),
+    Tuple(&'a Rc<ValueVec>),
     Map(&'a Rc<RefCell<crate::vm::collections::OxMap>>),
     Set(&'a Rc<RefCell<crate::vm::collections::OxSet>>),
     Closure(&'a Rc<ObjClosure>),
@@ -974,18 +1124,32 @@ impl ObjStructInstance {
     }
 }
 
+impl ObjStructInstance {
+    /// The fields, leaving the instance with none; its buffer goes with them.
+    pub(crate) fn take_fields(&mut self) -> Vec<Value> {
+        if self.fields.ptr.is_null() {
+            return Vec::new();
+        }
+        // Reconstitute the Vec `new` leaked, so its allocator frees the buffer.
+        let fields = unsafe {
+            Vec::from_raw_parts(
+                self.fields.ptr,
+                self.fields.len as usize,
+                self.fields.cap as usize,
+            )
+        };
+        self.fields.ptr = std::ptr::null_mut();
+        self.fields.len = 0;
+        fields
+    }
+}
+
 impl Drop for ObjStructInstance {
     fn drop(&mut self) {
-        if !self.fields.ptr.is_null() {
-            // Reconstitute the Vec so its allocator frees the buffer and Drops each Value.
-            unsafe {
-                let _ = Vec::from_raw_parts(
-                    self.fields.ptr,
-                    self.fields.len as usize,
-                    self.fields.cap as usize,
-                );
-            }
-            self.fields.ptr = std::ptr::null_mut();
+        let fields = self.take_fields();
+        // A long linked list of nodes would otherwise drop one frame per node.
+        if fields.iter().any(Value::may_own_values) {
+            drop_nested(fields);
         }
     }
 }
@@ -1026,6 +1190,28 @@ pub struct ObjEnumInstance {
     pub payload: VmEnumPayload,
 }
 
+impl ObjEnumInstance {
+    /// Move the payload's values into `out`, leaving a unit payload.
+    pub(crate) fn take_payload_into(&mut self, out: &mut Vec<Value>) {
+        match std::mem::replace(&mut self.payload, VmEnumPayload::Unit(None)) {
+            VmEnumPayload::Unit(v) => out.extend(v),
+            VmEnumPayload::Tuple(vs) => out.extend(vs),
+            VmEnumPayload::Struct(fields) => out.extend(fields.into_iter().map(|(_, v)| v)),
+        }
+    }
+}
+
+impl Drop for ObjEnumInstance {
+    fn drop(&mut self) {
+        // An enum `Cons` chain would otherwise drop one frame per link.
+        let mut payload = Vec::new();
+        self.take_payload_into(&mut payload);
+        if payload.iter().any(Value::may_own_values) {
+            drop_nested(payload);
+        }
+    }
+}
+
 /// A loaded module.
 #[derive(Debug)]
 pub struct ObjModule {
@@ -1041,6 +1227,32 @@ pub struct ObjModule {
 // ── Value methods ──────────────────────────────────────────────────────
 
 impl Value {
+    /// A new array holding `items`.
+    pub fn array(items: Vec<Value>) -> Value {
+        Value::Array(Rc::new(RefCell::new(items.into())))
+    }
+
+    /// A new tuple holding `items`.
+    pub fn tuple(items: Vec<Value>) -> Value {
+        Value::Tuple(Rc::new(items.into()))
+    }
+
+    /// Whether dropping this value can drop other values: the containers
+    /// [`drop_values`] unpacks instead of recursing into.
+    #[inline]
+    pub(crate) fn may_own_values(&self) -> bool {
+        matches!(
+            self,
+            Value::Array(_)
+                | Value::Tuple(_)
+                | Value::Map(_)
+                | Value::Set(_)
+                | Value::StructInstance(_)
+                | Value::EnumInstance(_)
+                | Value::Wrapped(_)
+        )
+    }
+
     // Mirror NanValue's accessors so call sites stop relying on the enum's pattern shape.
 
     #[inline] pub fn as_integer(&self) -> Option<i64> {
@@ -1067,10 +1279,10 @@ impl Value {
     #[inline] pub fn as_string(&self) -> Option<&Rc<String>> {
         if let Value::String(s) = self { Some(s) } else { None }
     }
-    #[inline] pub fn as_array(&self) -> Option<&Rc<RefCell<Vec<Value>>>> {
+    #[inline] pub fn as_array(&self) -> Option<&Rc<RefCell<ValueVec>>> {
         if let Value::Array(a) = self { Some(a) } else { None }
     }
-    #[inline] pub fn as_tuple(&self) -> Option<&Rc<Vec<Value>>> {
+    #[inline] pub fn as_tuple(&self) -> Option<&Rc<ValueVec>> {
         if let Value::Tuple(t) = self { Some(t) } else { None }
     }
     #[inline] pub fn as_map(&self) -> Option<&Rc<RefCell<crate::vm::collections::OxMap>>> {
@@ -1155,7 +1367,7 @@ impl Value {
     /// V5 fix: a typed zero-init heap default — `arr <array>` with no
     /// initializer — is produced once by the compiler and parked in the
     /// function's constant pool. A plain `clone()` of that constant on every
-    /// call shares the SAME `Rc<RefCell<Vec<Value>>>`, so mutations from one
+    /// call shares the SAME `Rc<RefCell<ValueVec>>`, so mutations from one
     /// call leak into the next (`b()` called 3× printed `1,2,3` instead of
     /// `1,1,1`). Materializing the default through `fresh_clone` gives each
     /// initialization its own empty collection, matching the tree-walker.
@@ -1163,7 +1375,7 @@ impl Value {
         match self {
             Value::Array(arr) => {
                 let fresh: Vec<Value> = arr.borrow().iter().map(|v| v.fresh_clone()).collect();
-                Value::Array(Rc::new(RefCell::new(fresh)))
+                Value::Array(Rc::new(RefCell::new(fresh.into())))
             }
             Value::Map(map) => {
                 let mut fresh = crate::vm::collections::OxMap::new();

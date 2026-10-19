@@ -245,6 +245,16 @@ pub enum OpCode {
     /// Operand: u16 slot. The lock is looked up by this instruction's
     /// offset in [`Chunk::local_locks`].
     SetLocalLocked,
+
+    // --- Lowered `each i in range(...)` ---
+    /// Entry check and bound of a lowered range loop. Operand: u16 step
+    /// constant (a nonzero Integer). Stack: [start, end] -> [limit].
+    /// Raises the `range` builtin's error unless both are Integers, then
+    /// pushes `end - step` saturated to i64: the loop continues after `i`
+    /// while `i < limit` (`i > limit` counting down), which is exactly
+    /// `i + step < end` without computing `i + step`, so the counter's
+    /// increment can never wrap.
+    RangeLimit,
 }
 
 /// Canonical byte layout of an instruction's operands.
@@ -322,7 +332,7 @@ pub(crate) struct OpInfo {
 impl OpCode {
     /// Convert a raw byte to an OpCode. Returns None for invalid bytes.
     pub fn from_byte(byte: u8) -> Option<OpCode> {
-        if byte <= OpCode::SetLocalLocked as u8 {
+        if byte <= OpCode::RangeLimit as u8 {
             // SAFETY: OpCode is repr(u8) and we verified the range.
             Some(unsafe { std::mem::transmute::<u8, OpCode>(byte) })
         } else {
@@ -425,7 +435,8 @@ impl OpCode {
             | OpCode::IsTypeMut
             | OpCode::PushHandler
             | OpCode::CheckType
-            | OpCode::SetLocalLocked => OperandLayout::U16,
+            | OpCode::SetLocalLocked
+            | OpCode::RangeLimit => OperandLayout::U16,
 
             // Opcode + u16 + u8.
             OpCode::StructLiteral
@@ -462,7 +473,7 @@ impl OpCode {
             Dup => StackEffect::Fixed { pops: 0, pushes: 1, peeks: 1 },
             Add | Subtract | Multiply | Divide | Modulo | Equal | NotEqual | Greater
             | GreaterEqual | Less | LessEqual | BitAnd | BitOr | BitXor | ShiftLeft
-            | ShiftRight | Index | IterGet => {
+            | ShiftRight | Index | IterGet | RangeLimit => {
                 StackEffect::Fixed { pops: 2, pushes: 1, peeks: 0 }
             }
             Not | BitNot | Negate | TypeWrap | IsType | GetField | GetModuleField
@@ -532,7 +543,7 @@ impl OpCode {
             self,
             Divide | Modulo | Call | CallNamed | MethodCall | MethodCallNamed | Index
                 | IndexAssign | Slice | GetField | SetField | TypeWrap | Import | Fail | Log
-                | CheckType | SetLocalLocked
+                | CheckType | SetLocalLocked | RangeLimit
         );
         OpProperties {
             may_allocate,
@@ -554,7 +565,7 @@ impl OpCode {
                 | SetLocal | GetGlobal | SetGlobal | DefineGlobal | DefineGlobalTyped
                 | GetUpvalue | SetUpvalue | Closure | Jump | JumpIfFalse | JumpIfTrue | Loop
                 | PopJumpIfFalse | Call | Return | StructDef | StructLiteral | GetField
-                | SetField | DefineMethod | MethodCall
+                | SetField | DefineMethod | MethodCall | RangeLimit
         ) {
             JitSupport::Native
         } else {
@@ -822,7 +833,7 @@ mod tests {
 
     #[test]
     fn every_opcode_has_canonical_metadata() {
-        for byte in 0..=OpCode::SetLocalLocked as u8 {
+        for byte in 0..=OpCode::RangeLimit as u8 {
             let op = OpCode::from_byte(byte).expect("contiguous opcode discriminants");
             let info = op.info();
             assert_eq!(op.fixed_len(), info.operands.fixed_instruction_len());

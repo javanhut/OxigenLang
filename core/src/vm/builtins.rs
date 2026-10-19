@@ -336,9 +336,9 @@ fn builtin_rest(args: &[Value]) -> Value {
         ValueRepr::Array(arr) => {
             let borrowed = arr.borrow();
             if borrowed.is_empty() {
-                Value::Array(Rc::new(RefCell::new(Vec::new())))
+                Value::Array(Rc::new(RefCell::new(Vec::new().into())))
             } else {
-                Value::Array(Rc::new(RefCell::new(borrowed[1..].to_vec())))
+                Value::Array(Rc::new(RefCell::new(borrowed[1..].to_vec().into())))
             }
         }
         _ => Value::Error(rc_str("rest() requires an array")),
@@ -458,7 +458,7 @@ fn builtin_range(args: &[Value]) -> Value {
             None => break,
         }
     }
-    Value::Array(Rc::new(RefCell::new(arr)))
+    Value::Array(Rc::new(RefCell::new(arr.into())))
 }
 
 fn builtin_chars(args: &[Value]) -> Value {
@@ -468,7 +468,7 @@ fn builtin_chars(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::String(s) => {
             let arr: Vec<Value> = s.chars().map(Value::Char).collect();
-            Value::Array(Rc::new(RefCell::new(arr)))
+            Value::Array(Rc::new(RefCell::new(arr.into())))
         }
         _ => Value::Error(rc_str("chars() requires a string")),
     }
@@ -516,7 +516,7 @@ fn builtin_keys(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Map(m) => {
             let keys: Vec<Value> = m.borrow().iter().map(|(k, _)| k.clone()).collect();
-            Value::Array(Rc::new(RefCell::new(keys)))
+            Value::Array(Rc::new(RefCell::new(keys.into())))
         }
         _ => Value::Error(rc_str("keys() requires a map")),
     }
@@ -529,7 +529,7 @@ fn builtin_values(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Map(m) => {
             let vals: Vec<Value> = m.borrow().iter().map(|(_, v)| v.clone()).collect();
-            Value::Array(Rc::new(RefCell::new(vals)))
+            Value::Array(Rc::new(RefCell::new(vals.into())))
         }
         _ => Value::Error(rc_str("values() requires a map")),
     }
@@ -602,7 +602,7 @@ fn builtin_has(args: &[Value]) -> Value {
 }
 
 fn builtin_tuple(args: &[Value]) -> Value {
-    Value::Tuple(Rc::new(args.to_vec()))
+    Value::Tuple(Rc::new(args.to_vec().into()))
 }
 
 fn builtin_set(args: &[Value]) -> Value {
@@ -729,7 +729,7 @@ fn builtin_split(args: &[Value]) -> Value {
                 .split(sep.as_ref())
                 .map(|p| Value::String(rc_str(p)))
                 .collect();
-            Value::Array(Rc::new(RefCell::new(parts)))
+            Value::Array(Rc::new(RefCell::new(parts.into())))
         }
         _ => Value::Error(rc_str("__split() requires string arguments")),
     }
@@ -910,7 +910,7 @@ fn builtin_sort(args: &[Value]) -> Value {
         ValueRepr::Array(arr) => {
             let mut sorted = arr.borrow().clone();
             sorted.sort_by(sort_order);
-            Value::Array(Rc::new(RefCell::new(sorted)))
+            Value::Array(Rc::new(RefCell::new(sorted.into())))
         }
         _ => Value::Error(rc_str("__sort() requires an array")),
     }
@@ -1652,7 +1652,7 @@ fn builtin_list_dir(args: &[Value]) -> Value {
                     .filter_map(|e| e.ok())
                     .map(|e| Value::String(rc_str(e.path().to_string_lossy())))
                     .collect();
-                Value::Array(Rc::new(RefCell::new(items)))
+                Value::Array(Rc::new(RefCell::new(items.into())))
             }
             Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
                 msg: rc_str(format!("{}", e)),
@@ -1685,7 +1685,7 @@ fn builtin_walk_dir(args: &[Value]) -> Value {
                 }
             }
             walk(std::path::Path::new(path.as_ref()), &mut items);
-            Value::Array(Rc::new(RefCell::new(items)))
+            Value::Array(Rc::new(RefCell::new(items.into())))
         }
         _ => Value::Error(rc_str("__walk_dir() requires a string")),
     }
@@ -2319,7 +2319,7 @@ fn json_parse_array(chars: &[char], pos: &mut usize, depth: usize) -> Result<Val
     json_skip_ws(chars, pos);
     if *pos < chars.len() && chars[*pos] == ']' {
         *pos += 1;
-        return Ok(Value::Array(Rc::new(RefCell::new(elements))));
+        return Ok(Value::Array(Rc::new(RefCell::new(elements.into()))));
     }
     loop {
         elements.push(json_parse_value(chars, pos, depth)?);
@@ -2336,7 +2336,7 @@ fn json_parse_array(chars: &[char], pos: &mut usize, depth: usize) -> Result<Val
         }
         *pos += 1;
     }
-    Ok(Value::Array(Rc::new(RefCell::new(elements))))
+    Ok(Value::Array(Rc::new(RefCell::new(elements.into()))))
 }
 
 fn json_parse_object(chars: &[char], pos: &mut usize, depth: usize) -> Result<Value, String> {
@@ -2514,7 +2514,7 @@ fn toml_value_to_value(tv: toml::Value) -> Value {
         toml::Value::Datetime(dt) => Value::String(rc_str(dt.to_string())),
         toml::Value::Array(values) => {
             let items: Vec<Value> = values.into_iter().map(toml_value_to_value).collect();
-            Value::Array(Rc::new(RefCell::new(items)))
+            Value::Array(Rc::new(RefCell::new(items.into())))
         }
         toml::Value::Table(entries) => {
             let items: Vec<(Value, Value)> = entries
@@ -2983,7 +2983,7 @@ fn builtin_net_udp_receive(args: &[Value]) -> Value {
         Ok((data, addr)) => Value::Tuple(Rc::new(vec![
             Value::String(rc_str(data)),
             Value::String(rc_str(addr)),
-        ])),
+        ].into())),
         Err(e) => Value::Error(rc_str(e)),
     }
 }

@@ -46,6 +46,12 @@ The script calls it like any function: `add_score(10)`. An `Err` becomes a
 runtime error in the script, which the script can catch with `<guard>`.
 Modules the script imports can call natives too.
 
+To return a collection, build it with `Value::array(vec![...])` or
+`Value::tuple(vec![...])`. Their elements are held in a `ValueVec`, which
+derefs to `Vec<Value>` (so `a.borrow().len()` and `a.borrow_mut().push(v)`
+work as before), and which frees deeply nested values without overflowing
+your thread's stack. A raw `Vec<Value>` converts with `.into()`.
+
 ## Host values
 
 `Value::host` wraps any Rust value that implements `PartialEq`, such as an

@@ -856,6 +856,7 @@ impl JitInner {
                             | OpCode::NotEqual
                             | OpCode::Call
                             | OpCode::TypeWrap
+                            | OpCode::RangeLimit
                     );
                     if !handles_own_flush && !virt_stack.is_empty() {
                         virt_stack.flush_to_memory(&mut builder, vm_val);
@@ -998,6 +999,71 @@ impl JitInner {
                             let call = builder.ins().call(refs.type_wrap, &[vm_val, idx_val]);
                             let status = builder.inst_results(call)[0];
                             emit_early_exit_on_err(&mut builder, exit_block, status);
+                            ip += 3;
+                        }
+                        OpCode::RangeLimit => {
+                            let idx = read_u16(code, ip + 1);
+                            let step = match chunk.constants.get(idx as usize) {
+                                Some(crate::vm::value::Value::Integer(step)) if *step != 0 => *step,
+                                _ => return Err(()),
+                            };
+                            // The limit is the loop's own local; keep it in a register when slot_types allows.
+                            let init_var = slot_types
+                                .local_init_result_ip
+                                .get(&ip)
+                                .and_then(|slot| int_locals.get(slot).map(|&var| (*slot, var)));
+                            if virt_stack.top_n_are_int_ssa(2) {
+                                // Both bounds are ints: `end - step`, saturated, in registers.
+                                let end = virt_stack.pop_int_ssa().unwrap();
+                                let _start = virt_stack.pop_int_ssa().unwrap();
+                                use cranelift_codegen::ir::condcodes::IntCC;
+                                let step_val = builder.ins().iconst(types::I64, step);
+                                let diff = builder.ins().isub(end, step_val);
+                                // `end - step` leaves i64 exactly when end is past this edge.
+                                let (cc, edge, sat) = if step > 0 {
+                                    (IntCC::SignedLessThan, i64::MIN + step, i64::MIN)
+                                } else {
+                                    (IntCC::SignedGreaterThan, i64::MAX + step, i64::MAX)
+                                };
+                                let edge_val = builder.ins().iconst(types::I64, edge);
+                                let overflows = builder.ins().icmp(cc, end, edge_val);
+                                let sat_val = builder.ins().iconst(types::I64, sat);
+                                let limit = builder.ins().select(overflows, sat_val, diff);
+                                if let Some((slot, var)) = init_var {
+                                    // Materialize the backing slot (values staged below land first), then def_var.
+                                    if !virt_stack.is_empty() {
+                                        virt_stack.flush_to_memory(&mut builder, vm_val);
+                                    }
+                                    emit_inline_push_integer(&mut builder, vm_val, limit);
+                                    builder.def_var(var, limit);
+                                    live_int_slots.insert(slot);
+                                } else {
+                                    virt_stack.push_int_ssa(limit);
+                                }
+                            } else {
+                                // The helper checks the bounds' types and can raise, so stamp the line first.
+                                maybe_emit_current_line(
+                                    &mut builder,
+                                    own_frame_ptr,
+                                    line,
+                                    col,
+                                    &mut last_emitted_loc,
+                                );
+                                if !virt_stack.is_empty() {
+                                    virt_stack.flush_to_memory(&mut builder, vm_val);
+                                }
+                                let idx_val = builder.ins().iconst(types::I32, idx as i64);
+                                let call =
+                                    builder.ins().call(refs.range_limit, &[vm_val, idx_val]);
+                                let status = builder.inst_results(call)[0];
+                                emit_early_exit_on_err(&mut builder, exit_block, status);
+                                // On success the helper left an Integer on top: harvest it into the register.
+                                if let Some((slot, var)) = init_var {
+                                    let limit = emit_load_stack_top_integer_payload(&mut builder, vm_val);
+                                    builder.def_var(var, limit);
+                                    live_int_slots.insert(slot);
+                                }
+                            }
                             ip += 3;
                         }
                         OpCode::GetLocal => {

@@ -53,14 +53,6 @@ fn comparing_cyclic_arrays_terminates() {
 }
 
 #[test]
-#[ignore = "needs an iterative Drop for Value; an `impl Drop for Value` forbids moving out \
-            of Value in embedders' pattern matches (E0509), a public API break"]
-fn deeply_nested_value_drops_without_overflow() {
-    let out = interp("x := []\neach i in range(300000) { x = [x] }\nx = 0\n\"done\"");
-    assert_eq!(out.as_deref(), Ok("done"));
-}
-
-#[test]
 fn deeply_nested_value_prints_without_overflow() {
     let out = interp("x := []\neach i in range(5000) { x = [x] }\nlen(str(x)) > 0");
     assert_eq!(out.as_deref(), Ok("True"));

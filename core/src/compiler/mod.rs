@@ -185,6 +185,7 @@ impl BindingKind {
 /// end or redirect a loop).
 const LOOP_INDEX: &str = "\u{0}index";
 const LOOP_RANGE_END: &str = "\u{0}range_end";
+const LOOP_RANGE_LIMIT: &str = "\u{0}range_limit";
 const LOOP_ITERABLE: &str = "\u{0}iterable";
 const CHOOSE_SUBJECT: &str = "\u{0}choose";
 
@@ -1663,8 +1664,9 @@ impl Compiler {
 
                 self.begin_scope();
 
-                // iter_slot is the array path only; index_slot is the counter, end_slot the exclusive bound.
-                let (index_slot, iter_slot, end_slot) = if let Some((args, _)) = range_args {
+                // iter_slot is the array path only; index_slot is the counter, end_slot the exclusive bound,
+                // limit_slot the last counter value that may still be advanced (see `RangeLimit`).
+                let (index_slot, iter_slot, end_slot, limit_slot) = if let Some((args, _)) = range_args {
                     // counter = start (0 for 1-arg form), evaluated once
                     if args.len() == 1 {
                         self.emit_constant(Value::Integer(0), line);
@@ -1677,7 +1679,14 @@ impl Compiler {
                     self.add_local(LOOP_RANGE_END, BindingKind::ImmutableConstant { decl: Span::default() }, None);
                     let i = self.resolve_local(LOOP_INDEX).unwrap();
                     let e = self.resolve_local(LOOP_RANGE_END).unwrap();
-                    (i, 0, e)
+                    // Checks both bounds are ints, as the builtin does, and bounds the counter so it never wraps.
+                    self.emit_op_u16(OpCode::GetLocal, i, line);
+                    self.emit_op_u16(OpCode::GetLocal, e, line);
+                    let step_idx = self.make_constant(Value::Integer(range_step), line);
+                    self.emit_op_u16(OpCode::RangeLimit, step_idx, line);
+                    self.add_local(LOOP_RANGE_LIMIT, BindingKind::ImmutableConstant { decl: Span::default() }, None);
+                    let l = self.resolve_local(LOOP_RANGE_LIMIT).unwrap();
+                    (i, 0, e, l)
                 } else {
                     self.compile_expression(iterable);
                     self.add_local(LOOP_ITERABLE, BindingKind::ImmutableConstant { decl: Span::default() }, None);
@@ -1685,36 +1694,41 @@ impl Compiler {
                     self.add_local(LOOP_INDEX, BindingKind::Mutable, None);
                     let it = self.resolve_local(LOOP_ITERABLE).unwrap();
                     let i = self.resolve_local(LOOP_INDEX).unwrap();
-                    (i, it, 0)
+                    (i, it, 0, 0)
                 };
                 let is_range = range_args.is_some();
+                // Counting up runs while index < bound, down while index > bound: the bound stays exclusive either way.
+                let range_cmp = if range_step > 0 { OpCode::Less } else { OpCode::Greater };
+
+                // A range loop tests `index < end` once here and then `index < limit` before each advance.
+                let entry_exit = if is_range {
+                    self.emit_op_u16(OpCode::GetLocal, index_slot, line);
+                    self.emit_op_u16(OpCode::GetLocal, end_slot, line);
+                    self.emit_op(range_cmp, line);
+                    let jump = self.emit_jump(OpCode::JumpIfFalse, line);
+                    self.emit_op(OpCode::Pop, line);
+                    Some(jump)
+                } else {
+                    None
+                };
 
                 let loop_start = self.current_chunk().len();
                 self.current_frame_mut().loop_starts.push(loop_start);
                 self.current_frame_mut().loop_exits.push(Vec::new());
                 self.current_frame_mut().loop_continues.push(Vec::new());
 
-                // Loop condition (leaves a bool both branches Pop).
-                if is_range {
-                    // Counting up stops at index < end, down at index > end, so the bound stays exclusive either way.
-                    self.emit_op_u16(OpCode::GetLocal, index_slot, line);
-                    self.emit_op_u16(OpCode::GetLocal, end_slot, line);
-                    self.emit_op(
-                        if range_step > 0 {
-                            OpCode::Less
-                        } else {
-                            OpCode::Greater
-                        },
-                        line,
-                    );
+                // Array loop condition (leaves a bool both branches Pop).
+                let header_exit = if is_range {
+                    None
                 } else {
                     self.emit_op_u16(OpCode::GetLocal, iter_slot, line);
                     self.emit_op(OpCode::IterLen, line);
                     self.emit_op_u16(OpCode::GetLocal, index_slot, line);
                     self.emit_op(OpCode::Greater, line);
-                }
-                let exit_jump = self.emit_jump(OpCode::JumpIfFalse, line);
-                self.emit_op(OpCode::Pop, line);
+                    let jump = self.emit_jump(OpCode::JumpIfFalse, line);
+                    self.emit_op(OpCode::Pop, line);
+                    Some(jump)
+                };
 
                 // Push the counter (range) or iterable[index]; the two-name form pushes key and value.
                 if is_range {
@@ -1797,6 +1811,18 @@ impl Compiler {
                     );
                 }
 
+                // `index < limit` is `index + step < end` without computing a sum that could wrap.
+                let advance_exit = if is_range {
+                    self.emit_op_u16(OpCode::GetLocal, index_slot, line);
+                    self.emit_op_u16(OpCode::GetLocal, limit_slot, line);
+                    self.emit_op(range_cmp, line);
+                    let jump = self.emit_jump(OpCode::JumpIfFalse, line);
+                    self.emit_op(OpCode::Pop, line);
+                    Some(jump)
+                } else {
+                    None
+                };
+
                 // Advance the index by the range's step (1 for the array path).
                 self.emit_op_u16(OpCode::GetLocal, index_slot, line);
                 self.emit_constant(Value::Integer(range_step), line);
@@ -1806,8 +1832,17 @@ impl Compiler {
 
                 self.emit_loop(loop_start, line);
 
-                self.patch_jump(exit_jump);
+                // Each condition exit pops its own bool: the JIT pairs a branch with its landing Pop.
+                for jump in [header_exit, advance_exit].into_iter().flatten() {
+                    self.patch_jump(jump);
+                }
                 self.emit_op(OpCode::Pop, line);
+                if let Some(entry_exit) = entry_exit {
+                    let over = self.emit_jump(OpCode::Jump, line);
+                    self.patch_jump(entry_exit);
+                    self.emit_op(OpCode::Pop, line);
+                    self.patch_jump(over);
+                }
 
                 let exits = self.current_frame_mut().loop_exits.pop().unwrap();
                 for exit in exits {
@@ -3496,8 +3531,8 @@ fn default_for_type(type_name: &str) -> Value {
         "CHAR" => Value::Char('\0'),
         "BYTE" => Value::Byte(0),
         "UINT" => Value::Uint(0),
-        "ARRAY" => Value::Array(std::rc::Rc::new(std::cell::RefCell::new(Vec::new()))),
-        "TUPLE" => Value::Tuple(std::rc::Rc::new(Vec::new())),
+        "ARRAY" => Value::Array(std::rc::Rc::new(std::cell::RefCell::new(Vec::new().into()))),
+        "TUPLE" => Value::Tuple(std::rc::Rc::new(Vec::new().into())),
         "MAP" => Value::Map(std::rc::Rc::new(std::cell::RefCell::new(
             crate::vm::collections::OxMap::new(),
         ))),

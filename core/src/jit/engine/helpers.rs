@@ -38,6 +38,7 @@ pub(super) struct HelperIds {
     pub iter_entry: FuncId,                // (vm) -> u32
     pub index_assign: FuncId,              // (vm) -> u32
     pub type_wrap: FuncId,                 // (vm, u32) -> u32
+    pub range_limit: FuncId,               // (vm, u32) -> u32
     pub local_add_array_mod_index: FuncId, // (vm, u32, u32, u32, i64, u32) -> u32
     pub struct_field_add_const: FuncId,    // (vm, u32, u32, i64) -> u32
     pub struct_field_add_local: FuncId,    // (vm, u32, u32, u32) -> u32
@@ -147,6 +148,7 @@ pub(super) struct HelperRefs {
     pub iter_entry: FuncRef,
     pub index_assign: FuncRef,
     pub type_wrap: FuncRef,
+    pub range_limit: FuncRef,
     pub local_add_array_mod_index: FuncRef,
     pub struct_field_add_const: FuncRef,
     pub struct_field_add_local: FuncRef,
@@ -247,6 +249,7 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_op_iter_entry", runtime::jit_op_iter_entry);
     reg!("jit_op_index_assign", runtime::jit_op_index_assign);
     reg!("jit_type_wrap", runtime::jit_type_wrap);
+    reg!("jit_range_limit", runtime::jit_range_limit);
     reg!(
         "jit_local_add_array_mod_index",
         runtime::jit_local_add_array_mod_index
@@ -508,6 +511,7 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         iter_entry: decl(module, "jit_op_iter_entry", &sig_vm_to_u32),
         index_assign: decl(module, "jit_op_index_assign", &sig_vm_to_u32),
         type_wrap: decl(module, "jit_type_wrap", sig_vm_u32_fallible),
+        range_limit: decl(module, "jit_range_limit", sig_vm_u32_fallible),
         local_add_array_mod_index: decl(
             module,
             "jit_local_add_array_mod_index",
@@ -602,6 +606,7 @@ pub(super) fn declare_helper_refs(
         iter_entry: r(ids.iter_entry),
         index_assign: r(ids.index_assign),
         type_wrap: r(ids.type_wrap),
+        range_limit: r(ids.range_limit),
         local_add_array_mod_index: r(ids.local_add_array_mod_index),
         struct_field_add_const: r(ids.struct_field_add_const),
         struct_field_add_local: r(ids.struct_field_add_local),
