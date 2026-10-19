@@ -400,22 +400,23 @@ println(array.group_by(["apple", "avocado", "beet"], first_letter))
 
 ### `sort(arr)`
 
-Sort ascending. Handles an array of **all** integers, **all** floats, or
-**all** strings.
+Sort ascending. Numbers of every kind (int, float, uint, byte) compare by
+value, so ints and floats mix freely; `NaN` sorts after every other number.
 
 ```oxi
 println(array.sort([3, 1, 4, 1, 5]))       // [1, 1, 3, 4, 5]
 println(array.sort(["pear", "apple"]))     // [apple, pear]
+println(array.sort([2.5, 1]))              // [1, 2.5]
 ```
 
-Mixed types have no defined order, so pairs of different types compare equal
-and the array comes back essentially unsorted:
+An array of mixed kinds is grouped by kind, in this order: `None`, booleans
+(`False` first), numbers, chars, strings, then anything else by type name.
+Values of a kind with no natural order (arrays, maps, structs) keep their
+relative order.
 
 ```oxi
-println(array.sort([2.5, 1]))   // [2.5, 1]   <- int vs float: not sorted
+println(array.sort(["b", 3, None, 1.5, True]))   // [None, True, 1.5, 3, b]
 ```
-
-Convert first (`array.map(xs, fun(x) { float(x) })`) or use `sort_by`.
 
 ### `sort_by(arr, key_fn)`
 

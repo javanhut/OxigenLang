@@ -30,8 +30,8 @@ Basic map operations are **global builtins** — no import needed:
 |------|--------|
 | `null` | `None` |
 | `true` / `false` | `True` / `False` |
-| number (integer) | `Integer` |
-| number (fractional) | `Float` |
+| number (integer) | `Integer` (`Float` past the range of a 64-bit int) |
+| number (fractional or with an exponent) | `Float` |
 | `"string"` | `String` |
 | `[array]` | `Array` |
 | `{object}` | `Map` |
@@ -65,6 +65,15 @@ r := <type<Error> || <Value>>(json.parse("not json"))
 println(is_error(r))   // True
 ```
 
+The parser follows RFC 8259 strictly: numbers like `01`, `1.` or `.5`, unknown
+escapes like `\q`, and a `\u` escape that is not four hex digits are errors.
+A character outside the Basic Multilingual Plane written as a surrogate pair
+(`\ud83d\ude00`) decodes to that one character; a lone surrogate is an error.
+
+Arrays and objects may nest at most **512** levels deep. Deeper input is an
+error rather than a crash, which matters when the JSON comes from a client:
+a request body of a few million `[` would otherwise exhaust the stack.
+
 ### `stringify(val)`
 
 Serialize any Oxigen value to a compact JSON string (no spaces, no trailing
@@ -75,7 +84,12 @@ println(json.stringify({"name": "Oxigen", "version": 1}))
 // {"name":"Oxigen","version":1}
 ```
 
-Map key order is preserved as inserted.
+Map key order is preserved as inserted. JSON keys are strings, so a number,
+boolean or char key is written as its text (`{1: 2}` becomes `{"1":2}`); any
+other key type is an error.
+
+A structure that contains itself (`a := [1]; a[0] = a`) is an error rather than
+an endless recursion, and so is nesting deeper than 512 levels.
 
 ### `read(path)`
 

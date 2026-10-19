@@ -182,7 +182,8 @@ port := option {
 ### `env_set(key, val)`
 
 Set a variable for this process and anything it spawns afterwards. It does not
-affect the parent shell.
+affect the parent shell. A key that is empty or contains `=` or a NUL byte, or
+a value containing NUL, is an error.
 
 ```oxi
 os.env_set("OXI_MODE", "debug")
@@ -237,7 +238,9 @@ each entry in os.list_dir(".") {
 
 ### `walk_dir(path)`
 
-Every path under a directory, recursively.
+Every path under a directory, recursively. A symlink to a directory is listed
+but not followed, so a link back up the tree (`a -> .`) cannot make the walk
+loop.
 
 ```oxi
 introduce os

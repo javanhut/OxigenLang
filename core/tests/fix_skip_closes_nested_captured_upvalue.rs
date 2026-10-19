@@ -78,19 +78,20 @@ fn assert_parity(source: &str, expected: &str) {
 #[test]
 fn option_arm_value_with_single_local() {
     // The minimal repro of the corruption: a value-producing option arm that
-    // declares a local. Must yield the RESULT (6), not the local (5).
-    assert_parity("r := option { True -> { y := 5  y + 1 } }\nr", "6");
+    // declares a local. Must yield the RESULT (6), not the local (5). (One
+    // statement per line: two on a line are now a parse error.)
+    assert_parity("r := option { True -> {\n y := 5\n y + 1\n } }\nr", "6");
 }
 
 #[test]
 fn option_arm_value_with_two_locals() {
-    assert_parity("r := option { True -> { y := 5  z := 7  y + z } }\nr", "12");
+    assert_parity("r := option { True -> {\n y := 5\n z := 7\n y + z\n } }\nr", "12");
 }
 
 #[test]
 fn option_arm_value_with_three_locals() {
     assert_parity(
-        "r := option { True -> { a := 1  b := 2  c := 3  a + b + c } }\nr",
+        "r := option { True -> {\n a := 1\n b := 2\n c := 3\n a + b + c\n } }\nr",
         "6",
     );
 }

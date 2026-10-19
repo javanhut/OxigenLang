@@ -7,6 +7,9 @@ fun append_file(path <str>, content <str>) { __append_file(path, content) }
 
 fun file_exists(path <str>) { __file_exists(path) }
 
+// Size of a file in bytes.
+fun file_size(path <str>) { __file_size(path) }
+
 // Console input
 fun input(prompt <str>) { __input(prompt) }
 

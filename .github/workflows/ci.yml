@@ -2,6 +2,10 @@ name: CI
 
 on: [push, pull_request]
 
+# Tests only read the repository; nothing here needs a token that can write.
+permissions:
+  contents: read
+
 # Cancel superseded runs on the same ref.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -49,9 +53,8 @@ jobs:
       - run: cargo build -p oxigen
       - name: Run Oxigen test suite
         run: ./target/debug/oxigen test tests/
-      # Concurrency can't live in a <test> block (diverge ships thunks by
-      # compile-order id against one process-global source), so run the
-      # self-asserting program directly; it exits non-zero on any mismatch.
+      # A self-asserting program rather than <test> blocks: it exits non-zero
+      # on any mismatch, and exercises a whole program's worker pool.
       - name: Run concurrency smoke test
         run: ./target/debug/oxigen tests/concurrency.oxi
       # Same constraint, plus it needs a real socket: the api module's wire

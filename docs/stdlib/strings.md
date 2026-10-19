@@ -30,6 +30,7 @@ Strings are immutable — every function here returns a **new** string.
 | [`slice`](#slices-start-end) | `slice(s, start, end)` | `str` |
 | [`char_at`](#char_ats-i) | `char_at(s, i)` | `str` |
 | [`is_empty`](#is_emptys) | `is_empty(s)` | `bool` |
+| [`byte_len`](#byte_lens) | `byte_len(s)` | `int` |
 | [`reverse`](#reverses) | `reverse(s)` | `str` |
 | [`repeated`](#repeateds-n) | `repeated(s, n)` | `str` |
 | [`pad_left`](#pad_lefts-width-fill) | `pad_left(s, width, fill)` | `str` |
@@ -181,11 +182,13 @@ println(strings.contains("hello", "z"))         // False
 
 ### `index_of(s, sub)`
 
-Index of the first occurrence of `sub`, or `-1` if it never appears.
+Index of the first occurrence of `sub`, or `-1` if it never appears. The
+index counts characters, like `s[i]`, not bytes.
 
 ```oxi
 println(strings.index_of("hello", "ll"))   // 2
 println(strings.index_of("hello", "z"))    // -1
+println(strings.index_of("héllo", "l"))    // 2
 ```
 
 ### `count(s, sub)`
@@ -229,6 +232,16 @@ println(strings.is_empty(""))    // True
 println(strings.is_empty("x"))   // False
 ```
 
+### `byte_len(s)`
+
+Length in UTF-8 bytes. `len(s)` counts characters, which is what indexing and
+slicing use; byte counts are for wire formats such as `Content-Length`.
+
+```oxi
+println(len("héllo"))               // 5
+println(strings.byte_len("héllo"))  // 6
+```
+
 ---
 
 ## Building
@@ -253,8 +266,9 @@ println(strings.repeated("-", 20))   // --------------------
 
 ### `pad_left(s, width, fill)`
 
-Prepend `fill` until the string is at least `width` long. A string already at
-least that long is returned unchanged.
+Prepend `fill` until the string is at least `width` characters long. A string
+already at least that long is returned unchanged. An empty `fill` with a string
+shorter than `width` is an error (it could never reach the width).
 
 ```oxi
 println(strings.pad_left("7", 3, "0"))   // 007

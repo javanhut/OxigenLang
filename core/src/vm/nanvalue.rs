@@ -1433,10 +1433,12 @@ mod tests {
                 VmEnumVariantDef {
                     name: "Red".to_string(),
                     kind: VmEnumVariantKind::Unit(None),
+                    field_types: Vec::new(),
                 },
                 VmEnumVariantDef {
                     name: "Pair".to_string(),
                     kind: VmEnumVariantKind::Tuple(vec!["int".into(), "int".into()]),
+                    field_types: Vec::new(),
                 },
             ],
         });

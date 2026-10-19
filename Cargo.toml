@@ -8,7 +8,10 @@ members = [
 [profile.release]
 lto = true
 codegen-units = 1
-panic = "abort"
+# Unwind, not abort: the test runner and the worker pool catch a panic and
+# report it as a failed test or task, instead of the process dying with
+# every other result lost.
+panic = "unwind"
 
 [profile.test]
 # oxigen-core's test target pulls in a very large in-crate unit test surface.

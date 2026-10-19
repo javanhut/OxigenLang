@@ -85,6 +85,9 @@ fn eval_line(vm: &mut VM, line: &str) {
     };
 
     vm.set_source(line);
+    // Tasks spawned from now on run against every line so far.
+    let unit = oxigen_core::concurrent::unit_of(&function);
+    oxigen_core::concurrent::register_program(&function, &program, line, None, true);
     match vm.run(function) {
         Ok(Value::None) => {}
         Ok(Value::Error(msg)) => println!("{}", msg),
@@ -92,6 +95,7 @@ fn eval_line(vm: &mut VM, line: &str) {
         Err(err) => {
             println!("{}", err.message);
             vm.reset_exec_state();
+            oxigen_core::concurrent::unregister_program(unit);
         }
     }
 }

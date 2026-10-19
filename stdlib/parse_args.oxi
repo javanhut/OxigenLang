@@ -4,11 +4,19 @@ introduce strings
 struct Parser {
     args <array>
     args_map <map>
+    // alias -> verbose name, so `-u x` also fills `url`.
+    aliases <map>
 }
 
 pattern double_dash(s) when strings.contains_str(s, "--")
 
 pattern single_dash(s) when strings.contains_str(s, "-")
+
+// "-5" or "-2.5" after a flag is its value, not another flag.
+fun is_negative_number(s <str>) { __regex_match("^-[0-9]+(\\.[0-9]+)?$", s) }
+
+// The next argument is a flag, so the current one takes no value from it.
+fun is_flag(s <str>) { strings.starts_with(s, "-") and not is_negative_number(s) }
 
 fun normalize_array(arr <array>) {
     length_arr <int> := len(arr)
@@ -26,7 +34,7 @@ fun normalize_array(arr <array>) {
                     peek_ptr >= length_arr -> {
                         new_arr = push(new_arr, current_arg)
                     }
-                    strings.starts_with(arr[peek_ptr], "-") -> {
+                    is_flag(arr[peek_ptr]) -> {
                         new_arr = push(new_arr, current_arg)
                     }
                     {
@@ -41,9 +49,10 @@ fun normalize_array(arr <array>) {
     new_arr
 }
 
+// Split at the first `=` only: a value like "http://x/?a=b" keeps its own.
 fun k_v_pair(s <str>) {
-    key, value := strings.split(s, "=")
-    (key, value)
+    parts := strings.split(s, "=")
+    (parts[0], strings.join(rest(parts), "="))
 }
 
 Parser includes {
@@ -73,7 +82,22 @@ Parser includes {
             }
         }
         self.args_map[verbose_name] = ""
-        self.args_map[alias] = "" unless alias == None
+        option {
+            alias != None -> {
+                self.args_map[alias] = ""
+                self.aliases[alias] = verbose_name
+            }
+        }
+    }
+
+    // Store a flag's value under both of its names.
+    fun store(name <str>, v <generic>) {
+        self.args_map[name] = v
+        option {
+            has(self.aliases, name) -> {
+                self.args_map[self.aliases[name]] = v
+            }
+        }
     }
 
     fun process_args() {
@@ -84,7 +108,7 @@ Parser includes {
                     normalized_key := strings.strip(k, "--")
                     option {
                         has(self.args_map, normalized_key) -> {
-                            self.args_map[normalized_key] = v
+                            self.store(normalized_key, v)
                         }
                         {
                             <log>("Key: {k} is undefined. Skipping.")
@@ -95,7 +119,7 @@ Parser includes {
                     normalized_key := strings.strip(k, "-")
                     option {
                         has(self.args_map, normalized_key) -> {
-                            self.args_map[normalized_key] = v
+                            self.store(normalized_key, v)
                         }
                         {
                             <log>("Key: {k} is undefined. Skipping.")

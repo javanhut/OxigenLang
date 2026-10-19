@@ -427,10 +427,11 @@ fn invalidating_a_module_reloads_the_modules_that_imported_it() {
         assert_eq!(run_on(&mut vm, main).unwrap(), "10", "{name}");
 
         write(&dir, "b.oxi", "fun value() { 2 }\n");
+        // The whole import graph shares one cache, so b.oxi is cached here too.
         assert_eq!(
             vm.invalidate_module(&dir.join("b.oxi")),
-            1,
-            "{name}: a.oxi goes too"
+            2,
+            "{name}: b.oxi, and a.oxi goes too"
         );
         assert_eq!(run_on(&mut vm, main).unwrap(), "20", "{name}");
     }

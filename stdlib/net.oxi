@@ -90,6 +90,10 @@ fun accept(server <int>) { __net_tcp_accept(server) }
 // Send text on a connection. Returns the number of bytes written.
 fun send(conn <int>, data <str>) { __net_send(conn, data) }
 
+// Send a file's bytes unchanged on a connection — the way to send binary data,
+// which `send` (text only) would corrupt. Returns the number of bytes written.
+fun send_file(conn <int>, path <str>) { __net_send_file(conn, path) }
+
 // Receive up to `max` bytes from a connection. Returns "" on a clean close, and
 // also when a set_timeout deadline passes with nothing to read.
 fun receive(conn <int>, max <int> = 4096) { __net_receive(conn, max) }

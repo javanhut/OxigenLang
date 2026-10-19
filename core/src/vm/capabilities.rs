@@ -64,6 +64,7 @@ pub(crate) const GATED_BUILTINS: &[(&str, Capability)] = &[
     ("__remove", Capability::FileSystem),
     ("__is_dir", Capability::FileSystem),
     ("__is_file", Capability::FileSystem),
+    ("__file_size", Capability::FileSystem),
     ("__net_download", Capability::Network),
     ("__net_upload", Capability::Network),
     ("__net_http_open", Capability::Network),
@@ -74,6 +75,7 @@ pub(crate) const GATED_BUILTINS: &[(&str, Capability)] = &[
     ("__net_tcp_listen", Capability::Network),
     ("__net_tcp_accept", Capability::Network),
     ("__net_send", Capability::Network),
+    ("__net_send_file", Capability::Network),
     ("__net_receive", Capability::Network),
     ("__net_close", Capability::Network),
     ("__net_udp_bind", Capability::Network),
@@ -96,6 +98,12 @@ pub(crate) const GATED_BUILTINS: &[(&str, Capability)] = &[
     ("__join_task", Capability::Threads),
     ("cancel", Capability::Threads),
     ("__time_sleep", Capability::Sleep),
+    // These take a local path as well as a URL or socket: a script allowed
+    // only the network could otherwise read and write any file through them.
+    // A builtin listed twice needs both capabilities.
+    ("__net_download", Capability::FileSystem),
+    ("__net_upload", Capability::FileSystem),
+    ("__net_send_file", Capability::FileSystem),
 ];
 
 /// The stand-in for a refused builtin: callable like the original, but
@@ -155,6 +163,9 @@ mod tests {
         "__starts_with",
         "__ends_with",
         "__contains_str",
+        "__str_index_of",
+        "__str_count",
+        "__byte_len",
         "__strip",
         "__strip_left",
         "__strip_right",

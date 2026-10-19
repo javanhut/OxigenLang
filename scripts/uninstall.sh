@@ -39,19 +39,29 @@ else
     echo "  $LIB_DIR not found, skipping."
 fi
 
-# Also clean up legacy ~/.oxigen install if present
+# Also clean up a legacy ~/.oxigen install if present. Only the files that
+# install put there, never the whole directory: it may hold other things.
 LEGACY_DIR="$HOME/.oxigen"
 if [ -d "$LEGACY_DIR" ]; then
     echo "  Removing legacy install at $LEGACY_DIR..."
-    rm -rf "$LEGACY_DIR"
+    rm -f "$LEGACY_DIR/bin/oxigen" "$LEGACY_DIR/bin/oxigen-lsp"
+    rm -rf "$LEGACY_DIR/lib/stdlib"
+    rmdir "$LEGACY_DIR/bin" "$LEGACY_DIR/lib" "$LEGACY_DIR" 2>/dev/null || true
     echo "  Removed."
 fi
+
+# Delete a legacy "# OxigenLang" marker line together with the PATH line the
+# old installer wrote after it — but only when that next line is about
+# ~/.oxigen, so a user's own line that happens to follow the marker stays.
+remove_marker_and_path_line() {
+    sed -i.bak -e '/^# OxigenLang$/{' -e 'N' -e '/\n.*\.oxigen/d' -e '}' "$1"
+}
 
 # Clean legacy shell config entries
 remove_from_rc() {
     local rc_file="$1"
-    if [ -f "$rc_file" ] && grep -q "# OxigenLang" "$rc_file"; then
-        sed -i.bak '/# OxigenLang/,+1d' "$rc_file"
+    if [ -f "$rc_file" ] && grep -q "^# OxigenLang$" "$rc_file"; then
+        remove_marker_and_path_line "$rc_file"
         sed -i.bak -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$rc_file"
         rm -f "${rc_file}.bak"
         echo "  Removed legacy PATH entry from $rc_file"
@@ -63,8 +73,8 @@ remove_from_rc "$HOME/.bash_profile"
 remove_from_rc "$HOME/.zshrc"
 
 FISH_CONFIG="$HOME/.config/fish/config.fish"
-if [ -f "$FISH_CONFIG" ] && grep -q "OxigenLang" "$FISH_CONFIG"; then
-    sed -i.bak '/# OxigenLang/,+1d' "$FISH_CONFIG"
+if [ -f "$FISH_CONFIG" ] && grep -q "^# OxigenLang$" "$FISH_CONFIG"; then
+    remove_marker_and_path_line "$FISH_CONFIG"
     rm -f "${FISH_CONFIG}.bak"
     echo "  Removed legacy PATH entry from $FISH_CONFIG"
 fi

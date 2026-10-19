@@ -31,6 +31,9 @@ fun char_at(s <str>, i <int>) { str(s[i]) }
 
 fun is_empty(s <str>) { len(s) == 0 }
 
+// UTF-8 bytes, for wire formats; `len` counts characters.
+fun byte_len(s <str>) { __byte_len(s) }
+
 fun reverse(s <str>) {
     result <str> := ""
     each c in chars(s) {
@@ -51,67 +54,63 @@ fun repeated(s <str>, n <int>) {
     result
 }
 
+// Widths count characters: `len` counts bytes, so "é" (two bytes) used to
+// count as already two wide. An empty fill can never reach the width, which
+// used to loop forever.
 fun pad_left(s <str>, width <int>, fill <str>) {
     result <str> := s
-    repeat when len(result) < width {
+    have <int> := len(chars(s))
+    step <int> := len(chars(fill))
+    option {
+        step == 0 and have < width -> {
+            <fail>("pad_left: fill must not be empty")
+        }
+    }
+    repeat when have < width {
         result = fill + result
+        have = have + step
     }
     result
 }
 
 fun pad_right(s <str>, width <int>, fill <str>) {
     result <str> := s
-    repeat when len(result) < width {
+    have <int> := len(chars(s))
+    step <int> := len(chars(fill))
+    option {
+        step == 0 and have < width -> {
+            <fail>("pad_right: fill must not be empty")
+        }
+    }
+    repeat when have < width {
         result = result + fill
+        have = have + step
     }
     result
 }
 
+// Works on characters, never byte offsets: slicing "élan" at byte 1 lands
+// inside the "é".
 fun capitalize(s <str>) {
     option {
         len(s) == 0 -> {
             s
         }
         {
-            upper(s[0:1]) + s[1:]
+            cs := chars(s)
+            out <str> := upper(str(cs[0]))
+            each c in rest(cs) {
+                out = out + str(c)
+            }
+            out
         }
     }
 }
 
 // ── Searching ──
-fun index_of(s <str>, sub <str>) {
-    n <int> := len(sub)
-    last <int> := len(s) - n
-    found <int> := -1
-    i <int>
-    repeat unless (i > last) or (found != -1) {
-        option {
-            s[i:i + n] == sub -> {
-                found = i
-            }
-        }
-        i = i + 1
-    }
-    found
-}
+// Indexes count characters, matching `s[i]`.
+fun index_of(s <str>, sub <str>) { __str_index_of(s, sub) }
 
-fun count(s <str>, sub <str>) {
-    n <int> := len(sub)
-    total <int>
-    i <int>
-    last <int> := len(s) - n
-    repeat unless (n == 0) or (i > last) {
-        option {
-            s[i:i + n] == sub -> {
-                total = total + 1
-                i = i + n
-            }
-            {
-                i = i + 1
-            }
-        }
-    }
-    total
-}
+fun count(s <str>, sub <str>) { __str_count(s, sub) }
 
 fun lines(s <str>) { split(s, "\n") }

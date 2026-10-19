@@ -10,6 +10,10 @@ ARG TARGETARCH
 COPY docker-context/${TARGETARCH}/oxigen /usr/local/bin/oxigen
 COPY stdlib/ /usr/local/lib/oxigen/stdlib/
 
+# Scripts run as an unprivileged user, not root.
+RUN adduser -D -u 10001 oxigen && mkdir -p /work && chown oxigen /work
+USER oxigen
+
 WORKDIR /work
 ENTRYPOINT ["oxigen"]
 CMD ["--help"]

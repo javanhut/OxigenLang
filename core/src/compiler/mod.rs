@@ -180,6 +180,14 @@ impl BindingKind {
     }
 }
 
+/// Names of compiler-made locals. A NUL can't appear in an identifier, so
+/// user code can neither read nor overwrite them (as `__index__` it could
+/// end or redirect a loop).
+const LOOP_INDEX: &str = "\u{0}index";
+const LOOP_RANGE_END: &str = "\u{0}range_end";
+const LOOP_ITERABLE: &str = "\u{0}iterable";
+const CHOOSE_SUBJECT: &str = "\u{0}choose";
+
 /// Tracks a local variable during compilation.
 #[derive(Debug, Clone)]
 struct Local {
@@ -236,6 +244,16 @@ struct CompilerFrame {
     /// re-declaration UPDATES the global). `repeat` therefore does NOT bump this;
     /// only `each` bodies do, and the V1-typed update-vs-shadow choice keys off it.
     each_body_depth: usize,
+    /// Every `SetLocal` emitted: `(offset, slot, lock of the binding written)`.
+    /// A slot's runtime lock is dropped when bindings of different types share
+    /// it, so `finalize_local_locks` re-attaches each typed binding's lock to
+    /// its own writes.
+    local_writes: Vec<(usize, u16, Option<String>)>,
+    /// Values the expression being compiled has pushed and not yet consumed
+    /// (a call's callee and earlier arguments, an operator's left operand).
+    /// They sit above the locals, so a block expression compiled now must
+    /// number its locals past them; see `compile_block_as_expression`.
+    temps: usize,
 }
 
 impl CompilerFrame {
@@ -263,6 +281,8 @@ impl CompilerFrame {
             handler_depth: 0,
             loop_handler_depths: Vec::new(),
             each_body_depth: 0,
+            local_writes: Vec::new(),
+            temps: 0,
         }
     }
 }
@@ -325,12 +345,17 @@ pub struct Compiler {
     /// matching the tree-walker, where `each` introduces a fresh per-iteration
     /// environment that `set_typed` writes the shadow into.
     typed_globals: std::collections::HashSet<String>,
-    /// Monotonic id stamped onto each `Function` at finalization, in compile
-    /// order. Deterministic for a given source, so a worker compiling the same
-    /// source assigns identical ids (closure transfer across threads relies on
-    /// this to identify a lambda's code).
-    fn_counter: u32,
+    /// Id stamped onto the next `Function` finalized: this compilation's
+    /// unit number in the high 32 bits, compile order in the low 32. Every
+    /// compilation in the process gets its own unit, so no two compiled
+    /// files share an id, and a worker recompiling the same program under
+    /// the same unit (`Compiler::for_unit`) assigns identical ids (closure
+    /// transfer across threads relies on this to identify a function's code).
+    fn_counter: u64,
 }
+
+/// The next unused compilation unit number.
+static NEXT_UNIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 impl Default for Compiler {
     fn default() -> Self {
@@ -340,6 +365,12 @@ impl Default for Compiler {
 
 impl Compiler {
     pub fn new() -> Self {
+        Self::for_unit(NEXT_UNIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// A compiler whose functions get the ids an earlier compilation of the
+    /// same program under `unit` gave them (see `Function::id`).
+    pub fn for_unit(unit: u32) -> Self {
         let mut compiler = Compiler {
             frames: Vec::new(),
             errors: Vec::new(),
@@ -353,7 +384,7 @@ impl Compiler {
             method_struct_stack: Vec::new(),
             declared_globals: std::collections::HashSet::new(),
             typed_globals: std::collections::HashSet::new(),
-            fn_counter: 0,
+            fn_counter: (unit as u64) << 32,
         };
         compiler.frames.push(CompilerFrame::new(None, 0));
         compiler
@@ -408,6 +439,7 @@ impl Compiler {
             return Err(self.errors);
         }
 
+        self.finalize_local_locks();
         let frame = self.frames.pop().unwrap();
         let mut function = frame.function;
         function.id = self.fn_counter;
@@ -417,6 +449,34 @@ impl Compiler {
     }
 
     // ── Helpers ────────────────────────────────────────────────────────
+
+    /// Give every write to a typed local its binding's lock back where the
+    /// slot's own lock could not hold it (another binding of a different type
+    /// shares the slot). Those writes become `SetLocalLocked`, which the JIT
+    /// declines, so only functions with such a clash leave the fast path.
+    fn finalize_local_locks(&mut self) {
+        let writes = std::mem::take(&mut self.current_frame_mut().local_writes);
+        for (offset, slot, lock) in writes {
+            let Some(lock) = lock.filter(|t| t != "GENERIC") else {
+                continue;
+            };
+            let slot_lock = self
+                .current_frame()
+                .function
+                .locals
+                .get(slot as usize)
+                .and_then(|li| li.type_constraint.as_deref());
+            if slot_lock == Some(lock.as_str()) {
+                continue;
+            }
+            let line = self.current_frame().function.chunk.lines.get(offset).copied().unwrap_or(0);
+            let tc = self.make_constant(Value::String(rc_str(lock.as_str())), line);
+            let chunk = self.current_chunk();
+            chunk.code[offset] = OpCode::SetLocalLocked as u8;
+            chunk.local_locks.push((offset, tc));
+        }
+        self.current_chunk().local_locks.sort_unstable_by_key(|&(o, _)| o);
+    }
 
     fn current_frame(&self) -> &CompilerFrame {
         self.frames.last().unwrap()
@@ -446,6 +506,15 @@ impl Compiler {
     }
 
     fn emit_op_u16(&mut self, op: OpCode, operand: u16, line: u32) {
+        if op == OpCode::SetLocal {
+            let offset = self.current_chunk().len();
+            let frame = self.current_frame_mut();
+            let lock = frame
+                .locals
+                .get(operand as usize)
+                .and_then(|l| l.type_constraint.clone());
+            frame.local_writes.push((offset, operand, lock));
+        }
         self.emit_op(op, line);
         let chunk = self.current_chunk();
         chunk.write_u16(operand, line);
@@ -615,6 +684,18 @@ impl Compiler {
         self.report(d);
     }
 
+    /// Rejects a struct or enum named like a built-in type. Type checks match
+    /// on names, so instances of `struct INTEGER` would pass every `<int>`.
+    fn reject_builtin_type_name(&mut self, name: &Identifier) {
+        if crate::vm::is_builtin_type_name(&name.value) {
+            self.error_at(
+                codes::COMPILE_ERROR,
+                name.token.span,
+                &format!("`{}` is reserved for a built-in type", name.value),
+            );
+        }
+    }
+
     /// Rejects a pattern declared with more than one parameter.
     ///
     /// A pattern is always called with exactly one argument — the value being
@@ -719,6 +800,65 @@ impl Compiler {
 
     /// Reports at a line only. Retained for sites that have no span to hand;
     /// they render without a caret until one is plumbed through.
+    /// How to load `self` when the bare, non-local `name` means `self.name`: it
+    /// is a field of the struct whose method is being compiled, and nothing
+    /// nearer binds it. In a closure nested in the method `self` is an upvalue —
+    /// resolving only a local `self` sent the closure's field reads and writes
+    /// to globals instead.
+    fn implicit_self_for(&mut self, name: &str) -> Option<(OpCode, u16)> {
+        if !self.method_field_stack.last().is_some_and(|f| f.contains(name)) {
+            return None;
+        }
+        if let Some(slot) = self.resolve_local("self") {
+            return Some((OpCode::GetLocal, slot));
+        }
+        if self.upvalue_binding(name).is_some() || self.upvalue_binding("self").is_none() {
+            return None;
+        }
+        let frame_idx = self.frames.len() - 1;
+        self.resolve_upvalue(frame_idx, "self").map(|uv| (OpCode::GetUpvalue, uv))
+    }
+
+    /// Push the value of the variable `name`: local, then upvalue, then global.
+    fn emit_get_variable(&mut self, name: &str, line: u32) {
+        if let Some(slot) = self.resolve_local(name) {
+            self.emit_op_u16(OpCode::GetLocal, slot, line);
+            return;
+        }
+        let frame_idx = self.frames.len() - 1;
+        if let Some(uv_idx) = self.resolve_upvalue(frame_idx, name) {
+            self.emit_op_u16(OpCode::GetUpvalue, uv_idx, line);
+        } else {
+            let name_const = self.make_constant(Value::String(rc_str(name)), line);
+            self.emit_op_u16(OpCode::GetGlobal, name_const, line);
+        }
+    }
+
+    /// Record `n` values left on the operand stack while the next operand compiles.
+    fn hold_temps(&mut self, n: usize) {
+        self.current_frame_mut().temps += n;
+    }
+
+    /// The operation consuming `n` held values is about to be emitted.
+    fn release_temps(&mut self, n: usize) {
+        let frame = self.current_frame_mut();
+        debug_assert!(frame.temps >= n, "released more temporaries than were held");
+        frame.temps = frame.temps.saturating_sub(n);
+    }
+
+    /// Argument, parameter and element counts are encoded in one byte; a
+    /// larger count used to wrap and silently call or build the wrong thing.
+    fn count_u8(&mut self, count: usize, line: u32) -> u8 {
+        u8::try_from(count).unwrap_or_else(|_| {
+            self.error_coded(
+                codes::COMPILE_ERROR,
+                &format!("too many items in one list: {count} (at most 255 arguments, parameters or names)"),
+                line,
+            );
+            u8::MAX
+        })
+    }
+
     fn error_coded(&mut self, code: Code, message: &str, line: u32) {
         self.errors.push(CompileError {
             message: message.to_string(),
@@ -763,7 +903,10 @@ impl Compiler {
     /// TOP of the operand stack — so calling it here would discard the RESULT
     /// instead of the block's locals (the result sits ABOVE the locals). That is
     /// the long-standing block-as-expression corruption:
-    ///   `r := option { True -> { y := 5  y + 1 } }`  →  VM gave `5`, not `6`.
+    ///   `r := option { True -> {`
+    ///   `    y := 5`
+    ///   `    y + 1`
+    ///   `} }`  →  VM gave `5`, not `6`.
     ///
     /// Cleanup that preserves the result and still closes captured locals:
     ///   stack on entry: [.. L0, L1, .., L_{k-1}, RESULT]
@@ -841,6 +984,11 @@ impl Compiler {
         let slot = self.current_frame().locals.len();
         // LocalInfo is the runtime mirror for `is_mut`, so provenance stays inside the compiler.
         self.record_local_info(slot, kind.is_mutable(), type_constraint.clone());
+        let decl_ip = self.current_chunk().code.len();
+        self.current_frame_mut()
+            .function
+            .local_decls
+            .push((decl_ip, slot as u16));
         self.current_frame_mut().locals.push(Local {
             name: name.to_string(),
             depth,
@@ -923,6 +1071,50 @@ impl Compiler {
         }
 
         None
+    }
+
+    /// The binding an upvalue named `name` resolves to: the innermost local of
+    /// that name in an enclosing frame, the same one `resolve_upvalue` captures.
+    fn upvalue_binding(&self, name: &str) -> Option<(BindingKind, Option<String>)> {
+        let current = self.frames.len().checked_sub(1)?;
+        self.frames[..current].iter().rev().find_map(|frame| {
+            frame
+                .locals
+                .iter()
+                .rev()
+                .find(|l| l.name == name)
+                .map(|l| (l.kind, l.type_constraint.clone()))
+        })
+    }
+
+    /// Checks a write through an upvalue the way a local write is checked:
+    /// immutability at compile time, the declared type lock at run time
+    /// (`CheckType` before the `SetUpvalue`). `walrus` writes (`:=`) may
+    /// override an immutable constant, as they may for a local.
+    fn check_upvalue_write(
+        &mut self,
+        name: &str,
+        span: Span,
+        verb: &str,
+        suffix: &str,
+        walrus: bool,
+        line: u32,
+    ) {
+        let Some((kind, constraint)) = self.upvalue_binding(name) else {
+            return;
+        };
+        let forbidden = match kind {
+            BindingKind::Mutable => false,
+            BindingKind::ImmutableConstant { .. } => !walrus,
+            BindingKind::ImmutableLoopVar { .. } | BindingKind::ImmutableTypeName { .. } => true,
+        };
+        if forbidden {
+            self.report_immutable_write(name, kind, span, verb, suffix);
+        }
+        if let Some(ty) = constraint.filter(|t| t != "GENERIC") {
+            let tc = self.make_constant(Value::String(rc_str(ty.as_str())), line);
+            self.emit_op_u16(OpCode::CheckType, tc, line);
+        }
     }
 
     fn add_upvalue(&mut self, frame_idx: usize, index: u16, is_local: bool) -> u16 {
@@ -1172,6 +1364,7 @@ impl Compiler {
                 } else {
                     let frame_idx = self.frames.len() - 1;
                     if let Some(uv_idx) = self.resolve_upvalue(frame_idx, &name.value) {
+                        self.check_upvalue_write(&name.value, name.token.span, "rebind", "", true, line);
                         self.emit_op_u16(OpCode::SetUpvalue, uv_idx, line);
                         self.emit_op(OpCode::Pop, line);
                     } else if self.current_frame().scope_depth > 0
@@ -1325,23 +1518,18 @@ impl Compiler {
                     self.report_immutable_write(&name.value, kind, name.token.span, "assign to", "");
                 }
                 // A bare name that is not a local but is a field of the enclosing struct resolves to self.field.
-                if self.resolve_local(&name.value).is_none() {
-                    let is_field = self
-                        .method_field_stack
-                        .last()
-                        .is_some_and(|f| f.contains(&name.value));
-                    if is_field
-                        && let Some(self_slot) = self.resolve_local("self") {
-                            // SetField pops both object and value, so no trailing Pop is needed.
-                            self.emit_op_u16(OpCode::GetLocal, self_slot, line);
-                            self.compile_expression(value);
-                            let field_const = self.make_constant(
-                                Value::String(rc_str(name.value.as_str())),
-                                line,
-                            );
-                            self.emit_op_u16(OpCode::SetField, field_const, line);
-                            return;
-                        }
+                if self.resolve_local(&name.value).is_none()
+                    && let Some((load_self, self_idx)) = self.implicit_self_for(&name.value)
+                {
+                    // SetField pops both object and value, so no trailing Pop is needed.
+                    self.emit_op_u16(load_self, self_idx, line);
+                    self.hold_temps(1);
+                    self.compile_expression(value);
+                    self.release_temps(1);
+                    let field_const =
+                        self.make_constant(Value::String(rc_str(name.value.as_str())), line);
+                    self.emit_op_u16(OpCode::SetField, field_const, line);
+                    return;
                 }
                 self.compile_expression(value);
                 if let Some(slot) = self.resolve_local(&name.value) {
@@ -1349,6 +1537,7 @@ impl Compiler {
                 } else {
                     let frame_idx = self.frames.len() - 1;
                     if let Some(uv_idx) = self.resolve_upvalue(frame_idx, &name.value) {
+                        self.check_upvalue_write(&name.value, name.token.span, "assign to", "", false, line);
                         self.emit_op_u16(OpCode::SetUpvalue, uv_idx, line);
                     } else {
                         let name_const =
@@ -1482,20 +1671,20 @@ impl Compiler {
                     } else {
                         self.compile_expression(&args[0]);
                     }
-                    self.add_local("__index__", BindingKind::Mutable, None);
+                    self.add_local(LOOP_INDEX, BindingKind::Mutable, None);
                     // range(n) puts the bound first; every other form puts it second, since a third argument is the step.
                     self.compile_expression(if args.len() == 1 { &args[0] } else { &args[1] });
-                    self.add_local("__range_end__", BindingKind::ImmutableConstant { decl: Span::default() }, None);
-                    let i = self.resolve_local("__index__").unwrap();
-                    let e = self.resolve_local("__range_end__").unwrap();
+                    self.add_local(LOOP_RANGE_END, BindingKind::ImmutableConstant { decl: Span::default() }, None);
+                    let i = self.resolve_local(LOOP_INDEX).unwrap();
+                    let e = self.resolve_local(LOOP_RANGE_END).unwrap();
                     (i, 0, e)
                 } else {
                     self.compile_expression(iterable);
-                    self.add_local("__iterable__", BindingKind::ImmutableConstant { decl: Span::default() }, None);
+                    self.add_local(LOOP_ITERABLE, BindingKind::ImmutableConstant { decl: Span::default() }, None);
                     self.emit_constant(Value::Integer(0), line);
-                    self.add_local("__index__", BindingKind::Mutable, None);
-                    let it = self.resolve_local("__iterable__").unwrap();
-                    let i = self.resolve_local("__index__").unwrap();
+                    self.add_local(LOOP_INDEX, BindingKind::Mutable, None);
+                    let it = self.resolve_local(LOOP_ITERABLE).unwrap();
+                    let i = self.resolve_local(LOOP_INDEX).unwrap();
                     (i, it, 0)
                 };
                 let is_range = range_args.is_some();
@@ -1696,31 +1885,59 @@ impl Compiler {
                 values,
                 reassign,
             } => {
+                // Every value is computed before any name is bound, so `a, b = b, a` swaps.
+                let local_define = !*reassign && self.current_frame().scope_depth > 0;
+                // A `:=` naming an existing variable updates it, as `x := v` does. Then
+                // the new names need their slots before the values are pushed, so they
+                // get `None` placeholders and every name is stored from the top down.
+                let fresh: Vec<bool> = names
+                    .iter()
+                    .map(|n| n.value == "_" || self.unpack_name_is_fresh(&n.value))
+                    .collect();
+                let placeholders = local_define && fresh.iter().any(|f| !f);
+                if placeholders {
+                    for (name, _) in names.iter().zip(&fresh).filter(|(_, f)| **f) {
+                        self.emit_op(OpCode::None, line);
+                        self.add_local(&name.value, BindingKind::Mutable, None);
+                    }
+                }
+
                 if let Some(exprs) = values {
                     // Multi-expression: a, b := expr1, expr2
-                    for (name, expr) in names.iter().zip(exprs.iter()) {
-                        self.compile_expression(expr);
-                        self.compile_unpack_bind(name, *reassign, line);
+                    if exprs.len() != names.len() {
+                        self.error_coded(
+                            codes::COMPILE_ERROR,
+                            &format!("expected {} values, got {}", names.len(), exprs.len()),
+                            line,
+                        );
+                        return;
                     }
+                    for expr in exprs {
+                        self.compile_expression(expr);
+                        self.hold_temps(1);
+                    }
+                    self.release_temps(exprs.len());
                 } else {
                     // Single-expression unpack: a, b := tuple_or_array
                     self.compile_expression(value);
-                    self.emit_op_u8(OpCode::Unpack, names.len() as u8, line);
-                    if *reassign {
-                        // Reassign pops from the top, so iterate in reverse to pair name[last] with element[last].
-                        for name in names.iter().rev() {
-                            self.compile_unpack_bind(name, true, line);
-                        }
-                    } else if self.current_frame().scope_depth > 0 {
-                        // add_local assigns sequential slots matching push order, so iterate forward, even for `_`.
-                        for name in names {
-                            self.compile_unpack_define(name, line);
-                        }
-                    } else {
-                        // DefineGlobal pops from the top, so bind the last name first to preserve positional order.
-                        for name in names.iter().rev() {
-                            self.compile_unpack_define(name, line);
-                        }
+                    let count = self.count_u8(names.len(), line);
+                    self.emit_op_u8(OpCode::Unpack, count, line);
+                }
+
+                if *reassign || placeholders {
+                    // Stores pop from the top, so iterate in reverse to pair name[last] with element[last].
+                    for name in names.iter().rev() {
+                        self.compile_unpack_bind(name, !*reassign, line);
+                    }
+                } else if local_define {
+                    // add_local assigns sequential slots matching push order, so iterate forward, even for `_`.
+                    for name in names {
+                        self.compile_unpack_define(name, line);
+                    }
+                } else {
+                    // DefineGlobal pops from the top, so bind the last name first to preserve positional order.
+                    for name in names.iter().rev() {
+                        self.compile_unpack_define(name, line);
                     }
                 }
             }
@@ -1732,7 +1949,9 @@ impl Compiler {
                 ..
             } => {
                 self.compile_expression(object);
+                self.hold_temps(1);
                 self.compile_expression(value);
+                self.release_temps(1);
                 let field_const =
                     self.make_constant(Value::String(rc_str(field.value.as_str())), line);
                 self.emit_op_u16(OpCode::SetField, field_const, line);
@@ -1745,8 +1964,11 @@ impl Compiler {
                 ..
             } => {
                 self.compile_expression(object);
+                self.hold_temps(1);
                 self.compile_expression(index);
+                self.hold_temps(1);
                 self.compile_expression(value);
+                self.release_temps(2);
                 self.emit_op(OpCode::IndexAssign, line);
             }
 
@@ -1767,6 +1989,7 @@ impl Compiler {
                 fields,
                 ..
             } => {
+                self.reject_builtin_type_name(name);
                 let field_info: Vec<(String, String, bool)> = fields
                     .iter()
                     .map(|f| (f.name.value.clone(), f.type_ann.type_name(), f.hidden))
@@ -1806,6 +2029,7 @@ impl Compiler {
             }
 
             Statement::EnumDef { name, variants, .. } => {
+                self.reject_builtin_type_name(name);
                 let mut next_auto: i64 = 0;
                 let mut resolved: Vec<VmEnumVariantDef> = Vec::new();
                 for variant in variants {
@@ -1839,9 +2063,19 @@ impl Compiler {
                             fields.iter().map(|f| f.name.value.clone()).collect(),
                         ),
                     };
+                    let field_types = match &variant.kind {
+                        VariantKind::Unit(_) => Vec::new(),
+                        VariantKind::Tuple(params) => {
+                            params.iter().map(|(_, ty)| ty.type_name()).collect()
+                        }
+                        VariantKind::Struct(fields) => {
+                            fields.iter().map(|f| f.type_ann.type_name()).collect()
+                        }
+                    };
                     resolved.push(VmEnumVariantDef {
                         name: variant.name.value.clone(),
                         kind,
+                        field_types,
                     });
                 }
                 let enum_val = Value::EnumDef(std::rc::Rc::new(ObjEnumDef {
@@ -1903,7 +2137,8 @@ impl Compiler {
                 let struct_const =
                     self.make_constant(Value::String(rc_str(struct_name.value.as_str())), line);
                 self.emit_op_u16(OpCode::DefineMethod, struct_const, line);
-                self.emit_byte(methods.len() as u8, line);
+                let count = self.count_u8(methods.len(), line);
+                self.emit_byte(count, line);
             }
 
             Statement::Pattern {
@@ -1925,24 +2160,21 @@ impl Compiler {
             Statement::Choose { subject, arms, .. } => {
                 // Capture before compiling the subject, which resets the flag.
                 let choose_consumed = self.suppress_statement_pop;
-                // Store the subject as a temporary global so pattern functions see it without touching stack layout.
+                // The subject and any inline patterns are locals of this `choose`. As
+                // globals (`__choose_tmp__`, `__pattern_<name>`) a pattern condition
+                // that ran another `choose` overwrote the subject, and an inline
+                // pattern replaced any top-level pattern of the same name.
+                self.begin_scope();
                 self.compile_expression(subject);
-                let temp_name = "__choose_tmp__";
-                let temp_const = self.make_constant(Value::String(rc_str(temp_name)), line);
-                self.emit_op_u16(OpCode::DefineGlobal, temp_const, line);
+                let subject_slot = self.current_frame().locals.len() as u16;
+                self.add_local(CHOOSE_SUBJECT, BindingKind::Mutable, None);
 
-                let mut end_jumps = Vec::new();
-                let mut has_else = false;
-
+                let mut inline_slots: Vec<Option<u16>> = Vec::with_capacity(arms.len());
                 for arm in arms {
                     if arm.pattern_name == "else" {
-                        has_else = true;
-                        self.compile_block_as_expression(&arm.body, line, choose_consumed);
                         break;
                     }
-
-                    // Register inline pattern if present
-                    if let (Some(params), Some(condition)) =
+                    let slot = if let (Some(params), Some(condition)) =
                         (&arm.inline_params, &arm.inline_condition)
                     {
                         // ChooseArm::pattern_name has no token, so an inline arm can only be located by line.
@@ -1950,18 +2182,30 @@ impl Compiler {
                         let param_names: Vec<String> =
                             params.iter().map(|p| p.value.clone()).collect();
                         self.compile_pattern_function(&param_names, condition, line);
-                        let pattern_global = format!("__pattern_{}", arm.pattern_name);
-                        let nc = self
-                            .make_constant(Value::String(rc_str(pattern_global.as_str())), line);
-                        self.emit_op_u16(OpCode::DefineGlobal, nc, line);
+                        let slot = self.current_frame().locals.len() as u16;
+                        self.add_local(&format!("__pattern_{}", arm.pattern_name), BindingKind::Mutable, None);
+                        Some(slot)
+                    } else {
+                        None
+                    };
+                    inline_slots.push(slot);
+                }
+
+                let mut end_jumps = Vec::new();
+                let mut has_else = false;
+
+                for (i, arm) in arms.iter().enumerate() {
+                    if arm.pattern_name == "else" {
+                        has_else = true;
+                        self.compile_block_as_expression(&arm.body, line, choose_consumed);
+                        break;
                     }
 
-                    let pattern_global = format!("__pattern_{}", arm.pattern_name);
-                    let pg_const =
-                        self.make_constant(Value::String(rc_str(pattern_global.as_str())), line);
-                    self.emit_op_u16(OpCode::GetGlobal, pg_const, line);
-                    let subj_const = self.make_constant(Value::String(rc_str(temp_name)), line);
-                    self.emit_op_u16(OpCode::GetGlobal, subj_const, line);
+                    match inline_slots[i] {
+                        Some(slot) => self.emit_op_u16(OpCode::GetLocal, slot, line),
+                        None => self.emit_get_variable(&format!("__pattern_{}", arm.pattern_name), line),
+                    }
+                    self.emit_op_u16(OpCode::GetLocal, subject_slot, line);
                     self.emit_op_u8(OpCode::Call, 1, line);
 
                     let skip = self.emit_jump(OpCode::JumpIfFalse, line);
@@ -1983,6 +2227,7 @@ impl Compiler {
                 for j in end_jumps {
                     self.patch_jump(j);
                 }
+                self.end_scope_keeping_value(line);
 
                 // Choose is a statement — discard the result value (unless suppressed)
                 if !self.suppress_statement_pop {
@@ -2017,7 +2262,8 @@ impl Compiler {
                         self.emit_op_u16(OpCode::Constant, nc, line);
                     }
                     self.emit_op_u16(OpCode::Import, path_const, line);
-                    self.emit_byte(names.len() as u8, line);
+                    let count = self.count_u8(names.len(), line);
+                    self.emit_byte(count, line);
                 } else {
                     self.emit_op_u16(OpCode::Import, path_const, line);
                     self.emit_byte(0, line); // no selective names
@@ -2168,7 +2414,9 @@ impl Compiler {
                 }
 
                 self.compile_expression(left);
+                self.hold_temps(1);
                 self.compile_expression(right);
+                self.release_temps(1);
                 match operator.as_str() {
                     "+" => self.emit_op(OpCode::Add, line),
                     "-" => self.emit_op(OpCode::Subtract, line),
@@ -2220,6 +2468,14 @@ impl Compiler {
                     } else {
                         let frame_idx = self.frames.len() - 1;
                         if let Some(uv_idx) = self.resolve_upvalue(frame_idx, &ident.value) {
+                            self.check_upvalue_write(
+                                &ident.value,
+                                ident.token.span,
+                                "mutate",
+                                &format!(" with `{operator}`"),
+                                false,
+                                line,
+                            );
                             self.emit_op_u16(OpCode::SetUpvalue, uv_idx, line);
                         } else {
                             let name_const = self
@@ -2240,7 +2496,9 @@ impl Compiler {
             Expression::Array { elements, .. } => {
                 for elem in elements {
                     self.compile_expression(elem);
+                    self.hold_temps(1);
                 }
+                self.release_temps(elements.len());
                 let count = elements.len() as u16;
                 self.emit_op_u16(OpCode::BuildArray, count, line);
             }
@@ -2248,7 +2506,9 @@ impl Compiler {
             Expression::TupleLiteral { elements, .. } => {
                 for elem in elements {
                     self.compile_expression(elem);
+                    self.hold_temps(1);
                 }
+                self.release_temps(elements.len());
                 let count = elements.len() as u16;
                 self.emit_op_u16(OpCode::BuildTuple, count, line);
             }
@@ -2256,8 +2516,11 @@ impl Compiler {
             Expression::MapLiteral { entries, .. } => {
                 for (key, val) in entries {
                     self.compile_expression(key);
+                    self.hold_temps(1);
                     self.compile_expression(val);
+                    self.hold_temps(1);
                 }
+                self.release_temps(entries.len() * 2);
                 let count = entries.len() as u16;
                 self.emit_op_u16(OpCode::BuildMap, count, line);
             }
@@ -2272,7 +2535,9 @@ impl Compiler {
                             self.compile_expression(expr);
                         }
                     }
+                    self.hold_temps(1);
                 }
+                self.release_temps(parts.len());
                 let count = parts.len() as u16;
                 self.emit_op_u16(OpCode::StringInterp, count, line);
             }
@@ -2306,49 +2571,69 @@ impl Compiler {
                 // Method call: obj.method(args) → MethodCall opcode
                 if let Expression::DotAccess { left, field, .. } = function.as_ref() {
                     self.compile_expression(left);
+                    self.hold_temps(1);
                     for arg in args {
                         self.compile_expression(arg);
+                        self.hold_temps(1);
                     }
                     let method_const =
                         self.make_constant(Value::String(rc_str(field.value.as_str())), line);
                     if named_args.is_empty() {
+                        self.release_temps(args.len() + 1);
                         self.emit_op_u16(OpCode::MethodCall, method_const, line);
-                        self.emit_byte(args.len() as u8, line);
+                        let count = self.count_u8(args.len(), line);
+                        self.emit_byte(count, line);
                     } else {
                         for (name, val_expr) in named_args {
                             self.emit_constant(Value::String(rc_str(name.as_str())), line);
+                            self.hold_temps(1);
                             self.compile_expression(val_expr);
+                            self.hold_temps(1);
                         }
+                        self.release_temps(args.len() + 1 + named_args.len() * 2);
                         self.emit_op_u16(OpCode::MethodCallNamed, method_const, line);
-                        self.emit_byte(args.len() as u8, line);
-                        self.emit_byte(named_args.len() as u8, line);
+                        let count = self.count_u8(args.len(), line);
+                        self.emit_byte(count, line);
+                        let count = self.count_u8(named_args.len(), line);
+                        self.emit_byte(count, line);
                     }
                     return;
                 }
 
                 // Normal function call
                 self.compile_expression(function);
+                self.hold_temps(1);
                 for arg in args {
                     self.compile_expression(arg);
+                    self.hold_temps(1);
                 }
 
                 if named_args.is_empty() {
-                    self.emit_op_u8(OpCode::Call, args.len() as u8, line);
+                    self.release_temps(args.len() + 1);
+                    let count = self.count_u8(args.len(), line);
+                    self.emit_op_u8(OpCode::Call, count, line);
                 } else {
                     // Push named args: name string, then value
                     for (name, val_expr) in named_args {
                         self.emit_constant(Value::String(rc_str(name.as_str())), line);
+                        self.hold_temps(1);
                         self.compile_expression(val_expr);
+                        self.hold_temps(1);
                     }
+                    self.release_temps(args.len() + 1 + named_args.len() * 2);
                     self.emit_op(OpCode::CallNamed, line);
-                    self.emit_byte(args.len() as u8, line);
-                    self.emit_byte(named_args.len() as u8, line);
+                    let count = self.count_u8(args.len(), line);
+                    self.emit_byte(count, line);
+                    let count = self.count_u8(named_args.len(), line);
+                    self.emit_byte(count, line);
                 }
             }
 
             Expression::Index { left, index, .. } => {
                 self.compile_expression(left);
+                self.hold_temps(1);
                 self.compile_expression(index);
+                self.release_temps(1);
                 self.emit_op(OpCode::Index, line);
             }
 
@@ -2356,15 +2641,19 @@ impl Compiler {
                 left, start, end, ..
             } => {
                 self.compile_expression(left);
+                self.hold_temps(1);
                 let mut flags: u8 = 0;
                 if let Some(s) = start {
                     self.compile_expression(s);
+                    self.hold_temps(1);
                     flags |= 0x01;
                 }
                 if let Some(e) = end {
                     self.compile_expression(e);
+                    self.hold_temps(1);
                     flags |= 0x02;
                 }
+                self.release_temps(1 + start.is_some() as usize + end.is_some() as usize);
                 self.emit_op_u8(OpCode::Slice, flags, line);
             }
 
@@ -2390,10 +2679,14 @@ impl Compiler {
                     self.make_constant(Value::String(rc_str(struct_name.as_str())), line);
                 for (fname, fval) in field_values {
                     self.emit_constant(Value::String(rc_str(fname.as_str())), line);
+                    self.hold_temps(1);
                     self.compile_expression(fval);
+                    self.hold_temps(1);
                 }
+                self.release_temps(field_values.len() * 2);
                 self.emit_op_u16(OpCode::StructLiteral, name_const, line);
-                self.emit_byte(field_values.len() as u8, line);
+                let count = self.count_u8(field_values.len(), line);
+                self.emit_byte(count, line);
             }
 
             Expression::EnumVariantConstruct {
@@ -2411,23 +2704,31 @@ impl Compiler {
                     },
                     value: enum_name.clone(),
                 }));
+                self.hold_temps(1);
                 let variant_const =
                     self.make_constant(Value::String(rc_str(variant_name.as_str())), line);
                 match kind {
                     EnumConstructKind::Tuple(args) => {
                         for arg in args {
                             self.compile_expression(arg);
+                            self.hold_temps(1);
                         }
+                        self.release_temps(args.len() + 1);
                         self.emit_op_u16(OpCode::MakeEnumVariantTuple, variant_const, line);
-                        self.emit_byte(args.len() as u8, line);
+                        let count = self.count_u8(args.len(), line);
+                        self.emit_byte(count, line);
                     }
                     EnumConstructKind::Struct(fields) => {
                         for (fname, fval) in fields {
                             self.emit_constant(Value::String(rc_str(fname.as_str())), line);
+                            self.hold_temps(1);
                             self.compile_expression(fval);
+                            self.hold_temps(1);
                         }
+                        self.release_temps(fields.len() * 2 + 1);
                         self.emit_op_u16(OpCode::MakeEnumVariantStruct, variant_const, line);
-                        self.emit_byte(fields.len() as u8, line);
+                        let count = self.count_u8(fields.len(), line);
+                        self.emit_byte(count, line);
                     }
                 }
             }
@@ -2543,8 +2844,15 @@ impl Compiler {
                 self.current_chunk()
                     .patch_u16(guard_jump_pos, offset as u16);
 
-                // Error case: compile fallback expression
-                self.compile_expression(fallback);
+                // Error case: the error is left on the stack and bound as a local of the
+                // fallback alone. It used to go into the VM's globals, clobbering a
+                // global of that name and losing to any local of that name.
+                self.with_held_as_locals(|c| {
+                    c.begin_scope();
+                    c.add_local(&binding.value, BindingKind::Mutable, None);
+                    c.compile_expression(fallback);
+                    c.end_scope_keeping_value(line);
+                });
                 self.patch_jump(end_jump);
             }
 
@@ -2648,13 +2956,22 @@ impl Compiler {
                 self.suppress_statement_pop = false;
             }
             Statement::If {
-                alternative: Some(_),
+                condition,
+                consequence,
+                alternative: Some(alternative),
                 ..
             } => {
-                // Both branches produce a value; a one-armed guard does not.
-                self.suppress_statement_pop = true;
-                self.compile_statement(stmt);
-                self.suppress_statement_pop = false;
+                // Both branches produce a value; a one-armed guard does not. Each arm is
+                // a value block — compiled as statements, the arms' values were popped.
+                self.compile_expression(condition);
+                let else_jump = self.emit_jump(OpCode::JumpIfFalse, line);
+                self.emit_op(OpCode::Pop, line);
+                self.compile_block_as_expression(consequence, line, consumed);
+                let end_jump = self.emit_jump(OpCode::Jump, line);
+                self.patch_jump(else_jump);
+                self.emit_op(OpCode::Pop, line);
+                self.compile_block_as_expression(alternative, line, consumed);
+                self.patch_jump(end_jump);
             }
             _ => {
                 self.compile_statement(stmt);
@@ -2678,32 +2995,44 @@ impl Compiler {
         }
     }
 
-    fn compile_unpack_bind(&mut self, name: &crate::ast::Identifier, reassign: bool, line: u32) {
+    /// Store the stack top into an existing variable for unpack, then pop it.
+    /// `walrus` (`:=`) may override an immutable constant, as `x := v` may.
+    fn compile_unpack_bind(&mut self, name: &crate::ast::Identifier, walrus: bool, line: u32) {
         if name.value == "_" {
             self.emit_op(OpCode::Pop, line);
-        } else if reassign {
-            // Reassignment: set existing variable
-            if let Some(slot) = self.resolve_local(&name.value) {
-                self.emit_op_u16(OpCode::SetLocal, slot, line);
-                self.emit_op(OpCode::Pop, line);
-            } else {
-                let frame_idx = self.frames.len() - 1;
-                if let Some(uv_idx) = self.resolve_upvalue(frame_idx, &name.value) {
-                    self.emit_op_u16(OpCode::SetUpvalue, uv_idx, line);
-                    self.emit_op(OpCode::Pop, line);
-                } else {
-                    let name_const =
-                        self.make_constant(Value::String(rc_str(name.value.as_str())), line);
-                    self.emit_op_u16(OpCode::SetGlobal, name_const, line);
-                    self.emit_op(OpCode::Pop, line);
-                }
-            }
-        } else if self.current_frame().scope_depth > 0 {
-            self.add_local(&name.value, BindingKind::Mutable, None);
-        } else {
-            let name_const = self.make_constant(Value::String(rc_str(name.value.as_str())), line);
-            self.emit_op_u16(OpCode::DefineGlobal, name_const, line);
+            return;
         }
+        if let Some(slot) = self.resolve_local(&name.value) {
+            let kind = self.current_frame().locals[slot as usize].kind;
+            let forbidden = match kind {
+                BindingKind::Mutable => false,
+                BindingKind::ImmutableConstant { .. } => !walrus,
+                BindingKind::ImmutableLoopVar { .. } | BindingKind::ImmutableTypeName { .. } => true,
+            };
+            if forbidden {
+                self.report_immutable_write(&name.value, kind, name.token.span, "assign to", "");
+            }
+            self.emit_op_u16(OpCode::SetLocal, slot, line);
+        } else {
+            let frame_idx = self.frames.len() - 1;
+            if let Some(uv_idx) = self.resolve_upvalue(frame_idx, &name.value) {
+                self.check_upvalue_write(&name.value, name.token.span, "assign to", "", walrus, line);
+                self.emit_op_u16(OpCode::SetUpvalue, uv_idx, line);
+            } else {
+                let name_const =
+                    self.make_constant(Value::String(rc_str(name.value.as_str())), line);
+                self.emit_op_u16(OpCode::SetGlobal, name_const, line);
+            }
+        }
+        self.emit_op(OpCode::Pop, line);
+    }
+
+    /// True when `:=` on `name` would declare a new local rather than update
+    /// an existing local, upvalue or global (the same rule `x := v` follows).
+    fn unpack_name_is_fresh(&self, name: &str) -> bool {
+        self.resolve_local(name).is_none()
+            && !self.declared_globals.contains(name)
+            && self.upvalue_binding(name).is_none()
     }
 
     /// Compile a block as a value-producing expression (option/choose arm,
@@ -2718,6 +3047,36 @@ impl Compiler {
             self.emit_op(OpCode::None, line);
             return;
         }
+        // Values the enclosing expression already pushed occupy the next stack
+        // slots. Unnamed placeholder locals stand in for them, so the block's own
+        // locals are numbered past them; they live in the enclosing scope, so the
+        // block's cleanup leaves them alone, and a `skip`/`stop` out of here pops
+        // them with everything else above the loop's floor.
+        self.with_held_as_locals(|c| c.compile_block_body_as_expression(stmts, line, consumed));
+    }
+
+    /// Run `body` with the held temporaries standing in as unnamed locals, so
+    /// any local it declares gets the stack slot it will really occupy.
+    fn with_held_as_locals(&mut self, body: impl FnOnce(&mut Self)) {
+        let held = std::mem::take(&mut self.current_frame_mut().temps);
+        let outer_depth = self.current_frame().scope_depth;
+        for _ in 0..held {
+            self.current_frame_mut().locals.push(Local {
+                name: String::new(),
+                depth: outer_depth,
+                is_captured: false,
+                kind: BindingKind::Mutable,
+                type_constraint: None,
+            });
+        }
+        body(self);
+        let frame = self.current_frame_mut();
+        let keep = frame.locals.len() - held;
+        frame.locals.truncate(keep);
+        frame.temps = held;
+    }
+
+    fn compile_block_body_as_expression(&mut self, stmts: &[Statement], line: u32, consumed: bool) {
         // Wrap in a scope so locals are cleaned up.
         self.begin_scope();
         for (i, stmt) in stmts.iter().enumerate() {
@@ -2725,7 +3084,11 @@ impl Compiler {
             if is_last {
                 // Compile the last statement inside the scope so it can reference block locals.
                 match stmt {
-                    Statement::Expr(_) => {
+                    Statement::Expr(_)
+                    | Statement::If {
+                        alternative: Some(_),
+                        ..
+                    } => {
                         self.compile_last_statement_as_value(stmt, line, consumed);
                         self.end_scope_keeping_value(line);
                     }
@@ -2957,18 +3320,13 @@ impl Compiler {
             self.emit_op_u16(OpCode::GetLocal, slot, line);
             return;
         }
-        // Gated on `self` being a local of the current frame, so nested closures do not resolve fields.
-        if self
-            .method_field_stack
-            .last()
-            .is_some_and(|f| f.contains(&ident.value))
-            && let Some(self_slot) = self.resolve_local("self") {
-                self.emit_op_u16(OpCode::GetLocal, self_slot, line);
-                let field_const =
-                    self.make_constant(Value::String(rc_str(ident.value.as_str())), line);
-                self.emit_op_u16(OpCode::GetField, field_const, line);
-                return;
-            }
+        if let Some((load_self, self_idx)) = self.implicit_self_for(&ident.value) {
+            self.emit_op_u16(load_self, self_idx, line);
+            let field_const =
+                self.make_constant(Value::String(rc_str(ident.value.as_str())), line);
+            self.emit_op_u16(OpCode::GetField, field_const, line);
+            return;
+        }
         let frame_idx = self.frames.len() - 1;
         if let Some(uv_idx) = self.resolve_upvalue(frame_idx, &ident.value) {
             self.emit_op_u16(OpCode::GetUpvalue, uv_idx, line);
@@ -2997,7 +3355,8 @@ impl Compiler {
         self.frames
             .push(CompilerFrame::new(name.map(|s| s.to_string()), 1));
         self.current_frame_mut().function.method_of = owning_struct;
-        self.current_frame_mut().function.arity = parameters.len() as u8;
+        let arity = self.count_u8(parameters.len(), line);
+        self.current_frame_mut().function.arity = arity;
 
         let params: Vec<ParamInfo> = parameters
             .iter()
@@ -3054,6 +3413,7 @@ impl Compiler {
             }
         }
 
+        self.finalize_local_locks();
         let frame = self.frames.pop().unwrap();
         let mut function = frame.function;
         function.id = self.fn_counter;

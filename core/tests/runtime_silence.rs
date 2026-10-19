@@ -167,7 +167,29 @@ fn cancel_on_a_non_task_is_rejected() {
 
 #[test]
 fn cancel_on_a_real_task_still_works() {
-    assert_eq!(run("t := diverge { 1 }\ncancel(t)\n\"ok\""), "ok");
+    // A spawn needs its program registered with the worker pool (the CLI does
+    // this for every script); without it `diverge` now fails up front.
+    let source = "t := diverge { 1 }\ncancel(t)\n\"ok\"";
+    for mut vm in [VM::new_interpreter(), VM::new_eager_jit()] {
+        let lexer = Lexer::new(source);
+        let mut parser = Parser::new(lexer, source);
+        let program = parser.parse_program();
+        let function = Compiler::new()
+            .compile(&program)
+            .unwrap_or_else(|e| panic!("compile errors: {e:?}"));
+        oxigen_core::concurrent::register_program(&function, &program, source, None, false);
+        let out = vm
+            .run(function)
+            .map(|v| format!("{v}"))
+            .unwrap_or_else(|e| e.message);
+        assert_eq!(out, "ok");
+    }
+}
+
+#[test]
+fn spawning_from_an_unregistered_program_is_reported() {
+    let out = run("t := diverge { 1 }\n\"ok\"");
+    assert!(out.contains("not registered"), "{out}");
 }
 
 // ── codes ───────────────────────────────────────────────────────────────────

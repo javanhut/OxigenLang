@@ -27,9 +27,11 @@ around on overflow; `/` and `%` raise an error instead. See
 ```oxi
 pi := 3.14
 neg := -0.5
+big := 1.5e3      // 1500.0; an exponent makes any literal a float
+tiny := 2E-4
 ```
 
-Type keyword: `float`. Zero value: `0.0`.
+Type keyword: `float`. Zero value: `0.0`. A literal too large for a 64-bit float is a compile error.
 
 Floats and integers can be mixed in arithmetic — the result follows standard promotion rules.
 

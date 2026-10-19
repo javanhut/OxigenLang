@@ -12,6 +12,7 @@ introduce io
 | [`write_file`](#write_filepath-content) | `write_file(path, content)` | `None` |
 | [`append_file`](#append_filepath-content) | `append_file(path, content)` | `None` |
 | [`file_exists`](#file_existspath) | `file_exists(path)` | `bool` |
+| [`file_size`](#file_sizepath) | `file_size(path)` | `int` bytes |
 | [`input`](#inputprompt) | `input(prompt)` | `str` |
 | [`read_line`](#read_line) | `read_line()` | `str` |
 
@@ -96,6 +97,15 @@ distinction matters.
 ---
 
 ## Console input
+
+
+### `file_size(path)`
+
+The size of a file in bytes, or an `IO` error value when it cannot be read.
+
+```oxi
+println(io.file_size("test.txt"))   // 13
+```
 
 ### `input(prompt)`
 

@@ -74,7 +74,7 @@ answer := option {
 
 ## Cancellation
 
-`cancel(task)` asks a task to stop. Cancellation is cooperative — the task stops at its next function call. Joining a cancelled task returns an error value (test it with `is_error`).
+`cancel(task)` asks a task to stop. Cancellation is cooperative — the task stops at its next function call or loop iteration, JIT-compiled loops included. Joining a cancelled task returns an error value (test it with `is_error`).
 
 ```oxi
 work := diverge { long_running() }
@@ -171,7 +171,8 @@ The model is built for parallel compute and I/O fan-out into the hundreds. A few
 - **Workers always use the default tiered JIT.** They ignore the main process's `--jit` / `--no-jit` flags; heavy per-task loops still JIT on their own.
 - **Auto-join only triggers on `+` today.** A task used in `a + b` resolves automatically, but other operators (`*`, `==`), indexing, and `println` still need an explicit `converge`.
 - **Structured `converge { ... }` blocks are not implemented yet** — use `converge <task>` or `diverge each`.
-- **Keep tasks as leaves.** Deeply nested diverge-and-converge inside a task is not the tested path; have a task do work and return, rather than orchestrate more tasks.
+- **Keep tasks as leaves.** A task's own `diverge` runs inline on its worker, and tasks may nest at most 64 deep; past that the innermost `diverge` returns an error value. Have a task do work and return, rather than orchestrate more tasks.
+- **Each task imports the modules it uses afresh.** A task gets its own copy of every module it reaches, with fresh module state, so a module's top level runs again for each task that uses it. For thousands of tiny tasks that each touch a large module, give each task a batch of items instead.
 
 ## Quick reference
 

@@ -46,6 +46,13 @@ pub struct Lexer {
     /// line numbers, which are already original-relative via `start_line`.
     base_offset: usize,
     comments: Vec<Comment>,
+    /// Open `(`, `[` and written `{` brackets. Indentation inside them is
+    /// layout, not structure: a multi-line map or call in an `#[indent]` file
+    /// must not open or close blocks.
+    bracket_depth: usize,
+    /// Strings currently being lexed inside interpolations, so absurd nesting
+    /// is reported instead of exhausting the stack.
+    interp_depth: usize,
     /// Real diagnostics for lexical problems.
     ///
     /// These used to be smuggled through `TokenType::Illegal`'s `literal`
@@ -84,6 +91,8 @@ impl Lexer {
             char_byte_offsets,
             base_offset,
             comments: Vec::new(),
+            bracket_depth: 0,
+            interp_depth: 0,
             diagnostics: Vec::new(),
         };
         l.read_char();
@@ -106,6 +115,11 @@ impl Lexer {
         let mut start_line = 1;
         let mut indent_mode = false;
 
+        // Editors on Windows like to save a byte-order mark; it is not code.
+        if let Some(rest) = effective_input.strip_prefix('\u{feff}') {
+            effective_input = rest;
+        }
+
         // Allow executable Oxigen scripts to start with a Unix shebang line.
         if effective_input.starts_with("#!") {
             if let Some(newline) = effective_input.find('\n') {
@@ -125,6 +139,23 @@ impl Lexer {
         }
 
         (effective_input, start_line, indent_mode)
+    }
+
+    /// The shebang and top-level directives (`#[indent]`, `#[location=...]`)
+    /// that are stripped before any code is read, one per line, and whether
+    /// they switch on indent mode. `fmt` reprints only what follows them, so
+    /// it has to agree with the lexer on exactly where that is.
+    pub fn header_directives(input: &str) -> (Vec<String>, bool) {
+        let (rest, _, indent_mode) = Self::preprocess_input(input);
+        let header = &input[..input.len() - rest.len()];
+        let header = header.strip_prefix('\u{feff}').unwrap_or(header);
+        let directives = header
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect();
+        (directives, indent_mode)
     }
 
     fn strip_top_level_directive(input: &str) -> Option<(&str, usize, bool)> {
@@ -170,39 +201,58 @@ impl Lexer {
     }
 
     pub fn next_token(&mut self) -> Token {
-        // Return any pending tokens first (from dedent handling)
-        if let Some(tok) = self.pending_tokens.pop_front() {
-            return tok;
-        }
-
-        if self.indent_mode && self.at_line_start {
-            self.at_line_start = false;
-            let indent_level = self.measure_indentation();
-            self.handle_indentation(indent_level);
-
+        // A loop rather than recursion after each comment: a long enough run of
+        // `/**/` used to overflow the stack.
+        loop {
+            // Return any pending tokens first (from dedent handling)
             if let Some(tok) = self.pending_tokens.pop_front() {
                 return tok;
             }
-        }
 
-        self.skip_whitespace_except_newline();
+            if self.at_line_start {
+                self.at_line_start = false;
+                if self.indent_mode && self.bracket_depth == 0 {
+                    let indent_level = self.measure_indentation();
+                    self.handle_indentation(indent_level);
+                    continue;
+                }
+            }
 
-        if self.ch == '\n' {
+            self.skip_whitespace_except_newline();
+
+            if self.ch == '\n' {
+                let span = self.span();
+                self.read_char();
+                self.at_line_start = true;
+                return Token {
+                    token_type: TokenType::Newline,
+                    literal: "\n".into(),
+                    span,
+                };
+            }
+
+            if self.ch == '/' && matches!(self.peek_char(), '/' | '*') {
+                if self.peek_char() == '/' {
+                    self.skip_line_comment();
+                } else {
+                    self.skip_block_comment();
+                }
+                continue;
+            }
+
             let span = self.span();
-            self.read_char();
-            self.at_line_start = true;
-            return Token {
-                token_type: TokenType::Newline,
-                literal: "\n".into(),
-                span,
-            };
+            let mut token = self.lex_token_at(span);
+            // read_string anchors an unterminated string at its opening quote, so only the end moves.
+            token.span.end = self.pos();
+            return token;
         }
+    }
 
-        let span = self.span();
-        let mut token = self.lex_token_at(span);
-        // read_string anchors an unterminated string at its opening quote, so only the end moves.
-        token.span.end = self.pos();
-        token
+    /// True once every character has been consumed. The current character
+    /// can't tell: a NUL byte in the source is a character like any other,
+    /// and treating it as the end used to drop everything after it.
+    fn at_eof(&self) -> bool {
+        self.position >= self.input.len()
     }
 
     /// Lexes exactly one token starting at the current character.
@@ -219,6 +269,16 @@ impl Lexer {
     /// the newline token.
     fn lex_token_at(&mut self, span: Span) -> Token {
         match self.ch {
+            '\0' if !self.at_eof() => {
+                self.read_char();
+                let span = Span::range(span.start, self.pos());
+                self.diagnostics.push(
+                    Diagnostic::error(codes::ILLEGAL_TOKEN, span, "unexpected NUL byte")
+                        .note("a NUL byte is not valid in Oxigen source")
+                        .help("remove it, or write `\\0` inside a string"),
+                );
+                self.illegal("\0", span)
+            }
             '\0' => {
                 // At EOF in indent mode, emit RBrace for any remaining open blocks
                 if self.indent_mode && self.indent_stack.len() > 1 {
@@ -333,8 +393,9 @@ impl Lexer {
                 _ => self.single_with_span(TokenType::Plus, span),
             },
             ':' => {
-                // In indent mode, colon at end of line becomes LBrace
-                if self.indent_mode && self.is_colon_at_eol() {
+                // In indent mode, colon at end of line becomes LBrace — but not
+                // inside brackets, where indentation opens no blocks.
+                if self.indent_mode && self.bracket_depth == 0 && self.is_colon_at_eol() {
                     self.read_char();
                     Token {
                         token_type: TokenType::LBrace,
@@ -405,12 +466,24 @@ impl Lexer {
             }
             '^' => self.single_with_span(TokenType::Caret, span),
             '~' => self.single_with_span(TokenType::Tilde, span),
-            '[' => self.single_with_span(TokenType::LBracket, span),
-            ']' => self.single_with_span(TokenType::RBracket, span),
-            '{' => self.single_with_span(TokenType::LBrace, span),
-            '}' => self.single_with_span(TokenType::RBrace, span),
-            '(' => self.single_with_span(TokenType::LParen, span),
-            ')' => self.single_with_span(TokenType::RParen, span),
+            '[' | '{' | '(' => {
+                self.bracket_depth += 1;
+                let tt = match self.ch {
+                    '[' => TokenType::LBracket,
+                    '{' => TokenType::LBrace,
+                    _ => TokenType::LParen,
+                };
+                self.single_with_span(tt, span)
+            }
+            ']' | '}' | ')' => {
+                self.bracket_depth = self.bracket_depth.saturating_sub(1);
+                let tt = match self.ch {
+                    ']' => TokenType::RBracket,
+                    '}' => TokenType::RBrace,
+                    _ => TokenType::RParen,
+                };
+                self.single_with_span(tt, span)
+            }
             '*' => self.single_with_span(TokenType::Asterisk, span),
             '/' => match self.peek_char() {
                 '/' => {
@@ -474,7 +547,7 @@ impl Lexer {
         };
         self.position = self.read_position;
         self.read_position += 1;
-        if self.ch != '\0' {
+        if !self.at_eof() {
             self.column += 1;
         }
     }
@@ -497,11 +570,11 @@ impl Lexer {
         let (span, own_line, start) = self.comment_start();
         self.read_char();
         self.read_char();
-        while self.ch != '\n' && self.ch != '\0' {
+        while self.ch != '\n' && !self.at_eof() {
             self.read_char();
         }
         self.record_comment(span, own_line, start);
-        // Leave self.ch at '\n' or '\0' so next_token handles it
+        // Leave self.ch at '\n' or EOF so next_token handles it
     }
 
     fn skip_block_comment(&mut self) {
@@ -510,7 +583,7 @@ impl Lexer {
         self.read_char();
         let mut closed = false;
         loop {
-            if self.ch == '\0' {
+            if self.at_eof() {
                 break;
             }
             if self.ch == '*' && self.peek_char() == '/' {
@@ -618,6 +691,22 @@ impl Lexer {
             return self.illegal(&literal, span);
         }
 
+        // `1.5e3`, `2E-4`: without this `e3` lexed as a separate statement.
+        if matches!(self.ch, 'e' | 'E') {
+            let sign = matches!(self.peek_char(), '+' | '-');
+            let digit_at = if sign { self.position + 2 } else { self.position + 1 };
+            if self.input.get(digit_at).is_some_and(|c| c.is_ascii_digit()) {
+                is_float = true;
+                self.read_char();
+                if sign {
+                    self.read_char();
+                }
+                while self.ch.is_ascii_digit() {
+                    self.read_char();
+                }
+            }
+        }
+
         let literal: String = self.input[start..self.position].iter().collect();
         Token {
             token_type: if is_float {
@@ -654,7 +743,7 @@ impl Lexer {
     /// (which makes the string unterminated). Triple-quoted strings span
     /// newlines and only end at their closing fence or EOF.
     fn at_string_body_end(&self, delimiter: char, triple: bool) -> bool {
-        self.ch == '\0'
+        self.at_eof()
             || self.at_closing_delimiter(delimiter, triple)
             || (!triple && self.ch == '\n')
     }
@@ -673,6 +762,24 @@ impl Lexer {
         self.consume_quote_fence(triple); // opening quote(s)
 
         let has_interp = self.string_has_interpolation(delimiter, triple);
+
+        if has_interp && self.interp_depth >= MAX_INTERP_DEPTH {
+            // Each level recurses through the real lexer; past this, report it
+            // rather than let a hostile file exhaust the stack.
+            while !self.at_string_body_end(delimiter, triple) {
+                self.read_char();
+            }
+            if self.at_closing_delimiter(delimiter, triple) {
+                self.consume_quote_fence(triple);
+            }
+            let span = Span::range(span.start, self.pos());
+            self.diagnostics.push(Diagnostic::error(
+                codes::BAD_STRING_INTERPOLATION,
+                span,
+                format!("string interpolation nested more than {MAX_INTERP_DEPTH} levels deep"),
+            ));
+            return self.illegal("nested interpolation", span);
+        }
 
         if !has_interp {
             // A single-line string stops at the delimiter, EOF, or a raw newline.
@@ -703,6 +810,9 @@ impl Lexer {
 
         // Remember the pending-token count so the queue can roll back cleanly.
         let pending_mark = self.pending_tokens.len();
+        // Brackets inside `{...}` belong to the string; an unbalanced one must
+        // not leave the rest of the file thinking it is inside brackets.
+        let depth_mark = self.bracket_depth;
         let mut literal_buf = std::string::String::new();
 
         // Stop at the closing fence, EOF, or a raw newline for single-line strings.
@@ -741,7 +851,7 @@ impl Lexer {
                         break;
                     }
 
-                    if self.ch == '\0' {
+                    if self.at_eof() {
                         break;
                     }
 
@@ -766,9 +876,14 @@ impl Lexer {
                     }
 
                     // Use the real lexer so `{ ... }` supports the whole language, not a hand-maintained subset.
+                    // A nested interpolated string queues its own parts, so its start
+                    // token goes in front of them rather than after.
                     let inner_span = self.span();
+                    let mark = self.pending_tokens.len();
+                    self.interp_depth += 1;
                     let inner_tok = self.lex_token_at(inner_span);
-                    self.pending_tokens.push_back(inner_tok);
+                    self.interp_depth -= 1;
+                    self.pending_tokens.insert(mark, inner_tok);
                 }
 
                 let end_span = self.span();
@@ -788,6 +903,7 @@ impl Lexer {
             }
         }
 
+        self.bracket_depth = depth_mark;
         if !self.at_closing_delimiter(delimiter, triple) {
             // Discard the queued part tokens and report one error at the opening quote.
             self.pending_tokens.truncate(pending_mark);
@@ -924,9 +1040,6 @@ impl Lexer {
         let mut pos = self.position;
         while pos < self.input.len() {
             let c = self.input[pos];
-            if c == '\0' {
-                return false;
-            }
             if triple {
                 // Closing fence: three delimiter chars in a row.
                 if c == delimiter
@@ -953,7 +1066,7 @@ impl Lexer {
     fn read_char_literal(&mut self, span: Span) -> Token {
         self.read_char();
         let start = self.position;
-        while self.ch != '`' && self.ch != '\0' {
+        while self.ch != '`' && !self.at_eof() {
             self.read_char();
         }
         let literal: String = self.input[start..self.position].iter().collect();
@@ -987,7 +1100,7 @@ impl Lexer {
         let mut pos = self.read_position;
         while pos < self.input.len() {
             let c = self.input[pos];
-            if c == '\n' || c == '\0' {
+            if c == '\n' {
                 return true;
             }
             // A // comment counts as end of line
@@ -1002,31 +1115,51 @@ impl Lexer {
         true // EOF counts as end of line
     }
 
-    /// Measure the indentation level at current position (count spaces/tabs)
-    /// Called at the start of a line, before skipping whitespace
-    fn measure_indentation(&self) -> usize {
-        let mut indent = 0;
-        let mut pos = self.position;
-
-        if self.ch == '\n' {
-            pos = self.read_position;
-        }
-
-        while pos < self.input.len() {
-            match self.input[pos] {
-                ' ' => indent += 1,
-                '\t' => indent += 4, // Treat tab as 4 spaces
-                '\n' => {
-                    // Empty line - reset and continue to next line
-                    indent = 0;
-                    pos += 1;
-                    continue;
+    /// Indentation of the next line that holds code, called at the start of a
+    /// line. Blank lines and lines holding only a comment carry no structure,
+    /// so they are consumed here (their comments still recorded) instead of
+    /// being measured — and consumed once, where re-scanning every following
+    /// blank line from each line start used to make them quadratic.
+    fn measure_indentation(&mut self) -> usize {
+        loop {
+            let mut indent = 0;
+            let mut pos = self.position;
+            while let Some(&c) = self.input.get(pos) {
+                match c {
+                    ' ' => indent += 1,
+                    '\t' => indent += 4, // Treat tab as 4 spaces
+                    // A CRLF line ending is a line ending, not indentation.
+                    '\r' => {}
+                    _ => break,
                 }
-                _ => break,
+                pos += 1;
             }
-            pos += 1;
+            let next = self.input.get(pos).copied();
+            let comment = next == Some('/') && matches!(self.input.get(pos + 1), Some('/' | '*'));
+            if next != Some('\n') && !comment {
+                return indent;
+            }
+            while self.position < pos {
+                self.read_char();
+            }
+            if comment {
+                if self.peek_char() == '/' {
+                    self.skip_line_comment();
+                } else {
+                    self.skip_block_comment();
+                }
+                self.skip_whitespace_except_newline();
+                if self.ch != '\n' && !self.at_eof() {
+                    // Code after a `/* ... */` on the same line: the line is
+                    // indented where the comment started.
+                    return indent;
+                }
+            }
+            if self.at_eof() {
+                return indent;
+            }
+            self.read_char(); // the newline
         }
-        indent
     }
 
     /// Handle indentation changes - emit RBrace tokens for dedents
@@ -1049,11 +1182,36 @@ impl Lexer {
                     literal: "}".into(),
                     span,
                 });
+                // As in brace style, a closed block ends its line. Without this
+                // a line starting with `[` or `(` after a dedent was read as
+                // indexing or calling the block expression just closed.
+                self.pending_tokens.push_back(Token {
+                    token_type: TokenType::Newline,
+                    literal: "\n".into(),
+                    span,
+                });
+            }
+            // Landing between two open levels used to be accepted, silently
+            // attaching the line to the outer block.
+            if self.indent_stack.last().is_some_and(|&top| top != indent_level) {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        codes::ILLEGAL_TOKEN,
+                        span,
+                        "unindent does not match any outer indentation level",
+                    )
+                    .help("indent this line to the same column as the block it belongs to"),
+                );
+                self.indent_stack.push(indent_level);
             }
         }
         // If equal, no action needed
     }
 }
+
+/// Interpolated strings nested inside one another's `{...}` beyond this are
+/// reported rather than lexed.
+const MAX_INTERP_DEPTH: usize = 64;
 
 fn is_ident_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'

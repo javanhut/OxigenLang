@@ -474,7 +474,9 @@ pub unsafe extern "C" fn jit_struct_field_add_const(
     if let Some(inst) = self_val.as_struct_instance() {
         let field_name = vm.current_constant(field_idx as u16);
         if let Some(fname) = field_name.as_string()
-            && let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+            && let Some(&idx) = inst.layout.indices.get(fname.as_ref())
+            // A hidden field is only writable from its struct's methods; the slow path raises the error.
+            && (!inst.layout.slots[idx].2 || vm.hidden_field_access_allowed(inst)) {
                 // SAFETY: single-threaded, nothing else borrows fields. Integer->Integer needs no Drop.
                 unsafe {
                     let slot = inst.fields.ptr.add(idx);
@@ -562,7 +564,8 @@ pub unsafe extern "C" fn jit_struct_field_add_local(
     if let (Some(inst), Some(rhs)) = (self_val.as_struct_instance(), rhs_val.as_integer()) {
         let field_name = vm.current_constant(field_idx as u16);
         if let Some(fname) = field_name.as_string()
-            && let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+            && let Some(&idx) = inst.layout.indices.get(fname.as_ref())
+            && (!inst.layout.slots[idx].2 || vm.hidden_field_access_allowed(inst)) {
                 // SAFETY: same as jit_struct_field_add_const.
                 unsafe {
                     let slot = inst.fields.ptr.add(idx);
@@ -957,15 +960,7 @@ pub unsafe extern "C" fn jit_get_upvalue(vm: *mut VM, idx: u32) {
             closed_int_value = Some(*n);
         }
     }
-    let closure = vm.active_closure();
-    if (idx as usize) < closure.upvalue_int_kinds.len() {
-        if let Some(n) = closed_int_value {
-            closure.upvalue_int_values[idx as usize].set(n);
-            closure.upvalue_int_kinds[idx as usize].set(1);
-        } else {
-            closure.upvalue_int_kinds[idx as usize].set(0);
-        }
-    }
+    arm_upvalue_int_cache(vm.active_closure(), idx as usize, closed_int_value);
     if let Some(c) = vm.jit.counters_ptr_opt() {
         let c = unsafe { &*c };
         c.get_upvalue_calls.set(c.get_upvalue_calls.get() + 1);
@@ -1004,15 +999,67 @@ pub unsafe extern "C" fn jit_set_upvalue(vm: *mut VM, idx: u32) {
             closed_int_value = Some(*n);
         }
     }
-    let closure = vm.active_closure();
-    if (idx as usize) < closure.upvalue_int_kinds.len() {
-        if let Some(n) = closed_int_value {
-            closure.upvalue_int_values[idx as usize].set(n);
-            closure.upvalue_int_kinds[idx as usize].set(1);
-        } else {
-            closure.upvalue_int_kinds[idx as usize].set(0);
+    arm_upvalue_int_cache(vm.active_closure(), idx as usize, closed_int_value);
+}
+
+/// Record upvalue `idx`'s current shape in `closure`'s int cache. A cache
+/// filled at an older write epoch is cleared first: its other entries may be
+/// stale, and restamping it would make them look current.
+fn arm_upvalue_int_cache(closure: &crate::vm::value::ObjClosure, idx: usize, closed_int_value: Option<i64>) {
+    if idx >= closure.upvalue_int_kinds.len() {
+        return;
+    }
+    let epoch = crate::jit::UPVALUE_WRITE_EPOCH.load(std::sync::atomic::Ordering::Relaxed);
+    let values = &closure.upvalue_int_values;
+    if values[0].get() != epoch {
+        for kind in closure.upvalue_int_kinds.iter() {
+            kind.set(0);
+        }
+        values[0].set(epoch);
+    }
+    if let Some(n) = closed_int_value {
+        values[idx + 1].set(n);
+        closure.upvalue_int_kinds[idx].set(1);
+    } else {
+        closure.upvalue_int_kinds[idx].set(0);
+    }
+}
+
+/// Typed-parameter check run by a compiled function's generic entry.
+///
+/// The interpreter checks a callee's annotated parameters in `call_closure`,
+/// but compiled call sites reach the entry directly, and the body is compiled
+/// trusting the annotations (an `<int>` parameter is read as a raw i64). Same
+/// rule and message as the interpreter; the error is reported from the caller.
+pub unsafe extern "C" fn jit_check_param_types(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.sync_stack_from_view();
+    let function = Rc::clone(&vm.active_closure().function);
+    let base = vm.current_slot_offset() + 1;
+    for (i, param) in function.params.iter().enumerate() {
+        let Some(expected_ty) = param.type_ann.as_deref() else {
+            continue;
+        };
+        let val = vm.stack_slot(base + i);
+        if (param.optional || param.has_default) && matches!(val, Value::None) {
+            continue;
+        }
+        if !val.effective_type_is(expected_ty)
+            && !crate::vm::type_matches(expected_ty, val.type_name())
+        {
+            let actual = val.effective_type_name();
+            let e = vm.error_in_jit_caller(
+                &format!(
+                    "type mismatch for parameter '{}': expected {}, got {}",
+                    param.name, expected_ty, actual
+                ),
+                &format!("parameter '{}' requires type {}", param.name, expected_ty),
+            );
+            vm.jit.stash_error(e);
+            return 1;
         }
     }
+    0
 }
 
 pub unsafe extern "C" fn jit_close_upvalue(vm: *mut VM) {
@@ -1245,10 +1292,12 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
         }
     };
 
-    // Cache hit: cached def matches current def.
+    // Cache hit: cached def matches current def. A null raw identity means
+    // `invalidate_method_caches` emptied the entry; the keepers only linger.
     if let (Some(cached_def), Some(cached_closure)) =
         (cache.struct_def.as_ref(), cache.closure.as_ref())
-        && Rc::ptr_eq(cached_def, &struct_def) {
+        && Rc::ptr_eq(cached_def, &struct_def)
+        && !cache.struct_def_raw.is_null() {
             let closure = Rc::clone(cached_closure);
             let owning_mg = struct_def.module_globals.get();
             let before_depth = vm.frames_len();

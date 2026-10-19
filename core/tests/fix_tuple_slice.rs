@@ -73,23 +73,20 @@ fn tuple_slice_open_both() {
 
 #[test]
 fn tuple_slice_negative_start() {
-    // The VM converts the bound with `n as usize` BEFORE clamping, so a
-    // negative start wraps to a huge index and yields an empty tuple (it does
-    // NOT count from the end).
-    assert_parity("(1,2,3,4)[-2:]", "()");
+    // A negative start counts from the end, as it does for arrays.
+    assert_parity("(1,2,3,4)[-2:]", "(3, 4)");
 }
 
 #[test]
 fn tuple_slice_negative_end() {
-    // A negative end wraps to a huge index, clamps to len, leaving the whole
-    // tuple from `start` (here start defaults to 0).
-    assert_parity("(1,2,3,4)[:-1]", "(1, 2, 3, 4)");
+    // A negative end counts from the end, as it does for arrays.
+    assert_parity("(1,2,3,4)[:-1]", "(1, 2, 3)");
 }
 
 #[test]
 fn tuple_slice_negative_both() {
-    // Negative start wraps huge; `s > e` => empty.
-    assert_parity("(1,2,3,4,5)[-3:-1]", "()");
+    // Both bounds count from the end.
+    assert_parity("(1,2,3,4,5)[-3:-1]", "(3, 4)");
 }
 
 #[test]

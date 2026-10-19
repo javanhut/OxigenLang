@@ -9,8 +9,9 @@ on:
     tags:
       - "v*"
 
+# Read-only by default; only the job that publishes the release can write.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -55,9 +56,22 @@ jobs:
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
           echo "underscored=${tag//./_}" >> "$GITHUB_OUTPUT"   # v0.1.4 -> v0_1_4
 
+  # A release is only cut from a commit that passes the test suite.
+  test:
+    name: Test suite
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo build -p oxigen
+      - run: ./target/debug/oxigen test tests/
+
   build:
     name: Build ${{ matrix.name }}
-    needs: verify
+    needs: [verify, test]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -119,6 +133,8 @@ jobs:
     name: GitHub release
     needs: [verify, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:

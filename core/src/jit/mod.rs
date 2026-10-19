@@ -19,6 +19,25 @@ use crate::vm::value::{Function, ObjClosure};
 
 pub mod scan;
 
+/// Bumped on every write to a closed upvalue cell.
+///
+/// Closures sharing a captured variable share its cell, but each keeps its
+/// own int cache of the cell's value (`ObjClosure::upvalue_int_values`), so a
+/// write through one closure — or by the interpreter — cannot reach the
+/// others' caches. Each cache instead records the epoch it was filled at in
+/// `upvalue_int_values[0]`, and both the JIT's inline reads and the helpers
+/// treat it as empty once the epoch has moved. Process-wide and relaxed:
+/// a write on another thread only costs a spurious miss.
+pub static UPVALUE_WRITE_EPOCH: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+/// Invalidate every closure's upvalue int cache. Called on each write to a
+/// closed upvalue cell.
+#[inline]
+pub fn note_upvalue_write() {
+    UPVALUE_WRITE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[cfg(feature = "jit")]
 mod engine;
 #[cfg(feature = "jit")]
@@ -172,6 +191,21 @@ impl JitEngine {
     #[cfg(not(feature = "jit"))]
     #[inline]
     pub(crate) fn bump_global_version(&mut self, _name: &str) {}
+
+    /// Empty every method-call and method-lookup IC. An `includes` block
+    /// replaces methods in the struct def in place, so a cache keyed on the
+    /// def's address would keep calling the old method. No-op before first
+    /// compilation and in non-JIT builds.
+    #[cfg(feature = "jit")]
+    pub(crate) fn invalidate_method_caches(&mut self) {
+        if let Some(inner) = self.inner.as_mut() {
+            inner.invalidate_method_caches();
+        }
+    }
+
+    #[cfg(not(feature = "jit"))]
+    #[inline]
+    pub(crate) fn invalidate_method_caches(&mut self) {}
 
     /// Stable per-name version cell pointer for the GetGlobal IC miss
     /// helper. Only callable from compiled code, so the engine exists.

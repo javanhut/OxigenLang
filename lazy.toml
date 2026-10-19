@@ -7,7 +7,9 @@
 default = "build"
 
 [variables]
-prefix = "$([ -w /usr/local/bin ] && echo /usr/local || echo $$HOME/.local)"
+# /usr/local when writable (root, sudo), else ~/.local. Plain `$`: imlazy hands
+# the text to the shell as is, so make's `$$` became the shell's PID.
+prefix = "$([ -w /usr/local/bin ] && echo /usr/local || echo $HOME/.local)"
 bindir = "{{prefix}}/bin"
 libdir = "{{prefix}}/lib/oxigen/stdlib"
 nvim_config = ""
@@ -33,12 +35,12 @@ run = ["cd lsp-go && go build -o ../target/release/oxigen-lsp ."]
 escalate = true
 run = [
   "echo \"Installing oxigen to {{bindir}}...\"",
-  "install -d {{bindir}}",
-  "install -m 755 target/release/oxigen {{bindir}}/oxigen",
+  "install -d \"{{bindir}}\"",
+  "install -m 755 target/release/oxigen \"{{bindir}}/oxigen\"",
   "echo \"Installing stdlib to {{libdir}}...\"",
-  "rm -rf {{libdir}}",
-  "install -d {{libdir}}",
-  "install -m 644 stdlib/*.oxi {{libdir}}/",
+  "rm -rf \"{{libdir}}\"",
+  "install -d \"{{libdir}}\"",
+  "install -m 644 stdlib/*.oxi \"{{libdir}}/\"",
   "echo \"\"",
   "echo \"Oxigen installed successfully.\"",
   "echo \" Binary: {{bindir}}/oxigen\"",
@@ -50,12 +52,12 @@ dep = ["build", "install-lsp"]
 escalate = true
 run = [
   "echo \"Installing oxigen with JIT enabled to {{bindir}}...\"",
-  "install -d {{bindir}}",
-  "install -m 755 target/release/oxigen {{bindir}}/oxigen",
+  "install -d \"{{bindir}}\"",
+  "install -m 755 target/release/oxigen \"{{bindir}}/oxigen\"",
   "echo \"Installing stdlib to {{libdir}}...\"",
-  "rm -rf {{libdir}}",
-  "install -d {{libdir}}",
-  "install -m 644 stdlib/*.oxi {{libdir}}/",
+  "rm -rf \"{{libdir}}\"",
+  "install -d \"{{libdir}}\"",
+  "install -m 644 stdlib/*.oxi \"{{libdir}}/\"",
   "echo \"\"",
   "echo \"Oxigen with JIT installed successfully.\"",
   "echo \" Binary: {{bindir}}/oxigen\"",
@@ -67,12 +69,12 @@ dep = ["build-with-jit"]
 escalate = true
 run = [
   "echo \"Installing oxigen (VM-only, no JIT) to {{bindir}}...\"",
-  "install -d {{bindir}}",
-  "install -m 755 target/release/oxigen {{bindir}}/oxigen",
+  "install -d \"{{bindir}}\"",
+  "install -m 755 target/release/oxigen \"{{bindir}}/oxigen\"",
   "echo \"Installing stdlib to {{libdir}}...\"",
-  "rm -rf {{libdir}}",
-  "install -d {{libdir}}",
-  "install -m 644 stdlib/*.oxi {{libdir}}/",
+  "rm -rf \"{{libdir}}\"",
+  "install -d \"{{libdir}}\"",
+  "install -m 644 stdlib/*.oxi \"{{libdir}}/\"",
   "echo \"\"",
   "echo \"Oxigen (VM-only) installed successfully.\"",
   "echo \" Binary: {{bindir}}/oxigen\"",
@@ -84,12 +86,12 @@ dep = ["build-no-jit"]
 escalate = true
 run = [
   "echo \"Installing oxigen-lsp to {{bindir}}...\"",
-  "install -d {{bindir}}",
-  "install -m 755 target/release/oxigen-lsp {{bindir}}/oxigen-lsp",
+  "install -d \"{{bindir}}\"",
+  "install -m 755 target/release/oxigen-lsp \"{{bindir}}/oxigen-lsp\"",
   "echo \"Installing stdlib to {{libdir}} (the LSP reads it for module completions)...\"",
-  "rm -rf {{libdir}}",
-  "install -d {{libdir}}",
-  "install -m 644 stdlib/*.oxi {{libdir}}/",
+  "rm -rf \"{{libdir}}\"",
+  "install -d \"{{libdir}}\"",
+  "install -m 644 stdlib/*.oxi \"{{libdir}}/\"",
   "echo \"oxigen-lsp installed successfully.\"",
   "echo \" Binary: {{bindir}}/oxigen-lsp\"",
   "echo \" Stdlib: {{libdir}}/\"",
@@ -99,7 +101,7 @@ dep = ["build-lsp"]
 [commands.install-lsp-nvcrow]
 desc = "One-shot setup for a Neovim / NvChad (\"nvcrow\") user: installs the oxigen-lsp binary (via install-lsp) AND drops the ftdetect, syntax, and lsp config files into the invoking user's Neovim config. Safe to run with sudo — the editor files go to the REAL user's ~/.config/nvim (via $SUDO_USER) and are chowned back to them, never left root-owned. Override the config dir with NVIM_CONFIG=."
 run = [
-  "user=\"$${SUDO_USER:-$$(id -un)}\"; home=\"$$(eval echo ~$$user)\"; cfg=\"{{nvim_config}}\"; [ -z \"$$cfg\" ] && cfg=\"$$home/.config/nvim\"; echo \"Installing Neovim/NvChad editor files for '$$user' to $$cfg...\"; install -d \"$$cfg/ftdetect\" \"$$cfg/syntax\" \"$$cfg/lsp\"; install -m 644 editors/neovim/ftdetect/oxigen.lua \"$$cfg/ftdetect/oxigen.lua\"; install -m 644 editors/neovim/syntax/oxigen.lua \"$$cfg/syntax/oxigen.lua\"; install -m 644 editors/neovim/lsp/oxigen_lsp.lua \"$$cfg/lsp/oxigen_lsp.lua\"; if [ -n \"$$SUDO_USER\" ]; then chown \"$$user\" \"$$cfg/ftdetect\" \"$$cfg/syntax\" \"$$cfg/lsp\" \"$$cfg/ftdetect/oxigen.lua\" \"$$cfg/syntax/oxigen.lua\" \"$$cfg/lsp/oxigen_lsp.lua\" 2>/dev/null || true; fi; echo \"\"; echo \"Oxigen LSP + Neovim files installed.\"; echo \" Binary: {{bindir}}/oxigen-lsp\"; echo \" ftdetect: $$cfg/ftdetect/oxigen.lua\"; echo \" syntax: $$cfg/syntax/oxigen.lua\"; echo \" lsp: $$cfg/lsp/oxigen_lsp.lua\"; echo \"\"; echo \"Enable the server in your NvChad config (lua/configs/lspconfig.lua):\"; echo \" vim.lsp.enable(\\\"oxigen_lsp\\\")\"; echo \"(or add \\\"oxigen_lsp\\\" to your servers list). Then restart Neovim or run\"; echo \":LspRestart and confirm with :LspInfo / :checkhealth lsp.\"",
+  "user=\"${SUDO_USER:-$(id -un)}\"; home=\"$(eval echo ~$user)\"; cfg=\"{{nvim_config}}\"; [ -z \"$cfg\" ] && cfg=\"$home/.config/nvim\"; echo \"Installing Neovim/NvChad editor files for '$user' to $cfg...\"; install -d \"$cfg/ftdetect\" \"$cfg/syntax\" \"$cfg/lsp\"; install -m 644 editors/neovim/ftdetect/oxigen.lua \"$cfg/ftdetect/oxigen.lua\"; install -m 644 editors/neovim/syntax/oxigen.lua \"$cfg/syntax/oxigen.lua\"; install -m 644 editors/neovim/lsp/oxigen_lsp.lua \"$cfg/lsp/oxigen_lsp.lua\"; if [ -n \"$SUDO_USER\" ]; then chown \"$user\" \"$cfg/ftdetect\" \"$cfg/syntax\" \"$cfg/lsp\" \"$cfg/ftdetect/oxigen.lua\" \"$cfg/syntax/oxigen.lua\" \"$cfg/lsp/oxigen_lsp.lua\" 2>/dev/null || true; fi; echo \"\"; echo \"Oxigen LSP + Neovim files installed.\"; echo \" Binary: {{bindir}}/oxigen-lsp\"; echo \" ftdetect: $cfg/ftdetect/oxigen.lua\"; echo \" syntax: $cfg/syntax/oxigen.lua\"; echo \" lsp: $cfg/lsp/oxigen_lsp.lua\"; echo \"\"; echo \"Enable the server in your NvChad config (lua/configs/lspconfig.lua):\"; echo \" vim.lsp.enable(\\\"oxigen_lsp\\\")\"; echo \"(or add \\\"oxigen_lsp\\\" to your servers list). Then restart Neovim or run\"; echo \":LspRestart and confirm with :LspInfo / :checkhealth lsp.\"",
 ]
 dep = ["install-lsp"]
 
@@ -107,11 +109,14 @@ dep = ["install-lsp"]
 dep = ["install", "install-lsp"]
 
 [commands.uninstall]
+# Escalated like the installs, so {{prefix}} resolves to the directory they
+# installed into.
+escalate = true
 run = [
   "echo \"Uninstalling oxigen...\"",
-  "rm -f {{bindir}}/oxigen",
-  "rm -f {{bindir}}/oxigen-lsp",
-  "rm -rf {{prefix}}/lib/oxigen",
+  "rm -f \"{{bindir}}/oxigen\"",
+  "rm -f \"{{bindir}}/oxigen-lsp\"",
+  "rm -rf \"{{prefix}}/lib/oxigen\"",
   "echo \"Oxigen uninstalled.\"",
 ]
 

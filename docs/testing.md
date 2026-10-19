@@ -78,6 +78,17 @@ test result: FAILED. 1 passed; 1 failed
 `oxigen test` exits with a non-zero status if any test fails, so it works in CI.
 Color is suppressed when stdout is not a terminal or when `NO_COLOR` is set.
 
+A few things count as failures so a broken suite can't pass by accident:
+
+- **Calling `os.exit()`** in a test, or at a test file's top level, fails that
+  test instead of ending the run.
+- **A `<test>` block inside `main { }` or a function** never runs, so it is
+  reported as a failure telling you to move it to the top level.
+- **A test file with no tests whose top level fails** (say `x := 1 / 0`) is
+  reported as a failing `<top level>` entry.
+
+Tests can use `diverge`/`converge`: tasks run against the test's own program.
+
 ## Tests and normal runs
 
 `<test>` blocks only execute under `oxigen test`. Running a file the normal way

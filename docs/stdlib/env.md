@@ -21,8 +21,9 @@ happens to be populated from a file. For actual environment variables use
 
 ### `discover_dot_file(filename?)`
 
-Search the **current working directory** for a file named `.env`, read it, and
-load every `KEY=VALUE` line into [`env_map`](#env_map).
+Load every `KEY=VALUE` line of `filename` into [`env_map`](#env_map) — or, with
+no argument, of the file named `.env` in the **current working directory**.
+Nothing is printed: the file holds secrets.
 
 ```oxi
 introduce env
@@ -38,23 +39,24 @@ API_KEY=abc123
 DEBUG=true
 ```
 
-If no `.env` is found in the current directory, it fails with
-`No environment file was found file.`
+```oxi
+env.discover_dot_file("config/prod.env")
+```
 
-> **The `filename` argument does not work.** Passing one prints the file's
-> contents and then raises a type error instead of loading it. Call
-> `discover_dot_file()` with no arguments, and `os.chdir` first if the file
-> lives elsewhere.
+If the file is not there (or, with no argument, no `.env` is in the current
+directory), it fails with `No environment file was found file.`
 
-**Parsing is deliberately simple, and it shows:**
+**Parsing is deliberately simple:**
 
 | Input line | Stored as |
 |------------|-----------|
 | `API_KEY=abc123` | `API_KEY` → `abc123` |
 | `QUOTED="has spaces"` | `QUOTED` → `"has spaces"` — quotes are **kept** |
-| `EQ=a=b` | `EQ` → `a` — everything after the second `=` is dropped |
-| `# comment` | ignored (no `=`, so no key) |
+| `EQ=a=b` | `EQ` → `a=b` — only the first `=` separates key from value |
+| `# comment` | ignored |
 | blank line | ignored |
+
+Windows line endings (`\r\n`) are handled.
 
 Strip quotes yourself if your file uses them:
 

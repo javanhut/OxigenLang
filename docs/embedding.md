@@ -86,7 +86,7 @@ vm.restrict(&[Capability::FileSystem]);   // files, but nothing else
 | Capability | What it allows |
 |---|---|
 | `FileSystem` | Reading and writing files and directories (`io`, most of `os`) |
-| `Network` | Sockets and HTTP (`net`, `api`) |
+| `Network` | Sockets and HTTP (`net`, `api`); `net.download`, `net.upload` and `net.send_file` touch local files, so they need `FileSystem` too |
 | `Process` | Running programs, environment variables, the working directory, exiting |
 | `Stdin` | Reading from standard input, which blocks until the user types |
 | `Threads` | `diverge`/`converge` |
@@ -135,8 +135,12 @@ A `VM` belongs to the thread that made it: its values are reference counted
 without atomics, so it cannot be sent to another thread. Use one VM per
 thread. The interrupt handle is the exception and can be sent anywhere.
 
-`diverge`/`converge` run tasks on a worker pool shared by the whole process,
-built from the program passed to `oxigen_core::concurrent::set_src`. That is
-one program per process, which suits the `oxigen` command. A host running
-several scripts should leave `Threads` out of their capabilities. Host natives
-and host values are not available inside spawned tasks.
+`diverge`/`converge` run tasks on a worker pool shared by the whole process.
+Each task runs on a fresh VM built from the declarations of the program that
+spawned it, so tell the pool which program that is before running it:
+`oxigen_core::concurrent::register_program(&function, &program, source, file,
+false)` (pass `true` to keep the previously registered program's declarations
+too, as the REPL does line by line). The last program registered is the one
+new tasks run against, process-wide, so register and run one program at a
+time; functions from imported modules find their module on their own. `set_src` still works for a host with one program per process. Host
+natives and host values are not available inside spawned tasks.
