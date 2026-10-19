@@ -910,7 +910,7 @@ fn builtin_sort(args: &[Value]) -> Value {
         ValueRepr::Array(arr) => {
             let mut sorted = arr.borrow().clone();
             sorted.sort_by(sort_order);
-            Value::Array(Rc::new(RefCell::new(sorted.into())))
+            Value::Array(Rc::new(RefCell::new(sorted)))
         }
         _ => Value::Error(rc_str("__sort() requires an array")),
     }

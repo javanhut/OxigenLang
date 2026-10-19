@@ -27,7 +27,10 @@ fn run_on(mut vm: VM, source: &str) -> Result<String, String> {
         .map_err(|e| e.message)
 }
 
-fn backends() -> [(&'static str, fn() -> VM); 3] {
+/// A backend's name and constructor.
+type Backend = (&'static str, fn() -> VM);
+
+fn backends() -> [Backend; 3] {
     [
         ("interpreter", VM::new_interpreter),
         ("tiered", VM::new_tiered),

@@ -419,8 +419,8 @@ impl Drop for ValueVec {
     }
 }
 
-/// How many container drops are on the native stack right now.
 thread_local! {
+    /// How many container drops are on the native stack right now.
     static DROP_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 

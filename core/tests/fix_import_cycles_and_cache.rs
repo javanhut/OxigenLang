@@ -55,7 +55,10 @@ fn run_main(dir: &Path, main_src: &str, make: fn() -> VM) -> Result<String, Stri
         .map_err(|e| e.message)
 }
 
-const BACKENDS: [(&str, fn() -> VM); 2] = [
+/// A backend's name and constructor.
+type Backend = (&'static str, fn() -> VM);
+
+const BACKENDS: [Backend; 2] = [
     ("interpreter", VM::new_interpreter),
     ("eager_jit", VM::new_eager_jit),
 ];
