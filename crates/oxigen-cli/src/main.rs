@@ -29,41 +29,34 @@ fn read_source(file_path: &str) -> String {
     }
 }
 
-fn is_header_line(line: &str, allow_shebang: bool) -> bool {
-    if allow_shebang && line.starts_with("#!") {
-        return true;
-    }
-
-    line == "#[indent]" || (line.starts_with("#[location=") && line.ends_with(']'))
-}
-
-fn header_prefix(source: &str) -> String {
-    let mut header_lines = Vec::new();
-
-    for (idx, line) in source.lines().enumerate() {
-        if is_header_line(line, idx == 0) {
-            header_lines.push(line);
-        } else {
-            break;
-        }
-    }
-
-    if header_lines.is_empty() {
-        String::new()
-    } else {
-        format!("{}\n", header_lines.join("\n"))
-    }
-}
-
-fn restore_header(source: &str, body: String) -> String {
-    let header = header_prefix(source);
-
-    if header.is_empty() {
+/// Puts the shebang and directives the lexer stripped back in front of the
+/// formatted body. Asking the lexer which lines those are keeps `fmt` from
+/// disagreeing with it: a `#[location=...]` with trailing space used to be
+/// dropped, and an `#[indent]` after a blank line removed while the body was
+/// reprinted in brace style.
+fn restore_header(directives: &[String], body: String) -> String {
+    if directives.is_empty() {
         body
-    } else if body.is_empty() {
-        header
     } else {
-        format!("{header}{body}")
+        format!("{}\n{body}", directives.join("\n"))
+    }
+}
+
+/// Stack for the thread that parses, compiles or runs user code, so deep but
+/// legal nesting is handled rather than overflowing the main thread's 8 MB.
+const STACK_SIZE: usize = 256 << 20; // 256 MB
+
+fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let handle = std::thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(f)
+        .expect("failed to spawn execution thread");
+    match handle.join() {
+        Ok(value) => value,
+        // The panic hook has already printed the message. Re-panicking here
+        // exited 101, outside the documented 0/1/2 contract: an internal
+        // error running the code is still "the code failed".
+        Err(_) => std::process::exit(1),
     }
 }
 
@@ -84,7 +77,6 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
         .expect("Could not resolve file path");
 
     // Large stack so all 16384 JIT frames fit natively and the V7 guard is the graceful limit.
-    const STACK_SIZE: usize = 256 << 20; // 256 MB
     let run = {
         let script_args: Vec<String> = script_args.to_vec();
         move || {
@@ -149,12 +141,7 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
             oxigen_core::concurrent::drain();
         }
     };
-    std::thread::Builder::new()
-        .stack_size(STACK_SIZE)
-        .spawn(run)
-        .expect("failed to spawn execution thread")
-        .join()
-        .expect("execution thread panicked");
+    on_big_stack(run);
 }
 
 // ── Terminal colors for `oxigen test` output ──
@@ -199,7 +186,13 @@ fn discover_files(dir: &std::path::Path, suffix: &str, out: &mut Vec<PathBuf>) {
         Err(_) => return,
     };
 
-    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    // Symlinks are skipped: following them ran a `sub/up -> ..` loop's tests
+    // dozens of times, and let `fmt` rewrite files outside the tree it was given.
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| !t.is_symlink()))
+        .map(|e| e.path())
+        .collect();
     paths.sort();
 
     for path in paths {
@@ -329,8 +322,7 @@ fn run_tests_command(paths: &[String]) {
             } else if p.is_file() {
                 files.push(p);
             } else {
-                eprintln!("No such file or directory: {}", arg);
-                std::process::exit(1);
+                usage_error(&format!("no such file or directory: {arg}"), None);
             }
         }
     }
@@ -383,6 +375,9 @@ fn run_tests_command(paths: &[String]) {
 }
 
 fn check_file(file_path: &str) {
+    if !PathBuf::from(file_path).is_file() {
+        usage_error(&format!("no such file: `{file_path}`"), None);
+    }
     let contents = read_source(file_path);
 
     let lexer = Lexer::new(&contents);
@@ -446,34 +441,43 @@ fn fmt_files(args: &[String], check: bool) {
     }
 
     let mut changed = 0;
+    let mut failed = 0;
     for path in &paths {
         let path = path.display().to_string();
-        let path = &path;
-        let contents = match fs::read_to_string(path) {
+        let contents = match fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Error reading {}: {}", path, e);
-                std::process::exit(1);
+                failed += 1;
+                continue;
             }
         };
 
-        let lexer = Lexer::new(&contents);
-        let mut parser = Parser::new(lexer, &contents);
-        let program = parser.parse_program();
-
-        let errors = parser.errors();
-        if !errors.is_empty() {
-            eprintln!("Syntax errors in {}:", path);
-            eprintln!("{}", parser.format_errors());
-            std::process::exit(1);
-        }
-
-        // restore_header puts #[indent] back, so the body must be emitted in indent style.
-        let indent_style = header_prefix(&contents)
-            .lines()
-            .any(|l| l.trim() == "#[indent]");
-        let body = Formatter::format_source(&program, parser.comments(), indent_style);
-        let formatted = restore_header(&contents, body);
+        // A file that does not parse is reported and left alone; the rest of
+        // the batch is still formatted rather than stopping half-way.
+        let formatted = {
+            let contents = contents.clone();
+            on_big_stack(move || {
+                let lexer = Lexer::new(&contents);
+                let mut parser = Parser::new(lexer, &contents);
+                let program = parser.parse_program();
+                if !parser.errors().is_empty() {
+                    return Err(parser.format_errors());
+                }
+                let (directives, indent_style) = Lexer::header_directives(&contents);
+                let body = Formatter::format_source(&program, parser.comments(), indent_style);
+                Ok(restore_header(&directives, body))
+            })
+        };
+        let formatted = match formatted {
+            Ok(f) => f,
+            Err(errors) => {
+                eprintln!("Syntax errors in {}:", path);
+                eprintln!("{errors}");
+                failed += 1;
+                continue;
+            }
+        };
 
         if formatted != contents {
             changed += 1;
@@ -481,12 +485,18 @@ fn fmt_files(args: &[String], check: bool) {
                 println!("Would reformat {}", path);
                 continue;
             }
-            if let Err(e) = fs::write(path, &formatted) {
+            if let Err(e) = write_atomically(&path, &formatted) {
                 eprintln!("Error writing {}: {}", path, e);
-                std::process::exit(1);
+                failed += 1;
+                continue;
             }
             println!("Formatted {}", path);
         }
+    }
+
+    if failed > 0 {
+        eprintln!("\n{failed} of {} file(s) could not be formatted.", paths.len());
+        std::process::exit(1);
     }
 
     // Say how many files were considered: silence after walking a tree is
@@ -503,6 +513,26 @@ fn fmt_files(args: &[String], check: bool) {
         );
         std::process::exit(1);
     }
+}
+
+/// Replaces `path` with `contents` via a temporary file and a rename, so an
+/// interrupted write cannot leave a half-written source file behind.
+fn write_atomically(path: &str, contents: &str) -> std::io::Result<()> {
+    let target = std::path::Path::new(path);
+    let tmp = target.with_file_name(format!(
+        ".{}.oxigen-fmt.tmp",
+        target.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+    ));
+    fs::write(&tmp, contents)?;
+    let result = fs::metadata(target)
+        .and_then(|meta| fs::set_permissions(&tmp, meta.permissions()))
+        .and_then(|()| fs::rename(&tmp, target));
+    if result.is_err() {
+        // Best-effort cleanup: the write error above is what gets reported,
+        // and a stray temp file is harmless next to it.
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Exit code for a malformed command line, kept distinct from `1` (which means
@@ -568,7 +598,17 @@ fn reject_leading_arg(arg: &str) -> ! {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    // `env::args` panics on an argument that is not UTF-8.
+    let args: Vec<String> = env::args_os()
+        .map(|arg| {
+            arg.into_string().unwrap_or_else(|bad| {
+                usage_error(
+                    &format!("argument is not valid UTF-8: {}", bad.to_string_lossy()),
+                    None,
+                )
+            })
+        })
+        .collect();
 
     // Recognised only before the subcommand or script path, or a script's own --no-jit is swallowed.
     let mut no_jit = false;
@@ -601,21 +641,29 @@ fn main() {
         Some("--version" | "-v") => print_version(),
         Some("--help" | "-h") => print_usage(),
         Some("check") => match rest.get(1) {
-            Some(path) => check_file(path),
+            Some(path) => {
+                let path = path.clone();
+                on_big_stack(move || check_file(&path));
+            }
             None => usage_error("`check` needs a file", Some("oxigen check <file.oxi>")),
         },
         Some("fmt") => {
-            let check = tail.first().is_some_and(|a| a == "--check");
-            let paths = if check { &tail[1..] } else { tail };
+            // Accepted anywhere after `fmt`, not only straight after it.
+            let check = tail.iter().any(|a| a == "--check");
+            let paths: Vec<String> = tail.iter().filter(|a| *a != "--check").cloned().collect();
             if paths.is_empty() {
                 usage_error(
                     "`fmt` needs a file or directory",
                     Some("oxigen fmt <file.oxi|dir>... (add --check to report instead of write)"),
                 );
             }
-            fmt_files(paths, check);
+            fmt_files(&paths, check);
         }
-        Some("test") => run_tests_command(tail),
+        Some("test") if tail.iter().any(|a| a == "--help" || a == "-h") => print_usage(),
+        Some("test") => {
+            let paths = tail.to_vec();
+            on_big_stack(move || run_tests_command(&paths));
+        }
         Some("explain") => match rest.get(1) {
             Some(code) => match render::explain(code) {
                 Some(text) => println!("{text}"),
@@ -627,11 +675,19 @@ fn main() {
             None => usage_error("`explain` needs an error code", Some("oxigen explain E0003")),
         },
         Some(path) if path.ends_with(".oxi") => {
-            if !PathBuf::from(path).exists() {
+            let p = PathBuf::from(path);
+            if !p.exists() {
                 usage_error(&format!("no such file: `{path}`"), None);
+            }
+            if p.is_dir() {
+                usage_error(&format!("`{path}` is a directory, not a script"), None);
             }
             run_file_vm(path, tail, jit_mode);
         }
+        Some(option) if option.starts_with('-') => usage_error(
+            &format!("unknown option `{option}`"),
+            Some("options are --jit, --no-jit, --version and --help, and come before the file"),
+        ),
         Some(other) => reject_leading_arg(other),
     }
 }

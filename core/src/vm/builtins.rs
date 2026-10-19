@@ -1,8 +1,9 @@
 use crate::vm::value::{ErrorValueData, Value, ValueRepr, rc_str};
+use crate::vm::vector;
+use std::collections::HashMap;
 use base64::Engine as _;
 use sha2::Digest as _;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 /// Register all built-in functions into a globals map.
@@ -38,6 +39,15 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("uint".to_string(), Value::Builtin(builtin_uint));
     globals.insert("chr".to_string(), Value::Builtin(builtin_chr));
     globals.insert("ord".to_string(), Value::Builtin(builtin_ord));
+    globals.insert("vec2".to_string(), Value::Builtin(vector::builtin_vec2));
+    globals.insert("vec3".to_string(), Value::Builtin(vector::builtin_vec3));
+    globals.insert("vec4".to_string(), Value::Builtin(vector::builtin_vec4));
+    globals.insert("__vec_dot".to_string(), Value::Builtin(vector::builtin_vec_dot));
+    globals.insert("__vec_cross".to_string(), Value::Builtin(vector::builtin_vec_cross));
+    globals.insert("__vec_length".to_string(), Value::Builtin(vector::builtin_vec_length));
+    globals.insert("__vec_distance".to_string(), Value::Builtin(vector::builtin_vec_distance));
+    globals.insert("__vec_normalize".to_string(), Value::Builtin(vector::builtin_vec_normalize));
+    globals.insert("__vec_lerp".to_string(), Value::Builtin(vector::builtin_vec_lerp));
 
     // Internal builtins (used by stdlib wrappers)
     globals.insert("__split".to_string(), Value::Builtin(builtin_split));
@@ -55,6 +65,9 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
         "__contains_str".to_string(),
         Value::Builtin(builtin_contains_str),
     );
+    globals.insert("__str_index_of".to_string(), Value::Builtin(builtin_str_index_of));
+    globals.insert("__str_count".to_string(), Value::Builtin(builtin_str_count));
+    globals.insert("__byte_len".to_string(), Value::Builtin(builtin_byte_len));
     globals.insert("__strip".to_string(), Value::Builtin(builtin_strip));
     globals.insert(
         "__strip_left".to_string(),
@@ -146,6 +159,7 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("__remove".to_string(), Value::Builtin(builtin_remove_file));
     globals.insert("__is_dir".to_string(), Value::Builtin(builtin_is_dir));
     globals.insert("__is_file".to_string(), Value::Builtin(builtin_is_file));
+    globals.insert("__file_size".to_string(), Value::Builtin(builtin_file_size));
 
     // Time builtins
     globals.insert("__time_now".to_string(), Value::Builtin(builtin_time_now));
@@ -230,6 +244,10 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("__net_tcp_listen".to_string(), Value::Builtin(builtin_net_tcp_listen));
     globals.insert("__net_tcp_accept".to_string(), Value::Builtin(builtin_net_tcp_accept));
     globals.insert("__net_send".to_string(), Value::Builtin(builtin_net_send));
+    globals.insert(
+        "__net_send_file".to_string(),
+        Value::Builtin(builtin_net_send_file),
+    );
     globals.insert("__net_receive".to_string(), Value::Builtin(builtin_net_receive));
     globals.insert(
         "__net_set_timeout".to_string(),
@@ -264,7 +282,8 @@ fn builtin_len(args: &[Value]) -> Value {
         return Value::Error(rc_str("len() takes exactly 1 argument"));
     }
     match args[0].repr() {
-        ValueRepr::String(s) => Value::Integer(s.len() as i64),
+        // Characters, like `s[i]`, slices and `each`; `__byte_len` gives UTF-8 bytes.
+        ValueRepr::String(s) => Value::Integer(s.chars().count() as i64),
         ValueRepr::Array(a) => Value::Integer(a.borrow().len() as i64),
         ValueRepr::Tuple(t) => Value::Integer(t.len() as i64),
         ValueRepr::Map(m) => Value::Integer(m.borrow().len() as i64),
@@ -317,9 +336,9 @@ fn builtin_rest(args: &[Value]) -> Value {
         ValueRepr::Array(arr) => {
             let borrowed = arr.borrow();
             if borrowed.is_empty() {
-                Value::Array(Rc::new(RefCell::new(Vec::new())))
+                Value::Array(Rc::new(RefCell::new(Vec::new().into())))
             } else {
-                Value::Array(Rc::new(RefCell::new(borrowed[1..].to_vec())))
+                Value::Array(Rc::new(RefCell::new(borrowed[1..].to_vec().into())))
             }
         }
         _ => Value::Error(rc_str("rest() requires an array")),
@@ -393,6 +412,9 @@ fn builtin_float(args: &[Value]) -> Value {
     }
 }
 
+/// The most elements `range()` builds as an array (about 1.6 GB of values).
+const RANGE_MAX_LEN: i128 = 100_000_000;
+
 fn builtin_range(args: &[Value]) -> Value {
     let mut ints = Vec::with_capacity(args.len());
     for arg in args {
@@ -411,8 +433,22 @@ fn builtin_range(args: &[Value]) -> Value {
     if step == 0 {
         return Value::Error(rc_str("range() step must not be zero"));
     }
+    // The whole range is built up front, so a huge one would try to allocate
+    // gigabytes and abort the host. `each i in range(...)` loops never get
+    // here: the compiler lowers them to a counter.
+    let span = if step > 0 {
+        i128::from(end) - i128::from(start)
+    } else {
+        i128::from(start) - i128::from(end)
+    };
+    let count = if span <= 0 { 0 } else { (span - 1) / i128::from(step).abs() + 1 };
+    if count > RANGE_MAX_LEN {
+        return Value::Error(rc_str(format!(
+            "range() would build {count} elements, more than the {RANGE_MAX_LEN} it allows; loop with `each i in range(...)` instead"
+        )));
+    }
 
-    let mut arr = Vec::new();
+    let mut arr = Vec::with_capacity(count as usize);
     let mut i = start;
     while if step > 0 { i < end } else { i > end } {
         arr.push(Value::Integer(i));
@@ -422,7 +458,7 @@ fn builtin_range(args: &[Value]) -> Value {
             None => break,
         }
     }
-    Value::Array(Rc::new(RefCell::new(arr)))
+    Value::Array(Rc::new(RefCell::new(arr.into())))
 }
 
 fn builtin_chars(args: &[Value]) -> Value {
@@ -432,7 +468,7 @@ fn builtin_chars(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::String(s) => {
             let arr: Vec<Value> = s.chars().map(Value::Char).collect();
-            Value::Array(Rc::new(RefCell::new(arr)))
+            Value::Array(Rc::new(RefCell::new(arr.into())))
         }
         _ => Value::Error(rc_str("chars() requires a string")),
     }
@@ -480,7 +516,7 @@ fn builtin_keys(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Map(m) => {
             let keys: Vec<Value> = m.borrow().iter().map(|(k, _)| k.clone()).collect();
-            Value::Array(Rc::new(RefCell::new(keys)))
+            Value::Array(Rc::new(RefCell::new(keys.into())))
         }
         _ => Value::Error(rc_str("keys() requires a map")),
     }
@@ -493,7 +529,7 @@ fn builtin_values(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Map(m) => {
             let vals: Vec<Value> = m.borrow().iter().map(|(_, v)| v.clone()).collect();
-            Value::Array(Rc::new(RefCell::new(vals)))
+            Value::Array(Rc::new(RefCell::new(vals.into())))
         }
         _ => Value::Error(rc_str("values() requires a map")),
     }
@@ -566,7 +602,7 @@ fn builtin_has(args: &[Value]) -> Value {
 }
 
 fn builtin_tuple(args: &[Value]) -> Value {
-    Value::Tuple(Rc::new(args.to_vec()))
+    Value::Tuple(Rc::new(args.to_vec().into()))
 }
 
 fn builtin_set(args: &[Value]) -> Value {
@@ -693,7 +729,7 @@ fn builtin_split(args: &[Value]) -> Value {
                 .split(sep.as_ref())
                 .map(|p| Value::String(rc_str(p)))
                 .collect();
-            Value::Array(Rc::new(RefCell::new(parts)))
+            Value::Array(Rc::new(RefCell::new(parts.into())))
         }
         _ => Value::Error(rc_str("__split() requires string arguments")),
     }
@@ -793,6 +829,37 @@ fn builtin_contains_str(args: &[Value]) -> Value {
     }
 }
 
+/// Index of the first `sub` in `s`, counted in characters like `s[i]`, or -1.
+fn builtin_str_index_of(args: &[Value]) -> Value {
+    match args {
+        [Value::String(s), Value::String(sub)] => match s.find(sub.as_str()) {
+            Some(byte) => Value::Integer(s[..byte].chars().count() as i64),
+            None => Value::Integer(-1),
+        },
+        _ => Value::Error(rc_str("__str_index_of() requires (string, string)")),
+    }
+}
+
+/// Length of `s` in UTF-8 bytes, for wire formats (`Content-Length`); `len`
+/// counts characters.
+fn builtin_byte_len(args: &[Value]) -> Value {
+    match args {
+        [Value::String(s)] => Value::Integer(s.len() as i64),
+        _ => Value::Error(rc_str("__byte_len() requires a string")),
+    }
+}
+
+/// Non-overlapping occurrences of `sub` in `s`; 0 for an empty `sub`.
+fn builtin_str_count(args: &[Value]) -> Value {
+    match args {
+        [Value::String(_), Value::String(sub)] if sub.is_empty() => Value::Integer(0),
+        [Value::String(s), Value::String(sub)] => {
+            Value::Integer(s.matches(sub.as_str()).count() as i64)
+        }
+        _ => Value::Error(rc_str("__str_count() requires (string, string)")),
+    }
+}
+
 fn builtin_strip(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("__strip() takes 2 arguments"));
@@ -842,17 +909,80 @@ fn builtin_sort(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Array(arr) => {
             let mut sorted = arr.borrow().clone();
-            sorted.sort_by(|a, b| match (a, b) {
-                (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
-                (Value::Float(x), Value::Float(y)) => {
-                    x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
-                }
-                (Value::String(x), Value::String(y)) => x.cmp(y),
-                _ => std::cmp::Ordering::Equal,
-            });
+            sorted.sort_by(sort_order);
             Value::Array(Rc::new(RefCell::new(sorted)))
         }
         _ => Value::Error(rc_str("__sort() requires an array")),
+    }
+}
+
+/// The order `__sort` uses. It has to be total — Rust's sort panics when it
+/// notices a comparator that is not — so values of different types are
+/// ordered by kind (None, booleans, numbers, chars, strings, everything
+/// else by type name), and numbers of any width compare by value, with NaN
+/// after every other number.
+fn sort_order(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    fn rank(v: &Value) -> u8 {
+        match v {
+            Value::None => 0,
+            Value::Boolean(_) => 1,
+            Value::Integer(_) | Value::Float(_) | Value::Uint(_) | Value::Byte(_) => 2,
+            Value::Char(_) => 3,
+            Value::String(_) => 4,
+            _ => 5,
+        }
+    }
+    enum Num {
+        Int(i128),
+        Float(f64),
+    }
+    fn num(v: &Value) -> Num {
+        match v {
+            Value::Integer(n) => Num::Int(i128::from(*n)),
+            Value::Uint(n) => Num::Int(i128::from(*n)),
+            Value::Byte(n) => Num::Int(i128::from(*n)),
+            Value::Float(f) => Num::Float(*f),
+            _ => Num::Int(0),
+        }
+    }
+    // Exact, so an int and a float that differ past f64 precision still order.
+    fn int_vs_float(i: i128, f: f64) -> Ordering {
+        if f.is_nan() || f >= 1.0e38 {
+            return Ordering::Less;
+        }
+        if f <= -1.0e38 {
+            return Ordering::Greater;
+        }
+        let whole = f.trunc();
+        match i.cmp(&(whole as i128)) {
+            Ordering::Equal => 0.0f64.partial_cmp(&(f - whole)).unwrap_or(Ordering::Equal),
+            other => other,
+        }
+    }
+    fn float_vs_float(x: f64, y: f64) -> Ordering {
+        match (x.is_nan(), y.is_nan()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+        }
+    }
+    let (ra, rb) = (rank(a), rank(b));
+    if ra != rb {
+        return ra.cmp(&rb);
+    }
+    match (a, b) {
+        (Value::Boolean(x), Value::Boolean(y)) => x.cmp(y),
+        (Value::Char(x), Value::Char(y)) => x.cmp(y),
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        _ if ra == 2 => match (num(a), num(b)) {
+            (Num::Int(x), Num::Int(y)) => x.cmp(&y),
+            (Num::Float(x), Num::Float(y)) => float_vs_float(x, y),
+            (Num::Int(x), Num::Float(y)) => int_vs_float(x, y),
+            (Num::Float(x), Num::Int(y)) => int_vs_float(y, x).reverse(),
+        },
+        _ => a.type_name().cmp(b.type_name()),
     }
 }
 
@@ -1094,8 +1224,21 @@ fn builtin_dt_format(args: &[Value]) -> Value {
         Some(f) => f,
         None => return vm_hard_err("__dt_format: format must be a string"),
     };
+    // chrono reports a bad specifier only when the result is written, and
+    // `to_string` turns that report into a panic, so check the format first.
+    let items: Vec<chrono::format::Item> = chrono::format::StrftimeItems::new(fmt).collect();
+    if items.iter().any(|item| matches!(item, chrono::format::Item::Error)) {
+        return vm_hard_err(format!("__dt_format: invalid format string '{}'", fmt));
+    }
     match chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0) {
-        Some(dt) => Value::String(rc_str(dt.format(fmt).to_string())),
+        Some(dt) => {
+            use std::fmt::Write as _;
+            let mut out = String::new();
+            match write!(out, "{}", dt.format_with_items(items.into_iter())) {
+                Ok(()) => Value::String(rc_str(out)),
+                Err(_) => vm_hard_err(format!("__dt_format: invalid format string '{}'", fmt)),
+            }
+        }
         None => vm_soft_err("timestamp out of range", "datetime"),
     }
 }
@@ -1424,6 +1567,16 @@ fn builtin_env_set(args: &[Value]) -> Value {
     }
     match (&args[0], &args[1]) {
         (Value::String(name), Value::String(val)) => {
+            // set_var panics on any of these rather than returning an error.
+            if name.is_empty() || name.contains('=') || name.contains('\0') {
+                return Value::Error(rc_str(format!(
+                    "__env_set(): invalid variable name {:?}: it must be non-empty and contain no '=' or NUL",
+                    name.as_str()
+                )));
+            }
+            if val.contains('\0') {
+                return Value::Error(rc_str("__env_set(): a value must not contain NUL"));
+            }
             // SAFETY: We don't access env vars concurrently from other threads.
             unsafe {
                 std::env::set_var(name.as_ref(), val.as_ref());
@@ -1499,7 +1652,7 @@ fn builtin_list_dir(args: &[Value]) -> Value {
                     .filter_map(|e| e.ok())
                     .map(|e| Value::String(rc_str(e.path().to_string_lossy())))
                     .collect();
-                Value::Array(Rc::new(RefCell::new(items)))
+                Value::Array(Rc::new(RefCell::new(items.into())))
             }
             Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
                 msg: rc_str(format!("{}", e)),
@@ -1522,16 +1675,36 @@ fn builtin_walk_dir(args: &[Value]) -> Value {
                     for entry in entries.filter_map(|e| e.ok()) {
                         let path = entry.path();
                         items.push(Value::String(rc_str(path.display().to_string())));
-                        if path.is_dir() {
+                        // The entry's own type, not its target's: following a
+                        // symlinked directory can loop (`a -> .`), and two
+                        // such links made the walk exponential.
+                        if entry.file_type().is_ok_and(|t| t.is_dir()) {
                             walk(&path, items);
                         }
                     }
                 }
             }
             walk(std::path::Path::new(path.as_ref()), &mut items);
-            Value::Array(Rc::new(RefCell::new(items)))
+            Value::Array(Rc::new(RefCell::new(items.into())))
         }
         _ => Value::Error(rc_str("__walk_dir() requires a string")),
+    }
+}
+
+/// Size of a file in bytes, the Content-Length of serving it whole.
+fn builtin_file_size(args: &[Value]) -> Value {
+    if args.len() != 1 {
+        return Value::Error(rc_str("__file_size() takes 1 argument"));
+    }
+    match args[0].repr() {
+        ValueRepr::String(path) => match std::fs::metadata(path.as_ref()) {
+            Ok(meta) => Value::Integer(meta.len() as i64),
+            Err(e) => Value::ErrorValue(Rc::new(ErrorValueData {
+                msg: rc_str(format!("{}", e)),
+                tag: Some(rc_str("IO")),
+            })),
+        },
+        _ => Value::Error(rc_str("__file_size() requires a string")),
     }
 }
 
@@ -1626,6 +1799,10 @@ fn builtin_time_sleep(args: &[Value]) -> Value {
         return Value::Error(rc_str("__time_sleep() takes 1 argument"));
     }
     match args[0].repr() {
+        // `ms as u64` made -1 a sleep of 584 million years.
+        ValueRepr::Integer(ms) if ms < 0 => Value::Error(rc_str(format!(
+            "__time_sleep(): milliseconds must not be negative, got {ms}"
+        ))),
         ValueRepr::Integer(ms) => {
             std::thread::sleep(std::time::Duration::from_millis(ms as u64));
             Value::None
@@ -1693,13 +1870,15 @@ fn builtin_rand_int(args: &[Value]) -> Value {
         return Value::Error(rc_str("__rand_int() takes 2 arguments"));
     }
     match (&args[0], &args[1]) {
+        // Inclusive of `max`, as random.rand_int documents. The span is
+        // computed wide: `max - min` overflowed on a range wider than i64.
         (Value::Integer(min), Value::Integer(max)) => {
-            let range = max - min;
-            if range <= 0 {
+            if max <= min {
                 return Value::Integer(*min);
             }
-            let r = next_rand();
-            Value::Integer(min + (r as i64).unsigned_abs() as i64 % range)
+            let span = (i128::from(*max) - i128::from(*min) + 1) as u128;
+            let r = u128::from(next_rand()) % span;
+            Value::Integer((i128::from(*min) + r as i128) as i64)
         }
         _ => Value::Error(rc_str("__rand_int() requires integer arguments")),
     }
@@ -1926,6 +2105,11 @@ fn builtin_path_is_within(args: &[Value]) -> Value {
 
 // ── JSON builtins ──────────────────────────────────────────────────────
 
+/// How deeply arrays and objects may nest, in either direction. The parser
+/// and the serializer recurse once per level, and a request body of a few
+/// million `[` used to overflow the stack and abort the process.
+const JSON_MAX_DEPTH: usize = 512;
+
 fn builtin_json_parse(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__json_parse() takes 1 argument"));
@@ -1934,7 +2118,7 @@ fn builtin_json_parse(args: &[Value]) -> Value {
         ValueRepr::String(s) => {
             let chars: Vec<char> = s.chars().collect();
             let mut pos = 0;
-            match json_parse_value(&chars, &mut pos) {
+            match json_parse_value(&chars, &mut pos, 0) {
                 Ok(val) => {
                     // Trailing content used to be ignored, so a truncated document parsed successfully.
                     json_skip_ws(&chars, &mut pos);
@@ -1959,7 +2143,7 @@ fn json_skip_ws(chars: &[char], pos: &mut usize) {
     }
 }
 
-fn json_parse_value(chars: &[char], pos: &mut usize) -> Result<Value, String> {
+fn json_parse_value(chars: &[char], pos: &mut usize, depth: usize) -> Result<Value, String> {
     json_skip_ws(chars, pos);
     if *pos >= chars.len() {
         return Err("unexpected end of JSON".to_string());
@@ -1968,11 +2152,31 @@ fn json_parse_value(chars: &[char], pos: &mut usize) -> Result<Value, String> {
         '"' => json_parse_string(chars, pos),
         't' | 'f' => json_parse_bool(chars, pos),
         'n' => json_parse_null(chars, pos),
-        '[' => json_parse_array(chars, pos),
-        '{' => json_parse_object(chars, pos),
+        '[' | '{' if depth >= JSON_MAX_DEPTH => Err(format!(
+            "nested more than {} levels deep at position {}",
+            JSON_MAX_DEPTH, pos
+        )),
+        '[' => json_parse_array(chars, pos, depth + 1),
+        '{' => json_parse_object(chars, pos, depth + 1),
         c if c == '-' || c.is_ascii_digit() => json_parse_number(chars, pos),
         c => Err(format!("unexpected character '{}' at position {}", c, pos)),
     }
+}
+
+/// The four hex digits of a `\u` escape starting at `pos`; nothing else
+/// (`u32::from_str_radix` alone accepted a sign, so `\u+041` parsed).
+fn json_hex4(chars: &[char], pos: usize) -> Result<u32, String> {
+    if pos + 4 > chars.len() {
+        return Err("incomplete unicode escape".to_string());
+    }
+    let mut cp = 0u32;
+    for &c in &chars[pos..pos + 4] {
+        let digit = c
+            .to_digit(16)
+            .ok_or_else(|| format!("invalid unicode escape at position {}", pos))?;
+        cp = cp * 16 + digit;
+    }
+    Ok(cp)
 }
 
 fn json_parse_string(chars: &[char], pos: &mut usize) -> Result<Value, String> {
@@ -1994,19 +2198,31 @@ fn json_parse_string(chars: &[char], pos: &mut usize) -> Result<Value, String> {
                 'b' => s.push('\u{0008}'),
                 'f' => s.push('\u{000C}'),
                 'u' => {
-                    *pos += 1;
-                    if *pos + 4 > chars.len() {
-                        return Err("incomplete unicode escape".to_string());
-                    }
-                    let hex: String = chars[*pos..*pos + 4].iter().collect();
-                    *pos += 3; // will be incremented once more below
-                    let cp = u32::from_str_radix(&hex, 16)
-                        .map_err(|_| format!("invalid unicode escape: {}", hex))?;
-                    if let Some(c) = char::from_u32(cp) {
-                        s.push(c);
+                    let hi = json_hex4(chars, *pos + 1)?;
+                    *pos += 4; // will be incremented once more below
+                    let cp = match hi {
+                        // A character outside the BMP is written as a UTF-16
+                        // surrogate pair, two escapes in a row.
+                        0xD800..=0xDBFF => {
+                            if chars.get(*pos + 1) != Some(&'\\') || chars.get(*pos + 2) != Some(&'u') {
+                                return Err(format!("unpaired surrogate \\u{:04x}", hi));
+                            }
+                            let lo = json_hex4(chars, *pos + 3)?;
+                            if !(0xDC00..=0xDFFF).contains(&lo) {
+                                return Err(format!("unpaired surrogate \\u{:04x}", hi));
+                            }
+                            *pos += 6;
+                            0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)
+                        }
+                        0xDC00..=0xDFFF => return Err(format!("unpaired surrogate \\u{:04x}", hi)),
+                        cp => cp,
+                    };
+                    match char::from_u32(cp) {
+                        Some(c) => s.push(c),
+                        None => return Err(format!("invalid unicode escape \\u{:04x}", cp)),
                     }
                 }
-                c => s.push(c),
+                c => return Err(format!("invalid escape '\\{}' at position {}", c, pos)),
             }
         } else {
             s.push(chars[*pos]);
@@ -2020,20 +2236,34 @@ fn json_parse_string(chars: &[char], pos: &mut usize) -> Result<Value, String> {
     Ok(Value::String(rc_str(s)))
 }
 
+/// A number as RFC 8259 spells it: no leading zeros, and at least one digit
+/// after a sign, a `.`, or an exponent.
 fn json_parse_number(chars: &[char], pos: &mut usize) -> Result<Value, String> {
     let start = *pos;
+    let digits = |pos: &mut usize| {
+        let from = *pos;
+        while *pos < chars.len() && chars[*pos].is_ascii_digit() {
+            *pos += 1;
+        }
+        *pos - from
+    };
     let mut is_float = false;
     if chars[*pos] == '-' {
         *pos += 1;
     }
-    while *pos < chars.len() && chars[*pos].is_ascii_digit() {
-        *pos += 1;
+    let int_start = *pos;
+    let int_digits = digits(pos);
+    if int_digits == 0 {
+        return Err(format!("invalid number at position {}", start));
+    }
+    if int_digits > 1 && chars[int_start] == '0' {
+        return Err(format!("invalid number at position {}: leading zero", start));
     }
     if *pos < chars.len() && chars[*pos] == '.' {
         is_float = true;
         *pos += 1;
-        while *pos < chars.len() && chars[*pos].is_ascii_digit() {
-            *pos += 1;
+        if digits(pos) == 0 {
+            return Err(format!("invalid number at position {}: no digits after '.'", start));
         }
     }
     if *pos < chars.len() && (chars[*pos] == 'e' || chars[*pos] == 'E') {
@@ -2042,21 +2272,23 @@ fn json_parse_number(chars: &[char], pos: &mut usize) -> Result<Value, String> {
         if *pos < chars.len() && (chars[*pos] == '+' || chars[*pos] == '-') {
             *pos += 1;
         }
-        while *pos < chars.len() && chars[*pos].is_ascii_digit() {
-            *pos += 1;
+        if digits(pos) == 0 {
+            return Err(format!("invalid number at position {}: no digits in exponent", start));
         }
     }
     let num_str: String = chars[start..*pos].iter().collect();
-    if is_float {
+    let as_float = || {
         num_str
             .parse::<f64>()
             .map(Value::Float)
             .map_err(|e| format!("invalid number: {}", e))
+    };
+    if is_float {
+        as_float()
     } else {
-        num_str
-            .parse::<i64>()
-            .map(Value::Integer)
-            .map_err(|e| format!("invalid number: {}", e))
+        // An integer past i64 is still a valid JSON number; read it the way
+        // JavaScript would rather than failing the whole document.
+        num_str.parse::<i64>().map(Value::Integer).or_else(|_| as_float())
     }
 }
 
@@ -2081,16 +2313,16 @@ fn json_parse_null(chars: &[char], pos: &mut usize) -> Result<Value, String> {
     }
 }
 
-fn json_parse_array(chars: &[char], pos: &mut usize) -> Result<Value, String> {
+fn json_parse_array(chars: &[char], pos: &mut usize, depth: usize) -> Result<Value, String> {
     *pos += 1; // skip [
     let mut elements = Vec::new();
     json_skip_ws(chars, pos);
     if *pos < chars.len() && chars[*pos] == ']' {
         *pos += 1;
-        return Ok(Value::Array(Rc::new(RefCell::new(elements))));
+        return Ok(Value::Array(Rc::new(RefCell::new(elements.into()))));
     }
     loop {
-        elements.push(json_parse_value(chars, pos)?);
+        elements.push(json_parse_value(chars, pos, depth)?);
         json_skip_ws(chars, pos);
         if *pos >= chars.len() {
             return Err("unterminated array".to_string());
@@ -2104,10 +2336,10 @@ fn json_parse_array(chars: &[char], pos: &mut usize) -> Result<Value, String> {
         }
         *pos += 1;
     }
-    Ok(Value::Array(Rc::new(RefCell::new(elements))))
+    Ok(Value::Array(Rc::new(RefCell::new(elements.into()))))
 }
 
-fn json_parse_object(chars: &[char], pos: &mut usize) -> Result<Value, String> {
+fn json_parse_object(chars: &[char], pos: &mut usize, depth: usize) -> Result<Value, String> {
     *pos += 1; // skip {
     let mut entries = Vec::new();
     json_skip_ws(chars, pos);
@@ -2119,13 +2351,16 @@ fn json_parse_object(chars: &[char], pos: &mut usize) -> Result<Value, String> {
     }
     loop {
         json_skip_ws(chars, pos);
+        if *pos >= chars.len() || chars[*pos] != '"' {
+            return Err(format!("expected a string key at {}", pos));
+        }
         let key = json_parse_string(chars, pos)?;
         json_skip_ws(chars, pos);
         if *pos >= chars.len() || chars[*pos] != ':' {
             return Err(format!("expected ':' at {}", pos));
         }
         *pos += 1;
-        let value = json_parse_value(chars, pos)?;
+        let value = json_parse_value(chars, pos, depth)?;
         entries.push((key, value));
         json_skip_ws(chars, pos);
         if *pos >= chars.len() {
@@ -2149,13 +2384,55 @@ fn builtin_json_stringify(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__json_stringify() takes 1 argument"));
     }
-    match value_to_json(&args[0]) {
+    match value_to_json(&args[0], &mut Vec::new()) {
         Ok(s) => Value::String(rc_str(s)),
         Err(e) => Value::Error(rc_str(format!("json stringify error: {}", e))),
     }
 }
 
-fn value_to_json(val: &Value) -> Result<String, String> {
+fn json_quote(s: &str) -> String {
+    let mut out = String::from('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < '\x20' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// `open` holds the containers being written, outermost first: one seen
+/// again is a cycle, which used to recurse until the stack overflowed.
+fn value_to_json(val: &Value, open: &mut Vec<*const ()>) -> Result<String, String> {
+    let container = match val {
+        Value::Array(a) => Some(Rc::as_ptr(a) as *const ()),
+        Value::Map(m) => Some(Rc::as_ptr(m) as *const ()),
+        Value::Tuple(t) => Some(Rc::as_ptr(t) as *const ()),
+        _ => None,
+    };
+    if let Some(ptr) = container {
+        if open.contains(&ptr) {
+            return Err(format!("cannot serialize a cyclic {}", val.type_name()));
+        }
+        if open.len() >= JSON_MAX_DEPTH {
+            return Err(format!("nested more than {} levels deep", JSON_MAX_DEPTH));
+        }
+        open.push(ptr);
+    }
+    let out = value_to_json_inner(val, open);
+    if container.is_some() {
+        open.pop();
+    }
+    out
+}
+
+fn value_to_json_inner(val: &Value, open: &mut Vec<*const ()>) -> Result<String, String> {
     match val.repr() {
         ValueRepr::None => Ok("null".to_string()),
         ValueRepr::Boolean(b) => Ok(if b { "true" } else { "false" }.to_string()),
@@ -2167,25 +2444,10 @@ fn value_to_json(val: &Value) -> Result<String, String> {
                 Ok(f.to_string())
             }
         }
-        ValueRepr::String(s) => {
-            let mut out = String::from('"');
-            for c in s.chars() {
-                match c {
-                    '"' => out.push_str("\\\""),
-                    '\\' => out.push_str("\\\\"),
-                    '\n' => out.push_str("\\n"),
-                    '\r' => out.push_str("\\r"),
-                    '\t' => out.push_str("\\t"),
-                    c if c < '\x20' => out.push_str(&format!("\\u{:04x}", c as u32)),
-                    c => out.push(c),
-                }
-            }
-            out.push('"');
-            Ok(out)
-        }
+        ValueRepr::String(s) => Ok(json_quote(s)),
         ValueRepr::Array(arr) => {
             let items: Result<Vec<String>, String> =
-                arr.borrow().iter().map(value_to_json).collect();
+                arr.borrow().iter().map(|v| value_to_json(v, open)).collect();
             Ok(format!("[{}]", items?.join(",")))
         }
         ValueRepr::Map(entries) => {
@@ -2193,20 +2455,37 @@ fn value_to_json(val: &Value) -> Result<String, String> {
                 .borrow()
                 .iter()
                 .map(|(k, v)| {
-                    let kj = value_to_json(k)?;
-                    let vj = value_to_json(v)?;
+                    // JSON keys are strings; scalar keys are written the way
+                    // JavaScript would write them, anything else is refused.
+                    let kj = match k.repr() {
+                        ValueRepr::String(s) => json_quote(s),
+                        ValueRepr::Char(c) => json_quote(&c.to_string()),
+                        ValueRepr::Integer(_)
+                        | ValueRepr::Float(_)
+                        | ValueRepr::Uint(_)
+                        | ValueRepr::Byte(_)
+                        | ValueRepr::Boolean(_) => json_quote(&value_to_json_inner(k, open)?),
+                        _ => {
+                            return Err(format!(
+                                "cannot serialize a {} map key to JSON",
+                                k.type_name()
+                            ));
+                        }
+                    };
+                    let vj = value_to_json(v, open)?;
                     Ok(format!("{}:{}", kj, vj))
                 })
                 .collect();
             Ok(format!("{{{}}}", items?.join(",")))
         }
         ValueRepr::Tuple(t) => {
-            let items: Result<Vec<String>, String> = t.iter().map(value_to_json).collect();
+            let items: Result<Vec<String>, String> =
+                t.iter().map(|v| value_to_json(v, open)).collect();
             Ok(format!("[{}]", items?.join(",")))
         }
         ValueRepr::Byte(n) => Ok(n.to_string()),
         ValueRepr::Uint(n) => Ok(n.to_string()),
-        ValueRepr::Char(c) => Ok(format!("\"{}\"", c)),
+        ValueRepr::Char(c) => Ok(json_quote(&c.to_string())),
         _ => Err(format!("cannot serialize {} to JSON", val.type_name())),
     }
 }
@@ -2235,7 +2514,7 @@ fn toml_value_to_value(tv: toml::Value) -> Value {
         toml::Value::Datetime(dt) => Value::String(rc_str(dt.to_string())),
         toml::Value::Array(values) => {
             let items: Vec<Value> = values.into_iter().map(toml_value_to_value).collect();
-            Value::Array(Rc::new(RefCell::new(items)))
+            Value::Array(Rc::new(RefCell::new(items.into())))
         }
         toml::Value::Table(entries) => {
             let items: Vec<(Value, Value)> = entries
@@ -2623,6 +2902,18 @@ fn builtin_net_send(args: &[Value]) -> Value {
     }
 }
 
+fn builtin_net_send_file(args: &[Value]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(rc_str("send_file: expected (conn, path)"));
+    }
+    let id = net_try!(net_int(&args[0], "send_file conn"));
+    let path = net_try!(net_str(&args[1], "send_file path"));
+    match crate::netres::tcp_send_file(id as u64, &path) {
+        Ok(n) => Value::Integer(n),
+        Err(e) => Value::Error(rc_str(e)),
+    }
+}
+
 fn builtin_net_receive(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("receive: expected (conn, max)"));
@@ -2692,7 +2983,7 @@ fn builtin_net_udp_receive(args: &[Value]) -> Value {
         Ok((data, addr)) => Value::Tuple(Rc::new(vec![
             Value::String(rc_str(data)),
             Value::String(rc_str(addr)),
-        ])),
+        ].into())),
         Err(e) => Value::Error(rc_str(e)),
     }
 }

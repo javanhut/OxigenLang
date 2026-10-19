@@ -42,6 +42,7 @@ For an HTTP **server**, use [api](api.md), which is built on this module.
 | [`send`](#sendconn-data) | `send(conn, data)` | `int` bytes written |
 | [`receive`](#receiveconn-max) | `receive(conn, max = 4096)` | `str` |
 | [`set_timeout`](#set_timeoutconn-ms) | `set_timeout(conn, ms)` | `None` |
+| [`send_file`](#send_fileconn-path) | `send_file(conn, path)` | `int` bytes sent |
 | [`close`](#closehandle) | `close(handle)` | `None` |
 | [`udp_bind`](#udp_bindhost-port) | `udp_bind(host, port)` | socket handle |
 | [`udp_send`](#udp_sendsock-data-host-port) | `udp_send(sock, data, host, port)` | `int` bytes sent |
@@ -153,6 +154,9 @@ memory.
 
 Stream a GET response body straight to a file. Returns the HTTP status code.
 
+Because it writes a file, an embedded VM needs the `filesystem` capability as
+well as `network` to call it (see [embedding](../embedding.md)).
+
 ```oxi
 status := net.download("https://example.com/big.iso", "big.iso")
 println(status)   // 200
@@ -161,6 +165,9 @@ println(status)   // 200
 ### `upload(method, url, file_path, headers)`
 
 Stream a file as the request body. Returns `{status, body}`.
+
+It reads a local file, so like `download` it needs both the `network` and the
+`filesystem` capability in a restricted VM.
 
 ```oxi
 resp := net.upload("POST", "https://example.com/upload", "big.iso",
@@ -200,6 +207,10 @@ way to consume NDJSON and SSE: one call, one complete record.
 
 It returns whole UTF-8 characters, so emoji, accents and CJK are never split
 across two reads.
+
+A line longer than 8 MiB is an error rather than an ever-growing buffer: a
+server that never sends a newline cannot exhaust memory. Use
+[`read_chunk`](#read_chunkstream-max-timeout_ms) for such streams.
 
 ```oxi
 introduce net
@@ -243,7 +254,9 @@ Same timeout rules; `""` at end of stream. Prefer `read_line` for text.
 
 ## TCP sockets
 
-A **handle** is an opaque ticket number for an open socket. Pass it to
+A **handle** is an opaque ticket number for an open socket. The numbers are
+not sequential: every VM in a process shares one table of sockets, so handles
+are drawn at random to keep one script from guessing another's. Pass it to
 `send`/`receive`/`close`. Always `close` a handle when you are done — a
 forgotten handle leaks one connection until the program exits, like a file you
 never close.
@@ -263,6 +276,18 @@ Block until a client connects; returns a connection handle for that client.
 ### `send(conn, data)`
 
 Send text; returns the number of bytes written.
+
+### `send_file(conn, path)`
+
+Send a file's bytes on a connection unchanged and return how many were written.
+[`send`](#sendconn-data) takes text, so this is how to send an image or any
+other binary data without corrupting it. It reads a local file, so a restricted
+VM needs the `filesystem` capability as well as `network`.
+
+```oxi
+net.send(conn, "HTTP/1.1 200 OK\r\nContent-Length: {io.file_size("logo.png")}\r\n\r\n")
+net.send_file(conn, "logo.png")
+```
 
 ### `receive(conn, max)`
 

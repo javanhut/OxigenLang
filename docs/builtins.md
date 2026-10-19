@@ -67,6 +67,10 @@ len(set(1, 2, 3))
 
 **Supported types:** String, Array, Tuple, Map, Set.
 
+A string's length is counted in characters, the same unit as `s[i]` and
+slices: `len("héllo")` is 5. For the UTF-8 byte count use
+`strings.byte_len`.
+
 ### `push(array, element)`
 
 Appends the element to the end of the array and returns **that same array** — arrays are shared references, so the original is modified too.
@@ -155,6 +159,11 @@ approached:
 range(5, 0, -1)     // [5, 4, 3, 2, 1]
 range(10, 0, -3)    // [10, 7, 4, 1]
 ```
+
+`range` builds the whole array, so it refuses to build more than 100,000,000
+elements (`range(9223372036854775807)` is an error, not an attempt to allocate
+exabytes). `each i in range(...)` has no such limit: the loop counts without
+building the array.
 
 Commonly used with `each` for counted iteration:
 
@@ -318,6 +327,19 @@ tuple()
 ```
 
 Accepts any number of arguments of any type. This is equivalent to using the literal syntax `(1, 2, 3)`.
+
+### `vec2(x, y)` / `vec3(x, y, z)` / `vec4(x, y, z, w)`
+
+Creates a vector from two, three or four numbers (ints or floats).
+
+```oxi
+v := vec3(1, 0.5, -2)
+v.y          // 0.5
+v * 2        // vec3(2, 1, -4)
+```
+
+The wrong count, or anything that is not a number, is an error. See
+[Vectors](data_types.md#vectors).
 
 ## Map Operations
 
@@ -543,6 +565,7 @@ option {
 | `uint`      | `(value)`              | `Uint`       | Create unsigned integer               |
 | `set`       | `(values...)`          | `Set`        | Create set (deduplicates)             |
 | `tuple`     | `(values...)`          | `Tuple`      | Create tuple                          |
+| `vec2`/`vec3`/`vec4` | `(numbers...)` | `Vec2`/`Vec3`/`Vec4` | Create a vector             |
 | `keys`      | `(map)`                | `Array`      | Array of map keys                     |
 | `values`    | `(map)`                | `Array`      | Array of map values                   |
 | `insert`    | `(map, key, value)`    | `Map`        | New map with entry added/updated      |

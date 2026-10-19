@@ -19,6 +19,25 @@ use crate::vm::value::{Function, ObjClosure};
 
 pub mod scan;
 
+/// Bumped on every write to a closed upvalue cell.
+///
+/// Closures sharing a captured variable share its cell, but each keeps its
+/// own int cache of the cell's value (`ObjClosure::upvalue_int_values`), so a
+/// write through one closure — or by the interpreter — cannot reach the
+/// others' caches. Each cache instead records the epoch it was filled at in
+/// `upvalue_int_values[0]`, and both the JIT's inline reads and the helpers
+/// treat it as empty once the epoch has moved. Process-wide and relaxed:
+/// a write on another thread only costs a spurious miss.
+pub static UPVALUE_WRITE_EPOCH: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+/// Invalidate every closure's upvalue int cache. Called on each write to a
+/// closed upvalue cell.
+#[inline]
+pub fn note_upvalue_write() {
+    UPVALUE_WRITE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[cfg(feature = "jit")]
 mod engine;
 #[cfg(feature = "jit")]
@@ -97,6 +116,10 @@ pub struct JitEngine {
     array_index_fast_misses: usize,
     #[cfg(feature = "jit")]
     inner: Option<engine::JitInner>,
+    /// Address of the VM's armed byte (`vm::limits`), compiled into loop
+    /// back-edges as a constant. 0 until the VM sets it.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    limits_armed: usize,
 }
 
 impl Default for JitEngine {
@@ -114,7 +137,21 @@ impl JitEngine {
             array_index_fast_misses: 0,
             #[cfg(feature = "jit")]
             inner: None,
+            limits_armed: 0,
         }
+    }
+
+    /// Tell the engine where its VM's armed byte lives (`vm::limits`). Set
+    /// once, before anything is compiled.
+    pub(crate) fn set_limits_armed(&mut self, addr: usize) {
+        self.limits_armed = addr;
+    }
+
+    /// The compiler, created on first use.
+    #[cfg(feature = "jit")]
+    fn inner(&mut self) -> &mut engine::JitInner {
+        let armed = self.limits_armed;
+        self.inner.get_or_insert_with(|| engine::JitInner::new(armed))
     }
 
     /// Raw pointer to the JIT counters block, if the inner engine has
@@ -155,12 +192,26 @@ impl JitEngine {
     #[inline]
     pub(crate) fn bump_global_version(&mut self, _name: &str) {}
 
+    /// Empty every method-call and method-lookup IC. An `includes` block
+    /// replaces methods in the struct def in place, so a cache keyed on the
+    /// def's address would keep calling the old method. No-op before first
+    /// compilation and in non-JIT builds.
+    #[cfg(feature = "jit")]
+    pub(crate) fn invalidate_method_caches(&mut self) {
+        if let Some(inner) = self.inner.as_mut() {
+            inner.invalidate_method_caches();
+        }
+    }
+
+    #[cfg(not(feature = "jit"))]
+    #[inline]
+    pub(crate) fn invalidate_method_caches(&mut self) {}
+
     /// Stable per-name version cell pointer for the GetGlobal IC miss
     /// helper. Only callable from compiled code, so the engine exists.
     #[cfg(feature = "jit")]
     pub(crate) fn global_version_cell(&mut self, name: &str) -> *mut u64 {
-        self.inner
-            .get_or_insert_with(engine::JitInner::new)
+        self.inner()
             .global_version_cell(name)
     }
 
@@ -203,12 +254,12 @@ impl JitEngine {
         #[cfg(not(feature = "jit"))]
         {
             let _ = func;
-            return false;
+            false
         }
 
         #[cfg(feature = "jit")]
         {
-            let inner = self.inner.get_or_insert_with(engine::JitInner::new);
+            let inner = self.inner();
             inner.maybe_compile(func)
         }
     }
@@ -230,7 +281,7 @@ impl JitEngine {
         if call_count < self.threshold {
             return None;
         }
-        let inner = self.inner.get_or_insert_with(engine::JitInner::new);
+        let inner = self.inner();
         let e = inner.maybe_compile_entries(func)?;
         let kind_u8 = match e.specialized_kind {
             None => crate::vm::value::SPECIALIZED_KIND_NONE,
@@ -281,7 +332,7 @@ impl JitEngine {
 
         #[cfg(feature = "jit")]
         {
-            let inner = self.inner.get_or_insert_with(engine::JitInner::new);
+            let inner = self.inner();
             inner.maybe_compile_thunk(func)
         }
     }
@@ -304,7 +355,7 @@ impl JitEngine {
 
         #[cfg(feature = "jit")]
         {
-            let inner = self.inner.get_or_insert_with(engine::JitInner::new);
+            let inner = self.inner();
             inner.maybe_compile_thunk(func)
         }
     }

@@ -56,8 +56,14 @@ if ! command -v cargo &> /dev/null; then
     exit 1
 fi
 
-# Check write permissions
-if [ ! -w "$BIN_DIR" ]; then
+# Check write permissions on the bin dir, or on the closest directory above
+# it that exists: a fresh PREFIX=~/.local has no bin/ yet, and the install
+# creates it.
+check_dir="$BIN_DIR"
+while [ ! -e "$check_dir" ]; do
+    check_dir="$(dirname -- "$check_dir")"
+done
+if [ ! -w "$check_dir" ]; then
     echo "Error: No write permission to $BIN_DIR"
     echo "Run with sudo or set PREFIX to a writable location:"
     echo "  sudo ./scripts/install.sh"
@@ -92,9 +98,10 @@ if [ "$WITH_LSP" = true ]; then
     chmod 755 "$BIN_DIR/oxigen-lsp"
 fi
 
-# Clean up build artifacts
+# Clean up the release build this script made. Only target/release: the
+# rest of target/ may hold a developer's own debug and test builds.
 echo "Cleaning up build artifacts..."
-rm -rf "$REPO_ROOT/target"
+rm -rf "$TARGET_DIR"
 
 echo ""
 echo "=== OxigenLang installed successfully ==="

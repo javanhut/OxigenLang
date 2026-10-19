@@ -68,6 +68,16 @@ struct Res {
     body <str>
 }
 
+// A file response, from `file`/`static_dir`. The body is not read into a
+// string: strings hold text, so an image or font would be corrupted (or fail to
+// read at all). The file is streamed to the socket byte for byte instead.
+struct FileRes {
+    status <int>
+    headers <map>
+    path <str>
+    size <int>
+}
+
 // A router plus the socket it serves. Each worker thread gets its own.
 struct App {
     server <int>
@@ -75,12 +85,25 @@ struct App {
     dynamic <array>
     keep_alive <bool>
     idle_timeout <int>
+    header_timeout <int>
+    body_timeout <int>
+}
+
+// Defaults for the per-request deadlines, in milliseconds; see `serve`.
+default_header_timeout <int> = 10000
+default_body_timeout <int> = 60000
+
+// A config value, or `fallback` when the config predates the key.
+fun setting(cfg <map>, key <str>, fallback <generic>) {
+    v := cfg[key]
+    give fallback when v == None
+    v
 }
 
 // Build this worker's router from the config `serve` handed it. A struct cannot
 // be rebuilt on a thread that did not declare it, so what crosses is this plain
 // map and the App is constructed here, on the worker.
-fun app(cfg <map>) { App(cfg["server"], {}, [], cfg["keep_alive"], cfg["idle_timeout"]) }
+fun app(cfg <map>) { App(cfg["server"], {}, [], cfg["keep_alive"], cfg["idle_timeout"], setting(cfg, "header_timeout", default_header_timeout), setting(cfg, "body_timeout", default_body_timeout)) }
 
 // ── Responses ─────────────────────────────────────────────────────────────
 // JSON response. Any Oxigen value works — maps, arrays, structs, primitives.
@@ -119,18 +142,23 @@ fun content_type(p <str>) {
 }
 
 // Serve one file from disk, with its Content-Type inferred from the extension.
-// A missing file is a 404 rather than a crash, so a handler can call this on a
-// path that may not exist.
+// A missing file — or a directory — is a 404 rather than a crash, so a handler
+// can call this on a path that may not exist. Returns a `FileRes`; the bytes
+// are sent as they are on disk, so binary files are safe.
 //
 //     fun home(req <map>) { api.file("site/index.html") }
 fun file(p <str>, status <int> = 200) {
-    give fail_with(404, "not found") unless io.file_exists(p)
-    Res(status, {"Content-Type": content_type(p)}, io.read_file(p))
+    give fail_with(404, "not found") unless __is_file(p)
+    size := __file_size(p)
+    give fail_with(404, "not found") when is_error(size)
+    FileRes(status, {"Content-Type": content_type(p)}, p, size)
 }
 
-// Serve `req["path"]` from under `root` — the whole-site case.
+// Serve `req["path"]` from under `root` — the whole-site case. A route ending
+// in `/*` matches every path under its prefix:
 //
-//     app.get("/*", fun(req) { api.static_dir(req, "site") })
+//     fun site(req <map>) { api.static_dir(req, "site") }
+//     app.get("/*", site)
 //
 // A request path is attacker-controlled, so it is resolved and then checked to
 // be inside `root` before anything is read. `path.join` alone is not enough:
@@ -211,11 +239,11 @@ fun compile_path(path <str>) {
 }
 
 App includes {
-    // Register a handler. Paths with no `:param` go in a map for an O(1)
-    // lookup; only parameterized paths are scanned segment by segment.
+    // Register a handler. Paths with no `:param` or trailing `/*` go in a map
+    // for an O(1) lookup; only those are scanned segment by segment.
     fun route(method <str>, path <str>, handler <generic>) {
         option {
-            __contains_str(path, "/:") -> {
+            __contains_str(path, "/:") or __ends_with(path, "/*") -> {
                 self.dynamic = push(self.dynamic, (method, compile_path(path), handler))
             }
             {
@@ -265,7 +293,7 @@ App includes {
         live <bool> := True
         served <int> := 0
         repeat when live {
-            req := read_request(conn)
+            req := read_request(conn, self.header_timeout, self.body_timeout)
             option {
                 req == None -> {
                     live = False
@@ -277,7 +305,7 @@ App includes {
                 {
                     served = served + 1
                     live = self.keep_alive and served < keep_alive_max and wants_keep_alive(req)
-                    net.send(conn, render(self.dispatch(req), live))
+                    send_res(conn, self.dispatch(req), live)
                 }
             }
         }
@@ -319,16 +347,33 @@ App includes {
 }
 
 // Match one compiled route against a request's segments. Returns the captured
-// params, or None when the shapes differ.
+// params, or None when the shapes differ. A route ending in `/*` matches any
+// number of trailing segments and captures them, joined, as params["*"].
 fun match_segments(segments <array>, segs <array>) {
     count := len(segs)
+    fixed := len(segments)
+    last_param, last_name := segments[fixed - 1]
+    wild := not last_param and last_name == "*"
+    fixed = fixed - 1 when wild
     option {
-        len(segments) != count -> {
+        wild and count < fixed -> {
+            give None
+        }
+        not wild and count != fixed -> {
             give None
         }
     }
     params <map> := {}
-    each i in range(count) {
+    option {
+        wild -> {
+            tail <array> := []
+            each i in range(fixed, count) {
+                tail = push(tail, segs[i])
+            }
+            params["*"] = decode(__join(tail, "/"))
+        }
+    }
+    each i in range(fixed) {
         is_param, name := segments[i]
         option {
             is_param -> {
@@ -391,7 +436,7 @@ fun miss(routes <map>, dynamic <array>, path <str>) {
 // Normalize whatever a handler returned into a response.
 fun to_res(v <generic>) {
     option {
-        type(v) == "Res" -> {
+        type(v) == "Res" or type(v) == "FileRes" -> {
             v
         }
         type(v) == "STRING" -> {
@@ -404,11 +449,24 @@ fun to_res(v <generic>) {
 }
 
 // ── HTTP wire format ──────────────────────────────────────────────────────
+// Milliseconds since `started`, a __time_monotonic() reading.
+fun elapsed_ms(started <int>) { (__time_monotonic() - started) / 1000000 }
+
 // Read one request. Returns a request map, a `Res` to send back when the
 // request is unusable, or None when the peer closed the connection.
-fun read_request(conn <int>) {
+//
+// `header_ms` bounds the whole header, not each read: a client trickling one
+// byte at a time resets a per-read timeout forever, and a handful of them used
+// to hold every worker.
+fun read_request(conn <int>, header_ms <int> = default_header_timeout, body_ms <int> = default_body_timeout) {
+    started <int> := __time_monotonic()
     buf <str> := net.receive(conn, read_size)
-    repeat when buf != "" and not __contains_str(buf, "\r\n\r\n") and len(buf) <= head_limit {
+    repeat when buf != "" and not __contains_str(buf, "\r\n\r\n") and __byte_len(buf) <= head_limit {
+        option {
+            elapsed_ms(started) > header_ms -> {
+                give fail_with(408, "request header timeout")
+            }
+        }
         chunk := net.receive(conn, read_size)
         option {
             chunk == "" -> {
@@ -441,6 +499,14 @@ fun read_request(conn <int>) {
         headers[__lower(__trim(kv[0]))] = __trim(__join(rest(kv), ":")) when len(kv) > 1
         // Values contain colons (Host: x:8000), so only the first one splits.
     }
+    // Chunked bodies are not decoded. Ignoring the header would read the chunk
+    // framing as the body, and a proxy in front that does decode it would see a
+    // different request than this server — so refuse it.
+    option {
+        has(headers, "transfer-encoding") -> {
+            give fail_with(501, "Transfer-Encoding is not supported; send a Content-Length")
+        }
+    }
     length := content_length(headers)
     option {
         is_error(length) -> {
@@ -450,7 +516,8 @@ fun read_request(conn <int>) {
             give fail_with(413, "request body too large")
         }
     }
-    body := read_body(conn, __join(rest(parts), "\r\n\r\n"), length.value)
+    body := read_body(conn, __join(rest(parts), "\r\n\r\n"), length.value, body_ms)
+    give body when type(body) == "Res"
     target := request_line[1]
     path <str> := target
     query <map> := {}
@@ -465,10 +532,13 @@ fun read_request(conn <int>) {
 }
 
 // Content-Length as an Error||Value: absent means 0, unparseable means an error.
+// Only plain digits count — `int` would also read "1e3" or "+5".
 fun content_length(headers <map>) {
     option {
         has(headers, "content-length") -> {
-            <type<Error> || <Value>>(int(headers["content-length"]))
+            raw := __trim(headers["content-length"])
+            give <Error>("invalid Content-Length") unless __regex_match("^[0-9]+$", raw)
+            <type<Error> || <Value>>(int(raw))
         }
         {
             <Value>(0)
@@ -483,23 +553,33 @@ fun content_length(headers <map>) {
 // read is treated as body bytes, because separating them needs a leftover buffer
 // carried across requests. Every mainstream client has pipelining off; add the
 // buffer if that ever changes.
-fun read_body(conn <int>, so_far <str>, length <int>) {
-    have <int> := len(so_far)
+//
+// Returns the body, or a `Res` to answer with: a body that ends before its
+// Content-Length is refused rather than handed to the handler truncated, and
+// one still arriving after `body_ms` is cut off.
+fun read_body(conn <int>, so_far <str>, length <int>, body_ms <int> = default_body_timeout) {
+    have <int> := __byte_len(so_far)
     option {
         have >= length -> {
             give so_far
         }
     }
+    started <int> := __time_monotonic()
     chunks <array> := [so_far]
     repeat when have < length {
+        option {
+            elapsed_ms(started) > body_ms -> {
+                give fail_with(408, "request body timeout")
+            }
+        }
         chunk := net.receive(conn, read_size)
         option {
             chunk == "" -> {
-                stop
+                give fail_with(400, "request body shorter than its Content-Length")
             }
         }
         chunks = push(chunks, chunk)
-        have = have + len(chunk)
+        have = have + __byte_len(chunk)
     }
     __join(chunks, "")
 }
@@ -528,14 +608,19 @@ fun wants_keep_alive(req <map>) {
     }
 }
 
-// Serialize a response. Built as one string and sent in a single write, so the
-// status line and body never land in separate TCP segments.
-fun render(res <Res>, live <bool>) {
-    out <array> := ["HTTP/1.1 {res.status} {reason(res.status)}\r\n"]
-    each name, value in res.headers {
-        out = push(out, "{name}: {value}\r\n")
+// A header name or value with CR, LF and NUL replaced by spaces. Handlers put
+// client input in headers (a redirect target from a query string), and a raw
+// CRLF there would end the header early and let the client write its own
+// headers and body into the response.
+fun header_safe(text <generic>) { __replace(__replace(__replace("{text}", "\r", " "), "\n", " "), "\0", " ") }
+
+// The status line and headers, through the blank line.
+fun render_head(status <int>, headers <map>, length <int>, live <bool>) {
+    out <array> := ["HTTP/1.1 {status} {reason(status)}\r\n"]
+    each name, value in headers {
+        out = push(out, "{header_safe(name)}: {header_safe(value)}\r\n")
     }
-    out = push(out, "Content-Length: {len(res.body)}\r\n")
+    out = push(out, "Content-Length: {length}\r\n")
     out = push(out, option {
         live -> {
             "Connection: keep-alive\r\n"
@@ -545,8 +630,24 @@ fun render(res <Res>, live <bool>) {
         }
     })
     out = push(out, "\r\n")
-    out = push(out, res.body)
     __join(out, "")
+}
+
+// Serialize a response. Built as one string and sent in a single write, so the
+// status line and body never land in separate TCP segments.
+fun render(res <Res>, live <bool>) { render_head(res.status, res.headers, __byte_len(res.body), live) + res.body }
+
+// Send a `Res` or a `FileRes` on a connection.
+fun send_res(conn <int>, res <generic>, live <bool>) {
+    option {
+        type(res) == "FileRes" -> {
+            net.send(conn, render_head(res.status, res.headers, res.size, live))
+            __net_send_file(conn, res.path)
+        }
+        {
+            net.send(conn, render(res, live))
+        }
+    }
 }
 
 // Reason phrase for a status code. Only the codes this module and its users
@@ -589,6 +690,9 @@ fun reason(status <int>) {
         status == 405 -> {
             "Method Not Allowed"
         }
+        status == 408 -> {
+            "Request Timeout"
+        }
         status == 409 -> {
             "Conflict"
         }
@@ -606,6 +710,9 @@ fun reason(status <int>) {
         }
         status == 500 -> {
             "Internal Server Error"
+        }
+        status == 501 -> {
+            "Not Implemented"
         }
         status == 503 -> {
             "Service Unavailable"
@@ -637,17 +744,21 @@ fun reason(status <int>) {
 // instead; concurrency then caps at `workers` requests rather than `workers`
 // clients.
 //
-// `idle_timeout` bounds each individual read, not the request as a whole, so it
-// also costs a slowloris client its connection. A body still arriving in pieces
-// keeps resetting it; only a client that sends nothing at all for that long is
-// dropped.
+// `idle_timeout` bounds each individual read, so a client that goes quiet is
+// dropped. It cannot stop a client that keeps sending one byte at a time, so the
+// request as a whole is bounded too: its headers must arrive within
+// `header_timeout` and its body within `body_timeout` (milliseconds). A client
+// past either is answered 408 and dropped.
+//
+// `host` defaults to loopback, so a server is reachable from other machines
+// only when asked: pass host="0.0.0.0" to listen on every interface.
 //
 // ponytail: fixed worker count, no growth under load. Size it for peak
 // concurrent connections; add a dynamic pool if that stops being predictable.
-fun serve(worker <generic>, host <str> = "0.0.0.0", port <int> = 8000, workers <int> = 64, keep_alive <bool> = True, idle_timeout <int> = 5000) {
+fun serve(worker <generic>, host <str> = "127.0.0.1", port <int> = 8000, workers <int> = 64, keep_alive <bool> = True, idle_timeout <int> = 5000, header_timeout <int> = 10000, body_timeout <int> = 60000) {
     server := net.listen(host, port)
     println("api listening on http://{host}:{port} ({workers} workers)")
-    config := {"server": server, "keep_alive": keep_alive, "idle_timeout": idle_timeout}
+    config := {"server": server, "keep_alive": keep_alive, "idle_timeout": idle_timeout, "header_timeout": header_timeout, "body_timeout": body_timeout}
     tasks <array> := []
     each i in range(workers) {
         // __spawn, not `diverge`: the worker function is a parameter here, and

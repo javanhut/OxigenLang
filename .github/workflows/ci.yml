@@ -2,6 +2,10 @@ name: CI
 
 on: [push, pull_request]
 
+# Tests only read the repository; nothing here needs a token that can write.
+permissions:
+  contents: read
+
 # Cancel superseded runs on the same ref.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -23,6 +27,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
+  # Suite 1b — the same, with the JIT compiled out: what `imlazy build-no-jit`
+  # builds. Nothing else builds this configuration, which is how it once
+  # stopped compiling unnoticed.
+  rust-tests-no-jit:
+    name: Rust suite without the JIT
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --no-default-features
+
   # Suite 2 — Oxigen: the <test> blocks in tests/*_test.oxi, run by the
   # language's own test runner. stdlib resolves from the repo-root ./stdlib,
   # so the step runs from the checkout root. The runner exits non-zero on any
@@ -37,9 +53,8 @@ jobs:
       - run: cargo build -p oxigen
       - name: Run Oxigen test suite
         run: ./target/debug/oxigen test tests/
-      # Concurrency can't live in a <test> block (diverge ships thunks by
-      # compile-order id against one process-global source), so run the
-      # self-asserting program directly; it exits non-zero on any mismatch.
+      # A self-asserting program rather than <test> blocks: it exits non-zero
+      # on any mismatch, and exercises a whole program's worker pool.
       - name: Run concurrency smoke test
         run: ./target/debug/oxigen tests/concurrency.oxi
       # Same constraint, plus it needs a real socket: the api module's wire
@@ -74,3 +89,5 @@ jobs:
       # backend without naming it.
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy without the JIT
+        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings

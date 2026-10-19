@@ -82,6 +82,15 @@ impl OxMap {
         Self::default()
     }
 
+    /// Move every key and value into `out`, leaving the map empty.
+    pub(crate) fn drain_into(&mut self, out: &mut Vec<Value>) {
+        self.index.clear();
+        for (k, v) in self.entries.drain(..) {
+            out.push(k);
+            out.push(v);
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -185,9 +194,26 @@ pub struct OxSet {
     index: HashMap<HashKey, usize>,
 }
 
+impl Drop for OxMap {
+    fn drop(&mut self) {
+        // A map holding a map holding a map... would drop one frame per level.
+        if self.entries.iter().any(|(k, v)| k.may_own_values() || v.may_own_values()) {
+            let mut values = Vec::with_capacity(self.entries.len() * 2);
+            self.drain_into(&mut values);
+            crate::vm::value::drop_nested(values);
+        }
+    }
+}
+
 impl OxSet {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Move every element into `out`, leaving the set empty.
+    pub(crate) fn drain_into(&mut self, out: &mut Vec<Value>) {
+        self.index.clear();
+        out.append(&mut self.items);
     }
     pub fn len(&self) -> usize {
         self.items.len()
@@ -260,5 +286,16 @@ impl OxSet {
 impl PartialEq for OxSet {
     fn eq(&self, other: &Self) -> bool {
         self.len() == other.len() && self.items.iter().all(|i| other.contains(i))
+    }
+}
+
+impl Drop for OxSet {
+    fn drop(&mut self) {
+        // Elements are hashable, but tuples of tuples still nest.
+        if self.items.iter().any(Value::may_own_values) {
+            let mut values = Vec::with_capacity(self.items.len());
+            self.drain_into(&mut values);
+            crate::vm::value::drop_nested(values);
+        }
     }
 }

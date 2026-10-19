@@ -26,6 +26,18 @@ pub(super) fn vm_stack_view_len_offset() -> i32 {
     (VM::stack_view_offset() + StackView::OFFSET_LEN as usize) as i32
 }
 
+/// Byte offset of `limits_armed` from the base of `VM`.
+#[inline(always)]
+pub(super) fn vm_limits_armed_offset() -> i32 {
+    VM::limits_armed_offset() as i32
+}
+
+/// Byte offset of `loop_countdown` from the base of `VM`.
+#[inline(always)]
+pub(super) fn vm_loop_countdown_offset() -> i32 {
+    VM::loop_countdown_offset() as i32
+}
+
 #[allow(dead_code)]
 #[inline(always)]
 pub(super) fn vm_jit_frame_view_ptr_offset() -> i32 {

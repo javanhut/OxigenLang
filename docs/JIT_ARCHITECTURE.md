@@ -294,6 +294,15 @@ for `GetLocal+Const+Arith+SetLocal`, `GetLocal+GetLocal+Arith+SetLocal`,
 **Control flow.** `Jump`, `JumpIfFalse`, `JumpIfTrue`, `Loop`,
 `PopJumpIfFalse`.
 
+**Range loops.** `each i in range(...)` is lowered to a counter, not an
+array. `RangeLimit` runs once on entry: it raises `range()`'s own error
+unless both bounds are ints, and yields `end - step` saturated to i64.
+The loop tests `i < end` once, then `i < limit` before each advance —
+exactly `i + step < end`, without a sum that could wrap past i64::MAX.
+It is computed in registers when both bounds are staged as ints (helper
+otherwise), and the limit is a register-eligible local initializer in
+`slot_types`, alongside `Constant(Integer)`.
+
 **Calls.** `Call` (inline IR guard + `jit_op_call_hit` /
 `jit_op_call_miss`), `Return` (`jit_op_return`).
 

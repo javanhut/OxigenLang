@@ -1,4 +1,5 @@
 introduce os
+introduce regex
 introduce strings
 introduce toml
 
@@ -59,7 +60,56 @@ fun check_oxigen_version() {
             True
         }
     }
-    (True, strings.split(out, " ")[1]) unless not success then (False, "")
+    (True, version_from_output(out)) unless not success then (False, "")
+}
+
+// `oxigen --version` prints "Oxigen Version: 0.1.4": the version is the last word.
+fun version_from_output(out <str>) {
+    words := strings.split(strings.trim(out), " ")
+    words[len(words) - 1]
+}
+
+fun semantic_version_split(version_str <str>) {
+    major, minor, patch := strings.split(version_str, ".")
+    (int(major), int(minor), int(patch))
+}
+
+// Whether version `a` comes after version `b`.
+fun is_newer(a <str>, b <str>) {
+    a_major, a_minor, a_patch := semantic_version_split(a)
+    b_major, b_minor, b_patch := semantic_version_split(b)
+    option {
+        a_major != b_major -> {
+            a_major > b_major
+        }
+        a_minor != b_minor -> {
+            a_minor > b_minor
+        }
+        {
+            a_patch > b_patch
+        }
+    }
+}
+
+// The newest release version (the X.Y.Z of a vX.Y.Z tag) in the output of
+// `git ls-remote --tags --refs`, or "" when there is none. Updating builds a
+// release tag, never whatever the default branch holds at the moment.
+fun latest_release(listing <str>) {
+    best := ""
+    each line in strings.split(listing, "\n") {
+        found := regex.captures("refs/tags/v(\\d+)\\.(\\d+)\\.(\\d+)$", strings.trim(line))
+        option {
+            found != None -> {
+                version := "{found[1]}.{found[2]}.{found[3]}"
+                option {
+                    best == "" or is_newer(version, best) -> {
+                        best = version
+                    }
+                }
+            }
+        }
+    }
+    best
 }
 
 fun cleanup_tmp_dir(home_dir <str>, total_path <str>) {
@@ -73,45 +123,17 @@ fun cleanup_tmp_dir(home_dir <str>, total_path <str>) {
 }
 
 fun update_oxigen(home_dir <str>, total_path <str>) {
-    uninstall_command <str> = "./scripts/uninstall.sh"
-    build_command <str> = "cargo build --manifest-path Cargo.toml --release -p oxigen"
+    // install.sh builds first and stops before touching the installed copy
+    // if the build fails, so a broken build leaves the current oxigen in place.
     install_command <str> = "./scripts/install.sh"
-    <log<uninstall>>("Uninstalling current version of oxigen...")
-    uninstall := os.exec(uninstall_command)
-    u_out, u_err, u_code := (uninstall["stdout"], uninstall["stderr"], uninstall["code"])
-    option {
-        u_code != 0 -> {
-            <log>(u_err) unless strings.trim(u_err) == ""
-            cleanup_tmp_dir(home_dir, total_path)
-            <log<Error>>("Failed to uninstall with code: {u_code}")
-            <fail>(unsuccessful_system_call)
-        }
-        {
-            <log<debug>>(u_out)
-        }
-    }
-    <log<build>>("Building updated version....")
-    build := os.exec(build_command)
-    b_out, b_err, b_code := (build["stdout"], build["stderr"], build["code"])
-    option {
-        b_code != 0 -> {
-            <log>(b_err) unless strings.trim(b_err) == ""
-            cleanup_tmp_dir(home_dir, total_path)
-            <log<Error>>("Failed to build with code: {b_code}")
-            <fail>(unsuccessful_system_call)
-        }
-        {
-            <log<debug>>(b_out)
-        }
-    }
-    <log<install>>("Installing updated version....")
+    <log<install>>("Building and installing updated version....")
     install := os.exec(install_command)
     i_out, i_err, i_code := (install["stdout"], install["stderr"], install["code"])
     option {
         i_code != 0 -> {
             <log>(i_err) unless strings.trim(i_err) == ""
             cleanup_tmp_dir(home_dir, total_path)
-            <log<Error>>("Failed to install with code: {i_code}")
+            <log<Error>>("Failed to build or install with code: {i_code}")
             <fail>(unsuccessful_system_call)
         }
         {
@@ -196,7 +218,23 @@ main {
         }
     }
     os.chdir(total_path)
-    results := os.exec("git clone {oxigen_repo_url}")
+    tags := os.exec("git ls-remote --tags --refs {oxigen_repo_url}")
+    option {
+        tags["code"] != 0 -> {
+            <log>(tags["stderr"]) unless strings.trim(tags["stderr"]) == ""
+            cleanup_tmp_dir(home_dir, total_path)
+            <fail>("Failed to list releases {tags["code"]}")
+        }
+    }
+    release <str> := latest_release(tags["stdout"])
+    option {
+        release == "" -> {
+            cleanup_tmp_dir(home_dir, total_path)
+            <fail>("No release tags found at {oxigen_repo_url}")
+        }
+    }
+    <log>("Latest release: v{release}")
+    results := os.exec("git clone --depth 1 --branch v{release} {oxigen_repo_url}")
     out, err, code := (results["stdout"], results["stderr"], results["code"])
     option {
         code != 0 -> {
@@ -220,10 +258,6 @@ main {
         }
         {
             <log>("Versions differ. Checking if version is newer.")
-            fun semantic_version_split(version_str <str>) {
-                major, minor, patch := strings.split(version_str, ".")
-                (int(major), int(minor), int(patch))
-            }
             new_pull := semantic_version_split(package_ver)
             installed_version := semantic_version_split(installed_oxigen_ver)
             p_major, p_minor, p_patch := new_pull
@@ -264,4 +298,23 @@ main {
             }
         }
     }
+}
+
+<test>("version_from_output takes the version, not the label") {
+    expect(version_from_output("Oxigen Version: 0.1.4\n")).eq("0.1.4")
+}
+
+<test>("latest_release picks the highest vX.Y.Z tag") {
+    listing := "a1\trefs/tags/v0.1.4\nb2\trefs/tags/v0.10.0\nc3\trefs/tags/v0.9.9\nd4\trefs/tags/v1.0.0-rc1\n"
+    expect(latest_release(listing)).eq("0.10.0")
+}
+
+<test>("latest_release is empty without release tags") {
+    expect(latest_release("a1\trefs/tags/nightly\n")).eq("")
+}
+
+<test>("is_newer compares numerically") {
+    expect(is_newer("0.10.0", "0.9.9")).eq(True)
+    expect(is_newer("0.1.4", "0.1.4")).eq(False)
+    expect(is_newer("1.0.0", "0.99.99")).eq(True)
 }

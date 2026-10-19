@@ -22,7 +22,7 @@ fn underline(label: &Label, src: &SourceFile) -> Option<String> {
     let start_byte = label.span.start.offset;
     let end_byte = label.span.end.offset;
     let width = if end_byte > start_byte {
-        let covered = src
+        let covered: usize = src
             .text
             .get(start_byte..end_byte)
             .unwrap_or_default()
@@ -30,17 +30,48 @@ fn underline(label: &Label, src: &SourceFile) -> Option<String> {
             .next()
             .unwrap_or_default()
             .chars()
-            .count();
+            .map(cell_width)
+            .sum();
         covered.max(1)
     } else {
         1
     };
     // Don't run past the end of the line.
-    let remaining = line_text.chars().count().saturating_sub(col - 1).max(1);
-    let width = width.min(remaining);
+    let remaining: usize = line_text.chars().skip(col - 1).map(cell_width).sum();
+    let width = width.min(remaining.max(1));
 
-    let pad = " ".repeat(col.saturating_sub(1));
+    // Pad with what precedes the caret, cell for cell: a tab stays a tab and a
+    // wide character takes two spaces, or the caret drifts left of the error.
+    let pad: String = line_text
+        .chars()
+        .take(col.saturating_sub(1))
+        .map(|c| match c {
+            '\t' => "\t".to_string(),
+            c => " ".repeat(cell_width(c)),
+        })
+        .collect();
     Some(format!("{pad}{}", "^".repeat(width)))
+}
+
+/// Terminal cells a character occupies: two for East Asian wide and emoji
+/// ranges, one otherwise (tabs are handled by the caller).
+fn cell_width(c: char) -> usize {
+    let wide = matches!(c as u32,
+        0x1100..=0x115F
+        | 0x2E80..=0x303E
+        | 0x3041..=0x33FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xA000..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x1F300..=0x1F64F
+        | 0x1F900..=0x1F9FF
+        | 0x20000..=0x3FFFD);
+    if wide { 2 } else { 1 }
 }
 
 fn secondary_underline(label: &Label, src: &SourceFile) -> Option<String> {

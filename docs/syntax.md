@@ -187,6 +187,13 @@ each i in [1, 2, 3]:
     println(i)
 ```
 
+Each statement ends at the end of its line (or at the `}` of a one-line
+block); two statements on one line are an error. In `#[indent]` files, lines
+holding only a comment don't count towards indentation, a dedent must return to
+a column an enclosing block used, and indentation inside `(...)`, `[...]` and
+written `{...}` is layout only — so a multi-line call, list or map works as it
+does in brace style.
+
 ## Built-in Functions — [Full Guide](builtins.md)
 
 | Category     | Functions                                          |

@@ -26,13 +26,20 @@ type Server struct {
 
 	diagMu     sync.Mutex
 	diagTimers map[string]*time.Timer // per-URI debounce
-	diagCancel context.CancelFunc     // cancels the in-flight run
+	diagRuns   map[string]*diagRun    // per-URI in-flight run
+}
+
+// diagRun is one in-flight diagnostics run for a document. A newer run for
+// the same document, or closing it, cancels it.
+type diagRun struct {
+	cancel context.CancelFunc
 }
 
 func NewServer() *Server {
 	return &Server{
 		documents:  make(map[string]*documentState),
 		diagTimers: make(map[string]*time.Timer),
+		diagRuns:   make(map[string]*diagRun),
 		writer:     bufio.NewWriter(os.Stdout),
 		oxigenBin:  findOxigenBinary(),
 		stdlibPath: findStdlibPath(),
@@ -237,18 +244,22 @@ func (s *Server) handleDidClose(msg Request) {
 		return
 	}
 
-	s.diagMu.Lock()
-	if t, ok := s.diagTimers[params.TextDocument.URI]; ok {
-		t.Stop()
-		delete(s.diagTimers, params.TextDocument.URI)
-	}
-	s.diagMu.Unlock()
-
 	s.mu.Lock()
 	delete(s.documents, params.TextDocument.URI)
 	s.mu.Unlock()
 
-	// Clear diagnostics for closed document
+	// Stop pending and in-flight runs, and clear the document's diagnostics,
+	// under diagMu so no run can publish after the clear.
+	s.diagMu.Lock()
+	defer s.diagMu.Unlock()
+	if t, ok := s.diagTimers[params.TextDocument.URI]; ok {
+		t.Stop()
+		delete(s.diagTimers, params.TextDocument.URI)
+	}
+	if run, ok := s.diagRuns[params.TextDocument.URI]; ok {
+		run.cancel()
+		delete(s.diagRuns, params.TextDocument.URI)
+	}
 	s.notify("textDocument/publishDiagnostics", PublishDiagnosticsParams{
 		URI:         params.TextDocument.URI,
 		Diagnostics: []Diagnostic{},
@@ -378,20 +389,36 @@ func (s *Server) scheduleDiagnostics(uri, content string, version int) {
 
 func (s *Server) runDiagnostics(uri, content string, version int) {
 	s.diagMu.Lock()
-	if s.diagCancel != nil {
-		s.diagCancel()
+	if prev, ok := s.diagRuns[uri]; ok {
+		prev.cancel()
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), diagTimeout)
-	s.diagCancel = cancel
+	run := &diagRun{cancel: cancel}
+	s.diagRuns[uri] = run
 	s.diagMu.Unlock()
 	defer cancel()
 
 	diagnostics := getDiagnosticsCtx(ctx, content, s.oxigenBin)
-	if ctx.Err() != nil {
-		return // cancelled by a newer edit or timed out
-	}
 	if diagnostics == nil {
 		diagnostics = []Diagnostic{}
+	}
+
+	// Publish only while this is still the document's run: a newer edit or
+	// a close replaces or removes it, and holding diagMu keeps a close from
+	// slipping in between the check and the publish.
+	s.diagMu.Lock()
+	defer s.diagMu.Unlock()
+	if s.diagRuns[uri] != run || ctx.Err() != nil {
+		return // cancelled by a newer edit or a close, or timed out
+	}
+	delete(s.diagRuns, uri)
+	// A run that started after its document closed (a late didOpen
+	// goroutine or debounce timer) has nothing left to report on.
+	s.mu.Lock()
+	_, open := s.documents[uri]
+	s.mu.Unlock()
+	if !open {
+		return
 	}
 	v := version
 	s.notify("textDocument/publishDiagnostics", PublishDiagnosticsParams{

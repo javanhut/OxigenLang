@@ -319,6 +319,60 @@ println(math.log2(8))   // 3
 println(math.log10(1000))   // 3
 ```
 
+## Vectors
+
+These take the `vec2`, `vec3` and `vec4` values described in
+[Data Types](../data_types.md#vectors).
+
+### `dot(a, b)`
+
+The dot product of two vectors of the same size, as a float.
+
+```oxi
+println(math.dot(vec3(1, 2, 3), vec3(4, 5, 6)))   // 32
+```
+
+### `cross(a, b)`
+
+The cross product of two `vec3`s: a `vec3` at right angles to both.
+
+```oxi
+println(math.cross(vec3(1, 0, 0), vec3(0, 1, 0)))   // vec3(0, 0, 1)
+```
+
+### `length(v)`
+
+How long the vector is, as a float.
+
+```oxi
+println(math.length(vec2(3, 4)))   // 5
+```
+
+### `distance(a, b)`
+
+The length of `a - b`.
+
+```oxi
+println(math.distance(vec3(1, 1, 1), vec3(1, 4, 5)))   // 5
+```
+
+### `normalize(v)`
+
+The vector pointing the same way with length 1. A zero-length vector has no
+direction, so normalizing one is an error.
+
+```oxi
+println(math.normalize(vec2(3, 4)))   // vec2(0.6, 0.8)
+```
+
+### `lerp(a, b, t)`
+
+Blend from `a` (at `t = 0`) to `b` (at `t = 1`).
+
+```oxi
+println(math.lerp(vec2(0, 0), vec2(10, 20), 0.5))   // vec2(5, 10)
+```
+
 ---
 
 ## Constants

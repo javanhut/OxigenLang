@@ -65,7 +65,7 @@ Two values arrive from the framework rather than from your code, and neither is
 magic — each has exactly one source.
 
 **`cfg <map>`** is handed to your worker function by
-[`serve`](#serveworker-host-port-workers-keep_alive-idle_timeout). You never
+[`serve`](#serveworker-host-port-workers-keep_alive-idle_timeout-header_timeout-body_timeout). You never
 build it and never read from it directly; you pass it straight to
 [`api.app(cfg)`](#appcfg), which turns it into an [`App`](#struct-app). It
 carries the three things a worker thread needs:
@@ -75,6 +75,8 @@ carries the three things a worker thread needs:
 | `server` | `int` | the listening socket handle `serve` bound |
 | `keep_alive` | `bool` | the `keep_alive` argument you gave `serve` |
 | `idle_timeout` | `int` | the `idle_timeout` argument you gave `serve` |
+| `header_timeout` | `int` | the `header_timeout` argument you gave `serve` |
+| `body_timeout` | `int` | the `body_timeout` argument you gave `serve` |
 
 It is a plain map rather than an `App` because it has to cross a thread
 boundary — see [why the routes live in a function](#why-your-routes-live-in-a-function).
@@ -97,10 +99,10 @@ fun index(req <map>) { ... }      // req  from the dispatcher, once per request
 
 | Function | Signature |
 |----------|-----------|
-| [`serve`](#serveworker-host-port-workers-keep_alive-idle_timeout) | `serve(worker, host = "0.0.0.0", port = 8000, workers = 64, keep_alive = True, idle_timeout = 5000)` |
+| [`serve`](#serveworker-host-port-workers-keep_alive-idle_timeout-header_timeout-body_timeout) | `serve(worker, host = "127.0.0.1", port = 8000, workers = 64, keep_alive = True, idle_timeout = 5000, header_timeout = 10000, body_timeout = 60000)` |
 | [`app`](#appcfg) | `app(cfg)` |
 
-### `serve(worker, host, port, workers, keep_alive, idle_timeout)`
+### `serve(worker, host, port, workers, keep_alive, idle_timeout, header_timeout, body_timeout)`
 
 Bind `host:port` and run `worker` on `workers` threads, each with its own
 router over the shared listening socket. **Blocks** until the acceptors stop.
@@ -108,11 +110,17 @@ router over the shared listening socket. **Blocks** until the acceptors stop.
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
 | `worker` | — | a top-level function taking one argument, the config map |
-| `host` | `"0.0.0.0"` | interface to bind; `"127.0.0.1"` for local-only |
+| `host` | `"127.0.0.1"` | interface to bind; `"0.0.0.0"` to accept connections from other machines |
 | `port` | `8000` | port to bind |
 | `workers` | `64` | how many connections are served at once |
 | `keep_alive` | `True` | reuse a connection for more requests |
 | `idle_timeout` | `5000` | ms a single read may stall before the connection is dropped |
+| `header_timeout` | `10000` | ms the whole request head may take to arrive; past it, **408** |
+| `body_timeout` | `60000` | ms the whole body may take to arrive; past it, **408** |
+
+The default `host` is loopback only, so a server is not reachable from the
+network unless you ask for it with `host="0.0.0.0"` (in a container, that is
+what publishing a port needs).
 
 ### Why your routes live in a function
 
@@ -391,8 +399,13 @@ what makes the module serve a *website* and not only an API.
 
 ### `file(path, status)`
 
-Reads the file and sets `Content-Type` from its extension, so a browser renders
-a page instead of showing its source. A missing file is a `404`, not a crash.
+Serves the file with its `Content-Type` set from the extension, so a browser
+renders a page instead of showing its source. A missing file, or a directory,
+is a `404`, not a crash.
+
+It returns a [`FileRes`](#struct-fileres), not a `Res`: the file is not read
+into a string but streamed to the client byte for byte when the response is
+sent, so images, fonts and other binary files arrive intact.
 
 ```oxi
 fun home(req <map>) { api.file("site/index.html") }
@@ -408,6 +421,17 @@ scripts, images. A path ending in `/` serves `index.html` from that directory.
 ```oxi
 fun assets(req <map>) { api.static_dir(req, "site") }
 ```
+
+To serve a whole tree, register it on a route ending in `/*`, which matches
+every path under its prefix (the matched tail is in `req.params["*"]`):
+
+```oxi
+app.get("/*", assets)            // everything not matched by another route
+app.get("/static/*", assets)     // only paths under /static/
+```
+
+Routes without a wildcard are tried first, so `app.get("/*", ...)` does not
+shadow the rest of your API.
 
 A request path comes from the caller, so it is resolved and then checked to be
 inside `root` before anything is read: `/../../etc/passwd` returns `404`. Do not
@@ -718,9 +742,11 @@ Over capacity the server slows down; it does not stop accepting. Pass
 `keep_alive=False` to answer one request per connection instead — concurrency
 then caps at `workers` *requests* rather than `workers` *clients*.
 
-Because `idle_timeout` bounds each individual read rather than the request as a
-whole, a slowloris client loses its connection while a genuinely slow upload,
-which keeps sending, does not.
+`idle_timeout` bounds each individual read, so it cannot stop a client that
+keeps sending one byte at a time (slowloris). The request as a whole is bounded
+too: its head must arrive within `header_timeout` (10s) and its body within
+`body_timeout` (60s), or the client gets a **408** and the connection is
+closed.
 
 A client cannot make the server allocate without bound:
 
@@ -728,10 +754,19 @@ A client cannot make the server allocate without bound:
 |-------|-------|------------------------|
 | `head_limit` | 64 KiB | **431** request headers too large |
 | `body_limit` | 8 MiB | **413** request body too large |
-| unparseable `Content-Length` | — | **400** invalid Content-Length |
+| `Content-Length` that is not plain digits | — | **400** invalid Content-Length |
+| body ends before its `Content-Length` | — | **400**; the handler never sees a truncated body |
+| `Transfer-Encoding` (chunked) | — | **501**; send a `Content-Length` instead |
+| head or body slower than `header_timeout`/`body_timeout` | 10s / 60s | **408** |
 
-**Not implemented:** request pipelining, TLS (terminate it at a proxy), and
-multipart uploads. Binary request bodies are read as UTF-8 text.
+Header names and values are written with any CR, LF or NUL replaced by a
+space, so a handler that puts client input in a header (a redirect target
+from the query string, say) cannot be used to inject headers or a body.
+
+**Not implemented:** request pipelining, chunked request bodies, TLS (terminate
+it at a proxy), and multipart uploads. Binary request bodies are read as UTF-8
+text (invalid bytes become U+FFFD); binary *responses* are fine through
+[`file`](#filepath-status).
 
 ---
 
@@ -759,6 +794,18 @@ introduce {Res} from api
 fun raw(req <map>) { Res(200, {"X-A": "1"}, "hi") }
 ```
 
+### Struct: `FileRes`
+
+A file response, returned by [`file`](#filepath-status) and
+[`static_dir`](#static_dirreq-root).
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `status` | `int` | status code |
+| `headers` | `map` | response headers |
+| `path` | `str` | the file to stream |
+| `size` | `int` | its size in bytes, sent as `Content-Length` |
+
 ### Struct: `App`
 
 A router plus the socket it serves. Each worker thread gets its own.
@@ -770,6 +817,8 @@ A router plus the socket it serves. Each worker thread gets its own.
 | `dynamic` | `array` | parameterized routes as `(method, segments, handler)` |
 | `keep_alive` | `bool` | whether connections are reused |
 | `idle_timeout` | `int` | per-read timeout in ms |
+| `header_timeout` | `int` | deadline for a request's head in ms |
+| `body_timeout` | `int` | deadline for a request's body in ms |
 
 ### Module constants
 
@@ -803,9 +852,9 @@ stack trace, or extending the module, is not guesswork.
 |----------|-----------|---------|
 | `app.serve_conn` | `serve_conn(conn)` | Serve one connection: read, route, respond, repeat while kept alive |
 | `app.dispatch` | `dispatch(req)` | Find the handler, run it contained, and normalize the result to a `Res` |
-| `read_request` | `read_request(conn)` | Read one request. Returns a request map, a `Res` to send back when the request is unusable, or `None` when the peer closed |
-| `read_body` | `read_body(conn, so_far, length)` | Read the rest of the body, collecting chunks and joining once |
-| `content_length` | `content_length(headers)` | `Content-Length` as an `Error \|\| Value`; absent means `0`, unparseable is an error |
+| `read_request` | `read_request(conn, header_ms, body_ms)` | Read one request. Returns a request map, a `Res` to send back when the request is unusable, or `None` when the peer closed |
+| `read_body` | `read_body(conn, so_far, length, body_ms)` | Read the rest of the body, collecting chunks and joining once; a `Res` (400 or 408) when it ends early or arrives too slowly |
+| `content_length` | `content_length(headers)` | `Content-Length` as an `Error \|\| Value`; absent means `0`, anything but plain digits is an error |
 | `wants_keep_alive` | `wants_keep_alive(req)` | HTTP/1.1 keeps the connection open unless told otherwise; HTTP/1.0 is the reverse |
 
 ### Routing
@@ -813,21 +862,24 @@ stack trace, or extending the module, is not guesswork.
 | Function | Signature | Purpose |
 |----------|-----------|---------|
 | `compile_path` | `compile_path(path)` | Split a route path into `(is_param, name)` segments once, at registration |
-| `match_segments` | `match_segments(segments, segs)` | Match one compiled route against a request's segments; returns the captured params or `None` |
+| `match_segments` | `match_segments(segments, segs)` | Match one compiled route against a request's segments; returns the captured params or `None`. A trailing `*` segment matches any tail |
 | `match_dynamic` | `match_dynamic(dynamic, method, segs)` | Scan the parameterized routes; returns `(handler, params)` or `(None, {})` |
 | `allowed_methods` | `allowed_methods(routes, dynamic, path)` | Every method registered for a path |
 | `miss` | `miss(routes, dynamic, path)` | The 404-or-405 answer for an unmatched request |
-| `to_res` | `to_res(v)` | Normalize whatever a handler returned into a `Res` |
+| `to_res` | `to_res(v)` | Normalize whatever a handler returned into a `Res` (a `FileRes` passes through) |
 
 ### Wire format
 
 | Function | Signature | Purpose |
 |----------|-----------|---------|
 | `render` | `render(res, live)` | Serialize a response as one string, sent in a single write, so the status line and body never land in separate TCP segments |
+| `render_head` | `render_head(status, headers, length, live)` | The status line and headers through the blank line, with CR/LF/NUL in headers replaced by spaces |
+| `header_safe` | `header_safe(text)` | A header name or value with CR, LF and NUL replaced by spaces |
+| `send_res` | `send_res(conn, res, live)` | Send a `Res`, or a `FileRes` (head, then the file's bytes) |
 | `reason` | `reason(status)` | Reason phrase for a status code; anything unlisted renders as `"OK"`, which clients ignore |
 
 `reason` covers 200, 201, 202, 204, 301, 302, 304, 400, 401, 403, 404, 405,
-409, 413, 422, 429, 431, 500, 503.
+408, 409, 413, 422, 429, 431, 500, 501, 503.
 
 ---
 

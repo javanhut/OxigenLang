@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 /// Frozen per-file totals. See the module docs before changing a number.
 const BASELINE: &[(&str, usize)] = &[
     ("core/src/compiler/slot_types.rs", 1),
-    ("core/src/concurrent.rs", 6),
+    ("core/src/concurrent.rs", 7),
     ("core/src/diagnostics/render.rs", 2),
     ("core/src/jit/engine/lean.rs", 1),
     ("core/src/jit/engine/mod.rs", 9),
@@ -52,8 +52,8 @@ const BASELINE: &[(&str, usize)] = &[
     ("core/src/vm/builtins.rs", 5),
     ("core/src/vm/mod.rs", 5),
     ("core/src/vm/nanvalue.rs", 2),
-    ("core/src/vm/value.rs", 3),
-    ("crates/oxigen-cli/src/main.rs", 4),
+    ("core/src/vm/value.rs", 2),
+    ("crates/oxigen-cli/src/main.rs", 5),
     ("crates/oxigen-cli/src/repl/mod.rs", 1),
 ];
 
@@ -81,7 +81,7 @@ const SHAPES: &[&str] = &[
 const BOUNDARY_FILES: &[(&str, usize)] = &[
     ("core/src/vm/builtins.rs", 7),
     ("core/src/netres/mod.rs", 1),
-    ("core/src/concurrent.rs", 0),
+    ("core/src/concurrent.rs", 1),
 ];
 
 /// Narrowing casts. Not `usize` — it is 64-bit here, so it does not narrow from

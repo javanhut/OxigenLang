@@ -37,7 +37,7 @@ func formatDocument(content, oxigenBin string) []TextEdit {
 	lineCount := uint32(len(lines))
 	lastLineLen := uint32(0)
 	if lineCount > 0 {
-		lastLineLen = uint32(len(lines[lineCount-1]))
+		lastLineLen = utf16Len(lines[lineCount-1])
 	}
 
 	return []TextEdit{{

@@ -1,19 +1,42 @@
 pub mod builtins;
+pub mod capabilities;
 pub mod collections;
 pub mod intern;
+pub mod limits;
 pub mod nanvalue;
 pub mod value;
+pub mod vector;
 
 use crate::compiler::opcode::OpCode;
 use crate::jit::JitEngine;
 use crate::vm::value::*;
+pub use capabilities::Capability;
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 pub(crate) const STACK_MAX: usize = 262144; // 256K stack slots
 pub(crate) const FRAMES_MAX: usize = 16384; // 16K call frames — supports deep recursion
+/// Stack slots every call keeps free. A function whose own
+/// [`Chunk::stack_bound`](crate::compiler::opcode::Chunk::stack_bound) is
+/// larger reserves that much instead (see [`Function::stack_reserve`]), and
+/// the JIT, whose inline call paths only check this margin, declines to
+/// compile it.
+pub(crate) const STACK_GUARD_MARGIN: usize = 8192;
+
+/// Type names the runtime itself uses. A user struct or enum may not take
+/// one, or its instances would satisfy that built-in type's checks.
+pub(crate) const BUILTIN_TYPE_NAMES: &[&str] = &[
+    "INTEGER", "FLOAT", "CHAR", "STRING", "BOOLEAN", "ARRAY", "FUNCTION", "STRUCT_DEF",
+    "STRUCT", "BYTE", "UINT", "TUPLE", "MAP", "SET", "MODULE", "BUILTIN", "NONE", "ERROR",
+    "VALUE", "ENUM_DEF", "ENUM", "TASK", "HOST", "GENERIC",
+];
+
+pub(crate) fn is_builtin_type_name(name: &str) -> bool {
+    BUILTIN_TYPE_NAMES.contains(&name)
+}
 
 /// Checks if `actual` satisfies the type constraint `expected`.
 /// Handles GENERIC (accepts anything) and union types like "INTEGER || STRING".
@@ -28,6 +51,74 @@ pub(crate) fn type_matches(expected: &str, actual: &str) -> bool {
         expected.split(" || ").any(|t| t == "GENERIC" || t == actual)
     } else {
         expected == actual
+    }
+}
+
+/// The common type for arithmetic on two different kinds of number, by the
+/// same rule `==` uses: `byte` or `uint` with `int` is `int`, `byte` with
+/// `uint` is `uint`, anything with `float` is `float`, and `byte` with `byte`
+/// is `int`. The operator then runs on the converted pair, so it behaves
+/// exactly as it does for that type with itself. `None` for any other pair,
+/// including two numbers that already share a type.
+fn promote_numeric(a: &Value, b: &Value) -> Option<(Value, Value)> {
+    use Value::{Byte, Float, Integer, Uint};
+    fn to_float(v: &Value) -> Option<f64> {
+        match v {
+            Integer(n) => Some(*n as f64),
+            Uint(n) => Some(*n as f64),
+            Byte(n) => Some(f64::from(*n)),
+            Float(x) => Some(*x),
+            _ => None,
+        }
+    }
+    // A `uint` past `i64::MAX` wraps, as the `+` and `-` arms always did.
+    fn to_int(v: &Value) -> Option<i64> {
+        match v {
+            Integer(n) => Some(*n),
+            Uint(n) => Some(*n as i64),
+            Byte(n) => Some(i64::from(*n)),
+            _ => None,
+        }
+    }
+    match (a, b) {
+        (Integer(_), Integer(_)) | (Uint(_), Uint(_)) | (Float(_), Float(_)) => None,
+        (Float(_), _) | (_, Float(_)) => Some((Float(to_float(a)?), Float(to_float(b)?))),
+        (Byte(x), Uint(y)) => Some((Uint(u64::from(*x)), Uint(*y))),
+        (Uint(x), Byte(y)) => Some((Uint(*x), Uint(u64::from(*y)))),
+        _ => Some((Integer(to_int(a)?), Integer(to_int(b)?))),
+    }
+}
+
+/// How `a` and `b` order, for `<`, `<=`, `>` and `>=`. `None` when they
+/// cannot be compared; `Some(None)` when they can but have no order (a NaN).
+///
+/// Integers of any width (`int`, `uint`, `byte`) compare by exact value: all
+/// of them fit in an `i128`, so a `uint` above `i64::MAX` is still greater
+/// than every `int` instead of wrapping negative. Anything with a float
+/// compares as floats, as `int` with `float` always has. Strings compare with
+/// strings and chars with chars.
+fn order(a: &Value, b: &Value) -> Option<Option<Ordering>> {
+    fn integer(v: &Value) -> Option<i128> {
+        match v {
+            Value::Integer(n) => Some(i128::from(*n)),
+            Value::Uint(n) => Some(i128::from(*n)),
+            Value::Byte(n) => Some(i128::from(*n)),
+            _ => None,
+        }
+    }
+    fn number(v: &Value) -> Option<f64> {
+        match v {
+            Value::Float(x) => Some(*x),
+            other => integer(other).map(|n| n as f64),
+        }
+    }
+    match (a, b) {
+        (Value::String(l), Value::String(r)) => Some(Some(l.cmp(r))),
+        (Value::Char(l), Value::Char(r)) => Some(Some(l.cmp(r))),
+        _ => match (integer(a), integer(b)) {
+            (Some(l), Some(r)) => Some(Some(l.cmp(&r))),
+            _ => Some(number(a)?.partial_cmp(&number(b)?)),
+        },
     }
 }
 
@@ -188,6 +279,15 @@ pub struct VMError {
     pub tag: Option<String>,
 }
 
+impl VMError {
+    /// A loop budget or interrupt error: the host stopping the script,
+    /// which no handler in the script may catch.
+    pub fn is_host_limit(&self) -> bool {
+        use crate::diagnostics::registry::{INTERRUPTED, LOOP_BUDGET_EXHAUSTED};
+        self.code == INTERRUPTED || self.code == LOOP_BUDGET_EXHAUSTED
+    }
+}
+
 impl std::fmt::Display for VMError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)
@@ -273,6 +373,28 @@ pub struct VM {
     /// Baseline JIT engine. Stub/no-op when the `jit` feature is off.
     pub jit: JitEngine,
     execution_mode: ExecutionMode,
+
+    /// `interrupt`'s armed byte (`limits::Limits::armed_ptr`), cached where
+    /// JIT-compiled back-edges can load it at `VM::limits_armed_offset`. The
+    /// `Arc` in `interrupt` keeps it alive.
+    pub(crate) limits_armed: *const std::sync::atomic::AtomicU8,
+    /// Loop iterations the budget still allows; meaningful only while a
+    /// budget is set. JIT-compiled loops read and decrement it in place, at
+    /// `VM::loop_countdown_offset`.
+    pub(crate) loop_countdown: i64,
+    interrupt: limits::InterruptHandle,
+
+    /// Host-registered natives, registered again in each child VM so
+    /// imported modules can call them.
+    natives: Vec<(String, Value)>,
+    /// What scripts may reach outside the VM; `None` is everything.
+    capabilities: Option<Vec<Capability>>,
+    /// For each cached module, every file it imported, directly or through
+    /// other modules, so invalidating a file also drops what was built on it.
+    module_deps: HashMap<PathBuf, std::collections::HashSet<PathBuf>>,
+    /// Every module this VM's own code imported (cache hits included); a
+    /// module's `module_deps` entry is built from its sub-VM's set.
+    imported_here: std::collections::HashSet<PathBuf>,
 }
 
 /// A recoverable-error landing pad installed by `PushHandler`. Records the
@@ -350,7 +472,16 @@ impl VM {
             error_handlers: Vec::new(),
             jit: JitEngine::new(),
             execution_mode: mode,
+            limits_armed: std::ptr::null(),
+            loop_countdown: 0,
+            interrupt: limits::InterruptHandle::default(),
+            natives: Vec::new(),
+            capabilities: None,
+            module_deps: HashMap::new(),
+            imported_here: std::collections::HashSet::new(),
         };
+        vm.limits_armed = vm.interrupt.0.armed_ptr();
+        vm.jit.set_limits_armed(vm.limits_armed as usize);
         match mode {
             ExecutionMode::Interpreter => vm.jit.disable(),
             ExecutionMode::TieredJit => {}
@@ -371,6 +502,18 @@ impl VM {
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub const fn stack_view_offset() -> usize {
         std::mem::offset_of!(VM, stack_view)
+    }
+
+    /// Byte offset of `limits_armed`, the pointer JIT-compiled loops check.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub const fn limits_armed_offset() -> usize {
+        std::mem::offset_of!(VM, limits_armed)
+    }
+
+    /// Byte offset of `loop_countdown`, which JIT-compiled loops decrement in place.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    pub const fn loop_countdown_offset() -> usize {
+        std::mem::offset_of!(VM, loop_countdown)
     }
 
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
@@ -420,7 +563,7 @@ impl VM {
             .collect();
         self.globals.insert(
             "__args".to_string(),
-            Value::Array(Rc::new(RefCell::new(args_val))),
+            Value::Array(Rc::new(RefCell::new(args_val.into()))),
         );
     }
 
@@ -465,6 +608,17 @@ impl VM {
             upvalue_int_values: uv_values,
         });
 
+        let from_host = self.is_idle();
+        let result = self.run_closure(closure);
+        // A failed run leaves its frames and operands behind. Clear them so
+        // the host's next run or call starts clean.
+        if result.is_err() && from_host {
+            self.reset_exec_state();
+        }
+        result
+    }
+
+    fn run_closure(&mut self, closure: Rc<ObjClosure>) -> Result<Value, VMError> {
         // Slot 0 is the callee slot call_closure expects.
         self.push(Value::Closure(Rc::clone(&closure)));
 
@@ -492,6 +646,139 @@ impl VM {
         self.jit_executing.set(false);
     }
 
+    /// Limit how many loop iterations scripts may run from now on, across
+    /// runs and calls, until the next call. `None` removes the limit.
+    ///
+    /// Running out is a `loop budget exhausted` error that the script cannot
+    /// catch. A host that calls a script every frame sets the budget before
+    /// each call.
+    pub fn set_loop_budget(&mut self, budget: Option<u64>) {
+        self.interrupt.0.set_budget(budget.is_some());
+        self.loop_countdown = budget.map_or(0, |n| i64::try_from(n).unwrap_or(i64::MAX));
+    }
+
+    /// Make `f` callable from scripts as `name`. Unlike a builtin it is a
+    /// closure, so it can hold the host's state. An `Err` is a runtime error
+    /// in the script, which the script can catch.
+    pub fn register_native(
+        &mut self,
+        name: &str,
+        f: impl Fn(&[Value]) -> Result<Value, String> + 'static,
+    ) {
+        let native = Value::Native(Rc::new(NativeFunction {
+            name: name.to_string(),
+            func: Box::new(f),
+        }));
+        self.natives.retain(|(existing, _)| existing != name);
+        self.natives.push((name.to_string(), native.clone()));
+        self.set_host_global(name, native);
+    }
+
+    /// Keep only the `allowed` capabilities. Builtins behind the others fail
+    /// with an error naming the capability, here and in imported modules.
+    pub fn restrict(&mut self, allowed: &[Capability]) {
+        self.capabilities = Some(allowed.to_vec());
+        // A module imported before now captured the unrestricted builtins in
+        // its own globals; importing it again must rebuild it under the limits.
+        self.module_cache.clear();
+        self.module_deps.clear();
+        for &(name, capability) in capabilities::GATED_BUILTINS {
+            if !allowed.contains(&capability) {
+                self.set_host_global(name, capabilities::refused(name, capability));
+            }
+        }
+    }
+
+    /// The capabilities scripts in this VM may use; `None` is all of them.
+    pub fn capabilities(&self) -> Option<&[Capability]> {
+        self.capabilities.as_deref()
+    }
+
+    /// A global the host sets from outside any script. The JIT caches global
+    /// lookups, so it has to hear about the change.
+    fn set_host_global(&mut self, name: &str, value: Value) {
+        self.jit.bump_global_version(name);
+        self.globals.insert(name.to_string(), value);
+    }
+
+    /// Drop the module at `path`, and every cached module that imported it,
+    /// from the cache, so the next import reads it again. Returns how many
+    /// cache entries this VM dropped.
+    pub fn invalidate_module(&mut self, path: &Path) -> usize {
+        // Cache keys are canonical paths (see `resolve_module_path`).
+        let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let doomed: Vec<PathBuf> = self
+            .module_cache
+            .keys()
+            .filter(|cached| {
+                **cached == target
+                    || self
+                        .module_deps
+                        .get(*cached)
+                        .is_some_and(|deps| deps.contains(&target))
+            })
+            .cloned()
+            .collect();
+        for cached in &doomed {
+            self.module_cache.remove(cached);
+            self.module_deps.remove(cached);
+        }
+        doomed.len()
+    }
+
+    /// A handle that stops this VM's running script from another thread.
+    pub fn interrupt_handle(&self) -> limits::InterruptHandle {
+        self.interrupt.clone()
+    }
+
+    /// One loop iteration's share of the host's limits, taken when the armed
+    /// byte is set: delivers a pending interrupt, or counts the iteration
+    /// against the budget, failing once it is spent.
+    pub(crate) fn loop_limit_step(&mut self) -> Result<(), VMError> {
+        if self.interrupt.0.take_interrupt() {
+            return Err(self.runtime_error_coded(
+                crate::diagnostics::registry::INTERRUPTED,
+                "interrupted",
+                Some("the program running this script stopped it"),
+            ));
+        }
+        if self.interrupt.0.budget_on() {
+            if self.loop_countdown == 0 {
+                return Err(self.runtime_error_coded(
+                    crate::diagnostics::registry::LOOP_BUDGET_EXHAUSTED,
+                    "loop budget exhausted",
+                    Some("the program running this script limits how many loop iterations it may run"),
+                ));
+            }
+            self.loop_countdown -= 1;
+        }
+        Ok(())
+    }
+
+    /// A VM for an imported module's top level, run on the importer's
+    /// behalf: same execution mode, and the same interrupt and budget
+    /// switch. What is left of the budget is lent with [`VM::lend_limits`]
+    /// around the run.
+    fn child_vm(&self) -> VM {
+        let mut child = VM::new_with_mode(self.execution_mode);
+        child.interrupt = self.interrupt.clone();
+        child.limits_armed = child.interrupt.0.armed_ptr();
+        child.jit.set_limits_armed(child.limits_armed as usize);
+        if let Some(allowed) = &self.capabilities {
+            child.restrict(allowed);
+        }
+        for (name, native) in &self.natives {
+            child.natives.push((name.clone(), native.clone()));
+            child.set_host_global(name, native.clone());
+        }
+        child
+    }
+
+    /// Moves the remaining loop budget from `self` to `to`.
+    fn lend_limits(&mut self, to: &mut VM) {
+        to.loop_countdown = std::mem::take(&mut self.loop_countdown);
+    }
+
     /// Look up a global value by name (used by the concurrency worker pool to
     /// resolve a spawned function by name). Returns a clone if present.
     pub fn get_global(&self, name: &str) -> Option<Value> {
@@ -511,10 +798,60 @@ impl VM {
         self.globals.insert(name, val);
     }
 
+    /// Where the module whose globals are `globals` was loaded from, if this
+    /// VM loaded it (used to tell a worker which module a spawned function
+    /// or struct belongs to).
+    pub fn module_path_of(&self, globals: &Rc<HashMap<String, Value>>) -> Option<PathBuf> {
+        self.module_cache
+            .iter()
+            .find(|(_, module)| Rc::ptr_eq(&module.globals, globals))
+            .map(|(path, _)| path.clone())
+    }
+
+    /// The globals of the module this VM loaded from `path`, if it has.
+    pub fn loaded_module_globals(&self, path: &Path) -> Option<Rc<HashMap<String, Value>>> {
+        let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        self.module_cache.get(&key).map(|module| Rc::clone(&module.globals))
+    }
+
+    /// The globals of the module at `path`, importing it into this VM first
+    /// if it hasn't been. A worker uses it to run a spawned function from a
+    /// module in that module's context.
+    pub fn module_globals_at(&mut self, path: &Path) -> Result<Rc<HashMap<String, Value>>, VMError> {
+        if let Some(globals) = self.loaded_module_globals(path) {
+            return Ok(globals);
+        }
+        let path_str = path.to_string_lossy().into_owned();
+        // A namespace import also binds the module under its file name; keep
+        // whatever that global held, since nothing here asked for the binding.
+        let bound = path_str.rsplit('/').next().unwrap_or(&path_str).to_string();
+        let saved = self.globals.get(&bound).cloned();
+        self.import_module(&path_str, &[])?;
+        match saved {
+            Some(v) => {
+                self.globals.insert(bound, v);
+            }
+            None => {
+                self.globals.remove(&bound);
+            }
+        }
+        self.loaded_module_globals(path)
+            .ok_or_else(|| self.runtime_error(&format!("module not loaded: {}", path.display())))
+    }
+
     /// Call a callee `Value` (closure or builtin) with positional `args` from
     /// external Rust code, driving the VM to completion and returning the
     /// result. Used by the concurrency worker pool.
     pub fn call_with_args(&mut self, callee: Value, args: Vec<Value>) -> Result<Value, VMError> {
+        let from_host = self.is_idle();
+        let result = self.call_with_args_inner(callee, args);
+        if result.is_err() && from_host {
+            self.reset_exec_state();
+        }
+        result
+    }
+
+    fn call_with_args_inner(&mut self, callee: Value, args: Vec<Value>) -> Result<Value, VMError> {
         let depth = self.frames.len();
         let arg_count = args.len();
         self.push(callee);
@@ -527,6 +864,11 @@ impl VM {
             self.execute_until(depth)?;
         }
         Ok(self.pop())
+    }
+
+    /// No script is running: the host, not a script, is calling in.
+    fn is_idle(&self) -> bool {
+        self.frames.is_empty() && self.jit_frame_view.len == 0
     }
 
     // ── Opcode handlers (shared between interpreter and JIT runtime) ──
@@ -657,9 +999,25 @@ impl VM {
             }
             Upvalue::Closed(v) => {
                 *v = val;
+                // Other closures sharing this cell may hold its old value in their int caches.
+                crate::jit::note_upvalue_write();
             }
         }
         Ok(())
+    }
+
+    /// `RangeLimit`: [start, end] -> [end - step, saturated]. Both bounds
+    /// must be Integers, as the `range` builtin requires.
+    pub(crate) fn handle_range_limit(&mut self, step: i64) -> Result<(), VMError> {
+        let end = self.pop();
+        let start = self.pop();
+        match (&start, &end) {
+            (Value::Integer(_), Value::Integer(end)) => {
+                self.push(Value::Integer(end.saturating_sub(step)));
+                Ok(())
+            }
+            _ => Err(self.runtime_error("range() requires integer arguments")),
+        }
     }
 
     pub(crate) fn handle_close_upvalue(&mut self) {
@@ -763,7 +1121,12 @@ impl VM {
                             "declare the value (`x <Struct>`) and set it through a method of the struct",
                         ));
                     }
-                    field_vec[idx] = pair[1].clone();
+                    field_vec[idx] = self.check_field_value(
+                        &struct_name_str,
+                        fname,
+                        &layout.slots[idx].1,
+                        pair[1].clone(),
+                    )?;
                     assigned[idx] = true;
                 } else {
                     return Err(self.runtime_error_hint(
@@ -881,6 +1244,14 @@ impl VM {
         };
 
         match object.repr() {
+            ValueRepr::Vector(vector) => match vector.component(fname) {
+                Some(c) => Ok(Value::Float(f64::from(c))),
+                None => Err(self.runtime_error(&format!(
+                    "{} has no component {}",
+                    vector.constructor(),
+                    fname
+                ))),
+            },
             ValueRepr::StructInstance(inst) => {
                 // Direct Vec index via the instance's cached layout, no HashMap in the hot path.
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
@@ -1052,7 +1423,7 @@ impl VM {
     /// Deliberately chain-directional: a `Person` method may read a hidden
     /// field of an `American` (an American is-a Person), but a method of an
     /// unrelated struct may not, and neither may top-level code.
-    fn hidden_field_access_allowed(&self, inst: &crate::vm::value::ObjStructInstance) -> bool {
+    pub(crate) fn hidden_field_access_allowed(&self, inst: &crate::vm::value::ObjStructInstance) -> bool {
         // `active_closure` is authoritative for both interpreted and JIT'd
         // frames; reading `frames.last()` would answer for the caller once a
         // hot method tiered up, and deny its own `self.field`.
@@ -1121,11 +1492,21 @@ impl VM {
             return Err(self.runtime_error("invalid field name"));
         };
         match object.repr() {
+            ValueRepr::Vector(vector) => Err(self.runtime_error_hint(
+                &format!("cannot assign to {}.{}: vectors are values", vector.constructor(), fname),
+                "build a new vector instead, e.g. v = vec2(5, v.y)",
+            )),
             ValueRepr::StructInstance(inst) => {
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
                     if inst.layout.slots[idx].2 && !self.hidden_field_access_allowed(inst) {
                         return Err(self.hidden_field_error(fname, &inst.struct_name));
                     }
+                    let value = self.check_field_value(
+                        &inst.struct_name,
+                        fname,
+                        &inst.layout.slots[idx].1,
+                        value,
+                    )?;
                     inst.set_field(idx, value);
                     Ok(())
                 } else {
@@ -1166,6 +1547,9 @@ impl VM {
                     methods.insert(mname.to_string(), pair[0].clone());
                 }
             }
+            drop(methods);
+            // Compiled call sites cache methods by struct def, which was just changed in place.
+            self.jit.invalidate_method_caches();
         }
         Ok(())
     }
@@ -1280,10 +1664,10 @@ impl VM {
                 Upvalue::Closed(v) => v.clone(),
             })
             .collect();
-        self.stack[start] = Value::Closure(Rc::new(crate::vm::value::ObjClosure::closed(
-            Rc::clone(&c.function),
-            vals,
-        )));
+        let closed = crate::vm::value::ObjClosure::closed(Rc::clone(&c.function), vals);
+        // The worker needs to know which module the closure belongs to.
+        closed.module_globals.set(c.module_globals.get());
+        self.stack[start] = Value::Closure(Rc::new(closed));
     }
 
     // ── Stack Operations ───────────────────────────────────────────────
@@ -1463,10 +1847,20 @@ impl VM {
     }
 
     /// Insert `value` at `idx`, syncing `stack_view.len`. O(stack_len − idx).
+    ///
+    /// Refuses to grow the stack past `STACK_MAX`: `Vec::insert` at capacity
+    /// would reallocate and leave the JIT's `stack_view.ptr` dangling.
     #[inline(always)]
-    pub(crate) fn stack_insert(&mut self, idx: usize, value: Value) {
+    pub(crate) fn stack_insert(&mut self, idx: usize, value: Value) -> Result<(), VMError> {
+        if self.stack.len() >= STACK_MAX {
+            return Err(self.runtime_error_hint(
+                "stack overflow",
+                "check for infinite recursion or deeply nested calls",
+            ));
+        }
         self.stack.insert(idx, value);
         self.stack_view.len = self.stack.len();
+        Ok(())
     }
 
     /// Overwrite an existing slot in-place (no length change, no sync).
@@ -1734,10 +2128,37 @@ impl VM {
             .and_then(|f| f.closure.function.name.clone())
     }
 
+    /// Build an error as the caller of the innermost JIT frame would see it.
+    ///
+    /// The interpreter checks a call's arguments before the callee has a frame,
+    /// so the error names the call site. A compiled callee checks them in its
+    /// prologue, with its frame already pushed: hide that frame while the error
+    /// is rendered, and let whichever activation sits highest on the stack —
+    /// a compiled or an interpreted caller — be the one reporting.
+    #[cfg(feature = "jit")]
+    pub(crate) fn error_in_jit_caller(&mut self, message: &str, hint: &str) -> VMError {
+        let Some(callee) = self.jit_frame_pop_raw() else {
+            return self.runtime_error_hint(message, hint);
+        };
+        let jit_caller = self.jit_frame_top().map(|f| f.slot_offset);
+        let interp_caller = self.frames.last().map(|f| f.slot_offset);
+        let prev = self.jit_executing.replace(match (jit_caller, interp_caller) {
+            (Some(j), Some(i)) => j > i,
+            (Some(_), None) => true,
+            _ => false,
+        });
+        let err = self.runtime_error_hint(message, hint);
+        self.jit_executing.set(prev);
+        let len = self.jit_frame_view.len;
+        unsafe { self.jit_frame_view.ptr.add(len).write(callee) };
+        self.jit_frame_view.len = len + 1;
+        err
+    }
+
     /// Walk the active call frames from innermost to outermost, returning
     /// `(function_name, line)` per frame. The top-level script body has
-    /// `name == None`. When the JIT is executing, all of its frames are
-    /// included innermost-first, ahead of any interpreter frames below.
+    /// `name == None`. JIT and interpreter frames are merged by stack base,
+    /// so a trace that crosses between the two keeps every frame in order.
     fn stack_trace(&self) -> Vec<(Option<String>, u32, Option<String>)> {
         // None means the entry script.
         let entry_file = self.current_file.as_deref().map(display_path_cwd);
@@ -1751,20 +2172,23 @@ impl VM {
                 .or_else(|| entry_file.clone())
         };
 
-        let mut trace: Vec<(Option<String>, u32, Option<String>)> = Vec::new();
-        if self.jit_executing.get() {
-            let len = self.jit_frame_view.len;
-            for i in (0..len).rev() {
-                let frame = unsafe { &*self.jit_frame_view.ptr.add(i) };
-                let closure = unsafe { &*frame.closure_raw };
-                trace.push((
-                    closure.function.name.clone(),
-                    frame.line,
-                    frame_file(closure),
-                ));
-            }
+        // JIT and interpreter activations interleave (a compiled caller can run an
+        // interpreted callee and vice versa), so order both by stack base: a callee
+        // always sits above its caller. Equal bases are one activation recorded in
+        // both lists; the one actually executing is the JIT's only while it runs.
+        type TraceEntry = (Option<String>, u32, Option<String>);
+        let jit_on_top = self.jit_executing.get();
+        let mut entries: Vec<(usize, bool, TraceEntry)> = Vec::new();
+        for i in 0..self.jit_frame_view.len {
+            let frame = unsafe { &*self.jit_frame_view.ptr.add(i) };
+            let closure = unsafe { &*frame.closure_raw };
+            entries.push((
+                frame.slot_offset,
+                jit_on_top,
+                (closure.function.name.clone(), frame.line, frame_file(closure)),
+            ));
         }
-        for frame in self.frames.iter().rev() {
+        for frame in &self.frames {
             let ip = if frame.ip > 0 { frame.ip - 1 } else { 0 };
             let line = frame
                 .closure
@@ -1774,13 +2198,16 @@ impl VM {
                 .get(ip)
                 .copied()
                 .unwrap_or(0);
-            trace.push((
-                frame.closure.function.name.clone(),
-                line,
-                frame_file(&frame.closure),
+            entries.push((
+                frame.slot_offset,
+                !jit_on_top,
+                (frame.closure.function.name.clone(), line, frame_file(&frame.closure)),
             ));
         }
-        trace
+        // Innermost first; at an equal base the executing record wins.
+        entries.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        entries.dedup_by(|later, kept| later.0 == kept.0);
+        entries.into_iter().map(|(_, _, e)| e).collect()
     }
 
     /// Whether a field's declared type admits `None`, making omission
@@ -1788,6 +2215,67 @@ impl VM {
     /// is meant to be left off at the tail.
     fn field_is_optional(type_name: &str) -> bool {
         type_name.split("||").any(|t| t.trim().eq_ignore_ascii_case("none"))
+    }
+
+    /// Check a value about to be stored in field `field` of `struct_name`,
+    /// declared `type_name`. Returns the value to store: an `<int>` widens
+    /// into a `<float>` field, everything else must already match. `None` is
+    /// the zero value of a struct- or enum-typed field, so it stays valid
+    /// there; a primitive field only takes it when declared `|| None`.
+    pub(crate) fn check_field_value(
+        &self,
+        struct_name: &str,
+        field: &str,
+        type_name: &str,
+        value: Value,
+    ) -> Result<Value, VMError> {
+        if type_name.is_empty() || type_name == "GENERIC" {
+            return Ok(value);
+        }
+        if matches!(value, Value::None)
+            && (Self::field_is_optional(type_name)
+                || type_name
+                    .split(" || ")
+                    .any(|t| !is_builtin_type_name(t) && !t.starts_with("ERROR")))
+        {
+            return Ok(value);
+        }
+        if value.effective_type_is(type_name) || type_matches(type_name, value.type_name()) {
+            return Ok(value);
+        }
+        if let Value::Integer(n) = value
+            && type_matches(type_name, "FLOAT")
+        {
+            return Ok(Value::Float(n as f64));
+        }
+        Err(self.runtime_error_hint(
+            &format!(
+                "type mismatch: field '{}' of {} is {}, got {}",
+                field,
+                struct_name,
+                type_name,
+                value.effective_type_name()
+            ),
+            &format!("field '{}' is declared <{}>", field, type_name),
+        ))
+    }
+
+    /// Check a tuple variant's payload against its declared field types.
+    fn check_variant_args(
+        &self,
+        enum_name: &str,
+        variant: &crate::vm::value::VmEnumVariantDef,
+        names: &[String],
+        args: Vec<Value>,
+    ) -> Result<Vec<Value>, VMError> {
+        let owner = format!("{}.{}", enum_name, variant.name);
+        args.into_iter()
+            .enumerate()
+            .map(|(i, arg)| match (names.get(i), variant.field_types.get(i)) {
+                (Some(name), Some(ty)) => self.check_field_value(&owner, name, ty, arg),
+                _ => Ok(arg),
+            })
+            .collect()
     }
 
     /// Reports a call whose argument count the signature cannot accept.
@@ -1804,6 +2292,16 @@ impl VM {
             .map(|n| format!("`{n}`"))
             .unwrap_or_else(|| "this function".to_string());
         let plural = |n: usize| if n == 1 { "argument" } else { "arguments" };
+        // A method's implicit `self` is counted in its arity but never written by the caller.
+        let implicit_self = usize::from(
+            function.method_of.is_some()
+                && function.params.first().is_some_and(|p| p.name == "self"),
+        );
+        let (got, required, max) = (
+            got.saturating_sub(implicit_self),
+            required.saturating_sub(implicit_self),
+            max.saturating_sub(implicit_self),
+        );
 
         let expectation = if required == max {
             format!("{required} {}", plural(required))
@@ -1819,7 +2317,7 @@ impl VM {
             let missing: Vec<String> = function
                 .params
                 .iter()
-                .skip(got)
+                .skip(got + implicit_self)
                 .filter(|p| !p.has_default && !p.optional)
                 .map(|p| format!("`{}`", p.name))
                 .collect();
@@ -1922,6 +2420,11 @@ impl VM {
     /// push the error as an in-band `ErrorValue`, set `ip` to the catch target,
     /// and return `Ok(())`. Otherwise return the error for propagation.
     fn recover_to_handler(&mut self, stop_depth: usize, err: VMError) -> Result<(), VMError> {
+        // The host's limits stop the script; letting it catch them would let
+        // it carry on.
+        if err.is_host_limit() {
+            return Err(err);
+        }
         match self.error_handlers.last().copied() {
             Some(h) if h.frame_len > stop_depth => {
                 self.error_handlers.pop();
@@ -1998,9 +2501,9 @@ impl VM {
                 }
 
                 // ── Arithmetic ──────────────────────────────────────
-                OpCode::Add => int_fast_binop!(l, r, true, Value::Integer(l + r), binary_add),
-                OpCode::Subtract => int_fast_binop!(l, r, true, Value::Integer(l - r), binary_sub),
-                OpCode::Multiply => int_fast_binop!(l, r, true, Value::Integer(l * r), binary_mul),
+                OpCode::Add => int_fast_binop!(l, r, true, Value::Integer(l.wrapping_add(r)), binary_add),
+                OpCode::Subtract => int_fast_binop!(l, r, true, Value::Integer(l.wrapping_sub(r)), binary_sub),
+                OpCode::Multiply => int_fast_binop!(l, r, true, Value::Integer(l.wrapping_mul(r)), binary_mul),
                 // Excludes -1 as well as 0: Rust traps i64::MIN / -1 unconditionally and panic=abort kills the process.
                 OpCode::Divide => {
                     int_fast_binop!(l, r, r != 0 && r != -1, Value::Integer(l / r), binary_div)
@@ -2085,20 +2588,8 @@ impl VM {
                 // ── Unary ───────────────────────────────────────────
                 OpCode::Negate => {
                     let val = self.pop();
-                    let val = self.force(val);
-                    match val.repr() {
-                        ValueRepr::Integer(n) => self.push(Value::Integer(-n)),
-                        ValueRepr::Float(f) => self.push(Value::Float(-f)),
-                        _ => {
-                            return Err(self.runtime_error_hint(
-                                &format!(
-                                    "negation is only supported for numbers, got {}",
-                                    val.type_name()
-                                ),
-                                "only <int> and <float> values can be negated",
-                            ));
-                        }
-                    }
+                    let negated = self.unary_negate(val)?;
+                    self.push(negated);
                 }
 
                 // ── Postfix ─────────────────────────────────────────
@@ -2116,25 +2607,41 @@ impl VM {
                 }
                 OpCode::SetLocal => {
                     let slot = self.frames[frame_idx].read_u16() as usize;
-                    // A set type stays locked; only <generic> or untyped carries no constraint.
-                    let constraint = self.frames[frame_idx]
+                    self.check_local_lock(&self.frames[frame_idx].closure.function, slot)?;
+                    let offset = self.frames[frame_idx].slot_offset;
+                    let value = self.peek(0).clone();
+                    self.stack[offset + slot] = value;
+                }
+                OpCode::SetLocalLocked => {
+                    let op_offset = self.frames[frame_idx].ip - 1;
+                    let slot = self.frames[frame_idx].read_u16() as usize;
+                    let lock = self.frames[frame_idx]
                         .closure
                         .function
-                        .locals
-                        .get(slot)
-                        .and_then(|li| li.type_constraint.clone());
-                    if let Some(expected) = constraint {
-                        let actual = self.peek(0).effective_type_name();
-                        if !type_matches(&expected, &actual) {
-                            return Err(self.runtime_error_hint(
-                                &format!("type mismatch: expected {}, got {}", expected, actual),
-                                &format!("variable is locked to type {}", expected),
-                            ));
-                        }
+                        .chunk
+                        .local_lock_at(op_offset)
+                        .cloned();
+                    if let Some(expected) = lock.as_ref().and_then(|v| v.as_string()) {
+                        self.check_type_lock(expected)?;
                     }
                     let offset = self.frames[frame_idx].slot_offset;
                     let value = self.peek(0).clone();
                     self.stack[offset + slot] = value;
+                }
+                OpCode::RangeLimit => {
+                    let idx = self.frames[frame_idx].read_u16();
+                    let step = match self.frames[frame_idx].read_constant(idx) {
+                        Value::Integer(step) => *step,
+                        _ => return Err(self.runtime_error("invalid step constant in RangeLimit")),
+                    };
+                    self.handle_range_limit(step)?;
+                }
+                OpCode::CheckType => {
+                    let idx = self.frames[frame_idx].read_u16();
+                    let expected = self.frames[frame_idx].read_constant(idx).clone();
+                    if let Some(expected) = expected.as_string() {
+                        self.check_type_lock(expected)?;
+                    }
                 }
                 OpCode::GetGlobal => {
                     let idx = self.frames[frame_idx].read_u16();
@@ -2192,6 +2699,9 @@ impl VM {
                 }
                 OpCode::Loop => {
                     let offset = self.frames[frame_idx].read_u16() as usize;
+                    if self.interrupt.0.is_armed() {
+                        self.loop_limit_step()?;
+                    }
                     self.maybe_compile_current_loop_hot_function(frame_idx);
                     self.frames[frame_idx].ip -= offset;
                 }
@@ -2272,13 +2782,13 @@ impl VM {
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count;
                     let elements: Vec<Value> = self.stack_drain_from(start);
-                    self.push(Value::Array(Rc::new(RefCell::new(elements))));
+                    self.push(Value::Array(Rc::new(RefCell::new(elements.into()))));
                 }
                 OpCode::BuildTuple => {
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count;
                     let elements: Vec<Value> = self.stack_drain_from(start);
-                    self.push(Value::Tuple(Rc::new(elements)));
+                    self.push(Value::Tuple(Rc::new(elements.into())));
                 }
                 OpCode::BuildMap => {
                     let count = self.frames[frame_idx].read_u16() as usize;
@@ -2401,13 +2911,12 @@ impl VM {
 
                 OpCode::Guard => {
                     let jump_offset = self.frames[frame_idx].read_u16() as usize;
-                    let binding_hi = self.frames[frame_idx].read_byte();
-                    let binding_lo = self.frames[frame_idx].read_byte();
-                    let binding_idx = ((binding_hi as u16) << 8) | (binding_lo as u16);
+                    // The binding name operand is only for disassembly: the fallback
+                    // binds the error as its own local.
+                    self.frames[frame_idx].read_u16();
                     let tag_hi = self.frames[frame_idx].read_byte();
                     let tag_lo = self.frames[frame_idx].read_byte();
                     let tag_idx = ((tag_hi as u16) << 8) | (tag_lo as u16);
-                    let binding_name = self.frames[frame_idx].read_constant(binding_idx).clone();
 
                     let value = self.peek(0).clone();
                     // End the borrow of `value` before acting on the tag-filter result.
@@ -2434,12 +2943,8 @@ impl VM {
 
                     match err {
                         Some((true, _, _)) => {
-                            // Matching error: bind it, then jump to the fallback.
-                            if let Some(name) = binding_name.as_string() {
-                                self.globals.insert(name.to_string(), value);
-                                self.jit.bump_global_version(name);
-                            }
-                            self.pop();
+                            // Matching error: leave it on the stack, where the fallback
+                            // binds it as a local, and jump to the fallback.
                             self.frames[frame_idx].ip += jump_offset;
                         }
                         Some((false, msg, tag)) => {
@@ -2543,18 +3048,30 @@ impl VM {
                 OpCode::Unpack => {
                     let count = self.frames[frame_idx].read_byte() as usize;
                     let value = self.pop();
+                    // The names must match the elements exactly (docs/variables.md); padding
+                    // with None or dropping the rest hid the mistake.
+                    let mismatch = |got: usize| {
+                        self.runtime_error_hint(
+                            &format!("expected {} values, got {}", count, got),
+                            "the number of names on the left must match the number of elements",
+                        )
+                    };
                     match value.repr() {
                         ValueRepr::Array(arr) => {
-                            let borrowed = arr.borrow();
-                            for i in 0..count {
-                                let val = borrowed.get(i).cloned().unwrap_or(Value::None);
+                            let items: Vec<Value> = arr.borrow().to_vec();
+                            if items.len() != count {
+                                return Err(mismatch(items.len()));
+                            }
+                            for val in items {
                                 self.push(val);
                             }
                         }
                         ValueRepr::Tuple(t) => {
-                            for i in 0..count {
-                                let val = t.get(i).cloned().unwrap_or(Value::None);
-                                self.push(val);
+                            if t.len() != count {
+                                return Err(mismatch(t.len()));
+                            }
+                            for val in t.iter() {
+                                self.push(val.clone());
                             }
                         }
                         _ => {
@@ -2788,6 +3305,7 @@ impl VM {
                                             args.len()
                                         )));
                                     }
+                                    let args = self.check_variant_args(&def.name, v, expected, args)?;
                                     self.push(Value::EnumInstance(Rc::new(
                                         crate::vm::value::ObjEnumInstance {
                                             enum_name: def.name.clone(),
@@ -2853,12 +3371,17 @@ impl VM {
                                             fields.len()
                                         )));
                                     }
-                                    for (fname, _) in &fields {
-                                        if !expected.contains(fname) {
+                                    for (fname, value) in fields.iter_mut() {
+                                        let Some(i) = expected.iter().position(|n| n == fname) else {
                                             return Err(self.runtime_error(&format!(
                                                 "struct variant {}.{} has no field '{}'",
                                                 def.name, v.name, fname
                                             )));
+                                        };
+                                        if let Some(ty) = v.field_types.get(i) {
+                                            let owner = format!("{}.{}", def.name, v.name);
+                                            let checked = std::mem::replace(value, Value::None);
+                                            *value = self.check_field_value(&owner, fname, ty, checked)?;
                                         }
                                     }
                                     self.push(Value::EnumInstance(Rc::new(
@@ -2910,10 +3433,53 @@ impl VM {
         }
     }
 
+    /// A set type stays locked; only <generic> or untyped carries no
+    /// constraint. Checks the value about to be stored in `slot` (the top of
+    /// the stack) against `function`'s lock for it. Shared by the interpreter
+    /// and the JIT; allocates only to report a mismatch.
+    pub(crate) fn check_local_lock(&self, function: &Function, slot: usize) -> Result<(), VMError> {
+        let Some(expected) = function
+            .locals
+            .get(slot)
+            .and_then(|li| li.type_constraint.as_deref())
+        else {
+            return Ok(());
+        };
+        self.check_type_lock(expected)
+    }
+
+    /// The lock check itself: the value on top of the stack must have type
+    /// `expected`.
+    pub(crate) fn check_type_lock(&self, expected: &str) -> Result<(), VMError> {
+        let value = self.peek(0);
+        if value.effective_type_is(expected) {
+            return Ok(());
+        }
+        let actual = value.effective_type_name();
+        Err(self.runtime_error_hint(
+            &format!("type mismatch: expected {}, got {}", expected, actual),
+            &format!("variable is locked to type {}", expected),
+        ))
+    }
+
+    /// Unary `-`, shared by the interpreter and the JIT.
+    pub(crate) fn unary_negate(&self, v: Value) -> Result<Value, VMError> {
+        let v = self.force(v);
+        match v.repr() {
+            ValueRepr::Integer(n) => Ok(Value::Integer(n.wrapping_neg())),
+            ValueRepr::Float(f) => Ok(Value::Float(-f)),
+            ValueRepr::Vector(vector) => Ok(vector.map(|c| -c).into_value()),
+            _ => Err(self.runtime_error_hint(
+                &format!("negation is only supported for numbers, got {}", v.type_name()),
+                "only <int>, <float> and vector values can be negated",
+            )),
+        }
+    }
+
     pub(crate) fn binary_add(&self, a: Value, b: Value) -> Result<Value, VMError> {
         let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
-            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l + r)),
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l.wrapping_add(*r))),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l + r)),
             (Value::Integer(l), Value::Float(r)) => Ok(Value::Float(*l as f64 + r)),
             (Value::Float(l), Value::Integer(r)) => Ok(Value::Float(l + *r as f64)),
@@ -2923,12 +3489,12 @@ impl VM {
                 s.push_str(r);
                 Ok(Value::String(rc_str(s)))
             }
-            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer(*l as i64 + *r as i64)),
-            (Value::Byte(l), Value::Integer(r)) => Ok(Value::Integer(*l as i64 + r)),
-            (Value::Integer(l), Value::Byte(r)) => Ok(Value::Integer(l + *r as i64)),
+            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer((*l as i64).wrapping_add(*r as i64))),
+            (Value::Byte(l), Value::Integer(r)) => Ok(Value::Integer((*l as i64).wrapping_add(*r))),
+            (Value::Integer(l), Value::Byte(r)) => Ok(Value::Integer((*l).wrapping_add(*r as i64))),
             (Value::Uint(l), Value::Uint(r)) => Ok(Value::Uint(l.wrapping_add(*r))),
-            (Value::Uint(l), Value::Integer(r)) => Ok(Value::Integer(*l as i64 + r)),
-            (Value::Integer(l), Value::Uint(r)) => Ok(Value::Integer(l + *r as i64)),
+            (Value::Uint(l), Value::Integer(r)) => Ok(Value::Integer((*l as i64).wrapping_add(*r))),
+            (Value::Integer(l), Value::Uint(r)) => Ok(Value::Integer((*l).wrapping_add(*r as i64))),
             (Value::Byte(l), Value::Float(r)) => Ok(Value::Float(*l as f64 + r)),
             (Value::Float(l), Value::Byte(r)) => Ok(Value::Float(l + *r as f64)),
             (Value::Uint(l), Value::Float(r)) => Ok(Value::Float(*l as f64 + r)),
@@ -2957,23 +3523,27 @@ impl VM {
                 Ok(Value::Tuple(Rc::new(new)))
             }
             // Wording matches the tree-walker so file and REPL output agree.
-            _ => Err(self.runtime_error_hint(
-                &format!("type mismatch: {} + {}", a.type_name(), b.type_name()),
-                "operands must be the same type for this operator",
-            )),
+            _ if let Some((a, b)) = promote_numeric(&a, &b) => self.binary_add(a, b),
+            _ => match vector::arithmetic(&a, &b, '+') {
+                Some(result) => result.map_err(|message| self.runtime_error(&message)),
+                None => Err(self.runtime_error_hint(
+                    &format!("type mismatch: {} + {}", a.type_name(), b.type_name()),
+                    "operands must be the same type for this operator",
+                )),
+            },
         }
     }
 
     pub(crate) fn binary_sub(&self, a: Value, b: Value) -> Result<Value, VMError> {
         let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
-            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l - r)),
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l.wrapping_sub(*r))),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l - r)),
             (Value::Integer(l), Value::Float(r)) => Ok(Value::Float(*l as f64 - r)),
             (Value::Float(l), Value::Integer(r)) => Ok(Value::Float(l - *r as f64)),
-            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer(*l as i64 - *r as i64)),
-            (Value::Byte(l), Value::Integer(r)) => Ok(Value::Integer(*l as i64 - r)),
-            (Value::Integer(l), Value::Byte(r)) => Ok(Value::Integer(l - *r as i64)),
+            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer((*l as i64).wrapping_sub(*r as i64))),
+            (Value::Byte(l), Value::Integer(r)) => Ok(Value::Integer((*l as i64).wrapping_sub(*r))),
+            (Value::Integer(l), Value::Byte(r)) => Ok(Value::Integer((*l).wrapping_sub(*r as i64))),
             (Value::Uint(l), Value::Uint(r)) => {
                 if r > l {
                     Err(self.runtime_error("unsigned integer underflow"))
@@ -2981,28 +3551,36 @@ impl VM {
                     Ok(Value::Uint(l - r))
                 }
             }
-            (Value::Uint(l), Value::Integer(r)) => Ok(Value::Integer(*l as i64 - r)),
-            (Value::Integer(l), Value::Uint(r)) => Ok(Value::Integer(l - *r as i64)),
-            _ => Err(self.runtime_error_hint(
-                &format!("type mismatch: {} - {}", a.type_name(), b.type_name()),
-                "operands must be the same type for this operator",
-            )),
+            (Value::Uint(l), Value::Integer(r)) => Ok(Value::Integer((*l as i64).wrapping_sub(*r))),
+            (Value::Integer(l), Value::Uint(r)) => Ok(Value::Integer((*l).wrapping_sub(*r as i64))),
+            _ if let Some((a, b)) = promote_numeric(&a, &b) => self.binary_sub(a, b),
+            _ => match vector::arithmetic(&a, &b, '-') {
+                Some(result) => result.map_err(|message| self.runtime_error(&message)),
+                None => Err(self.runtime_error_hint(
+                    &format!("type mismatch: {} - {}", a.type_name(), b.type_name()),
+                    "operands must be the same type for this operator",
+                )),
+            },
         }
     }
 
     pub(crate) fn binary_mul(&self, a: Value, b: Value) -> Result<Value, VMError> {
         let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
-            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l * r)),
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l.wrapping_mul(*r))),
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l * r)),
             (Value::Integer(l), Value::Float(r)) => Ok(Value::Float(*l as f64 * r)),
             (Value::Float(l), Value::Integer(r)) => Ok(Value::Float(l * *r as f64)),
-            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer(*l as i64 * *r as i64)),
+            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer((*l as i64).wrapping_mul(*r as i64))),
             (Value::Uint(l), Value::Uint(r)) => Ok(Value::Uint(l.wrapping_mul(*r))),
-            _ => Err(self.runtime_error_hint(
-                &format!("type mismatch: {} * {}", a.type_name(), b.type_name()),
-                "operands must be the same type for this operator",
-            )),
+            _ if let Some((a, b)) = promote_numeric(&a, &b) => self.binary_mul(a, b),
+            _ => match vector::arithmetic(&a, &b, '*') {
+                Some(result) => result.map_err(|message| self.runtime_error(&message)),
+                None => Err(self.runtime_error_hint(
+                    &format!("type mismatch: {} * {}", a.type_name(), b.type_name()),
+                    "operands must be the same type for this operator",
+                )),
+            },
         }
     }
 
@@ -3080,10 +3658,14 @@ impl VM {
                     Ok(Value::Uint(l / r))
                 }
             }
-            _ => Err(self.runtime_error_hint(
-                &format!("type mismatch: {} / {}", a.type_name(), b.type_name()),
-                "operands must be the same type for this operator",
-            )),
+            _ if let Some((a, b)) = promote_numeric(&a, &b) => self.binary_div(a, b),
+            _ => match vector::arithmetic(&a, &b, '/') {
+                Some(result) => result.map_err(|message| self.runtime_error(&message)),
+                None => Err(self.runtime_error_hint(
+                    &format!("type mismatch: {} / {}", a.type_name(), b.type_name()),
+                    "operands must be the same type for this operator",
+                )),
+            },
         }
     }
 
@@ -3128,6 +3710,7 @@ impl VM {
                     Ok(Value::Uint(l % r))
                 }
             }
+            _ if let Some((a, b)) = promote_numeric(&a, &b) => self.binary_mod(a, b),
             _ => Err(self.runtime_error_hint(
                 &format!("type mismatch: {} % {}", a.type_name(), b.type_name()),
                 "operands must be the same type for this operator",
@@ -3235,67 +3818,37 @@ impl VM {
     }
 
     pub(crate) fn compare_less(&self, a: Value, b: Value) -> Result<Value, VMError> {
-        let (a, b) = (self.force(a), self.force(b));
-        match (&a, &b) {
-            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l < r)),
-            (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l < r)),
-            (Value::Integer(l), Value::Float(r)) => Ok(Value::Boolean((*l as f64) < *r)),
-            (Value::Float(l), Value::Integer(r)) => Ok(Value::Boolean(*l < (*r as f64))),
-            (Value::String(l), Value::String(r)) => Ok(Value::Boolean(l < r)),
-            (Value::Char(l), Value::Char(r)) => Ok(Value::Boolean(l < r)),
-            (Value::Uint(l), Value::Uint(r)) => Ok(Value::Boolean(l < r)),
-            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Boolean(l < r)),
-            _ => Err(self.runtime_error_hint(
-                &format!("cannot compare {} < {}", a.type_name(), b.type_name()),
-                "comparison requires matching numeric types or chars",
-            )),
-        }
+        self.compare(a, b, "<", Ordering::is_lt)
     }
 
     pub(crate) fn compare_less_equal(&self, a: Value, b: Value) -> Result<Value, VMError> {
-        let (a, b) = (self.force(a), self.force(b));
-        match (&a, &b) {
-            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l <= r)),
-            (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l <= r)),
-            (Value::Integer(l), Value::Float(r)) => Ok(Value::Boolean((*l as f64) <= *r)),
-            (Value::Float(l), Value::Integer(r)) => Ok(Value::Boolean(*l <= (*r as f64))),
-            (Value::Char(l), Value::Char(r)) => Ok(Value::Boolean(l <= r)),
-            (Value::Uint(l), Value::Uint(r)) => Ok(Value::Boolean(l <= r)),
-            _ => Err(self.runtime_error_hint(
-                &format!("cannot compare {} <= {}", a.type_name(), b.type_name()),
-                "comparison requires matching numeric types or chars",
-            )),
-        }
+        self.compare(a, b, "<=", Ordering::is_le)
     }
 
     pub(crate) fn compare_greater(&self, a: Value, b: Value) -> Result<Value, VMError> {
-        let (a, b) = (self.force(a), self.force(b));
-        match (&a, &b) {
-            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l > r)),
-            (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l > r)),
-            (Value::Integer(l), Value::Float(r)) => Ok(Value::Boolean((*l as f64) > *r)),
-            (Value::Float(l), Value::Integer(r)) => Ok(Value::Boolean(*l > (*r as f64))),
-            (Value::Char(l), Value::Char(r)) => Ok(Value::Boolean(l > r)),
-            (Value::Uint(l), Value::Uint(r)) => Ok(Value::Boolean(l > r)),
-            _ => Err(self.runtime_error_hint(
-                &format!("cannot compare {} > {}", a.type_name(), b.type_name()),
-                "comparison requires matching numeric types or chars",
-            )),
-        }
+        self.compare(a, b, ">", Ordering::is_gt)
     }
 
     pub(crate) fn compare_greater_equal(&self, a: Value, b: Value) -> Result<Value, VMError> {
+        self.compare(a, b, ">=", Ordering::is_ge)
+    }
+
+    /// `a symbol b` for the four ordering operators, which all accept the
+    /// same operands (see [`order`]). A float NaN orders with nothing, so
+    /// every comparison involving one is false.
+    fn compare(
+        &self,
+        a: Value,
+        b: Value,
+        symbol: &str,
+        holds: fn(Ordering) -> bool,
+    ) -> Result<Value, VMError> {
         let (a, b) = (self.force(a), self.force(b));
-        match (&a, &b) {
-            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Boolean(l >= r)),
-            (Value::Float(l), Value::Float(r)) => Ok(Value::Boolean(l >= r)),
-            (Value::Integer(l), Value::Float(r)) => Ok(Value::Boolean((*l as f64) >= *r)),
-            (Value::Float(l), Value::Integer(r)) => Ok(Value::Boolean(*l >= (*r as f64))),
-            (Value::Char(l), Value::Char(r)) => Ok(Value::Boolean(l >= r)),
-            (Value::Uint(l), Value::Uint(r)) => Ok(Value::Boolean(l >= r)),
-            _ => Err(self.runtime_error_hint(
-                &format!("cannot compare {} >= {}", a.type_name(), b.type_name()),
-                "comparison requires matching numeric types or chars",
+        match order(&a, &b) {
+            Some(ordering) => Ok(Value::Boolean(ordering.is_some_and(holds))),
+            None => Err(self.runtime_error_hint(
+                &format!("cannot compare {} {} {}", a.type_name(), symbol, b.type_name()),
+                "comparison requires numbers, strings or chars on both sides",
             )),
         }
     }
@@ -3314,6 +3867,24 @@ impl VM {
             ValueRepr::Closure(closure) => {
                 let module_globals = closure.module_globals.get();
                 self.call_closure(Rc::clone(closure), arg_count, named_args, module_globals)
+            }
+            ValueRepr::Native(native) => {
+                if !named_args.is_empty() {
+                    return Err(self.runtime_error(
+                        "named arguments are not supported for built-in functions",
+                    ));
+                }
+                let start = self.stack.len() - arg_count;
+                let result = (native.func)(&self.stack[start..]);
+                // Drop the args AND the native itself (at start - 1).
+                self.stack_truncate(start - 1);
+                match result {
+                    Ok(value) => {
+                        self.push(value);
+                        Ok(())
+                    }
+                    Err(message) => Err(self.runtime_error(&message)),
+                }
             }
             ValueRepr::Builtin(func) => {
                 if !named_args.is_empty() {
@@ -3385,11 +3956,11 @@ impl VM {
                         ));
                     }
                     let val = if i < args.len() {
-                        args[i].clone()
+                        self.check_field_value(&def_name, &slot.0, &slot.1, args[i].clone())?
                     } else if let Some((_, v)) =
                         named_args.iter().find(|(n, _)| *n == slot.0)
                     {
-                        v.clone()
+                        self.check_field_value(&def_name, &slot.0, &slot.1, v.clone())?
                     } else {
                         if !Self::field_is_optional(&slot.1) {
                             missing.push(format!("`{}`", slot.0));
@@ -3454,10 +4025,12 @@ impl VM {
         };
         let closure = Rc::clone(closure);
         // Every recursive and hot-loop call lands here, so it folds straight into jit_op_call.
-        if closure.jit_state.get() == 1 && closure.function.arity as usize == arg_count
-            && let Some(result) = self.call_closure_fast_path(&closure) {
+        if closure.jit_state.get() == 1 && closure.function.arity as usize == arg_count {
+            self.check_param_types(&closure.function)?;
+            if let Some(result) = self.call_closure_fast_path(&closure) {
                 return result.map(|_| true);
             }
+        }
         self.call_closure(closure, arg_count, &[], None)?;
         Ok(true)
     }
@@ -3477,7 +4050,7 @@ impl VM {
         let instance_idx = self.stack.len() - 1 - arg_count;
         let instance = self.stack[instance_idx].clone();
         self.stack[instance_idx] = Value::Closure(Rc::clone(&closure));
-        self.stack_insert(instance_idx + 1, instance);
+        self.stack_insert(instance_idx + 1, instance)?;
         self.call_closure(closure, arg_count + 1, &[], module_globals)
     }
 
@@ -3525,7 +4098,7 @@ impl VM {
                     // Rearrange [instance, args..] to [closure, instance, args..] so the instance becomes `self`.
                     self.stack[instance_idx] = Value::Closure(Rc::clone(&closure));
                     // Insert instance as first arg (self) right after the closure
-                    self.stack_insert(instance_idx + 1, instance);
+                    self.stack_insert(instance_idx + 1, instance)?;
                     return self.call_closure(
                         closure,
                         arg_count + 1,
@@ -3549,13 +4122,13 @@ impl VM {
                 if let Some(builtin) = self.globals.get(&builtin_name).cloned() {
                     // Rearrange: [instance, arg1, ...] → [builtin, instance, arg1, ...]
                     self.stack[instance_idx] = builtin;
-                    self.stack_insert(instance_idx + 1, instance);
+                    self.stack_insert(instance_idx + 1, instance)?;
                     return self.call_value(arg_count + 1, named_args);
                 }
                 // Try without __ prefix
                 if let Some(builtin) = self.globals.get(method_name).cloned() {
                     self.stack[instance_idx] = builtin;
-                    self.stack_insert(instance_idx + 1, instance);
+                    self.stack_insert(instance_idx + 1, instance)?;
                     return self.call_value(arg_count + 1, named_args);
                 }
                 Err(self.runtime_error_hint(
@@ -3598,7 +4171,7 @@ impl VM {
                 let variant = def.variants.iter().find(|v| v.name == method_name).cloned();
                 match variant {
                     Some(v) => match v.kind {
-                        crate::vm::value::VmEnumVariantKind::Tuple(expected) => {
+                        crate::vm::value::VmEnumVariantKind::Tuple(ref expected) => {
                             if expected.len() != arg_count {
                                 return Err(self.runtime_error(&format!(
                                     "tuple variant {}.{} expects {} arguments, got {}",
@@ -3611,6 +4184,7 @@ impl VM {
                             let start = self.stack.len() - arg_count;
                             let args: Vec<Value> = self.stack_drain_from(start);
                             self.pop(); // receiver (EnumDef)
+                            let args = self.check_variant_args(&def.name, &v, expected, args)?;
                             self.push(Value::EnumInstance(Rc::new(
                                 crate::vm::value::ObjEnumInstance {
                                     enum_name: def.name.clone(),
@@ -3732,6 +4306,40 @@ impl VM {
         }
     }
 
+    /// Check the `arity` arguments on top of the stack against `function`'s
+    /// parameter annotations. Every call path runs this before entering the
+    /// callee — the JIT trusts `<int>` parameters to hold ints. Defaults are
+    /// filled later by bytecode, so a None in a defaulted slot is skipped here.
+    #[inline(always)]
+    pub(crate) fn check_param_types(&self, function: &Function) -> Result<(), VMError> {
+        let expected = function.arity as usize;
+        if expected == 0 || !function.has_typed_params() {
+            return Ok(());
+        }
+        let slot_base = self.stack.len() - expected;
+        for (i, param) in function.params.iter().enumerate() {
+            let Some(expected_ty) = param.type_ann.as_deref() else {
+                continue;
+            };
+            let val = &self.stack[slot_base + i];
+            if (param.optional || param.has_default) && matches!(val, Value::None) {
+                continue;
+            }
+            // Match the specific type or the generic category, so <Enum> accepts any enum value.
+            if !val.effective_type_is(expected_ty) && !type_matches(expected_ty, val.type_name()) {
+                let actual = val.effective_type_name();
+                return Err(self.runtime_error_hint(
+                    &format!(
+                        "type mismatch for parameter '{}': expected {}, got {}",
+                        param.name, expected_ty, actual
+                    ),
+                    &format!("parameter '{}' requires type {}", param.name, expected_ty),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Ultra-tight call path for JIT-compiled closures with exact arity,
     /// no named args, and no module globals. Marked `inline(always)` so the
     /// body folds into `call_closure_from_stack` (the JIT call helper's
@@ -3800,6 +4408,23 @@ impl VM {
         }
     }
 
+    /// Whether `closure`'s own name still resolves to it, in the globals its
+    /// body would read (`module_globals` first, as `GetGlobal` does).
+    #[cfg(feature = "jit")]
+    fn lean_self_name_current(
+        &self,
+        closure: &Rc<ObjClosure>,
+        module_globals: Option<&HashMap<String, Value>>,
+    ) -> bool {
+        let Some(name) = closure.function.name.as_deref() else {
+            return false;
+        };
+        let bound = module_globals
+            .and_then(|mg| mg.get(name))
+            .or_else(|| self.globals.get(name));
+        matches!(bound, Some(Value::Closure(c)) if Rc::ptr_eq(c, closure))
+    }
+
     fn call_closure(
         &mut self,
         closure: Rc<ObjClosure>,
@@ -3815,10 +4440,13 @@ impl VM {
         let state = closure.jit_state.get();
 
         // Lean by design: skips the call_count bump, the named-args block and the arity re-check.
-        if state == 1 && named_args.is_empty() && arg_count == expected && module_globals.is_none()
-            && let Some(result) = self.call_closure_fast_path(&closure) {
+        // Never the parameter type check, which the slow path below would have made.
+        if state == 1 && named_args.is_empty() && arg_count == expected && module_globals.is_none() {
+            self.check_param_types(&closure.function)?;
+            if let Some(result) = self.call_closure_fast_path(&closure) {
                 return result;
             }
+        }
 
         // Only bump the counter before tier-up; past state == 1 it is never consulted.
         if state != 1 {
@@ -3829,12 +4457,44 @@ impl VM {
 
         // Handle named arguments: fill in any missing positional args
         if !named_args.is_empty() {
-            // Extend stack to full arity if needed
-            let total_provided = arg_count + named_args.len();
-            if total_provided > expected && !closure.function.params.iter().any(|p| p.optional) {
+            // Validate everything before touching the stack: the frame is placed at
+            // `len - expected`, so surplus positional args would sit below it and leak.
+            let params = &closure.function.params;
+            let required = params.iter().filter(|p| !p.has_default && !p.optional).count();
+            if arg_count > expected {
+                return Err(self.arity_error(
+                    &closure.function,
+                    arg_count + named_args.len(),
+                    required,
+                    expected,
+                ));
+            }
+            let mut provided = vec![false; expected];
+            provided[..arg_count].iter_mut().for_each(|p| *p = true);
+            for (name, _) in named_args {
+                let Some(idx) = params.iter().position(|p| p.name == *name) else {
+                    return Err(self.runtime_error_hint(
+                        &format!("unknown named argument '{}'", name),
+                        "check the function signature for its parameter names",
+                    ));
+                };
+                if provided[idx] {
+                    return Err(self.runtime_error_hint(
+                        &format!("argument '{}' was given more than once", name),
+                        "pass each parameter either positionally or by name, not both",
+                    ));
+                }
+                provided[idx] = true;
+            }
+            if let Some(missing) = params
+                .iter()
+                .zip(&provided)
+                .find(|(p, given)| !**given && !p.has_default && !p.optional)
+                .map(|(p, _)| p.name.clone())
+            {
                 return Err(self.runtime_error_hint(
-                    &format!("expected {} arguments but got {}", expected, total_provided),
-                    "check the function signature for required and optional parameters",
+                    &format!("missing required argument '{}'", missing),
+                    "pass it positionally or by name",
                 ));
             }
 
@@ -3867,32 +4527,7 @@ impl VM {
             }
         }
 
-        // Defaults are filled later by bytecode, so a None in a defaulted slot is skipped here.
-        if expected > 0 && closure.function.params.iter().any(|p| p.type_ann.is_some()) {
-            let slot_base = self.stack.len() - expected;
-            for (i, param) in closure.function.params.iter().enumerate() {
-                let Some(expected_ty) = param.type_ann.as_deref() else {
-                    continue;
-                };
-                let val = &self.stack[slot_base + i];
-                if (param.optional || param.has_default) && matches!(val, Value::None) {
-                    continue;
-                }
-                let actual = val.effective_type_name();
-                // Match the specific type or the generic category, so <Enum> accepts any enum value.
-                if !type_matches(expected_ty, &actual)
-                    && !type_matches(expected_ty, val.type_name())
-                {
-                    return Err(self.runtime_error_hint(
-                        &format!(
-                            "type mismatch for parameter '{}': expected {}, got {}",
-                            param.name, expected_ty, actual
-                        ),
-                        &format!("parameter '{}' requires type {}", param.name, expected_ty),
-                    ));
-                }
-            }
-        }
+        self.check_param_types(&closure.function)?;
 
         if self.frames.len().saturating_add(self.jit_frame_len()) >= FRAMES_MAX {
             return Err(self.runtime_error_hint(
@@ -3901,9 +4536,9 @@ impl VM {
             ));
         }
 
-        // A recursive frame with many locals exhausts STACK_MAX before FRAMES_MAX, hitting the push abort.
-        const STACK_GUARD_MARGIN: usize = 8192;
-        if self.stack.len() >= STACK_MAX - STACK_GUARD_MARGIN {
+        // Refuse the call unless the callee's own pushes are sure to fit: this,
+        // not a check in `push`, is what keeps the stack in bounds.
+        if self.stack.len() >= STACK_MAX.saturating_sub(closure.function.stack_reserve()) {
             return Err(self.runtime_error_hint(
                 "stack overflow",
                 "check for infinite recursion or deeply nested calls",
@@ -3963,7 +4598,16 @@ impl VM {
         // stack_view.len, jit_frame_view.len or any Rc, so the state here is
         // still exactly what it was before the call. That is the Phase 2.4
         // reconstruction description for this entry kind.
-        if let Some(lean) = closure.lean_thunk.get() {
+        // Lean entries only exist in a JIT build; without one, `lean_thunk` stays None.
+        //
+        // The lean body lowers every call to a direct self-call, which is only
+        // what the interpreter does while the function's global name still
+        // names this closure. A rebound name (`orig := fib; fib = ...`) sends
+        // the call through the generic entry, which looks the name up.
+        #[cfg(feature = "jit")]
+        if let Some(lean) = closure.lean_thunk.get()
+            && self.lean_self_name_current(&closure, inherited_mg.as_deref())
+        {
             let arity = closure.lean_arity.get() as usize;
             let mut args: Vec<i64> = Vec::with_capacity(arity);
             let base = slot_offset + 1;
@@ -4172,7 +4816,7 @@ impl VM {
                 let borrowed = m.borrow();
                 if let Some((k, v)) = borrowed.entries().get(idx) {
                     // For maps, yield (key, value) tuple
-                    Value::Tuple(Rc::new(vec![k.clone(), v.clone()]))
+                    Value::Tuple(Rc::new(vec![k.clone(), v.clone()].into()))
                 } else {
                     Value::None
                 }
@@ -4273,6 +4917,17 @@ impl VM {
         }
     }
 
+    /// Resolve one slice bound against `len`: negative counts from the end,
+    /// and anything out of range clamps to the nearer end.
+    fn slice_bound(&self, bound: Option<Value>, default: usize, len: usize) -> Result<usize, VMError> {
+        match bound {
+            Some(Value::Integer(i)) if i < 0 => Ok(len.saturating_sub(i.unsigned_abs() as usize)),
+            Some(Value::Integer(i)) => Ok((i as u64).min(len as u64) as usize),
+            None => Ok(default),
+            _ => Err(self.runtime_error("slice index must be integer")),
+        }
+    }
+
     fn eval_slice(
         &self,
         collection: Value,
@@ -4282,89 +4937,34 @@ impl VM {
         match collection.repr() {
             ValueRepr::Array(arr) => {
                 let borrowed = arr.borrow();
-                let len = borrowed.len() as i64;
-                let s = match start {
-                    Some(Value::Integer(i)) => {
-                        if i < 0 {
-                            (len + i) as usize
-                        } else {
-                            i as usize
-                        }
-                    }
-                    None => 0,
-                    _ => return Err(self.runtime_error("slice index must be integer")),
-                };
-                let e = match end {
-                    Some(Value::Integer(i)) => {
-                        if i < 0 {
-                            (len + i) as usize
-                        } else {
-                            i as usize
-                        }
-                    }
-                    None => len as usize,
-                    _ => return Err(self.runtime_error("slice index must be integer")),
-                };
-                let s = s.min(len as usize);
-                let e = e.min(len as usize);
+                let len = borrowed.len();
+                let s = self.slice_bound(start, 0, len)?;
+                let e = self.slice_bound(end, len, len)?;
                 let sliced: Vec<Value> = if s <= e {
                     borrowed[s..e].to_vec()
                 } else {
                     Vec::new()
                 };
-                Ok(Value::Array(Rc::new(RefCell::new(sliced))))
+                Ok(Value::Array(Rc::new(RefCell::new(sliced.into()))))
             }
             ValueRepr::String(s) => {
-                let len = s.len() as i64;
-                let start_idx = match start {
-                    Some(Value::Integer(i)) => {
-                        if i < 0 {
-                            (len + i) as usize
-                        } else {
-                            i as usize
-                        }
-                    }
-                    None => 0,
-                    _ => return Err(self.runtime_error("slice index must be integer")),
-                };
-                let end_idx = match end {
-                    Some(Value::Integer(i)) => {
-                        if i < 0 {
-                            (len + i) as usize
-                        } else {
-                            i as usize
-                        }
-                    }
-                    None => len as usize,
-                    _ => return Err(self.runtime_error("slice index must be integer")),
-                };
-                let start_idx = start_idx.min(s.len());
-                let end_idx = end_idx.min(s.len());
-                if start_idx <= end_idx {
-                    Ok(Value::String(rc_str(&s[start_idx..end_idx])))
+                // Bounds count characters, like indexing and `len()`; slicing bytes split code points.
+                let len = s.chars().count();
+                let start_idx = self.slice_bound(start, 0, len)?;
+                let end_idx = self.slice_bound(end, len, len)?;
+                if start_idx < end_idx {
+                    let sliced: String = s.chars().skip(start_idx).take(end_idx - start_idx).collect();
+                    Ok(Value::String(rc_str(sliced)))
                 } else {
                     Ok(Value::String(rc_str("")))
                 }
             }
             ValueRepr::Tuple(t) => {
-                // The tree-walker converts bounds with `as usize` before clamping, so a negative index wraps huge.
                 let len = t.len();
-                let s = match start {
-                    Some(Value::Integer(i)) => i as usize,
-                    None => 0,
-                    _ => return Err(self.runtime_error("slice index must be integer")),
-                };
-                let e = match end {
-                    Some(Value::Integer(i)) => (i as usize).min(len),
-                    None => len,
-                    _ => return Err(self.runtime_error("slice index must be integer")),
-                };
-                let sliced: Vec<Value> = if s > e || s > len {
-                    Vec::new()
-                } else {
-                    t[s..e].to_vec()
-                };
-                Ok(Value::Tuple(Rc::new(sliced)))
+                let s = self.slice_bound(start, 0, len)?;
+                let e = self.slice_bound(end, len, len)?;
+                let sliced: Vec<Value> = if s <= e { t[s..e].to_vec() } else { Vec::new() };
+                Ok(Value::Tuple(Rc::new(sliced.into())))
             }
             _ => Err(self.runtime_error_hint(
                 &format!("cannot slice {}", collection.type_name()),
@@ -4377,12 +4977,19 @@ impl VM {
 
     fn import_module(&mut self, path_str: &str, selective_names: &[String]) -> Result<(), VMError> {
         let module_path = self.resolve_module_path(path_str)?;
+        self.imported_here.insert(module_path.clone());
 
         if let Some(cached) = self.module_cache.get(&module_path).cloned() {
             return self.bind_module(&cached, path_str, selective_names);
         }
 
-        if self.import_stack.contains(&module_path) {
+        // The importing file itself counts: the main script is never on the stack.
+        let importing_self = self
+            .current_file
+            .as_ref()
+            .and_then(|f| f.canonicalize().ok())
+            .is_some_and(|f| f == module_path);
+        if importing_self || self.import_stack.contains(&module_path) {
             return Err(self.runtime_error_hint(
                 &format!("circular import: {}", module_path.display()),
                 "two modules are importing each other — restructure to break the cycle",
@@ -4423,21 +5030,44 @@ impl VM {
         });
         crate::vm::value::set_module_origin(&function, &origin);
 
-        let mut sub_vm = VM::new();
+        let mut sub_vm = self.child_vm();
         sub_vm.set_source(&source);
         sub_vm.set_file(module_path.clone());
         sub_vm.is_main_context = false;
+        // One import stack and one cache for the whole import graph: a sub-VM that
+        // started empty could neither see a cycle back to its importers nor reuse
+        // a module another branch had already loaded.
         self.import_stack.push(module_path.clone());
+        sub_vm.import_stack = self.import_stack.clone();
+        sub_vm.module_cache = std::mem::take(&mut self.module_cache);
+        sub_vm.module_deps = std::mem::take(&mut self.module_deps);
 
         // Read before `run` consumes the function.
         let module_hidden: std::collections::HashSet<String> =
             function.hidden_globals.iter().cloned().collect();
 
-        let _result = sub_vm.run(function).map_err(|e| {
+        self.lend_limits(&mut sub_vm);
+        let result = sub_vm.run(function);
+        sub_vm.lend_limits(self);
+        self.module_cache = std::mem::take(&mut sub_vm.module_cache);
+        self.module_deps = std::mem::take(&mut sub_vm.module_deps);
+        self.import_stack.pop();
+        // Everything the module imported, so invalidating any of it drops this module too.
+        let mut deps = std::mem::take(&mut sub_vm.imported_here);
+        let nested: Vec<PathBuf> = deps
+            .iter()
+            .filter_map(|d| self.module_deps.get(d))
+            .flatten()
+            .cloned()
+            .collect();
+        deps.extend(nested);
+        let _result = result.map_err(|e| {
+            // The host's limits pass through unchanged, so they stay uncatchable.
+            if e.is_host_limit() {
+                return e;
+            }
             self.runtime_error(&format!("error in module '{}': {}", path_str, e.message))
         })?;
-
-        self.import_stack.pop();
 
         // Wire module-owned definitions back so imported functions reach their file-local helpers.
         let globals_rc = Rc::new(sub_vm.globals);
@@ -4458,6 +5088,7 @@ impl VM {
             hidden: module_hidden,
         });
 
+        self.module_deps.insert(module_path.clone(), deps);
         self.module_cache.insert(module_path, Rc::clone(&module));
 
         self.bind_module(&module, path_str, selective_names)
@@ -4544,8 +5175,8 @@ impl VM {
             "CHAR" => Value::Char('\0'),
             "BYTE" => Value::Byte(0),
             "UINT" => Value::Uint(0),
-            "ARRAY" => Value::Array(Rc::new(RefCell::new(Vec::new()))),
-            "TUPLE" => Value::Tuple(Rc::new(Vec::new())),
+            "ARRAY" => Value::Array(Rc::new(RefCell::new(Vec::new().into()))),
+            "TUPLE" => Value::Tuple(Rc::new(Vec::new().into())),
             "MAP" => Value::Map(Rc::new(RefCell::new(crate::vm::collections::OxMap::new()))),
             "SET" => Value::Set(Rc::new(RefCell::new(crate::vm::collections::OxSet::new()))),
             "NONE" => Value::None,
@@ -4664,7 +5295,15 @@ impl VM {
             }
             "INTEGER" => match value.repr() {
                 ValueRepr::Integer(_) => Ok(value.clone()),
-                ValueRepr::Float(f) => Ok(Value::Integer(f as i64)),
+                // `as i64` saturated 1e30 to i64::MAX and turned NaN into 0.
+                ValueRepr::Float(f) => {
+                    let t = f.trunc();
+                    if f.is_finite() && (-9223372036854775808.0..9223372036854775808.0).contains(&t) {
+                        Ok(Value::Integer(t as i64))
+                    } else {
+                        Err(self.runtime_error(&format!("cannot convert FLOAT {} to INTEGER: out of range", f)))
+                    }
+                }
                 ValueRepr::String(s) => s.parse::<i64>().map(Value::Integer).map_err(|_| {
                     self.runtime_error(&format!("cannot convert STRING \"{}\" to INTEGER", s))
                 }),
@@ -4748,9 +5387,23 @@ impl VM {
             "UINT" => {
                 match value.repr() {
                     ValueRepr::Uint(_) => Ok(value.clone()),
-                    ValueRepr::Integer(n) => Ok(Value::Uint(n as u64)),
-                    ValueRepr::Float(f) => Ok(Value::Uint(f as u64)),
+                    // `as u64` wrapped -1 to u64::MAX and saturated -1.5 to 0.
+                    ValueRepr::Integer(n) => u64::try_from(n).map(Value::Uint).map_err(|_| {
+                        self.runtime_error(&format!("cannot convert INTEGER {} to UINT (>= 0)", n))
+                    }),
+                    ValueRepr::Float(f) => {
+                        let t = f.trunc();
+                        if f.is_finite() && (0.0..18446744073709551616.0).contains(&t) {
+                            Ok(Value::Uint(t as u64))
+                        } else {
+                            Err(self.runtime_error(&format!("cannot convert FLOAT {} to UINT (>= 0)", f)))
+                        }
+                    }
                     ValueRepr::Byte(b) => Ok(Value::Uint(b as u64)),
+                    ValueRepr::String(s) => s.trim().parse::<u64>().map(Value::Uint).map_err(|_| {
+                        self.runtime_error(&format!("cannot convert STRING \"{}\" to UINT", s))
+                    }),
+                    ValueRepr::Boolean(b) => Ok(Value::Uint(u64::from(b))),
                     _ => Err(self
                         .runtime_error(&format!("cannot convert {} to UINT", value.type_name()))),
                 }
@@ -4763,7 +5416,7 @@ impl VM {
                             .chars()
                             .map(|c| Value::String(rc_str(c.to_string())))
                             .collect();
-                        Ok(Value::Array(Rc::new(RefCell::new(elements))))
+                        Ok(Value::Array(Rc::new(RefCell::new(elements.into()))))
                     }
                     _ => Err(self
                         .runtime_error(&format!("cannot convert {} to ARRAY", value.type_name()))),

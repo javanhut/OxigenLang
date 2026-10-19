@@ -28,7 +28,7 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 
 		if m := funRe.FindStringSubmatchIndex(line); m != nil {
 			name := line[m[2]:m[3]]
-			col := uint32(m[2])
+			col := utf16Len(line[:m[2]])
 			displayName := name
 			if currentStruct != "" {
 				displayName = currentStruct + "." + name
@@ -41,7 +41,7 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 
 		if m := structRe.FindStringSubmatchIndex(line); m != nil {
 			name := line[m[2]:m[3]]
-			col := uint32(m[2])
+			col := utf16Len(line[:m[2]])
 			symbols = append(symbols, makeSymbol(name, SymbolKindStruct, uri, lineNum, col))
 
 			for j := i + 1; j < len(lines); j++ {
@@ -62,7 +62,7 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 		// Enum definition: enum Name { Variant(...) ... }
 		if m := enumRe.FindStringSubmatchIndex(line); m != nil {
 			name := line[m[2]:m[3]]
-			col := uint32(m[2])
+			col := utf16Len(line[:m[2]])
 			symbols = append(symbols, makeSymbol(name, SymbolKindEnum, uri, lineNum, col))
 			continue
 		}
@@ -90,7 +90,7 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 
 		if m := patternRe.FindStringSubmatchIndex(line); m != nil {
 			name := line[m[2]:m[3]]
-			col := uint32(m[2])
+			col := utf16Len(line[:m[2]])
 			symbols = append(symbols, makeSymbol(name, SymbolKindFunction, uri, lineNum, col))
 			continue
 		}
@@ -110,7 +110,7 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 			indent := countLeadingSpaces(line)
 			if indent == 0 {
 				name := line[m[2]:m[3]]
-				col := uint32(m[2])
+				col := utf16Len(line[:m[2]])
 				rest := strings.TrimSpace(line[m[1]:])
 				kind := SymbolKindVariable
 				if strings.HasPrefix(rest, "fun(") || strings.HasPrefix(rest, "fun (") {
@@ -127,7 +127,7 @@ func getDocumentSymbols(source, uri string) []SymbolInformation {
 				trimmed := strings.TrimSpace(line)
 				if !strings.HasPrefix(trimmed, "fun ") && !strings.HasPrefix(trimmed, "hide ") && !strings.HasPrefix(trimmed, "hidden ") {
 					name := line[m[2]:m[3]]
-					col := uint32(m[2])
+					col := utf16Len(line[:m[2]])
 					symbols = append(symbols, makeSymbol(name, SymbolKindVariable, uri, lineNum, col))
 				}
 			}
@@ -145,7 +145,7 @@ func makeSymbol(name string, kind int, uri string, line, col uint32) SymbolInfor
 			URI: uri,
 			Range: Range{
 				Start: Position{Line: line, Character: col},
-				End:   Position{Line: line, Character: col + uint32(len(name))},
+				End:   Position{Line: line, Character: col + utf16Len(name)},
 			},
 		},
 	}

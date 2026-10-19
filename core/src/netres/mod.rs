@@ -1,6 +1,6 @@
 //! Native network resources for the `net` stdlib.
 //!
-//! Backs the TCP/UDP socket builtins with a thread-local handle registry, and
+//! Backs the TCP/UDP socket builtins with a process-wide handle registry, and
 //! provides the streaming HTTP helpers (`download`/`upload`) that avoid
 //! buffering whole bodies in memory.
 //!
@@ -8,12 +8,17 @@
 //! real OS resource lives here. `close` returns the ticket and is idempotent.
 //! The registry is a global lock-protected table, so a handle works from any
 //! worker thread (lets an accepted socket be handed to a `spawn`ed task).
+//! Because every VM in the process shares it, handle numbers are drawn from a
+//! keyed hash rather than counted up from 1: a script cannot reach another
+//! VM's socket by guessing a small integer.
 //!
 //! Socket reads/writes operate on UTF-8 text (lossy on read). This covers the
 //! common case (HTTP, line protocols, JSON over TCP); binary-safe byte I/O is
 //! intentionally deferred until a concrete need exists.
 
 use std::collections::HashMap;
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
@@ -45,14 +50,31 @@ struct HttpStream {
 /// `spawn_body_reader`.
 const BODY_QUEUE_CHUNKS: usize = 8;
 
+/// The longest line `http_read_line` will collect. A server that never sends
+/// a newline would otherwise grow the buffer until the process ran out of
+/// memory.
+const HTTP_MAX_LINE: usize = 8 * 1024 * 1024;
+
 // One lock so handles cross threads; I/O runs on a cloned fd outside it.
 static REGISTRY: LazyLock<Mutex<HashMap<u64, Resource>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+static ID_KEY: LazyLock<RandomState> = LazyLock::new(RandomState::new);
+
+/// Handles stay below 2^53 so they survive a round trip through a float.
+const HANDLE_MASK: u64 = (1 << 53) - 1;
 
 fn insert(res: Resource) -> u64 {
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    REGISTRY.lock().unwrap().insert(id, res);
-    id
+    let mut registry = REGISTRY.lock().unwrap();
+    loop {
+        let mut hasher = ID_KEY.build_hasher();
+        hasher.write_u64(NEXT_ID.fetch_add(1, Ordering::Relaxed));
+        let id = hasher.finish() & HANDLE_MASK;
+        // 0 stays free: callers use it as "no socket".
+        if id != 0 && !registry.contains_key(&id) {
+            registry.insert(id, res);
+            return id;
+        }
+    }
 }
 
 fn with_tcp<T>(id: u64, f: impl FnOnce(&mut TcpStream) -> Result<T, String>) -> Result<T, String> {
@@ -201,6 +223,18 @@ pub fn tcp_receive(id: u64, max: i64) -> Result<String, String> {
         };
         buf.truncate(n);
         Ok(String::from_utf8_lossy(&buf).into_owned())
+    })
+}
+
+/// Writes the file at `path` to a TCP connection unchanged and returns how
+/// many bytes went out. `tcp_send` takes text, so this is how a server sends
+/// a binary file (an image, a font) without corrupting it.
+pub fn tcp_send_file(id: u64, path: &str) -> Result<i64, String> {
+    let mut file = File::open(path).map_err(|e| format!("send_file: {}: {}", path, e))?;
+    with_tcp(id, |s| {
+        let n = std::io::copy(&mut file, s).map_err(|e| e.to_string())?;
+        s.flush().map_err(|e| e.to_string())?;
+        Ok(n as i64)
     })
 }
 
@@ -371,11 +405,23 @@ pub fn http_read_line(id: u64, timeout_ms: i64) -> Result<Option<String>, String
     };
     let mut st = stream.lock().unwrap();
 
+    // Bytes already searched for a newline; rescanning the whole buffer per
+    // chunk made a long line quadratic.
+    let mut scanned = 0;
     loop {
-        if let Some(pos) = st.carry.iter().position(|&b| b == b'\n') {
+        if let Some(off) = st.carry[scanned..].iter().position(|&b| b == b'\n') {
+            let pos = scanned + off;
             let line: Vec<u8> = st.carry.drain(..=pos).collect();
             let text = String::from_utf8_lossy(&line[..line.len() - 1]);
             return Ok(Some(text.trim_end_matches('\r').to_string())); // tolerate CRLF
+        }
+        scanned = st.carry.len();
+        if st.carry.len() > HTTP_MAX_LINE {
+            st.carry.clear();
+            return Err(format!(
+                "read_line: line longer than {} bytes; read it with read_chunk instead",
+                HTTP_MAX_LINE
+            ));
         }
         if st.done {
             // No newline left: flush any remaining bytes as the last line, "" = EOF.

@@ -442,6 +442,11 @@ each i in range(10, 0, -2) {
 }
 ```
 
+`each` over `range()` counts without building an array, and follows the
+builtin exactly: every bound must be an integer (`range(0.5, 3)` is an
+error), and the loop stops at the last value before it would step past the
+end of the integer range, near `9223372036854775807` or its negative.
+
 #### Two names: index/key and value
 
 Naming two variables binds both halves of each step. No separate enumerate

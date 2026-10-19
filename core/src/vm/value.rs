@@ -342,6 +342,156 @@ mod layout_tests {
     }
 }
 
+/// The elements of an array or tuple: a `Vec<Value>` (it derefs to one) that
+/// frees deep nesting without recursing.
+///
+/// Dropping `[[[...]]]` through the generated drop glue takes one native frame
+/// per level, so a few hundred thousand levels overflow the stack. `Value`
+/// itself can't implement `Drop` without forbidding hosts from moving out of
+/// it in a `match`, so the containers do: see [`drop_values`].
+/// `repr(transparent)` keeps the layout the JIT reads identical to the `Vec`.
+#[derive(Clone, Default, PartialEq)]
+#[repr(transparent)]
+pub struct ValueVec(pub Vec<Value>);
+
+impl ValueVec {
+    /// The elements, leaving this empty.
+    pub fn into_vec(mut self) -> Vec<Value> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl std::ops::Deref for ValueVec {
+    type Target = Vec<Value>;
+    #[inline(always)]
+    fn deref(&self) -> &Vec<Value> {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ValueVec {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Vec<Value> {
+        &mut self.0
+    }
+}
+
+impl From<Vec<Value>> for ValueVec {
+    #[inline(always)]
+    fn from(v: Vec<Value>) -> Self {
+        ValueVec(v)
+    }
+}
+
+impl FromIterator<Value> for ValueVec {
+    fn from_iter<I: IntoIterator<Item = Value>>(iter: I) -> Self {
+        ValueVec(iter.into_iter().collect())
+    }
+}
+
+impl IntoIterator for ValueVec {
+    type Item = Value;
+    type IntoIter = std::vec::IntoIter<Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_vec().into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a ValueVec {
+    type Item = &'a Value;
+    type IntoIter = std::slice::Iter<'a, Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl fmt::Debug for ValueVec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Drop for ValueVec {
+    fn drop(&mut self) {
+        if self.0.iter().any(Value::may_own_values) {
+            drop_nested(std::mem::take(&mut self.0));
+        }
+    }
+}
+
+thread_local! {
+    /// How many container drops are on the native stack right now.
+    static DROP_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Nesting the ordinary recursive drop may take before [`drop_values`] takes
+/// over. Shallow values, the common case, keep the plain drop glue.
+const RECURSIVE_DROP_LIMIT: u32 = 64;
+
+/// Drops the contents of a container that holds other containers: by plain
+/// recursion while shallow, iteratively once deep.
+pub(crate) fn drop_nested(values: Vec<Value>) {
+    DROP_DEPTH.with(|depth| {
+        let d = depth.get();
+        if d < RECURSIVE_DROP_LIMIT {
+            depth.set(d + 1);
+            drop(values);
+            depth.set(d);
+        } else {
+            drop_values(values);
+        }
+    });
+}
+
+/// Drops `pending` and everything only it keeps alive, without recursing.
+///
+/// A container whose last reference is being dropped hands its elements back
+/// to the work list before it goes, so it is freed empty; a shared one only
+/// loses a reference. Native stack use stays constant however deep the value
+/// is, and the work list reuses `pending`'s own buffer.
+pub(crate) fn drop_values(mut pending: Vec<Value>) {
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Array(rc) => {
+                if let Ok(cell) = Rc::try_unwrap(rc) {
+                    pending.append(&mut cell.into_inner().0);
+                }
+            }
+            Value::Tuple(rc) => {
+                if let Ok(mut items) = Rc::try_unwrap(rc) {
+                    pending.append(&mut items.0);
+                }
+            }
+            Value::Map(rc) => {
+                if let Ok(cell) = Rc::try_unwrap(rc) {
+                    cell.into_inner().drain_into(&mut pending);
+                }
+            }
+            Value::Set(rc) => {
+                if let Ok(cell) = Rc::try_unwrap(rc) {
+                    cell.into_inner().drain_into(&mut pending);
+                }
+            }
+            Value::StructInstance(rc) => {
+                if let Ok(mut inst) = Rc::try_unwrap(rc) {
+                    pending.extend(inst.take_fields());
+                }
+            }
+            Value::EnumInstance(rc) => {
+                if let Ok(mut inst) = Rc::try_unwrap(rc) {
+                    inst.take_payload_into(&mut pending);
+                }
+            }
+            Value::Wrapped(rc) => {
+                if let Ok(inner) = Rc::try_unwrap(rc) {
+                    pending.push(inner);
+                }
+            }
+            other => drop(other),
+        }
+    }
+}
+
 /// Runtime value for the OxigenLang VM.
 ///
 /// Unlike the tree-walking interpreter's `Object`, control flow signals
@@ -366,8 +516,8 @@ pub enum Value {
 
     // Rc<String> not Rc<str>, so the pointer stays thin; the fat variant cost 8 B per Value.
     String(Rc<String>),
-    Array(Rc<RefCell<Vec<Value>>>),
-    Tuple(Rc<Vec<Value>>),
+    Array(Rc<RefCell<ValueVec>>),
+    Tuple(Rc<ValueVec>),
     Map(Rc<RefCell<crate::vm::collections::OxMap>>),
     Set(Rc<RefCell<crate::vm::collections::OxSet>>),
 
@@ -399,6 +549,39 @@ pub enum Value {
     /// Terminal error — stops execution. Thin `Rc<String>` for the same
     /// reason as `String` above.
     Error(Rc<String>),
+
+    // Host embedding. Both are `Rc`s: the JIT treats every tag past `None`
+    // except `Builtin` as an `Rc` it may refcount inline.
+    /// A Rust closure the host registered (see `VM::register_native`).
+    Native(Rc<NativeFunction>),
+    /// A Rust value the host handed to the script (see [`Value::host`]).
+    Host(Rc<HostValue>),
+
+    /// `vec2`/`vec3`/`vec4` (see `vm::vector`). An `Rc` for the same reason.
+    Vector(Rc<crate::vm::vector::Vector>),
+}
+
+/// The closure behind a [`Value::Native`].
+pub type NativeFn = dyn Fn(&[Value]) -> Result<Value, String>;
+
+/// A host-registered function: its name for messages, and the closure.
+pub struct NativeFunction {
+    pub name: String,
+    pub(crate) func: Box<NativeFn>,
+}
+
+/// The payload of a [`Value::Host`]: a Rust value, the name `type()`
+/// reports for it, and how to compare two of them.
+pub struct HostValue {
+    pub type_name: String,
+    data: Box<dyn std::any::Any>,
+    eq: fn(&dyn std::any::Any, &dyn std::any::Any) -> bool,
+}
+
+impl HostValue {
+    fn same_value(&self, other: &HostValue) -> bool {
+        (self.eq)(self.data.as_ref(), other.data.as_ref())
+    }
 }
 
 /// "Read-only view" enum that mirrors the variant structure of
@@ -432,8 +615,8 @@ pub enum ValueRepr<'a> {
     Uint(u64),
     None,
     String(&'a Rc<String>),
-    Array(&'a Rc<RefCell<Vec<Value>>>),
-    Tuple(&'a Rc<Vec<Value>>),
+    Array(&'a Rc<RefCell<ValueVec>>),
+    Tuple(&'a Rc<ValueVec>),
     Map(&'a Rc<RefCell<crate::vm::collections::OxMap>>),
     Set(&'a Rc<RefCell<crate::vm::collections::OxSet>>),
     Closure(&'a Rc<ObjClosure>),
@@ -447,6 +630,9 @@ pub enum ValueRepr<'a> {
     Wrapped(&'a Rc<Value>),
     Error(&'a Rc<String>),
     Task(&'a Rc<crate::concurrent::TaskHandle>),
+    Native(&'a Rc<NativeFunction>),
+    Host(&'a Rc<HostValue>),
+    Vector(&'a Rc<crate::vm::vector::Vector>),
 }
 
 /// Boxed payload of `Value::ErrorValue`. Kept off the enum so `Value`
@@ -488,14 +674,21 @@ pub struct Function {
     pub upvalue_count: u16,
     pub params: Vec<ParamInfo>,
     pub locals: Vec<LocalInfo>,
+    /// `(ip, slot)` for every local declaration: `ip` is the code length when
+    /// the compiler bound the name, so the initializer (if any) is the
+    /// instruction ending there. Slot reuse across scopes means one slot can
+    /// appear several times. The JIT's slot-type pass reads it to tell a
+    /// local's initializer from a transient that happens to share its slot.
+    pub local_decls: Vec<(usize, u16)>,
     /// Whether the compiler emitted at least one backward-loop opcode for
     /// this function. Used by smart JIT tiering to compile loop-heavy
     /// single-call functions at entry instead of after they finish.
     pub has_loop: bool,
-    /// Stable, compile-order id. The concurrency layer uses it to identify a
-    /// closure's code across threads — a worker rebuilds the same id→Function
-    /// table by compiling the same source (ids are deterministic per source).
-    pub id: u32,
+    /// Unique in the process: the compilation unit in the high 32 bits,
+    /// compile order in the low 32. The concurrency layer uses it to identify
+    /// a closure's code across threads — a worker rebuilds the same
+    /// id→Function table by compiling the same program under the same unit.
+    pub id: u64,
     /// Which file this was compiled from. Stamped after compilation by
     /// `set_module_origin` — the same post-hoc wiring `module_globals` uses,
     /// since the compiler itself has no notion of files. `None` means the
@@ -509,9 +702,45 @@ pub struct Function {
     /// `includes` block defined it — nested closures inherit it. Hidden-field
     /// access is permitted only from code carrying the owning struct's name.
     pub method_of: Option<String>,
+    /// Whether any parameter carries a type annotation. Computed on first use
+    /// (after the compiler has filled `params`) so every call path can afford
+    /// to ask before choosing a fast path that skips the parameter check.
+    pub(crate) typed_params: std::cell::OnceCell<bool>,
+}
+
+impl Value {
+    /// A Rust value handed to scripts. Scripts can store and pass it but not
+    /// look inside; `type()` reports `type_name`, and two host values are
+    /// equal when they hold equal values of the same Rust type.
+    pub fn host<T: std::any::Any + PartialEq>(type_name: &str, value: T) -> Value {
+        fn eq<T: std::any::Any + PartialEq>(a: &dyn std::any::Any, b: &dyn std::any::Any) -> bool {
+            match (a.downcast_ref::<T>(), b.downcast_ref::<T>()) {
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            }
+        }
+        Value::Host(Rc::new(HostValue {
+            type_name: type_name.to_string(),
+            data: Box::new(value),
+            eq: eq::<T>,
+        }))
+    }
+
+    /// The Rust value inside a host value, if it holds a `T`.
+    pub fn host_ref<T: std::any::Any>(&self) -> Option<&T> {
+        match self {
+            Value::Host(h) => h.data.downcast_ref::<T>(),
+            _ => None,
+        }
+    }
 }
 
 impl Function {
+    /// Stack slots that must be free to call this function.
+    pub(crate) fn stack_reserve(&self) -> usize {
+        self.chunk.stack_bound().max(crate::vm::STACK_GUARD_MARGIN)
+    }
+
     pub fn new(name: Option<String>, arity: u8) -> Self {
         Function {
             name,
@@ -520,12 +749,20 @@ impl Function {
             upvalue_count: 0,
             params: Vec::new(),
             locals: Vec::new(),
+            local_decls: Vec::new(),
             has_loop: false,
             id: 0,
             origin: RefCell::new(None),
             hidden_globals: Vec::new(),
             method_of: None,
+            typed_params: std::cell::OnceCell::new(),
         }
+    }
+
+    pub(crate) fn has_typed_params(&self) -> bool {
+        *self
+            .typed_params
+            .get_or_init(|| self.params.iter().any(|p| p.type_ann.is_some()))
     }
 }
 
@@ -685,8 +922,12 @@ pub struct ObjClosure {
     /// `#[repr(transparent)]` so `Box<[Cell<T>]>` matches `Box<[T]>`
     /// layout — the JIT loads through these at known struct offsets.
     /// Populated lazily by `jit_get_upvalue` once it observes the
-    /// `Closed(Integer)` shape; invalidated by `jit_set_upvalue`.
-    /// Length matches `upvalues.len()`.
+    /// `Closed(Integer)` shape. `upvalue_int_kinds` has one entry per
+    /// upvalue; `upvalue_int_values` has one more, at the front:
+    /// `values[0]` is the `crate::jit::UPVALUE_WRITE_EPOCH` the cache was
+    /// filled at and `values[i + 1]` caches upvalue `i`. A cache whose epoch
+    /// is not the current one is empty — another closure (or the
+    /// interpreter) may have written a shared cell since.
     pub upvalue_int_kinds: Box<[Cell<u8>]>,
     pub upvalue_int_values: Box<[Cell<i64>]>,
 }
@@ -702,8 +943,9 @@ pub fn make_upvalue_int_caches(n: usize) -> (Box<[Cell<u8>]>, Box<[Cell<i64>]>) 
         .map(|_| Cell::new(0u8))
         .collect::<Vec<_>>()
         .into_boxed_slice();
-    let values = (0..n)
-        .map(|_| Cell::new(0i64))
+    // values[0] is the fill epoch; -1 never matches, so a new cache starts empty.
+    let values = std::iter::once(Cell::new(-1i64))
+        .chain((0..n).map(|_| Cell::new(0i64)))
         .collect::<Vec<_>>()
         .into_boxed_slice();
     (kinds, values)
@@ -771,7 +1013,7 @@ pub struct ObjStructDef {
     /// (parent fields first, then own) and the HashMap maps name → index.
     /// OnceCell: each struct def resolves its layout exactly once.
     pub layout: std::cell::OnceCell<std::rc::Rc<FieldLayout>>,
-    /// Globals of the module that defined this struct. Set after the
+    /// HashMap<String, Value> of the module that defined this struct. Set after the
     /// defining module finishes loading (see `VM::import_module`); read
     /// in `call_method` so methods called from another module still see
     /// their own module's top-level functions (e.g. `Parser` in
@@ -882,18 +1124,32 @@ impl ObjStructInstance {
     }
 }
 
+impl ObjStructInstance {
+    /// The fields, leaving the instance with none; its buffer goes with them.
+    pub(crate) fn take_fields(&mut self) -> Vec<Value> {
+        if self.fields.ptr.is_null() {
+            return Vec::new();
+        }
+        // Reconstitute the Vec `new` leaked, so its allocator frees the buffer.
+        let fields = unsafe {
+            Vec::from_raw_parts(
+                self.fields.ptr,
+                self.fields.len as usize,
+                self.fields.cap as usize,
+            )
+        };
+        self.fields.ptr = std::ptr::null_mut();
+        self.fields.len = 0;
+        fields
+    }
+}
+
 impl Drop for ObjStructInstance {
     fn drop(&mut self) {
-        if !self.fields.ptr.is_null() {
-            // Reconstitute the Vec so its allocator frees the buffer and Drops each Value.
-            unsafe {
-                let _ = Vec::from_raw_parts(
-                    self.fields.ptr,
-                    self.fields.len as usize,
-                    self.fields.cap as usize,
-                );
-            }
-            self.fields.ptr = std::ptr::null_mut();
+        let fields = self.take_fields();
+        // A long linked list of nodes would otherwise drop one frame per node.
+        if fields.iter().any(Value::may_own_values) {
+            drop_nested(fields);
         }
     }
 }
@@ -909,6 +1165,9 @@ pub enum VmEnumVariantKind {
 pub struct VmEnumVariantDef {
     pub name: String,
     pub kind: VmEnumVariantKind,
+    /// Declared type of each payload field, parallel to the names in `kind`
+    /// (empty for unit variants). Checked when the variant is constructed.
+    pub field_types: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -931,6 +1190,28 @@ pub struct ObjEnumInstance {
     pub payload: VmEnumPayload,
 }
 
+impl ObjEnumInstance {
+    /// Move the payload's values into `out`, leaving a unit payload.
+    pub(crate) fn take_payload_into(&mut self, out: &mut Vec<Value>) {
+        match std::mem::replace(&mut self.payload, VmEnumPayload::Unit(None)) {
+            VmEnumPayload::Unit(v) => out.extend(v),
+            VmEnumPayload::Tuple(vs) => out.extend(vs),
+            VmEnumPayload::Struct(fields) => out.extend(fields.into_iter().map(|(_, v)| v)),
+        }
+    }
+}
+
+impl Drop for ObjEnumInstance {
+    fn drop(&mut self) {
+        // An enum `Cons` chain would otherwise drop one frame per link.
+        let mut payload = Vec::new();
+        self.take_payload_into(&mut payload);
+        if payload.iter().any(Value::may_own_values) {
+            drop_nested(payload);
+        }
+    }
+}
+
 /// A loaded module.
 #[derive(Debug)]
 pub struct ObjModule {
@@ -946,6 +1227,32 @@ pub struct ObjModule {
 // ── Value methods ──────────────────────────────────────────────────────
 
 impl Value {
+    /// A new array holding `items`.
+    pub fn array(items: Vec<Value>) -> Value {
+        Value::Array(Rc::new(RefCell::new(items.into())))
+    }
+
+    /// A new tuple holding `items`.
+    pub fn tuple(items: Vec<Value>) -> Value {
+        Value::Tuple(Rc::new(items.into()))
+    }
+
+    /// Whether dropping this value can drop other values: the containers
+    /// [`drop_values`] unpacks instead of recursing into.
+    #[inline]
+    pub(crate) fn may_own_values(&self) -> bool {
+        matches!(
+            self,
+            Value::Array(_)
+                | Value::Tuple(_)
+                | Value::Map(_)
+                | Value::Set(_)
+                | Value::StructInstance(_)
+                | Value::EnumInstance(_)
+                | Value::Wrapped(_)
+        )
+    }
+
     // Mirror NanValue's accessors so call sites stop relying on the enum's pattern shape.
 
     #[inline] pub fn as_integer(&self) -> Option<i64> {
@@ -972,10 +1279,10 @@ impl Value {
     #[inline] pub fn as_string(&self) -> Option<&Rc<String>> {
         if let Value::String(s) = self { Some(s) } else { None }
     }
-    #[inline] pub fn as_array(&self) -> Option<&Rc<RefCell<Vec<Value>>>> {
+    #[inline] pub fn as_array(&self) -> Option<&Rc<RefCell<ValueVec>>> {
         if let Value::Array(a) = self { Some(a) } else { None }
     }
-    #[inline] pub fn as_tuple(&self) -> Option<&Rc<Vec<Value>>> {
+    #[inline] pub fn as_tuple(&self) -> Option<&Rc<ValueVec>> {
         if let Value::Tuple(t) = self { Some(t) } else { None }
     }
     #[inline] pub fn as_map(&self) -> Option<&Rc<RefCell<crate::vm::collections::OxMap>>> {
@@ -1042,6 +1349,9 @@ impl Value {
             Value::ErrorValue(d) => ValueRepr::ErrorValue(d),
             Value::Wrapped(v) => ValueRepr::Wrapped(v),
             Value::Error(s) => ValueRepr::Error(s),
+            Value::Native(f) => ValueRepr::Native(f),
+            Value::Host(h) => ValueRepr::Host(h),
+            Value::Vector(v) => ValueRepr::Vector(v),
             Value::Task(h) => ValueRepr::Task(h),
         }
     }
@@ -1057,7 +1367,7 @@ impl Value {
     /// V5 fix: a typed zero-init heap default — `arr <array>` with no
     /// initializer — is produced once by the compiler and parked in the
     /// function's constant pool. A plain `clone()` of that constant on every
-    /// call shares the SAME `Rc<RefCell<Vec<Value>>>`, so mutations from one
+    /// call shares the SAME `Rc<RefCell<ValueVec>>`, so mutations from one
     /// call leak into the next (`b()` called 3× printed `1,2,3` instead of
     /// `1,1,1`). Materializing the default through `fresh_clone` gives each
     /// initialization its own empty collection, matching the tree-walker.
@@ -1065,7 +1375,7 @@ impl Value {
         match self {
             Value::Array(arr) => {
                 let fresh: Vec<Value> = arr.borrow().iter().map(|v| v.fresh_clone()).collect();
-                Value::Array(Rc::new(RefCell::new(fresh)))
+                Value::Array(Rc::new(RefCell::new(fresh.into())))
             }
             Value::Map(map) => {
                 let mut fresh = crate::vm::collections::OxMap::new();
@@ -1140,6 +1450,28 @@ impl Value {
             Value::EnumDef(_) => "ENUM_DEF",
             Value::EnumInstance(_) => "ENUM",
             Value::Task(_) => "TASK",
+            Value::Native(_) => "BUILTIN",
+            Value::Host(_) => "HOST",
+            Value::Vector(v) => v.type_name(),
+        }
+    }
+
+    /// `type_matches(expected, &self.effective_type_name())`, without
+    /// building the name. Type locks and typed parameters run this on every
+    /// store and call.
+    pub fn effective_type_is(&self, expected: &str) -> bool {
+        use crate::vm::type_matches;
+        match self {
+            Value::StructInstance(inst) => type_matches(expected, &inst.struct_name),
+            Value::ErrorValue(data) => match &data.tag {
+                Some(_) => type_matches(expected, &self.effective_type_name()),
+                None => type_matches(expected, "ERROR"),
+            },
+            Value::Wrapped(_) => type_matches(expected, "VALUE"),
+            Value::EnumDef(d) => type_matches(expected, &d.name),
+            Value::EnumInstance(i) => type_matches(expected, &i.enum_name),
+            Value::Host(h) => type_matches(expected, &h.type_name),
+            other => type_matches(expected, other.type_name()),
         }
     }
 
@@ -1153,12 +1485,75 @@ impl Value {
             Value::Wrapped(_) => "VALUE".to_string(),
             Value::EnumDef(d) => d.name.clone(),
             Value::EnumInstance(i) => i.enum_name.clone(),
+            Value::Host(h) => h.type_name.clone(),
             other => other.type_name().to_string(),
         }
     }
 }
 
 // ── Display ────────────────────────────────────────────────────────────
+
+/// How deep `Display` nests before eliding the rest as `...`.
+const MAX_DISPLAY_DEPTH: usize = 256;
+/// How deep `==` compares before giving up (unequal).
+const MAX_EQ_DEPTH: usize = 1024;
+
+thread_local! {
+    /// Containers being displayed right now, outermost first. A container
+    /// already on it is a cycle; its length is the nesting depth.
+    static DISPLAYING: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Container pairs being compared right now, for `==`'s cycle check.
+    static COMPARING: std::cell::RefCell<Vec<(usize, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Display one container. A cyclic value (or one nested past
+/// `MAX_DISPLAY_DEPTH`) prints `open...close` instead of recursing until the
+/// native stack overflows.
+fn nested(
+    f: &mut fmt::Formatter<'_>,
+    ptr: usize,
+    open: &str,
+    close: &str,
+    body: impl FnOnce(&mut fmt::Formatter<'_>) -> fmt::Result,
+) -> fmt::Result {
+    let elide = DISPLAYING.with(|d| {
+        let d = d.borrow();
+        d.len() >= MAX_DISPLAY_DEPTH || d.contains(&ptr)
+    });
+    if elide {
+        return write!(f, "{open}...{close}");
+    }
+    DISPLAYING.with(|d| d.borrow_mut().push(ptr));
+    let result = body(f);
+    DISPLAYING.with(|d| d.borrow_mut().pop());
+    result
+}
+
+/// Compare two containers. The same pair met again while it is still being
+/// compared is a cycle, and assumed equal (the rest of the comparison decides);
+/// past `MAX_EQ_DEPTH` the values count as unequal rather than overflow the stack.
+fn compare_nested(a: usize, b: usize, body: impl FnOnce() -> bool) -> bool {
+    if a == b {
+        return true;
+    }
+    let state = COMPARING.with(|c| {
+        let c = c.borrow();
+        if c.contains(&(a, b)) {
+            Some(true)
+        } else if c.len() >= MAX_EQ_DEPTH {
+            Some(false)
+        } else {
+            None
+        }
+    });
+    if let Some(answer) = state {
+        return answer;
+    }
+    COMPARING.with(|c| c.borrow_mut().push((a, b)));
+    let result = body();
+    COMPARING.with(|c| c.borrow_mut().pop());
+    result
+}
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1168,48 +1563,51 @@ impl fmt::Display for Value {
             Value::Char(c) => write!(f, "`{}`", c),
             Value::String(s) => write!(f, "{}", s),
             Value::Boolean(b) => write!(f, "{}", if *b { "True" } else { "False" }),
-            Value::Array(elements) => {
+            Value::Array(elements) => nested(f, Rc::as_ptr(elements) as usize, "[", "]", |f| {
                 let items: Vec<String> = elements.borrow().iter().map(|e| e.to_string()).collect();
                 write!(f, "[{}]", items.join(", "))
-            }
+            }),
             Value::Closure(c) => {
                 let name = c.function.name.as_deref().unwrap_or("anonymous");
                 write!(f, "fun {}()", name)
             }
             Value::StructDef(sd) => write!(f, "struct {}", sd.name),
             Value::StructInstance(si) => {
-                let fields = si.field_slice();
-                let items: Vec<String> = si
-                    .layout
-                    .slots
-                    .iter()
-                    .enumerate()
-                    .map(|(i, slot)| format!("{}: {}", slot.0, fields[i]))
-                    .collect();
-                write!(f, "{} {{ {} }}", si.struct_name, items.join(", "))
+                let open = format!("{} {{ ", si.struct_name);
+                nested(f, Rc::as_ptr(si) as usize, &open, " }", |f| {
+                    let fields = si.field_slice();
+                    let items: Vec<String> = si
+                        .layout
+                        .slots
+                        .iter()
+                        .enumerate()
+                        .map(|(i, slot)| format!("{}: {}", slot.0, fields[i]))
+                        .collect();
+                    write!(f, "{} {{ {} }}", si.struct_name, items.join(", "))
+                })
             }
             Value::Byte(n) => write!(f, "{}", n),
             Value::Uint(n) => write!(f, "{}", n),
-            Value::Tuple(elements) => {
+            Value::Tuple(elements) => nested(f, Rc::as_ptr(elements) as usize, "(", ")", |f| {
                 let items: Vec<String> = elements.iter().map(|e| e.to_string()).collect();
                 if elements.len() == 1 {
                     write!(f, "({},)", items[0])
                 } else {
                     write!(f, "({})", items.join(", "))
                 }
-            }
-            Value::Map(entries) => {
+            }),
+            Value::Map(entries) => nested(f, Rc::as_ptr(entries) as usize, "{", "}", |f| {
                 let entries = entries.borrow();
                 let items: Vec<String> = entries
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k, v))
                     .collect();
                 write!(f, "{{{}}}", items.join(", "))
-            }
-            Value::Set(elements) => {
+            }),
+            Value::Set(elements) => nested(f, Rc::as_ptr(elements) as usize, "set(", ")", |f| {
                 let items: Vec<String> = elements.borrow().iter().map(|e| e.to_string()).collect();
                 write!(f, "set({})", items.join(", "))
-            }
+            }),
             Value::Module(m) => write!(f, "module <{}>", m.name),
             Value::Builtin(_) => write!(f, "builtin function"),
             Value::None => write!(f, "None"),
@@ -1217,10 +1615,12 @@ impl fmt::Display for Value {
                 Some(tag) => write!(f, "Error {{ tag: {}, msg: {} }}", tag, data.msg),
                 None => write!(f, "Error {{ msg: {} }}", data.msg),
             },
-            Value::Wrapped(val) => write!(f, "Value({})", val),
+            Value::Wrapped(val) => nested(f, Rc::as_ptr(val) as usize, "Value(", ")", |f| {
+                write!(f, "Value({})", val)
+            }),
             Value::Error(msg) => write!(f, "Error: {}", msg),
             Value::EnumDef(d) => write!(f, "enum {}", d.name),
-            Value::EnumInstance(i) => match &i.payload {
+            Value::EnumInstance(i) => nested(f, Rc::as_ptr(i) as usize, "", "", |f| match &i.payload {
                 VmEnumPayload::Unit(_) => write!(f, "{}.{}", i.enum_name, i.variant_name),
                 VmEnumPayload::Tuple(items) => {
                     let s: Vec<String> = items.iter().map(|v| v.to_string()).collect();
@@ -1239,8 +1639,11 @@ impl fmt::Display for Value {
                         s.join(", ")
                     )
                 }
-            },
+            }),
             Value::Task(_) => write!(f, "<task>"),
+            Value::Native(n) => write!(f, "<builtin {}>", n.name),
+            Value::Host(h) => write!(f, "<{}>", h.type_name),
+            Value::Vector(v) => write!(f, "{}", v),
         }
     }
 }
@@ -1277,6 +1680,9 @@ impl fmt::Debug for Value {
             }
             Value::Wrapped(v) => write!(f, "Wrapped({:?})", v),
             Value::Error(msg) => write!(f, "Error({:?})", msg),
+            Value::Native(n) => write!(f, "Native({})", n.name),
+            Value::Host(h) => write!(f, "Host({})", h.type_name),
+            Value::Vector(v) => write!(f, "Vector({})", v),
             Value::EnumDef(d) => write!(f, "EnumDef({})", d.name),
             Value::EnumInstance(i) => {
                 write!(
@@ -1302,21 +1708,37 @@ impl PartialEq for Value {
             (Value::None, Value::None) => true,
             (Value::Byte(a), Value::Byte(b)) => a == b,
             (Value::Uint(a), Value::Uint(b)) => a == b,
-            (Value::Array(a), Value::Array(b)) => *a.borrow() == *b.borrow(),
-            (Value::Tuple(a), Value::Tuple(b)) => a == b,
-            (Value::Map(a), Value::Map(b)) => *a.borrow() == *b.borrow(),
-            (Value::Set(a), Value::Set(b)) => *a.borrow() == *b.borrow(),
+            (Value::Array(a), Value::Array(b)) => {
+                compare_nested(Rc::as_ptr(a) as usize, Rc::as_ptr(b) as usize, || *a.borrow() == *b.borrow())
+            }
+            (Value::Tuple(a), Value::Tuple(b)) => {
+                compare_nested(Rc::as_ptr(a) as usize, Rc::as_ptr(b) as usize, || a == b)
+            }
+            (Value::Map(a), Value::Map(b)) => {
+                compare_nested(Rc::as_ptr(a) as usize, Rc::as_ptr(b) as usize, || *a.borrow() == *b.borrow())
+            }
+            (Value::Set(a), Value::Set(b)) => {
+                compare_nested(Rc::as_ptr(a) as usize, Rc::as_ptr(b) as usize, || *a.borrow() == *b.borrow())
+            }
             (Value::ErrorValue(a), Value::ErrorValue(b)) => a.msg == b.msg && a.tag == b.tag,
             (Value::Wrapped(a), Value::Wrapped(b)) => a == b,
             (Value::StructInstance(a), Value::StructInstance(b)) => {
-                a.struct_name == b.struct_name && a.field_slice() == b.field_slice()
+                a.struct_name == b.struct_name
+                    && compare_nested(Rc::as_ptr(a) as usize, Rc::as_ptr(b) as usize, || {
+                        a.field_slice() == b.field_slice()
+                    })
             }
             (Value::Module(a), Value::Module(b)) => a.name == b.name,
+            (Value::Native(a), Value::Native(b)) => Rc::ptr_eq(a, b),
+            (Value::Host(a), Value::Host(b)) => Rc::ptr_eq(a, b) || a.same_value(b),
+            (Value::Vector(a), Value::Vector(b)) => a == b,
             (Value::EnumDef(a), Value::EnumDef(b)) => a.name == b.name,
             (Value::EnumInstance(a), Value::EnumInstance(b)) => {
                 a.enum_name == b.enum_name
                     && a.variant_name == b.variant_name
-                    && payload_eq(&a.payload, &b.payload)
+                    && compare_nested(Rc::as_ptr(a) as usize, Rc::as_ptr(b) as usize, || {
+                        payload_eq(&a.payload, &b.payload)
+                    })
             }
             _ => false,
         }

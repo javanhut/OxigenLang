@@ -85,7 +85,22 @@ pub struct Parser {
     prefix_fns: HashMap<TokenType, PrefixParseFn>,
     infix_fns: HashMap<TokenType, InfixParseFn>,
     lookahead_buffer: VecDeque<Token>,
+    /// Open `parse_statement`/`parse_block`/`parse_expression` frames. Bounded
+    /// by `MAX_NESTING` so hostile input is a diagnostic, not a stack overflow.
+    depth: usize,
+    /// Set once the nesting limit is hit; the rest of the file is not parsed.
+    too_deep: bool,
+    /// Set when `Error<tag>>` consumed the `>` closing the whole annotation.
+    type_outer_closed: bool,
+    /// Set when the annotation ended in `>>`, which also consumed the `>` of
+    /// an enclosing `<type<...>>`.
+    type_close_extra: bool,
 }
+
+/// How deeply statements, blocks and expressions may nest. Generous for any
+/// hand-written program, and small enough that the parser, compiler and
+/// formatter all stay well inside an ordinary thread's stack.
+const MAX_NESTING: usize = 512;
 
 impl Parser {
     /// Parser that knows the file it is reading, so diagnostics can name it.
@@ -120,6 +135,10 @@ impl Parser {
             prefix_fns: HashMap::new(),
             infix_fns: HashMap::new(),
             lookahead_buffer: VecDeque::new(),
+            depth: 0,
+            too_deep: false,
+            type_outer_closed: false,
+            type_close_extra: false,
         };
 
         // Prefix Parse Functions
@@ -244,47 +263,9 @@ impl Parser {
         }
     }
 
+    /// `repeat unless c` runs while `not c`. Flipping a comparison instead
+    /// (`a < b` to `a >= b`) is only equivalent when neither side is NaN.
     fn negate_loop_condition(expr: Expression) -> Expression {
-        if let Expression::Infix {
-            token,
-            left,
-            operator,
-            right,
-        } = expr
-        {
-            let inverted = match operator.as_str() {
-                "==" => "!=",
-                "!=" => "==",
-                "<" => ">=",
-                "<=" => ">",
-                ">" => "<=",
-                ">=" => "<",
-                _ => {
-                    return Expression::Prefix {
-                        token: Token {
-                            token_type: TokenType::Not,
-                            literal: "not".to_string(),
-                            span: Span::default(),
-                        },
-                        operator: "not".to_string(),
-                        right: Box::new(Expression::Infix {
-                            token,
-                            left,
-                            operator,
-                            right,
-                        }),
-                    };
-                }
-            };
-
-            return Expression::Infix {
-                token,
-                left,
-                operator: inverted.to_string(),
-                right,
-            };
-        }
-
         Self::negate_expression(expr)
     }
 
@@ -308,6 +289,8 @@ impl Parser {
                 let tag = self.curr_token.literal.clone();
                 if self.peek_token.token_type == TokenType::RShift {
                     self.next_token(); // consume both closing '>' tokens
+                    // That second `>` closed the whole annotation, too.
+                    self.type_outer_closed = true;
                     return Some(TypeAnnotation::ErrorType(Some(tag)));
                 }
                 self.expect_peek(TokenType::Gt)?; // close inner '>'
@@ -350,9 +333,18 @@ impl Parser {
             return None;
         }
         self.next_token();
+        self.type_outer_closed = false;
+        self.type_close_extra = false;
         let mut types = vec![self.parse_type_union_member()?];
 
         loop {
+            // `<Error<tag>>` ends in `>>`, which already closed the annotation
+            // unless a legacy `|| <...>` union continues it.
+            if std::mem::take(&mut self.type_outer_closed)
+                && self.peek_token.token_type != TokenType::DoublePipe
+            {
+                break;
+            }
             let peek_type = self.peek_token.token_type.clone();
             let next_type = self.peek_nth(1).token_type.clone();
             match peek_type {
@@ -380,6 +372,7 @@ impl Parser {
                 }
                 TokenType::Gt | TokenType::RShift => {
                     self.next_token(); // consume closing '>' or '>>'
+                    self.type_close_extra = peek_type == TokenType::RShift;
                     break;
                 }
                 _ => {
@@ -410,7 +403,7 @@ impl Parser {
         };
         // Extents of statements the parser dropped without emitting anything.
         let mut dropped: Vec<Span> = Vec::new();
-        while self.curr_token.token_type != TokenType::Eof {
+        while self.curr_token.token_type != TokenType::Eof && !self.too_deep {
             if self.curr_token.token_type == TokenType::Newline {
                 self.next_token();
                 continue;
@@ -440,6 +433,7 @@ impl Parser {
             };
 
             if let Some(stmt) = self.parse_statement() {
+                self.expect_statement_end(false);
                 if hidden_decl && let Statement::Let { name, .. } = &stmt {
                     program.hidden.push(name.value.clone());
                 }
@@ -526,8 +520,81 @@ impl Parser {
     }
 
     pub fn parse_statement(&mut self) -> Option<Statement> {
-        let stmt = self.parse_statement_inner()?;
-        self.try_postfix_guard(stmt)
+        if !self.enter_nesting() {
+            return None;
+        }
+        let stmt = self.parse_statement_inner().and_then(|stmt| self.try_postfix_guard(stmt));
+        self.depth -= 1;
+        stmt
+    }
+
+    /// Counts one more level of nesting; false (with one diagnostic for the
+    /// whole file) past `MAX_NESTING`. Every caller that gets true must
+    /// decrement `depth` on the way out.
+    fn enter_nesting(&mut self) -> bool {
+        if self.too_deep {
+            return false;
+        }
+        if self.depth >= MAX_NESTING {
+            self.too_deep = true;
+            self.errors.push(
+                diag(
+                    codes::UNEXPECTED_TOKEN,
+                    self.curr_token.span,
+                    format!("code is nested too deeply (more than {MAX_NESTING} levels)"),
+                )
+                .note("the rest of the file was not parsed")
+                .help("split the expression or block into smaller pieces"),
+            );
+            return false;
+        }
+        self.depth += 1;
+        true
+    }
+
+    /// A statement must end its line (or its one-line block). Without this,
+    /// `x := 1 println(x)` was two statements, and `1.5e3` became `1.5`
+    /// followed by a statement `e3`.
+    fn expect_statement_end(&mut self, in_block: bool) {
+        let ok = match self.peek_token.token_type {
+            // An `Illegal` token (`;`, a stray character) was already reported
+            // by the lexer, with a better message than this one.
+            TokenType::Newline | TokenType::Eof | TokenType::Illegal => true,
+            TokenType::RBrace => in_block,
+            _ => false,
+        };
+        // In `#[indent]` files a block is closed by the next line's dedent, so a
+        // statement ending in a block has no newline token after it.
+        if ok || self.too_deep || self.curr_token.token_type == TokenType::RBrace {
+            return;
+        }
+        self.errors.push(
+            diag(
+                codes::UNEXPECTED_TOKEN,
+                self.peek_token.span,
+                format!("expected a new line before {:?}", self.peek_token.literal),
+            )
+            .label("a second statement starts here")
+            .help("put each statement on its own line"),
+        );
+    }
+
+    /// The current token as a name being declared — a loop variable, a
+    /// pattern or a pattern parameter. Any token used to be accepted here, so
+    /// `each 5 in xs` and `pattern 9(x)` parsed.
+    fn expect_name(&mut self, what: &str) -> Option<Identifier> {
+        if self.curr_token.token_type != TokenType::Ident {
+            self.errors.push(diag(
+                codes::EXPECTED_IDENTIFIER,
+                self.curr_token.span,
+                format!("expected {what}, got {:?}", self.curr_token.literal),
+            ));
+            return None;
+        }
+        Some(Identifier {
+            token: self.curr_token.clone(),
+            value: self.curr_token.literal.clone(),
+        })
     }
 
     fn parse_statement_inner(&mut self) -> Option<Statement> {
@@ -890,6 +957,15 @@ impl Parser {
     }
 
     fn parse_expression(&mut self, precedence: Precedence) -> Option<Expression> {
+        if !self.enter_nesting() {
+            return None;
+        }
+        let expr = self.parse_expression_at_depth(precedence);
+        self.depth -= 1;
+        expr
+    }
+
+    fn parse_expression_at_depth(&mut self, precedence: Precedence) -> Option<Expression> {
         let prefix = self.prefix_fns.get(&self.curr_token.token_type).copied();
 
         let mut left = match prefix {
@@ -1008,7 +1084,15 @@ impl Parser {
 
     fn parse_float(&mut self) -> Option<Expression> {
         let tok = self.curr_token.clone();
-        let value = tok.literal.parse::<f64>().ok()?;
+        let value = tok.literal.parse::<f64>().ok().filter(|v| v.is_finite());
+        let Some(value) = value else {
+            // Used to become `inf` silently, which `fmt` then wrote back as `inf.0`.
+            self.errors.push(
+                diag(codes::MALFORMED_NUMBER, tok.span, "float literal out of range")
+                    .label("too large for a 64-bit float"),
+            );
+            return None;
+        };
         Some(Expression::Float { token: tok, value })
     }
 
@@ -1398,6 +1482,11 @@ impl Parser {
             let token = self.curr_token.clone();
             self.expect_peek(TokenType::Lt)?;
             let target = self.parse_type_annotation()?;
+            // `<type<int>>` closes both with one `>>`; `<type<Error<t>>>` uses
+            // its `>>` on the tag and annotation and needs one more `>`.
+            if !std::mem::take(&mut self.type_close_extra) {
+                self.expect_peek(TokenType::Gt)?;
+            }
             self.expect_peek(TokenType::LParen)?;
             self.next_token(); // move to wrapped expression
             let value = self.parse_expression(Precedence::Lowest)?;
@@ -1603,10 +1692,7 @@ impl Parser {
 
     fn parse_diverge_each(&mut self, tok: Token) -> Option<Expression> {
         self.next_token(); // move to loop variable
-        let var = Identifier {
-            token: self.curr_token.clone(),
-            value: self.curr_token.literal.clone(),
-        };
+        let var = self.expect_name("a loop variable name")?;
         self.expect_peek(TokenType::In)?;
         self.next_token(); // move to iterable
         let iterable = self.parse_expression(Precedence::Lowest)?;
@@ -1894,7 +1980,10 @@ impl Parser {
     }
 
     fn parse_lt_expression(&mut self, left: Expression) -> Option<Expression> {
-        if Self::is_angle_effect_name_token(&self.peek_token) {
+        // After a value only `<guard...>` and `<fail...>` mean anything, and
+        // both are keywords. `log`, `type`, `Error` and `Value` are ordinary
+        // names here: `5 < log` is a comparison.
+        if matches!(self.peek_token.token_type, TokenType::Guard | TokenType::Fail) {
             return self.parse_angle_effect_with_target(Some(left));
         }
         self.parse_infix_expression(left)
@@ -2088,6 +2177,21 @@ impl Parser {
     fn parse_dot_expression(&mut self, left: Expression) -> Option<Expression> {
         let tok = self.curr_token.clone(); // '.'
         self.next_token(); // move to field name
+        // A field is a name (keywords included: `p.type`) or a variant index.
+        // Anything used to do — `m.(`, `m."a"`, even the newline in `p.`.
+        let is_name = !matches!(
+            self.curr_token.token_type,
+            TokenType::String | TokenType::MultilineString | TokenType::Char | TokenType::Illegal
+        ) && self.curr_token.literal.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && self.curr_token.literal.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !is_name && self.curr_token.token_type != TokenType::Integer {
+            self.errors.push(diag(
+                codes::EXPECTED_IDENTIFIER,
+                self.curr_token.span,
+                format!("expected a field name after `.`, got {:?}", self.curr_token.literal),
+            ));
+            return None;
+        }
         let field = Identifier {
             token: self.curr_token.clone(),
             value: self.curr_token.literal.clone(),
@@ -2310,10 +2414,7 @@ impl Parser {
         let token = self.curr_token.clone(); // 'each'
 
         self.next_token(); // move to variable name
-        let mut variable = Identifier {
-            token: self.curr_token.clone(),
-            value: self.curr_token.literal.clone(),
-        };
+        let mut variable = self.expect_name("a loop variable name")?;
 
         // The leading name binds the map key or sequence index, the second the element.
         let mut index_variable = None;
@@ -2321,10 +2422,7 @@ impl Parser {
             self.next_token(); // curr is ','
             self.next_token(); // move to the value name
             index_variable = Some(variable);
-            variable = Identifier {
-                token: self.curr_token.clone(),
-                value: self.curr_token.literal.clone(),
-            };
+            variable = self.expect_name("a loop variable name")?;
         }
 
         self.expect_peek(TokenType::In)?;
@@ -2379,10 +2477,7 @@ impl Parser {
         let token = self.curr_token.clone(); // 'pattern'
 
         self.next_token(); // move to pattern name
-        let name = Identifier {
-            token: self.curr_token.clone(),
-            value: self.curr_token.literal.clone(),
-        };
+        let name = self.expect_name("a pattern name")?;
 
         self.expect_peek(TokenType::LParen)?;
 
@@ -2390,18 +2485,12 @@ impl Parser {
         let mut params = Vec::new();
         if self.peek_token.token_type != TokenType::RParen {
             self.next_token();
-            params.push(Identifier {
-                token: self.curr_token.clone(),
-                value: self.curr_token.literal.clone(),
-            });
+            params.push(self.expect_name("a pattern parameter name")?);
 
             while self.peek_token.token_type == TokenType::Comma {
                 self.next_token(); // ','
                 self.next_token(); // next param
-                params.push(Identifier {
-                    token: self.curr_token.clone(),
-                    value: self.curr_token.literal.clone(),
-                });
+                params.push(self.expect_name("a pattern parameter name")?);
             }
         }
         self.expect_peek(TokenType::RParen)?;
@@ -2450,24 +2539,18 @@ impl Parser {
             if self.curr_token.token_type == TokenType::Pattern {
                 // Inline pattern definition
                 self.next_token(); // move to pattern name
-                let pattern_name = self.curr_token.literal.clone();
+                let pattern_name = self.expect_name("a pattern name")?.value;
 
                 self.expect_peek(TokenType::LParen)?;
 
                 let mut params = Vec::new();
                 if self.peek_token.token_type != TokenType::RParen {
                     self.next_token();
-                    params.push(Identifier {
-                        token: self.curr_token.clone(),
-                        value: self.curr_token.literal.clone(),
-                    });
+                    params.push(self.expect_name("a pattern parameter name")?);
                     while self.peek_token.token_type == TokenType::Comma {
                         self.next_token(); // ','
                         self.next_token(); // next param
-                        params.push(Identifier {
-                            token: self.curr_token.clone(),
-                            value: self.curr_token.literal.clone(),
-                        });
+                        params.push(self.expect_name("a pattern parameter name")?);
                     }
                 }
                 self.expect_peek(TokenType::RParen)?;
@@ -2499,7 +2582,7 @@ impl Parser {
                 });
             } else {
                 // Reference to pre-defined pattern
-                let pattern_name = self.curr_token.literal.clone();
+                let pattern_name = self.expect_name("a pattern name or `else`")?.value;
 
                 self.expect_peek(TokenType::Arrow)?;
                 self.next_token(); // move to body expression
@@ -2789,6 +2872,15 @@ impl Parser {
 
     // Parse a block of statements between { and }
     fn parse_block(&mut self) -> Option<Vec<Statement>> {
+        if !self.enter_nesting() {
+            return None;
+        }
+        let block = self.parse_block_at_depth();
+        self.depth -= 1;
+        block
+    }
+
+    fn parse_block_at_depth(&mut self) -> Option<Vec<Statement>> {
         let mut statements = Vec::new();
 
         let open_brace_span = self.curr_token.span;
@@ -2801,7 +2893,11 @@ impl Parser {
         while self.curr_token.token_type != TokenType::RBrace
             && self.curr_token.token_type != TokenType::Eof
         {
+            if self.too_deep {
+                return None;
+            }
             if let Some(stmt) = self.parse_statement() {
+                self.expect_statement_end(true);
                 statements.push(stmt);
             }
             self.next_token();
@@ -3250,19 +3346,36 @@ impl Parser {
             return false;
         }
 
+        // Brackets and interpolated strings are skipped whole, so a block or a
+        // multi-line literal in the condition does not hide the `then` after
+        // it, and a `then` inside `"{a unless b then c}"` is not taken for it.
         let mut idx = 1;
+        let mut depth = 0usize;
         loop {
             match self.peek_nth(idx).token_type {
-                TokenType::Then => return true,
-                TokenType::Newline | TokenType::Eof | TokenType::Comma | TokenType::RBrace => {
-                    return false;
+                TokenType::Then if depth == 0 => return true,
+                TokenType::LParen
+                | TokenType::LBracket
+                | TokenType::LBrace
+                | TokenType::InterpStart
+                | TokenType::MultilineInterpStart => depth += 1,
+                TokenType::RParen | TokenType::RBracket | TokenType::RBrace | TokenType::InterpEnd => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
                 }
-                _ => idx += 1,
+                TokenType::Newline | TokenType::Comma if depth == 0 => return false,
+                TokenType::Eof => return false,
+                _ => {}
             }
+            idx += 1;
         }
     }
 
-    fn skip_type_member_at(&mut self, mut pos: usize) -> Option<usize> {
+    /// Skips one annotation member; the flag says whether it also consumed the
+    /// annotation's closing `>`.
+    fn skip_type_member_at(&mut self, mut pos: usize) -> Option<(usize, bool)> {
         let token_type = self.peek_nth(pos).token_type.clone();
         let token_literal = self.peek_nth(pos).literal.clone();
         if !Self::is_type_name_token(&token_type) {
@@ -3276,13 +3389,15 @@ impl Parser {
             && next_next_type == TokenType::Ident
         {
             let closing_type = self.peek_nth(pos + 3).token_type.clone();
-            if matches!(closing_type, TokenType::Gt | TokenType::RShift) {
-                return Some(pos + 4);
-            }
-            return None;
+            return match closing_type {
+                TokenType::Gt => Some((pos + 4, false)),
+                // `>>` closes the tag and the annotation together.
+                TokenType::RShift => Some((pos + 4, true)),
+                _ => None,
+            };
         }
         pos += 1;
-        Some(pos)
+        Some((pos, false))
     }
 
     /// Scans past a type annotation starting at peek_nth(offset).
@@ -3292,11 +3407,13 @@ impl Parser {
         if self.peek_nth(start).token_type != TokenType::Lt {
             return None;
         }
-        let mut pos = start + 1;
-        pos = self.skip_type_member_at(pos)?;
+        let (mut pos, mut closed) = self.skip_type_member_at(start + 1)?;
 
         loop {
             let current_type = self.peek_nth(pos).token_type.clone();
+            if closed && current_type != TokenType::DoublePipe {
+                return Some(pos);
+            }
             let next_type = self.peek_nth(pos + 1).token_type.clone();
             match current_type {
                 TokenType::Gt if next_type == TokenType::DoublePipe => {
@@ -3308,7 +3425,7 @@ impl Parser {
                     if self.peek_nth(pos).token_type == TokenType::Lt {
                         pos += 1;
                     }
-                    pos = self.skip_type_member_at(pos)?;
+                    (pos, closed) = self.skip_type_member_at(pos)?;
                 }
                 _ => return None,
             }

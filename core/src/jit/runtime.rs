@@ -13,7 +13,7 @@
 #![cfg(feature = "jit")]
 
 use crate::vm::VM;
-use crate::vm::value::{Upvalue, Value, ValueRepr};
+use crate::vm::value::{Upvalue, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -238,7 +238,7 @@ pub unsafe extern "C" fn jit_build_array(vm: *mut VM, count: u32) {
         elements.push(vm.pop());
     }
     elements.reverse();
-    vm.push(Value::Array(Rc::new(RefCell::new(elements))));
+    vm.push(Value::Array(Rc::new(RefCell::new(elements.into()))));
 }
 
 pub unsafe extern "C" fn jit_op_index_fast_array_int(vm: *mut VM) -> u32 {
@@ -377,6 +377,28 @@ pub unsafe extern "C" fn jit_type_wrap(vm: *mut VM, type_idx: u32) -> u32 {
     }
 }
 
+/// `RangeLimit` when its bounds aren't both staged as ints: [start, end] ->
+/// [limit] on the VM stack, or the `range` builtin's error.
+pub unsafe extern "C" fn jit_range_limit(vm: *mut VM, step_idx: u32) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.sync_stack_from_view();
+    let step = match vm.current_constant(step_idx as u16) {
+        Value::Integer(step) => step,
+        _ => {
+            vm.jit
+                .stash_error(vm.runtime_error("invalid step constant in RangeLimit"));
+            return 1;
+        }
+    };
+    match vm.handle_range_limit(step) {
+        Ok(()) => 0,
+        Err(err) => {
+            vm.jit.stash_error(err);
+            1
+        }
+    }
+}
+
 pub unsafe extern "C" fn jit_local_add_array_mod_index(
     vm: *mut VM,
     dst_slot: u32,
@@ -474,7 +496,9 @@ pub unsafe extern "C" fn jit_struct_field_add_const(
     if let Some(inst) = self_val.as_struct_instance() {
         let field_name = vm.current_constant(field_idx as u16);
         if let Some(fname) = field_name.as_string()
-            && let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+            && let Some(&idx) = inst.layout.indices.get(fname.as_ref())
+            // A hidden field is only writable from its struct's methods; the slow path raises the error.
+            && (!inst.layout.slots[idx].2 || vm.hidden_field_access_allowed(inst)) {
                 // SAFETY: single-threaded, nothing else borrows fields. Integer->Integer needs no Drop.
                 unsafe {
                     let slot = inst.fields.ptr.add(idx);
@@ -562,7 +586,8 @@ pub unsafe extern "C" fn jit_struct_field_add_local(
     if let (Some(inst), Some(rhs)) = (self_val.as_struct_instance(), rhs_val.as_integer()) {
         let field_name = vm.current_constant(field_idx as u16);
         if let Some(fname) = field_name.as_string()
-            && let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+            && let Some(&idx) = inst.layout.indices.get(fname.as_ref())
+            && (!inst.layout.slots[idx].2 || vm.hidden_field_access_allowed(inst)) {
                 // SAFETY: same as jit_struct_field_add_const.
                 unsafe {
                     let slot = inst.fields.ptr.add(idx);
@@ -639,22 +664,9 @@ pub unsafe extern "C" fn jit_set_local_checked(vm: *mut VM, slot: u32) -> u32 {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::SetLocal);
     vm.sync_stack_from_view();
-    let constraint = vm
-        .active_closure()
-        .function
-        .locals
-        .get(slot as usize)
-        .and_then(|li| li.type_constraint.clone());
-    if let Some(expected) = constraint {
-        let actual = vm.peek(0).effective_type_name();
-        if !crate::vm::type_matches(&expected, &actual) {
-            let e = vm.runtime_error_hint(
-                &format!("type mismatch: expected {}, got {}", expected, actual),
-                &format!("variable is locked to type {}", expected),
-            );
-            vm.jit.stash_error(e);
-            return 1;
-        }
+    if let Err(e) = vm.check_local_lock(&vm.active_closure().function, slot as usize) {
+        vm.jit.stash_error(e);
+        return 1;
     }
     let base = vm.current_slot_offset();
     let value = vm.peek(0).clone();
@@ -682,7 +694,7 @@ pub unsafe extern "C" fn jit_check_recursion_depth(vm: *mut VM) -> u32 {
     // The inline recursion paths bypass the VM's frame and push guards, so mirror both bounds here.
     let frame_overflow =
         vm.frames_len().saturating_add(vm.jit_frame_len()) >= crate::vm::FRAMES_MAX;
-    let stack_overflow = vm.stack_view.len >= crate::vm::STACK_MAX - 8192;
+    let stack_overflow = vm.stack_view.len >= crate::vm::STACK_MAX - crate::vm::STACK_GUARD_MARGIN;
     if frame_overflow || stack_overflow {
         let e = vm.runtime_error_hint(
             "stack overflow",
@@ -692,6 +704,22 @@ pub unsafe extern "C" fn jit_check_recursion_depth(vm: *mut VM) -> u32 {
         return 1;
     }
     0
+}
+
+/// Called by a compiled loop back-edge that has to stop: an interrupt is
+/// pending, or the budget is spent. Stashes the error and returns 1; the
+/// back-edge never resumes the loop after calling this.
+pub unsafe extern "C" fn jit_loop_stop(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    let err = match vm.loop_limit_step() {
+        Err(e) => e,
+        // The back-edge saw a limit that the VM's own check no longer does.
+        // Neither the interrupt nor the budget can clear itself in between,
+        // so this does not happen; stop anyway rather than loop unchecked.
+        Ok(()) => vm.runtime_error("internal error: a loop stopped with no limit reached"),
+    };
+    vm.jit.stash_error(err);
+    1
 }
 
 // ── Arithmetic — return 0 on ok, 1 on runtime error ────────────────────
@@ -796,25 +824,12 @@ pub unsafe extern "C" fn jit_op_negate(vm: *mut VM) -> u32 {
     vm.jit.bump_helper(HelperCounter::Negate);
     vm.sync_stack_from_view();
     let v = vm.pop();
-    let v = vm.force(v);
-    match v.repr() {
-        ValueRepr::Integer(n) => {
-            vm.push(Value::Integer(-n));
+    match vm.unary_negate(v) {
+        Ok(negated) => {
+            vm.push(negated);
             0
         }
-        ValueRepr::Float(f) => {
-            vm.push(Value::Float(-f));
-            0
-        }
-        _ => {
-            let other = &v;
-            let err = vm.runtime_error_hint(
-                &format!(
-                    "negation is only supported for numbers, got {}",
-                    other.type_name()
-                ),
-                "only <int> and <float> values can be negated",
-            );
+        Err(err) => {
             vm.jit.stash_error(err);
             1
         }
@@ -967,15 +982,7 @@ pub unsafe extern "C" fn jit_get_upvalue(vm: *mut VM, idx: u32) {
             closed_int_value = Some(*n);
         }
     }
-    let closure = vm.active_closure();
-    if (idx as usize) < closure.upvalue_int_kinds.len() {
-        if let Some(n) = closed_int_value {
-            closure.upvalue_int_values[idx as usize].set(n);
-            closure.upvalue_int_kinds[idx as usize].set(1);
-        } else {
-            closure.upvalue_int_kinds[idx as usize].set(0);
-        }
-    }
+    arm_upvalue_int_cache(vm.active_closure(), idx as usize, closed_int_value);
     if let Some(c) = vm.jit.counters_ptr_opt() {
         let c = unsafe { &*c };
         c.get_upvalue_calls.set(c.get_upvalue_calls.get() + 1);
@@ -1014,15 +1021,67 @@ pub unsafe extern "C" fn jit_set_upvalue(vm: *mut VM, idx: u32) {
             closed_int_value = Some(*n);
         }
     }
-    let closure = vm.active_closure();
-    if (idx as usize) < closure.upvalue_int_kinds.len() {
-        if let Some(n) = closed_int_value {
-            closure.upvalue_int_values[idx as usize].set(n);
-            closure.upvalue_int_kinds[idx as usize].set(1);
-        } else {
-            closure.upvalue_int_kinds[idx as usize].set(0);
+    arm_upvalue_int_cache(vm.active_closure(), idx as usize, closed_int_value);
+}
+
+/// Record upvalue `idx`'s current shape in `closure`'s int cache. A cache
+/// filled at an older write epoch is cleared first: its other entries may be
+/// stale, and restamping it would make them look current.
+fn arm_upvalue_int_cache(closure: &crate::vm::value::ObjClosure, idx: usize, closed_int_value: Option<i64>) {
+    if idx >= closure.upvalue_int_kinds.len() {
+        return;
+    }
+    let epoch = crate::jit::UPVALUE_WRITE_EPOCH.load(std::sync::atomic::Ordering::Relaxed);
+    let values = &closure.upvalue_int_values;
+    if values[0].get() != epoch {
+        for kind in closure.upvalue_int_kinds.iter() {
+            kind.set(0);
+        }
+        values[0].set(epoch);
+    }
+    if let Some(n) = closed_int_value {
+        values[idx + 1].set(n);
+        closure.upvalue_int_kinds[idx].set(1);
+    } else {
+        closure.upvalue_int_kinds[idx].set(0);
+    }
+}
+
+/// Typed-parameter check run by a compiled function's generic entry.
+///
+/// The interpreter checks a callee's annotated parameters in `call_closure`,
+/// but compiled call sites reach the entry directly, and the body is compiled
+/// trusting the annotations (an `<int>` parameter is read as a raw i64). Same
+/// rule and message as the interpreter; the error is reported from the caller.
+pub unsafe extern "C" fn jit_check_param_types(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.sync_stack_from_view();
+    let function = Rc::clone(&vm.active_closure().function);
+    let base = vm.current_slot_offset() + 1;
+    for (i, param) in function.params.iter().enumerate() {
+        let Some(expected_ty) = param.type_ann.as_deref() else {
+            continue;
+        };
+        let val = vm.stack_slot(base + i);
+        if (param.optional || param.has_default) && matches!(val, Value::None) {
+            continue;
+        }
+        if !val.effective_type_is(expected_ty)
+            && !crate::vm::type_matches(expected_ty, val.type_name())
+        {
+            let actual = val.effective_type_name();
+            let e = vm.error_in_jit_caller(
+                &format!(
+                    "type mismatch for parameter '{}': expected {}, got {}",
+                    param.name, expected_ty, actual
+                ),
+                &format!("parameter '{}' requires type {}", param.name, expected_ty),
+            );
+            vm.jit.stash_error(e);
+            return 1;
         }
     }
+    0
 }
 
 pub unsafe extern "C" fn jit_close_upvalue(vm: *mut VM) {
@@ -1255,10 +1314,12 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
         }
     };
 
-    // Cache hit: cached def matches current def.
+    // Cache hit: cached def matches current def. A null raw identity means
+    // `invalidate_method_caches` emptied the entry; the keepers only linger.
     if let (Some(cached_def), Some(cached_closure)) =
         (cache.struct_def.as_ref(), cache.closure.as_ref())
-        && Rc::ptr_eq(cached_def, &struct_def) {
+        && Rc::ptr_eq(cached_def, &struct_def)
+        && !cache.struct_def_raw.is_null() {
             let closure = Rc::clone(cached_closure);
             let owning_mg = struct_def.module_globals.get();
             let before_depth = vm.frames_len();

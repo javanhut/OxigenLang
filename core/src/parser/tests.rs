@@ -406,9 +406,10 @@ fn test_parse_repeat_unless_statement() {
         Statement::Repeat {
             condition, body, ..
         } => {
+            // Negated, not inverted: `x <= 0` differs from `not (x > 0)` for NaN.
             match condition {
-                Expression::Infix { operator, .. } => assert_eq!(operator, "<="),
-                _ => panic!("Expected inverted repeat condition"),
+                Expression::Prefix { operator, .. } => assert_eq!(operator, "not"),
+                _ => panic!("Expected negated repeat condition"),
             }
             assert_eq!(body.len(), 1);
         }

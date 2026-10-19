@@ -234,6 +234,27 @@ pub enum OpCode {
     PushHandler,
     /// Remove the innermost error handler (normal-path exit of a region).
     PopHandler,
+
+    // --- Per-binding type locks ---
+    /// Check the value on top of the stack (left in place) against a type.
+    /// Operand: u16 type_name constant. Emitted before a write through an
+    /// upvalue whose binding is typed — the upvalue cell carries no lock.
+    CheckType,
+    /// `SetLocal` for a typed binding whose physical slot is shared with a
+    /// binding of another type, so the slot's own lock had to be cleared.
+    /// Operand: u16 slot. The lock is looked up by this instruction's
+    /// offset in [`Chunk::local_locks`].
+    SetLocalLocked,
+
+    // --- Lowered `each i in range(...)` ---
+    /// Entry check and bound of a lowered range loop. Operand: u16 step
+    /// constant (a nonzero Integer). Stack: [start, end] -> [limit].
+    /// Raises the `range` builtin's error unless both are Integers, then
+    /// pushes `end - step` saturated to i64: the loop continues after `i`
+    /// while `i < limit` (`i > limit` counting down), which is exactly
+    /// `i + step < end` without computing `i + step`, so the counter's
+    /// increment can never wrap.
+    RangeLimit,
 }
 
 /// Canonical byte layout of an instruction's operands.
@@ -311,7 +332,7 @@ pub(crate) struct OpInfo {
 impl OpCode {
     /// Convert a raw byte to an OpCode. Returns None for invalid bytes.
     pub fn from_byte(byte: u8) -> Option<OpCode> {
-        if byte <= OpCode::PopHandler as u8 {
+        if byte <= OpCode::RangeLimit as u8 {
             // SAFETY: OpCode is repr(u8) and we verified the range.
             Some(unsafe { std::mem::transmute::<u8, OpCode>(byte) })
         } else {
@@ -412,7 +433,10 @@ impl OpCode {
             | OpCode::IsMut
             | OpCode::IsType
             | OpCode::IsTypeMut
-            | OpCode::PushHandler => OperandLayout::U16,
+            | OpCode::PushHandler
+            | OpCode::CheckType
+            | OpCode::SetLocalLocked
+            | OpCode::RangeLimit => OperandLayout::U16,
 
             // Opcode + u16 + u8.
             OpCode::StructLiteral
@@ -449,12 +473,12 @@ impl OpCode {
             Dup => StackEffect::Fixed { pops: 0, pushes: 1, peeks: 1 },
             Add | Subtract | Multiply | Divide | Modulo | Equal | NotEqual | Greater
             | GreaterEqual | Less | LessEqual | BitAnd | BitOr | BitXor | ShiftLeft
-            | ShiftRight | Index | IterGet => {
+            | ShiftRight | Index | IterGet | RangeLimit => {
                 StackEffect::Fixed { pops: 2, pushes: 1, peeks: 0 }
             }
             Not | BitNot | Negate | TypeWrap | IsType | GetField | GetModuleField
             | ValueConstruct => StackEffect::Fixed { pops: 1, pushes: 1, peeks: 0 },
-            SetLocal | SetGlobal | SetUpvalue => {
+            SetLocal | SetGlobal | SetUpvalue | SetLocalLocked | CheckType => {
                 StackEffect::Fixed { pops: 0, pushes: 0, peeks: 1 }
             }
             CloseUpvalueAt | Increment | Decrement | Jump | Loop | Main | PopHandler => {
@@ -519,6 +543,7 @@ impl OpCode {
             self,
             Divide | Modulo | Call | CallNamed | MethodCall | MethodCallNamed | Index
                 | IndexAssign | Slice | GetField | SetField | TypeWrap | Import | Fail | Log
+                | CheckType | SetLocalLocked | RangeLimit
         );
         OpProperties {
             may_allocate,
@@ -540,7 +565,7 @@ impl OpCode {
                 | SetLocal | GetGlobal | SetGlobal | DefineGlobal | DefineGlobalTyped
                 | GetUpvalue | SetUpvalue | Closure | Jump | JumpIfFalse | JumpIfTrue | Loop
                 | PopJumpIfFalse | Call | Return | StructDef | StructLiteral | GetField
-                | SetField | DefineMethod | MethodCall
+                | SetField | DefineMethod | MethodCall | RangeLimit
         ) {
             JitSupport::Native
         } else {
@@ -581,6 +606,11 @@ pub struct Chunk {
     /// (rather than threaded through every `emit_*` signature) so the
     /// existing line-only emit API stays unchanged.
     cur_column: u32,
+    /// Cache for [`Chunk::stack_bound`], filled on first use (after
+    /// compilation has finished writing `code`).
+    stack_bound: std::cell::OnceCell<usize>,
+    /// `(offset of a SetLocalLocked, type_name constant)`, sorted by offset.
+    pub local_locks: Vec<(usize, u16)>,
 }
 
 impl Chunk {
@@ -591,7 +621,55 @@ impl Chunk {
             lines: Vec::new(),
             columns: Vec::new(),
             cur_column: 0,
+            stack_bound: std::cell::OnceCell::new(),
+            local_locks: Vec::new(),
         }
+    }
+
+    /// The type a `SetLocalLocked` at `offset` enforces.
+    pub fn local_lock_at(&self, offset: usize) -> Option<&crate::vm::value::Value> {
+        let i = self.local_locks.binary_search_by_key(&offset, |&(o, _)| o).ok()?;
+        self.constants.get(self.local_locks[i].1 as usize)
+    }
+
+    /// An upper bound on how many operand-stack slots this code can occupy
+    /// above its frame's callee slot.
+    ///
+    /// Compiled code has one stack height per instruction, and a loop body
+    /// leaves the height where it found it, so the peak height is at most
+    /// the pushes along one pass through the code: the sum of every
+    /// instruction's pushes. That over-counts branches but never
+    /// under-counts, which is the direction that matters: calls are refused
+    /// unless this much room is left, so no push can run off the end of the
+    /// stack.
+    pub fn stack_bound(&self) -> usize {
+        *self.stack_bound.get_or_init(|| self.compute_stack_bound())
+    }
+
+    fn compute_stack_bound(&self) -> usize {
+        // One spare slot for the error value a handler pushes on recovery.
+        let mut bound = 1usize;
+        let mut ip = 0usize;
+        while ip < self.code.len() {
+            let Some(op) = OpCode::from_byte(self.code[ip]) else {
+                // Undecodable code fails when it runs; count the byte so the
+                // bound stays an over-estimate until then.
+                bound += 2;
+                ip += 1;
+                continue;
+            };
+            bound += match op.info().stack {
+                StackEffect::Fixed { pushes, .. } => pushes as usize,
+                StackEffect::OperandDependent => match op {
+                    OpCode::Unpack => self.code.get(ip + 1).copied().unwrap_or(u8::MAX) as usize,
+                    // The others push their single result. Two leaves room
+                    // for any that briefly hold one more.
+                    _ => 2,
+                },
+            };
+            ip += self.instruction_len(ip).map_or(1, |len| len.max(1));
+        }
+        bound
     }
 
     /// Set the column to attach to subsequently written bytes. Call before
@@ -755,7 +833,7 @@ mod tests {
 
     #[test]
     fn every_opcode_has_canonical_metadata() {
-        for byte in 0..=OpCode::PopHandler as u8 {
+        for byte in 0..=OpCode::RangeLimit as u8 {
             let op = OpCode::from_byte(byte).expect("contiguous opcode discriminants");
             let info = op.info();
             assert_eq!(op.fixed_len(), info.operands.fixed_instruction_len());

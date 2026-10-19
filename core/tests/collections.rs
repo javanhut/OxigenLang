@@ -61,10 +61,7 @@ fn map_non_hashable_key_falls_back_to_linear() {
     // An Array used as a key has no hashable projection; the linear
     // fallback must still find it.
     let mut m = OxMap::new();
-    let arr = Value::Array(Rc::new(std::cell::RefCell::new(vec![
-        Value::Integer(1),
-        Value::Integer(2),
-    ])));
+    let arr = Value::array(vec![Value::Integer(1), Value::Integer(2)]);
     m.insert(arr.clone(), s("found"));
     m.insert(s("plain"), Value::Integer(9));
     assert_eq!(m.get(&arr), Some(&s("found")));

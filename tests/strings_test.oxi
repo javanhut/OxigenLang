@@ -29,3 +29,34 @@ introduce strings
 <test>("lines") {
     expect(strings.lines("a\nb\nc")).eq(["a", "b", "c"])
 }
+
+// Byte-offset slicing used to abort the whole process on any of these: a slice
+// that ends inside a multi-byte character is not a string.
+<test>("searching and capitalizing non-ASCII text") {
+    expect(strings.capitalize("élan")).eq("Élan")
+    expect(strings.capitalize("ß")).eq("SS")
+    expect(strings.index_of("héllo", "l")).eq(2)
+    expect(strings.index_of("日本語です", "語")).eq(2)
+    expect(strings.index_of("héllo", "z")).eq(-1)
+    expect(strings.count("naïve naïve", "v")).eq(2)
+    expect(strings.count("ééé", "é")).eq(3)
+    expect(strings.count("abc", "")).eq(0)
+}
+
+<test>("padding counts characters, not bytes") {
+    expect(strings.pad_left("é", 3, "0")).eq("00é")
+    expect(strings.pad_right("é", 3, ".")).eq("é..")
+    expect(strings.pad_left("7", 4, "ab")).eq("abab7")
+}
+
+<test>("padding with an empty fill is an error, not an endless loop") {
+    expect(<type<Error> || <Value>>(strings.pad_left("a", 5, ""))).is_error()
+    expect(<type<Error> || <Value>>(strings.pad_right("a", 5, ""))).is_error()
+    expect(strings.pad_left("abc", 2, "")).eq("abc")
+}
+
+<test>("len counts characters, byte_len counts UTF-8 bytes") {
+    expect(len("héllo")).eq(5)
+    expect(strings.byte_len("héllo")).eq(6)
+    expect(strings.byte_len("")).eq(0)
+}

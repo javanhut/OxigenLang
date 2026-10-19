@@ -111,10 +111,40 @@ fun explode(req) { <fail>("handler is broken") }
     res := api.file("example/website/index.html")
     expect(res.status).eq(200)
     expect(res.headers["Content-Type"]).eq("text/html; charset=utf-8")
-    expect(strings.contains_str(res.body, "<h1>")).truthy()
+    // The bytes are streamed at send time, not read into a string, so binary
+    // files survive; the response carries the path and the size.
+    expect(type(res)).eq("FileRes")
+    expect(res.size).eq(len(__read_file("example/website/index.html")))
     // A missing file is an answer, not a crash — handlers call this on paths
-    // that may not exist.
+    // that may not exist. A directory is not a file either.
     expect(api.file("example/website/nope.html").status).eq(404)
+    expect(api.file("example/website").status).eq(404)
+}
+
+<test>("header values cannot inject headers") {
+    rendered := api.render(api.redirect("/a\r\nSet-Cookie: x=1\r\n\r\nbody"), False)
+    expect(strings.contains_str(rendered, "\r\nSet-Cookie")).falsy()
+    expect(strings.contains_str(rendered, "Location: /a  Set-Cookie: x=1    body\r\n")).truthy()
+    named := api.render(api.respond(200, "ok", {"X-A\r\nX-B": "v"}), False)
+    expect(strings.contains_str(named, "\r\nX-B")).falsy()
+}
+
+<test>("a trailing /* route matches everything under its prefix") {
+    app := router()
+    app.get("/files/*", fun(req) { api.text(req.params["*"]) })
+    app.get("/exact", greet)
+    expect(app.dispatch(request("GET", "/files/a/b%20c.txt")).body).eq("a/b c.txt")
+    expect(app.dispatch(request("GET", "/files/")).body).eq("")
+    expect(app.dispatch(request("GET", "/other")).status).eq(404)
+    expect(app.dispatch(request("GET", "/exact")).body).eq("hi")
+}
+
+<test>("Content-Length must be plain digits") {
+    expect(api.content_length({"content-length": "12"}).value).eq(12)
+    expect(is_error(api.content_length({"content-length": "1e3"}))).truthy()
+    expect(is_error(api.content_length({"content-length": "+5"}))).truthy()
+    expect(is_error(api.content_length({"content-length": "-1"}))).truthy()
+    expect(api.content_length({}).value).eq(0)
 }
 
 <test>("static_dir serves under the root and refuses everything outside it") {

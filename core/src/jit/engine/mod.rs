@@ -47,7 +47,9 @@ pub(crate) use counters::{HelperCounter, JitCounters};
 use counters::{counter_offsets, emit_counter_bump};
 use defs::{
     Entry, obj_closure_module_globals_offset, vm_jit_frame_view_len_offset,
-    vm_jit_frame_view_ptr_offset, vm_stack_view_len_offset, vm_stack_view_ptr_offset,
+    vm_jit_frame_view_ptr_offset, vm_limits_armed_offset, vm_loop_countdown_offset,
+    vm_stack_view_len_offset,
+    vm_stack_view_ptr_offset,
 };
 pub(crate) use defs::{EntryKind, InvokeOutcome, SpecializedEntryKind};
 use helpers::{HelperIds, HelperRefs, declare_helper_refs, declare_helpers, register_helpers};
@@ -104,11 +106,13 @@ pub(super) struct JitInner {
     /// read from emitted IR). `SetGlobal`/`DefineGlobal` bump only the
     /// written name's cell, so unrelated ICs stay hot.
     global_version_cells: HashMap<String, Box<u64>>,
+    /// Address of the VM's armed byte, or 0 to load it through the VM.
+    limits_armed: usize,
 }
 
 
 impl JitInner {
-    pub fn new() -> Self {
+    pub fn new(limits_armed: usize) -> Self {
         use cranelift_codegen::settings::Configurable;
         let mut flag_builder = settings::builder();
         // opt_level=speed: matches or beats `none` on every loop bench; other 0.131 knobs regressed.
@@ -140,6 +144,7 @@ impl JitInner {
         };
 
         Self {
+            limits_armed,
             module,
             ctx: Context::new(),
             fbc: FunctionBuilderContext::new(),
@@ -175,6 +180,22 @@ impl JitInner {
     pub(crate) fn bump_global_version(&mut self, name: &str) {
         if let Some(cell) = self.global_version_cells.get_mut(name) {
             **cell = cell.wrapping_add(1);
+        }
+    }
+
+    /// Make every method IC miss once. Only the identity the emitted guards
+    /// compare is cleared: the keepers stay until the miss path refills the
+    /// entry, so a method still running from a stale entry stays alive.
+    pub(crate) fn invalidate_method_caches(&mut self) {
+        for m in &mut self.method_caches {
+            m.struct_def_raw = std::ptr::null();
+            m.inline_kind = MethodInlineKind::None;
+        }
+        for f in &mut self.field_caches {
+            if matches!(f.kind, FieldCacheKind::DefMethod) {
+                f.struct_def_raw = std::ptr::null();
+                f.kind = FieldCacheKind::Invalid;
+            }
         }
     }
 
@@ -381,6 +402,13 @@ impl JitInner {
     }
 
     fn compile_function(&mut self, func: &Rc<Function>) -> Result<CompiledEntries, ()> {
+        let limits_armed = self.limits_armed;
+        // The inline call paths only check `STACK_GUARD_MARGIN`, so a function
+        // that can push more runs interpreted, where `call_closure` checks its
+        // full reserve.
+        if func.chunk.stack_bound() > crate::vm::STACK_GUARD_MARGIN {
+            return Err(());
+        }
         let chunk = &func.chunk;
         let code = &chunk.code;
 
@@ -691,6 +719,18 @@ impl JitInner {
                         }
                     }
                     EntryKind::Generic => {
+                        if func.params.iter().any(|p| p.type_ann.is_some()) {
+                            let guarded = emit_param_type_guard(
+                                &mut builder,
+                                exit_block,
+                                &refs,
+                                vm_val,
+                                slot_offset_val,
+                                &func.params,
+                            );
+                            effective_entry_block = guarded;
+                            blocks.insert(0, guarded);
+                        }
                         if !prologue_slots.is_empty() {
                             use cranelift_codegen::ir::MemFlagsData;
                             let flags = MemFlagsData::trusted();
@@ -816,6 +856,7 @@ impl JitInner {
                             | OpCode::NotEqual
                             | OpCode::Call
                             | OpCode::TypeWrap
+                            | OpCode::RangeLimit
                     );
                     if !handles_own_flush && !virt_stack.is_empty() {
                         virt_stack.flush_to_memory(&mut builder, vm_val);
@@ -831,6 +872,10 @@ impl JitInner {
 
                                     if let Some(slot) = init_slot {
                                         // Materialize the backing slot so stack shape stays valid, then def_var.
+                                        // Values still staged below it must land first, or it takes their slot.
+                                        if !virt_stack.is_empty() {
+                                            virt_stack.flush_to_memory(&mut builder, vm_val);
+                                        }
                                         emit_inline_push_integer(&mut builder, vm_val, v);
                                         if let Some(&var) = int_locals.get(&slot) {
                                             builder.def_var(var, v);
@@ -845,6 +890,9 @@ impl JitInner {
                                     let v = builder.ins().iconst(types::I64, bits);
                                     if init_slot.is_some() {
                                         // Must materialize so the scaled-arith peephole sees the slot in memory.
+                                        if !virt_stack.is_empty() {
+                                            virt_stack.flush_to_memory(&mut builder, vm_val);
+                                        }
                                         emit_inline_push_float(&mut builder, vm_val, v);
                                     } else {
                                         virt_stack.push_float_ssa(v);
@@ -879,7 +927,14 @@ impl JitInner {
                                 // Virtual no-op — no mem op, no expr_stack change.
                             } else if let Some(slot) = slot_types.scope_pop_for(ip) {
                                 live_int_slots.remove(&slot);
-                                emit_inline_pop_tag_gated(&mut builder, &refs, vm_val);
+                                // A local whose initializer stayed staged (`v := a * b` over
+                                // registers) was never written to memory: its value is the
+                                // virtual top, and a memory pop would drop the slot below it.
+                                if virt_stack.is_empty() {
+                                    emit_inline_pop_tag_gated(&mut builder, &refs, vm_val);
+                                } else {
+                                    virt_stack.pop();
+                                }
                             } else if !virt_stack.is_empty() {
                                 // No memory op: the virt slot was never materialised.
                                 virt_stack.pop();
@@ -946,6 +1001,71 @@ impl JitInner {
                             emit_early_exit_on_err(&mut builder, exit_block, status);
                             ip += 3;
                         }
+                        OpCode::RangeLimit => {
+                            let idx = read_u16(code, ip + 1);
+                            let step = match chunk.constants.get(idx as usize) {
+                                Some(crate::vm::value::Value::Integer(step)) if *step != 0 => *step,
+                                _ => return Err(()),
+                            };
+                            // The limit is the loop's own local; keep it in a register when slot_types allows.
+                            let init_var = slot_types
+                                .local_init_result_ip
+                                .get(&ip)
+                                .and_then(|slot| int_locals.get(slot).map(|&var| (*slot, var)));
+                            if virt_stack.top_n_are_int_ssa(2) {
+                                // Both bounds are ints: `end - step`, saturated, in registers.
+                                let end = virt_stack.pop_int_ssa().unwrap();
+                                let _start = virt_stack.pop_int_ssa().unwrap();
+                                use cranelift_codegen::ir::condcodes::IntCC;
+                                let step_val = builder.ins().iconst(types::I64, step);
+                                let diff = builder.ins().isub(end, step_val);
+                                // `end - step` leaves i64 exactly when end is past this edge.
+                                let (cc, edge, sat) = if step > 0 {
+                                    (IntCC::SignedLessThan, i64::MIN + step, i64::MIN)
+                                } else {
+                                    (IntCC::SignedGreaterThan, i64::MAX + step, i64::MAX)
+                                };
+                                let edge_val = builder.ins().iconst(types::I64, edge);
+                                let overflows = builder.ins().icmp(cc, end, edge_val);
+                                let sat_val = builder.ins().iconst(types::I64, sat);
+                                let limit = builder.ins().select(overflows, sat_val, diff);
+                                if let Some((slot, var)) = init_var {
+                                    // Materialize the backing slot (values staged below land first), then def_var.
+                                    if !virt_stack.is_empty() {
+                                        virt_stack.flush_to_memory(&mut builder, vm_val);
+                                    }
+                                    emit_inline_push_integer(&mut builder, vm_val, limit);
+                                    builder.def_var(var, limit);
+                                    live_int_slots.insert(slot);
+                                } else {
+                                    virt_stack.push_int_ssa(limit);
+                                }
+                            } else {
+                                // The helper checks the bounds' types and can raise, so stamp the line first.
+                                maybe_emit_current_line(
+                                    &mut builder,
+                                    own_frame_ptr,
+                                    line,
+                                    col,
+                                    &mut last_emitted_loc,
+                                );
+                                if !virt_stack.is_empty() {
+                                    virt_stack.flush_to_memory(&mut builder, vm_val);
+                                }
+                                let idx_val = builder.ins().iconst(types::I32, idx as i64);
+                                let call =
+                                    builder.ins().call(refs.range_limit, &[vm_val, idx_val]);
+                                let status = builder.inst_results(call)[0];
+                                emit_early_exit_on_err(&mut builder, exit_block, status);
+                                // On success the helper left an Integer on top: harvest it into the register.
+                                if let Some((slot, var)) = init_var {
+                                    let limit = emit_load_stack_top_integer_payload(&mut builder, vm_val);
+                                    builder.def_var(var, limit);
+                                    live_int_slots.insert(slot);
+                                }
+                            }
+                            ip += 3;
+                        }
                         OpCode::GetLocal => {
                             // Disabled inside loops: Cranelift hoists the field load across iterations and loses the accumulation.
                             let sf_in_loop =
@@ -954,7 +1074,14 @@ impl JitInner {
                                 None
                             } else {
                                 match_struct_field_add_update(code, chunk, ip, &blocks)
-                            } {
+                            }
+                            .filter(|m| match m.shape {
+                                // The helper reads the addend from its stack slot, stale for a register-held local.
+                                StructFieldAddShape::Local { rhs_slot } => {
+                                    !int_locals.contains_key(&rhs_slot)
+                                }
+                                StructFieldAddShape::Const { .. } => true,
+                            }) {
                                 if !virt_stack.is_empty() {
                                     virt_stack.flush_to_memory(&mut builder, vm_val);
                                 }
@@ -971,6 +1098,8 @@ impl JitInner {
                                     m.field_idx,
                                     cache_ptr,
                                     m.shape,
+                                    own_frame_ptr,
+                                    chunk_loc(chunk, ip + 6),
                                 );
                                 ip += m.len;
                             } else if let Some(m) =
@@ -1008,6 +1137,7 @@ impl JitInner {
                                 if !virt_stack.is_empty() {
                                     virt_stack.flush_to_memory(&mut builder, vm_val);
                                 }
+                                let arith_ip = ip + 6;
                                 emit_inline_local_scaled_arith_update(
                                     &mut builder,
                                     exit_block,
@@ -1016,9 +1146,14 @@ impl JitInner {
                                     slot_offset_val,
                                     m.dst_slot,
                                     m.rhs_slot,
-                                    1,
+                                    None,
                                     m.op,
                                     m.pop_after,
+                                    PeepholeLocs {
+                                        frame_ptr: own_frame_ptr,
+                                        mul: (0, 0),
+                                        arith: chunk_loc(chunk, arith_ip),
+                                    },
                                 );
                                 ip += m.len;
                             } else if let Some(m) = match_local_scaled_arith_update(
@@ -1039,9 +1174,14 @@ impl JitInner {
                                     slot_offset_val,
                                     m.dst_slot,
                                     m.rhs_slot,
-                                    m.constant,
+                                    Some(m.constant),
                                     m.op,
                                     m.pop_after,
+                                    PeepholeLocs {
+                                        frame_ptr: own_frame_ptr,
+                                        mul: chunk_loc(chunk, ip + 9),
+                                        arith: chunk_loc(chunk, ip + 10),
+                                    },
                                 );
                                 ip += m.len;
                             } else if let Some(m) =
@@ -1061,6 +1201,11 @@ impl JitInner {
                                     m.constant,
                                     m.op,
                                     m.pop_after,
+                                    PeepholeLocs {
+                                        frame_ptr: own_frame_ptr,
+                                        mul: (0, 0),
+                                        arith: chunk_loc(chunk, ip + 6),
+                                    },
                                 );
                                 ip += m.len;
                             } else {
@@ -1630,6 +1775,7 @@ impl JitInner {
                             let target_ip = (ip + 3) - off;
                             let target = blocks[&target_ip];
                             virt_stack.flush_to_memory(&mut builder, vm_val);
+                            emit_loop_poll(&mut builder, exit_block, &refs, vm_val, limits_armed);
                             builder.ins().jump(target, &[]);
                             terminated = true;
                             ip += 3;
@@ -1851,7 +1997,13 @@ impl JitInner {
                                     .load(ptr_ty, flags, closure_ptr, kinds_box_off);
                             let kind_byte =
                                 builder.ins().load(types::I8, flags, kinds_data, idx as i32);
-                            let is_int = builder.ins().icmp_imm_s(IntCC::Equal, kind_byte, 1);
+                            let kind_is_int = builder.ins().icmp_imm_s(IntCC::Equal, kind_byte, 1);
+                            let values_data =
+                                builder
+                                    .ins()
+                                    .load(ptr_ty, flags, closure_ptr, values_box_off);
+                            let fresh = emit_upvalue_cache_is_fresh(&mut builder, values_data);
+                            let is_int = builder.ins().band(kind_is_int, fresh);
 
                             let fast_block = builder.create_block();
                             let fallback_block = builder.create_block();
@@ -1862,15 +2014,12 @@ impl JitInner {
 
                             // ── Fast block: cache hit ──
                             builder.switch_to_block(fast_block);
-                            let values_data =
-                                builder
-                                    .ins()
-                                    .load(ptr_ty, flags, closure_ptr, values_box_off);
+                            // values[0] is the fill epoch, so upvalue idx is at idx + 1.
                             let int_val = builder.ins().load(
                                 types::I64,
                                 flags,
                                 values_data,
-                                (idx as i32) * 8,
+                                (idx as i32 + 1) * 8,
                             );
                             emit_inline_push_integer(&mut builder, vm_val, int_val);
                             if let Some(cp) = counters_ptr_opt {
@@ -2419,10 +2568,26 @@ impl JitInner {
                                     builder.ins().icmp_imm_s(IntCC::Equal, upv_kind, 1);
 
                                 let both_ok = builder.ins().band(arg_is_int, upv_is_int);
+                                let fresh_check_block = builder.create_block();
                                 let do_inline_block = builder.create_block();
                                 let guard_miss_block = builder.create_block();
                                 builder.ins().brif(
                                     both_ok,
+                                    fresh_check_block,
+                                    &[],
+                                    guard_miss_block,
+                                    &[],
+                                );
+
+                                // The cache epoch is checked in its own block so its loads stay
+                                // off the call path when the site never inlines.
+                                builder.switch_to_block(fresh_check_block);
+                                let vals_data =
+                                    builder.ins().load(ptr_ty, f, inline_obj_ptr, vals_off);
+                                let upv_fresh =
+                                    emit_upvalue_cache_is_fresh(&mut builder, vals_data);
+                                builder.ins().brif(
+                                    upv_fresh,
                                     do_inline_block,
                                     &[],
                                     guard_miss_block,
@@ -2441,12 +2606,11 @@ impl JitInner {
 
                                 // ── The body: one wrapping add ──
                                 builder.switch_to_block(do_inline_block);
-                                let vals_data =
-                                    builder.ins().load(ptr_ty, f, inline_obj_ptr, vals_off);
                                 let eight_i = builder.ins().iconst(types::I64, 8);
                                 let val_off = builder.ins().imul(upv_idx64, eight_i);
                                 let val_addr = builder.ins().iadd(vals_data, val_off);
-                                let upv_val = builder.ins().load(types::I64, f, val_addr, 0);
+                                // values[0] is the fill epoch, so upvalue idx is at idx + 1.
+                                let upv_val = builder.ins().load(types::I64, f, val_addr, 8);
                                 let arg_val = builder.ins().load(
                                     types::I64,
                                     f,
@@ -2529,6 +2693,7 @@ impl JitInner {
 
                                 builder.switch_to_block(inline_after_block);
                                 builder.seal_block(try_inline_block);
+                                builder.seal_block(fresh_check_block);
                                 builder.seal_block(do_inline_block);
                                 builder.seal_block(guard_miss_block);
                                 builder.seal_block(commit_block);
@@ -3401,12 +3566,24 @@ impl JitInner {
                                     .iconst(types::I64, std::mem::size_of::<JitFrame>() as i64);
                                 let frame_off = builder.ins().imul(jit_frames_len, frame_size);
                                 let new_frame_ptr = builder.ins().iadd(jit_frames_ptr, frame_off);
-                                let module_globals = builder.ins().load(
+                                // A method resolves free names in the module that defined its
+                                // struct (the interpreter passes the def's globals), falling back
+                                // to the closure's own only when the def has none.
+                                let closure_mg = builder.ins().load(
                                     ptr_ty,
                                     flags,
                                     closure_raw_t,
                                     obj_closure_module_globals_offset(),
                                 );
+                                let def_t = builder.ins().iadd_imm_s(inst_def_raw, RC_VALUE_OFFSET as i64);
+                                let def_mg = builder.ins().load(
+                                    ptr_ty,
+                                    flags,
+                                    def_t,
+                                    std::mem::offset_of!(crate::vm::value::ObjStructDef, module_globals)
+                                        as i32,
+                                );
+                                let module_globals = builder.ins().select(def_mg, def_mg, closure_mg);
                                 // JitFrame stores the T pointer, not the RcBox pointer.
                                 builder.ins().store(
                                     flags,
@@ -3860,6 +4037,92 @@ fn emit_fallible(
     emit_early_exit_on_err(builder, exit_block, status);
 }
 
+/// True (as an `i8` flag) when a closure's upvalue int cache was filled at the
+/// current `UPVALUE_WRITE_EPOCH`, i.e. no closed upvalue cell has been written
+/// since. `values_data` is the data pointer of `upvalue_int_values`, whose
+/// first element is the fill epoch.
+fn emit_upvalue_cache_is_fresh(
+    builder: &mut FunctionBuilder<'_>,
+    values_data: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::MemFlagsData;
+    use cranelift_codegen::ir::condcodes::IntCC;
+    let flags = MemFlagsData::trusted();
+    let epoch_addr = builder.ins().iconst(
+        types::I64,
+        &crate::jit::UPVALUE_WRITE_EPOCH as *const std::sync::atomic::AtomicI64 as i64,
+    );
+    let current = builder.ins().load(types::I64, flags, epoch_addr, 0);
+    let filled_at = builder.ins().load(types::I64, flags, values_data, 0);
+    builder.ins().icmp(IntCC::Equal, current, filled_at)
+}
+
+/// Typed-parameter check at a compiled function's generic entry, returning the
+/// block the body starts in.
+///
+/// Compiled call sites enter here without the interpreter's `call_closure`
+/// check, and the body is compiled trusting the annotations: an `<int>`
+/// parameter is read as a raw i64. An Integer tag in an `<int>` parameter is
+/// accepted inline; anything else asks `jit_check_param_types`, which raises
+/// the interpreter's error. A value it accepts that is not an Integer (an
+/// optional parameter's None, a struct named INTEGER) bails out to the
+/// interpreter, since the body would misread it. Other annotations always go
+/// through the helper.
+fn emit_param_type_guard(
+    builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
+    refs: &HelperRefs,
+    vm_val: cranelift_codegen::ir::Value,
+    slot_offset_val: cranelift_codegen::ir::Value,
+    params: &[crate::vm::value::ParamInfo],
+) -> Block {
+    use cranelift_codegen::ir::MemFlagsData;
+    use cranelift_codegen::ir::condcodes::IntCC;
+    let flags = MemFlagsData::trusted();
+    let is_int_ann = |t: &str| matches!(t, "int" | "INTEGER");
+
+    let done_block = builder.create_block();
+    let all_int = params
+        .iter()
+        .all(|p| p.type_ann.as_deref().is_none_or(is_int_ann));
+    if !all_int {
+        let call = builder.ins().call(refs.check_param_types, &[vm_val]);
+        let status = builder.inst_results(call)[0];
+        emit_early_exit_on_err(builder, exit_block, status);
+    }
+
+    let slow_block = builder.create_block();
+    let stack_ptr = emit_load_stack_ptr(builder, vm_val);
+    let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
+    for (i, param) in params.iter().enumerate() {
+        if !param.type_ann.as_deref().is_some_and(is_int_ann) {
+            continue;
+        }
+        let slot = builder.ins().iconst(types::I64, i as i64 + 1);
+        let abs_slot = builder.ins().iadd(slot_offset_val, slot);
+        let byte_off = builder.ins().imul(abs_slot, value_size);
+        let slot_ptr = builder.ins().iadd(stack_ptr, byte_off);
+        let tag = builder.ins().load(types::I8, flags, slot_ptr, 0);
+        let is_int = builder.ins().icmp_imm_s(IntCC::Equal, tag, VALUE_TAG_INTEGER as i64);
+        let next = builder.create_block();
+        builder.ins().brif(is_int, next, &[], slow_block, &[]);
+        builder.switch_to_block(next);
+    }
+    builder.ins().jump(done_block, &[]);
+
+    builder.switch_to_block(slow_block);
+    let call = builder.ins().call(refs.check_param_types, &[vm_val]);
+    let status = builder.inst_results(call)[0];
+    emit_early_exit_on_err(builder, exit_block, status);
+    // Accepted, but not an Integer: the body cannot run on it.
+    let two = builder.ins().iconst(types::I32, 2);
+    let zero64 = builder.ins().iconst(types::I64, 0);
+    builder.ins().jump(exit_block, &[two.into(), zero64.into()]);
+
+    builder.switch_to_block(done_block);
+    done_block
+}
+
 /// Given a u32 status produced by a helper call, branch on status != 0:
 /// non-zero returns the status from the thunk; zero continues in a fresh
 /// "ok" block.
@@ -3912,7 +4175,7 @@ fn emit_inline_recursion_guard(
         .iconst(types::I64, crate::vm::FRAMES_MAX as i64);
     let stack_lim = builder
         .ins()
-        .iconst(types::I64, (crate::vm::STACK_MAX - 8192) as i64);
+        .iconst(types::I64, (crate::vm::STACK_MAX - crate::vm::STACK_GUARD_MARGIN) as i64);
     let frame_of = builder
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, jfl, frame_max);
@@ -3932,6 +4195,69 @@ fn emit_inline_recursion_guard(
         .ins()
         .jump(exit_block, &[status.into(), zero64.into()]);
     builder.switch_to_block(ok_block);
+}
+
+/// A loop back-edge's share of the host's limits (`vm::limits`). The common
+/// path loads the armed byte and branches past. While armed it counts the
+/// iteration against `loop_countdown` inline, and only on the way to
+/// stopping (an interrupt, or the budget spent) calls `loop_stop`, then
+/// leaves the function. No path from a call comes back into the loop, so the
+/// loop's values stay in registers instead of being saved around the call.
+fn emit_loop_poll(
+    builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
+    refs: &HelperRefs,
+    vm_val: cranelift_codegen::ir::Value,
+    limits_armed: usize,
+) {
+    use cranelift_codegen::ir::MemFlagsData;
+    let flags = MemFlagsData::trusted();
+    // The byte's address is fixed for the VM's life, and this code only runs
+    // for that VM, so it is a constant.
+    let armed_ptr = if limits_armed != 0 {
+        builder.ins().iconst(types::I64, limits_armed as i64)
+    } else {
+        builder
+            .ins()
+            .load(types::I64, flags, vm_val, vm_limits_armed_offset())
+    };
+    let armed = builder.ins().load(types::I8, flags, armed_ptr, 0);
+    let armed_block = builder.create_block();
+    let budget_block = builder.create_block();
+    let count_block = builder.create_block();
+    let stop_block = builder.create_block();
+    let done_block = builder.create_block();
+    for cold in [armed_block, budget_block, count_block, stop_block] {
+        builder.set_cold_block(cold);
+    }
+    builder.ins().brif(armed, armed_block, &[], done_block, &[]);
+
+    // An interrupt stops the loop; otherwise only the budget armed it.
+    builder.switch_to_block(armed_block);
+    let interrupt = builder
+        .ins()
+        .band_imm_s(armed, i64::from(crate::vm::limits::INTERRUPT));
+    builder.ins().brif(interrupt, stop_block, &[], budget_block, &[]);
+
+    builder.switch_to_block(budget_block);
+    let offset = vm_loop_countdown_offset();
+    let left = builder.ins().load(types::I64, flags, vm_val, offset);
+    builder.ins().brif(left, count_block, &[], stop_block, &[]);
+
+    builder.switch_to_block(count_block);
+    let left = builder.ins().iadd_imm_s(left, -1);
+    builder.ins().store(flags, left, vm_val, offset);
+    builder.ins().jump(done_block, &[]);
+
+    builder.switch_to_block(stop_block);
+    let call = builder.ins().call(refs.loop_stop, &[vm_val]);
+    let status = builder.inst_results(call)[0];
+    let zero64 = builder.ins().iconst(types::I64, 0);
+    builder
+        .ins()
+        .jump(exit_block, &[status.into(), zero64.into()]);
+
+    builder.switch_to_block(done_block);
 }
 
 // ── Bytecode helpers ───────────────────────────────────────────────────
@@ -3997,6 +4323,16 @@ enum StructFieldAddShape {
     Local { rhs_slot: u16 },
 }
 
+/// Whether every parameter accepts any Integer. An inlined body skips the
+/// callee's entry, and with it the typed-parameter check, so only callees whose
+/// parameters are untyped or `<int>` (which the inline guards' Integer tag
+/// checks already enforce) can be inlined.
+fn params_admit_any_int(func: &Function) -> bool {
+    func.params
+        .iter()
+        .all(|p| p.type_ann.as_deref().is_none_or(|t| matches!(t, "int" | "INTEGER")))
+}
+
 /// Detects whether `func` is exactly `fun(y) { x + y }` over one immutable
 /// captured integer, returning the upvalue slot it reads.
 ///
@@ -4020,7 +4356,7 @@ enum StructFieldAddShape {
 /// Whether the upvalue actually *holds* an integer is a runtime property, so it
 /// stays a guard at the call site rather than a condition here.
 pub(crate) fn detect_inline_closure_upvalue_add(func: &Function) -> Option<u16> {
-    if func.arity != 1 {
+    if func.arity != 1 || !params_admit_any_int(func) {
         return None;
     }
     let code = &func.chunk.code;
@@ -4056,6 +4392,9 @@ pub(crate) struct DetectedInlineMethod {
 /// plus the field name and addend so the caller can stamp it into the
 /// MethodCacheEntry for inline expansion at the call site.
 pub(crate) fn detect_inline_method_info(func: &Function) -> Option<DetectedInlineMethod> {
+    if !params_admit_any_int(func) {
+        return None;
+    }
     let code = &func.chunk.code;
     // Accept either shape: the compiler emits an implicit None/Return tail when the body has no return value.
     if code.len() < 17 {
@@ -4932,6 +5271,8 @@ fn emit_inline_struct_field_add(
     field_idx: u16,
     cache_ptr: *mut FieldCacheEntry,
     shape: StructFieldAddShape,
+    frame_ptr: cranelift_codegen::ir::Value,
+    get_field_loc: (u32, u32),
 ) {
     use cranelift_codegen::ir::MemFlagsData;
     use cranelift_codegen::ir::condcodes::IntCC;
@@ -5058,6 +5399,8 @@ fn emit_inline_struct_field_add(
 
     // Miss: the helper falls back to handle_get_field/handle_set_field and repopulates the IC.
     builder.switch_to_block(miss_block);
+    // The helper can fault (a hidden field, a non-int field); the field read is where the interpreter would.
+    emit_store_current_loc(builder, frame_ptr, get_field_loc.0, get_field_loc.1);
     let self_slot_v = builder.ins().iconst(types::I32, self_slot as i64);
     let field_idx_v = builder.ins().iconst(types::I32, field_idx as i64);
     let status = match shape {
@@ -5836,6 +6179,38 @@ fn emit_int_virt_divmod(
     builder.block_params(cont_block)[0]
 }
 
+/// Source locations a local-update peephole stamps before each helper call
+/// that can fault, so an error points at the operator that failed.
+#[derive(Clone, Copy)]
+struct PeepholeLocs {
+    frame_ptr: cranelift_codegen::ir::Value,
+    /// The `Multiply` of a scaled update; unused otherwise.
+    mul: (u32, u32),
+    /// The `Add`/`Subtract`/`Multiply` that writes the local.
+    arith: (u32, u32),
+}
+
+fn chunk_loc(chunk: &Chunk, ip: usize) -> (u32, u32) {
+    (
+        chunk.lines.get(ip).copied().unwrap_or(0),
+        chunk.columns.get(ip).copied().unwrap_or(0),
+    )
+}
+
+/// Slow-path store of the stack top into a local, through the checked helper
+/// so a type-locked local rejects a non-matching result like `SetLocal` does.
+fn emit_slow_set_local_checked(
+    builder: &mut FunctionBuilder<'_>,
+    exit_block: Block,
+    refs: &HelperRefs,
+    vm_val: cranelift_codegen::ir::Value,
+    slot_val: cranelift_codegen::ir::Value,
+) {
+    let call = builder.ins().call(refs.set_local_checked, &[vm_val, slot_val]);
+    let status = builder.inst_results(call)[0];
+    emit_early_exit_on_err(builder, exit_block, status);
+}
+
 /// Peephole fast path for `GetLocal(slot); Constant(int); Arith;
 /// SetLocal(slot); [Pop]`. On integer locals this updates the local
 /// payload in place and skips the temporary stack traffic. Non-integer
@@ -5852,6 +6227,7 @@ fn emit_inline_local_const_arith_update(
     constant: i64,
     op: IntArithOp,
     pop_after: bool,
+    locs: PeepholeLocs,
 ) {
     use cranelift_codegen::ir::MemFlagsData;
     use cranelift_codegen::ir::condcodes::IntCC;
@@ -5916,6 +6292,8 @@ fn emit_inline_local_const_arith_update(
         | IntArithOp::Shl
         | IntArithOp::Shr => unreachable!("local-const peephole only emitted for Add/Sub/Mul"),
     };
+    // Only this slow path can fault, so it stamps its own line; the fast path stays store-free.
+    emit_store_current_loc(builder, locs.frame_ptr, locs.arith.0, locs.arith.1);
     let call = builder.ins().call(slow_helper, &[vm_val]);
     let status = builder.inst_results(call)[0];
     let err_block = builder.create_block();
@@ -5928,7 +6306,8 @@ fn emit_inline_local_const_arith_update(
         .jump(exit_block, &[status.into(), zero64.into()]);
 
     builder.switch_to_block(set_block);
-    builder.ins().call(refs.set_local, &[vm_val, slot_val]);
+    // The result may no longer be an int, so a typed local's lock must be checked.
+    emit_slow_set_local_checked(builder, exit_block, refs, vm_val, slot_val);
     if pop_after {
         builder.ins().call(refs.pop, &[vm_val]);
     }
@@ -5941,6 +6320,10 @@ fn emit_inline_local_const_arith_update(
 /// Multiply; Add/Subtract; SetLocal(dst); [Pop]`. This covers tight-loop
 /// updates like `total := total + i * 2` without building the temporary
 /// stack values on the integer path.
+///
+/// `constant` is `None` for the unscaled `GetLocal(dst); GetLocal(rhs);
+/// Add/Subtract; SetLocal(dst)` shape. Its slow path must not multiply:
+/// `rhs * 1` is a type error for strings and turns a UINT into an INTEGER.
 #[allow(clippy::too_many_arguments)]
 fn emit_inline_local_scaled_arith_update(
     builder: &mut FunctionBuilder<'_>,
@@ -5950,9 +6333,10 @@ fn emit_inline_local_scaled_arith_update(
     slot_offset_val: cranelift_codegen::ir::Value,
     dst_slot: u16,
     rhs_slot: u16,
-    constant: i64,
+    constant: Option<i64>,
     op: IntArithOp,
     pop_after: bool,
+    locs: PeepholeLocs,
 ) {
     use cranelift_codegen::ir::MemFlagsData;
     use cranelift_codegen::ir::condcodes::IntCC;
@@ -5996,8 +6380,13 @@ fn emit_inline_local_scaled_arith_update(
         builder
             .ins()
             .load(types::I64, flags, addr_rhs, VALUE_INT_PAYLOAD_OFFSET as i32);
-    let scale = builder.ins().iconst(types::I64, constant);
-    let scaled_rhs = builder.ins().imul(rhs_payload, scale);
+    let scaled_rhs = match constant {
+        Some(c) => {
+            let scale = builder.ins().iconst(types::I64, c);
+            builder.ins().imul(rhs_payload, scale)
+        }
+        None => rhs_payload,
+    };
     let result = match op {
         IntArithOp::Add => builder.ins().iadd(dst_payload, scaled_rhs),
         IntArithOp::Sub => builder.ins().isub(dst_payload, scaled_rhs),
@@ -6021,23 +6410,26 @@ fn emit_inline_local_scaled_arith_update(
     let rhs_slot_val = builder.ins().iconst(types::I32, rhs_slot as i64);
     builder.ins().call(refs.get_local, &[vm_val, dst_slot_val]);
     builder.ins().call(refs.get_local, &[vm_val, rhs_slot_val]);
-    let scale = builder.ins().iconst(types::I64, constant);
-    emit_inline_push_integer(builder, vm_val, scale);
+    if let Some(c) = constant {
+        let scale = builder.ins().iconst(types::I64, c);
+        emit_inline_push_integer(builder, vm_val, scale);
 
-    let mul_call = builder.ins().call(refs.mul, &[vm_val]);
-    let mul_status = builder.inst_results(mul_call)[0];
-    let mul_err_block = builder.create_block();
-    let arith_block = builder.create_block();
-    builder
-        .ins()
-        .brif(mul_status, mul_err_block, &[], arith_block, &[]);
-    builder.switch_to_block(mul_err_block);
-    let zero64_a = builder.ins().iconst(types::I64, 0);
-    builder
-        .ins()
-        .jump(exit_block, &[mul_status.into(), zero64_a.into()]);
+        emit_store_current_loc(builder, locs.frame_ptr, locs.mul.0, locs.mul.1);
+        let mul_call = builder.ins().call(refs.mul, &[vm_val]);
+        let mul_status = builder.inst_results(mul_call)[0];
+        let mul_err_block = builder.create_block();
+        let arith_block = builder.create_block();
+        builder
+            .ins()
+            .brif(mul_status, mul_err_block, &[], arith_block, &[]);
+        builder.switch_to_block(mul_err_block);
+        let zero64_a = builder.ins().iconst(types::I64, 0);
+        builder
+            .ins()
+            .jump(exit_block, &[mul_status.into(), zero64_a.into()]);
 
-    builder.switch_to_block(arith_block);
+        builder.switch_to_block(arith_block);
+    }
     let slow_helper = match op {
         IntArithOp::Add => refs.add,
         IntArithOp::Sub => refs.sub,
@@ -6048,6 +6440,7 @@ fn emit_inline_local_scaled_arith_update(
         | IntArithOp::Shl
         | IntArithOp::Shr => unreachable!("scaled update only supports Add/Sub"),
     };
+    emit_store_current_loc(builder, locs.frame_ptr, locs.arith.0, locs.arith.1);
     let arith_call = builder.ins().call(slow_helper, &[vm_val]);
     let arith_status = builder.inst_results(arith_call)[0];
     let arith_err_block = builder.create_block();
@@ -6062,7 +6455,7 @@ fn emit_inline_local_scaled_arith_update(
         .jump(exit_block, &[arith_status.into(), zero64_b.into()]);
 
     builder.switch_to_block(set_block);
-    builder.ins().call(refs.set_local, &[vm_val, dst_slot_val]);
+    emit_slow_set_local_checked(builder, exit_block, refs, vm_val, dst_slot_val);
     if pop_after {
         builder.ins().call(refs.pop, &[vm_val]);
     }

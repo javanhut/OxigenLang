@@ -160,7 +160,7 @@ func detectCompletionContext(source string, pos Position, idx *docIndex, stdlibP
 	}
 
 	line := lines[lineIdx]
-	col := min(int(pos.Character), len(line))
+	col := byteOffset(line, pos.Character)
 	textBefore := line[:col]
 	trimmed := strings.TrimSpace(textBefore)
 	trimmedLeft := strings.TrimLeft(textBefore, " \t")
@@ -219,11 +219,9 @@ func detectCompletionContext(source string, pos Position, idx *docIndex, stdlibP
 }
 
 // positionToOffset converts an LSP (line, character) position to a byte offset
-// into source. Columns are treated as byte offsets within the line, matching
-// the rest of this server's simple line/column handling.
+// into source. The character counts UTF-16 code units, as LSP specifies.
 func positionToOffset(source string, pos Position) int {
 	line := int(pos.Line)
-	char := int(pos.Character)
 	n := len(source)
 
 	i := 0
@@ -233,9 +231,11 @@ func positionToOffset(source string, pos Position) int {
 		}
 	}
 	// i now sits at the first byte of the target line (or at EOF).
-	for col := 0; i < n && col < char && source[i] != '\n'; col, i = col+1, i+1 {
+	end := i
+	for end < n && source[end] != '\n' {
+		end++
 	}
-	return i
+	return i + byteOffset(source[i:end], pos.Character)
 }
 
 // inStringLiteralText reports whether pos sits inside the text of a string

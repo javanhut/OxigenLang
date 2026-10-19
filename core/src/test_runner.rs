@@ -74,8 +74,61 @@ fn eval_test_name(name: &Expression, source: &str, file_path: &Option<PathBuf>) 
     }
 }
 
+/// `<test>` blocks that are not at the top level, where the runner never
+/// sees them: inside `main { }` or a function body (`where` names which).
+fn nested_tests<'a>(stmts: &'a [Statement], where_: &str, out: &mut Vec<(&'a Expression, String)>) {
+    for stmt in stmts {
+        match stmt {
+            Statement::Test { name, body, .. } => {
+                out.push((name, where_.to_string()));
+                nested_tests(body, where_, out);
+            }
+            Statement::Main { body, .. } => nested_tests(body, "`main`", out),
+            Statement::Let { name, value: Expression::FunctionLiteral { body, .. } }
+            | Statement::TypedLet { name, value: Expression::FunctionLiteral { body, .. }, .. } => {
+                nested_tests(body, &format!("function `{}`", name.value), out)
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Run `program` (a test, or a test file's top level) on a fresh VM.
+fn run_test_program(program: &Program, source: &str, file_path: &Option<PathBuf>) -> Result<(), String> {
+    let func = Compiler::new().compile(program).map_err(|errs| {
+        errs.first()
+            .map(|e| e.message.clone())
+            .unwrap_or_else(|| "compile error".to_string())
+    })?;
+    // Tasks a test spawns run against this test's program.
+    crate::concurrent::register_program(&func, program, source, file_path.clone(), false);
+    let mut vm = VM::new();
+    vm.set_source(source);
+    // See above: `os.args()` needs `__args` to exist even with no argv.
+    vm.set_script_args(&[]);
+    if let Some(p) = file_path {
+        vm.set_file(p.clone());
+    }
+    // Exiting would end the whole run, reporting success for whatever
+    // failed before; inside a test it is a failure instead.
+    vm.register_native("__exit", |_| {
+        Err("os.exit() called while testing — a test cannot exit the test runner".to_string())
+    });
+    // A panic is a bug in Oxigen, but it fails this test, not the run.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run(func))) {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(e.message),
+        Err(panic) => Err(format!(
+            "internal error (Oxigen panicked): {}",
+            crate::concurrent::panic_message(&panic)
+        )),
+    }
+}
+
 /// Run every `<test>` block in `program` on the VM, returning one outcome per
-/// test (in source order). Files with no `<test>` blocks yield an empty vec.
+/// test (in source order). A file with no top-level `<test>` blocks yields an
+/// empty vec, unless its top level fails, or it has `<test>` blocks where
+/// they can't run.
 pub fn run_vm_tests(
     program: &Program,
     source: &str,
@@ -85,9 +138,6 @@ pub fn run_vm_tests(
         .statements
         .iter()
         .any(|s| matches!(s, Statement::Test { .. }));
-    if !has_tests {
-        return Vec::new();
-    }
 
     // Everything except <test> blocks and main, which is suppressed during `oxigen test`.
     let setup: Vec<Statement> = program
@@ -112,39 +162,42 @@ pub fn run_vm_tests(
         statements.extend(body.iter().cloned());
         let sub = Program { statements, hidden: Vec::new() };
 
-        let outcome = match Compiler::new().compile(&sub) {
-            Ok(func) => {
-                let mut vm = VM::new();
-                vm.set_source(source);
-                // See above: `os.args()` needs `__args` to exist even with no argv.
-                vm.set_script_args(&[]);
-                if let Some(ref p) = file_path {
-                    vm.set_file(p.clone());
-                }
-                match vm.run(func) {
-                    Ok(_) => TestOutcome {
-                        name: test_name,
-                        passed: true,
-                        message: None,
-                    },
-                    Err(e) => TestOutcome {
-                        name: test_name,
-                        passed: false,
-                        message: Some(e.message),
-                    },
-                }
-            }
-            Err(errs) => TestOutcome {
-                name: test_name,
+        let result = run_test_program(&sub, source, &file_path);
+        outcomes.push(TestOutcome {
+            name: test_name,
+            passed: result.is_ok(),
+            message: result.err(),
+        });
+    }
+
+    // A `<test>` the runner can't reach would otherwise vanish from the
+    // count: "ok. 0 passed" for a file whose tests never ran.
+    let mut nested = Vec::new();
+    for stmt in &program.statements {
+        if !matches!(stmt, Statement::Test { .. }) {
+            nested_tests(std::slice::from_ref(stmt), "", &mut nested);
+        }
+    }
+    for (name, where_) in nested {
+        outcomes.push(TestOutcome {
+            name: eval_test_name(name, source, &file_path),
+            passed: false,
+            message: Some(format!(
+                "this `<test>` is inside {where_}, so it never runs — move it to the file's top level"
+            )),
+        });
+    }
+
+    // With no tests to run it, a failing top level would go unnoticed.
+    if !has_tests && outcomes.is_empty() {
+        let top = Program { statements: prelude, hidden: program.hidden.clone() };
+        if let Err(message) = run_test_program(&top, source, &file_path) {
+            outcomes.push(TestOutcome {
+                name: "<top level>".to_string(),
                 passed: false,
-                message: Some(
-                    errs.first()
-                        .map(|e| e.message.clone())
-                        .unwrap_or_else(|| "compile error".to_string()),
-                ),
-            },
-        };
-        outcomes.push(outcome);
+                message: Some(message),
+            });
+        }
     }
 
     outcomes

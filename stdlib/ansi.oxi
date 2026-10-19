@@ -1,30 +1,30 @@
 enum ForeGroundColors {
-    Red: "[31m"
-    Green: "[32m"
-    Yellow: "[33m"
-    Blue: "[34m"
-    Magenta: "[35m"
-    Cyan: "[36m"
-    White: "[37m"
-    Gray: "[90m"
+    Red: "\e[31m"
+    Green: "\e[32m"
+    Yellow: "\e[33m"
+    Blue: "\e[34m"
+    Magenta: "\e[35m"
+    Cyan: "\e[36m"
+    White: "\e[37m"
+    Gray: "\e[90m"
 }
 
 enum BackGroundColors {
-    Black: "[40m"
-    Red: "[41m"
-    Green: "[42m"
-    Yellow: "[43m"
-    Blue: "[44m"
-    Magenta: "[45m"
-    Cyan: "[46m"
-    White: "[47m"
+    Black: "\e[40m"
+    Red: "\e[41m"
+    Green: "\e[42m"
+    Yellow: "\e[43m"
+    Blue: "\e[44m"
+    Magenta: "\e[45m"
+    Cyan: "\e[46m"
+    White: "\e[47m"
 }
 
 enum ModCodes {
-    Reset: "[0m"
-    Bold: "[1m"
-    Dim: "[2m"
-    Underline: "[4m"
+    Reset: "\e[0m"
+    Bold: "\e[1m"
+    Dim: "\e[2m"
+    Underline: "\e[4m"
 }
 
 fun add_color(string <str>, color <Enum>) {
@@ -41,13 +41,13 @@ fun add_modifier(string <str>, modifer <ModCodes>) {
 // These return escape strings to `print(...)`. Use clear_line to overwrite an
 // in-place status line (a spinner, a progress bar) on each redraw.
 // Move to column 0 and erase the line.
-fun clear_line() { "\r[K" }
+fun clear_line() { "\r\e[K" }
 
 // Move the cursor to the start of the current line (without erasing).
 fun line_start() { "\r" }
 
 // Hide / show the terminal cursor — wrap a spinner loop so the caret
 // doesn't flicker, and always restore it when done.
-fun hide_cursor() { "[?25l" }
+fun hide_cursor() { "\e[?25l" }
 
-fun show_cursor() { "[?25h" }
+fun show_cursor() { "\e[?25h" }

@@ -175,3 +175,16 @@ fun fmod(a <int> || <float>, b <int> || <float>) { a - trunc(a / b) * b }
 fun degrees(rad <int> || <float>) { rad * 180.0 / PI }
 
 fun radians(deg <int> || <float>) { deg * PI / 180.0 }
+
+// Vectors (vec2, vec3, vec4)
+fun dot(a, b) { __vec_dot(a, b) }
+
+fun cross(a, b) { __vec_cross(a, b) }
+
+fun length(v) { __vec_length(v) }
+
+fun distance(a, b) { __vec_distance(a, b) }
+
+fun normalize(v) { __vec_normalize(v) }
+
+fun lerp(a, b, t <int> || <float>) { __vec_lerp(a, b, t) }

@@ -337,6 +337,9 @@ impl FunctionSlotTypes {
 struct AbstractState {
     stack: Vec<SlotType>,
     slot_types: Vec<SlotType>,
+    /// Positions holding a declared local that is still in scope: set at its
+    /// declaration point, cleared when a `Pop` removes it. Joined with OR.
+    live_locals: Vec<bool>,
 }
 
 impl AbstractState {
@@ -344,6 +347,7 @@ impl AbstractState {
         AbstractState {
             stack: Vec::new(),
             slot_types: vec![SlotType::Bottom; num_slots],
+            live_locals: vec![false; num_slots],
         }
     }
 
@@ -382,6 +386,17 @@ impl AbstractState {
             }
         }
 
+        if self.live_locals.len() < other.live_locals.len() {
+            self.live_locals.resize(other.live_locals.len(), false);
+            changed = true;
+        }
+        for (mine, theirs) in self.live_locals.iter_mut().zip(&other.live_locals) {
+            if *theirs && !*mine {
+                *mine = true;
+                changed = true;
+            }
+        }
+
         changed
     }
 
@@ -392,6 +407,99 @@ impl AbstractState {
             self.slot_types[idx] = self.slot_types[idx].join(ty);
         }
     }
+}
+
+/// Map each local's initializing `Constant` to its slot, from the compiler's
+/// declaration points rather than from stack shape.
+///
+/// A slot is several locals over a function's life (disjoint scopes reuse it)
+/// and holds expression transients in between, so "a push at this depth" says
+/// nothing about which value is the local. A declaration is a simple init when
+/// the instruction ending at its declaration point is a `Constant` that left
+/// the value exactly at the slot, and no forward jump also arrives there
+/// (`x := c ? y : 1` lays out the `1` last, but `y` reaches the slot too).
+///
+/// The returned `init_sites` holds the params plus every slot whose
+/// declarations are all simple inits. A slot with any other declaration is
+/// left out, so it is never virtualized: the codegen only re-binds a slot's
+/// register at the IPs listed here, and a declaration it did not see would
+/// leave the register holding the previous occupant. So is a slot whose local
+/// was consumed straight from the stack while still in scope (the result of a
+/// block used as an expression), since that read goes to memory.
+fn collect_local_inits(
+    func: &Function,
+    code: &[u8],
+    chunk: &Chunk,
+    states: &HashMap<usize, AbstractState>,
+    forward_targets: &HashSet<usize>,
+    consumed_live: &HashSet<u16>,
+) -> (HashMap<usize, u16>, HashSet<u16>) {
+    // IP at which each instruction ends -> where it starts.
+    let mut start_of_end: HashMap<usize, usize> = HashMap::new();
+    let mut ip = 0;
+    while ip < code.len() {
+        let Ok(len) = chunk.instruction_len(ip) else { break };
+        start_of_end.insert(ip + len, ip);
+        ip += len;
+    }
+
+    let mut local_init_result_ip: HashMap<usize, u16> = HashMap::new();
+    let mut complex_slots: HashSet<u16> = HashSet::new();
+    let mut simple_slots: HashSet<u16> = HashSet::new();
+    for &(decl_ip, slot) in &func.local_decls {
+        if (1..=func.arity as u16).contains(&slot) {
+            continue;
+        }
+        // `n <int> := 0` declares after `Constant 0; TypeWrap INTEGER`, an identity
+        // wrap on an int constant, so the Constant is still what lands in the slot.
+        let last = start_of_end.get(&decl_ip).copied();
+        let producer = match last {
+            Some(p) if OpCode::from_byte(code[p]) == Some(OpCode::TypeWrap) => {
+                let wraps_to_int = chunk
+                    .constants
+                    .get(read_u16(code, p + 1) as usize)
+                    .and_then(|v| v.as_string())
+                    .is_some_and(|t| t.as_str() == "INTEGER");
+                start_of_end.get(&p).copied().filter(|&c| {
+                    wraps_to_int
+                        && !forward_targets.contains(&p)
+                        && OpCode::from_byte(code[c]) == Some(OpCode::Constant)
+                        && matches!(
+                            chunk.constants.get(read_u16(code, c + 1) as usize),
+                            Some(crate::vm::value::Value::Integer(_))
+                        )
+                })
+            }
+            other => other,
+        };
+        // A range loop's limit comes from `RangeLimit`, which yields an Integer or raises.
+        let init_ip = producer.filter(|&p| {
+            matches!(OpCode::from_byte(code[p]), Some(OpCode::Constant | OpCode::RangeLimit))
+                && !forward_targets.contains(&decl_ip)
+                && states
+                    .get(&decl_ip)
+                    .is_some_and(|st| st.stack.len() == slot as usize + 1)
+        });
+        match init_ip {
+            Some(p) => {
+                local_init_result_ip.insert(p, slot);
+                simple_slots.insert(slot);
+            }
+            None => {
+                complex_slots.insert(slot);
+            }
+        }
+    }
+
+    // Params are initialized at entry, not at any bytecode IP.
+    let mut init_sites: HashSet<u16> = (1..=func.arity as u16).collect();
+    init_sites.extend(
+        simple_slots
+            .difference(&complex_slots)
+            .filter(|slot| !consumed_live.contains(slot))
+            .copied(),
+    );
+    (local_init_result_ip, init_sites)
 }
 
 // ── Entry point ───────────────────────────────────────────────────────
@@ -429,8 +537,15 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         entry.write_slot(i + 1, ty);
     }
 
-    // first_init_ip records the FIRST init IP per slot, not later re-writes.
-    let mut first_init_ip: HashMap<u16, usize> = HashMap::new();
+    // Forward-jump targets: a declaration point reached by one also takes a value from another arm.
+    let mut forward_targets: HashSet<usize> = HashSet::new();
+    // Declaration point -> slots declared there.
+    let mut decls_at: HashMap<usize, Vec<u16>> = HashMap::new();
+    for &(ip, slot) in &func.local_decls {
+        decls_at.entry(ip).or_default().push(slot);
+    }
+    // Slots whose in-scope local was consumed as an operand; see `collect_local_inits`.
+    let mut consumed_live: HashSet<u16> = HashSet::new();
     let mut scope_pop_slot_ip: HashMap<usize, u16> = HashMap::new();
 
     // Worklist of IPs whose on-entry state changed and whose post-state needs recomputing.
@@ -451,6 +566,14 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                 Some(o) => o,
                 None => break,
             };
+            // A declaration takes effect before the instruction at its point runs.
+            if let Some(slots) = decls_at.get(&cursor) {
+                for &slot in slots {
+                    if let Some(live) = state.live_locals.get_mut(slot as usize) {
+                        *live = true;
+                    }
+                }
+            }
             let depth_before = state.stack.len();
             let (mut next_state, terminates, targets) = transfer(op, cursor, code, chunk, &state);
             let fallthrough = cursor
@@ -461,94 +584,43 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
             // A push growing the stack into the local range initializes that slot; Oxigen emits no SetLocal for `total := 0`.
             let depth_after = next_state.stack.len();
 
-            // A vacated position's first_init_ip is stale: a transient can share a stack slot with a later local.
-            if matches!(
-                op,
-                OpCode::BuildArray
-                    | OpCode::BuildTuple
-                    | OpCode::BuildSet
-                    | OpCode::BuildMap
-                    | OpCode::StructLiteral
-                    | OpCode::Call
-                    | OpCode::CallNamed
-                    | OpCode::MethodCall
-                    | OpCode::MethodCallNamed
-            ) && depth_after < depth_before
-            {
-                for pos in depth_after..depth_before {
-                    first_init_ip.remove(&(pos as u16));
+            // A block used as an expression ends by storing its result into its first
+            // local's slot and leaving it there (`SetLocal s; Pop`, no teardown), so the
+            // enclosing call or operator then consumes that slot straight from memory.
+            // A Pop ends a local's scope; any other consumer of a live local's position
+            // reads it as a value, so that slot must keep its memory copy current.
+            if depth_after < depth_before {
+                for pos in depth_after..depth_before.min(num_slots) {
+                    if next_state.live_locals.get(pos).copied().unwrap_or(false) {
+                        if !matches!(op, OpCode::Pop | OpCode::CloseUpvalue | OpCode::Return) {
+                            consumed_live.insert(pos as u16);
+                        }
+                        next_state.live_locals[pos] = false;
+                    }
                 }
             }
 
+            // A Constant landing in the local range joins that slot's type even when it is a
+            // transient: the join only ever widens, so a slot that ever holds a non-int stays Value.
             if matches!(op, OpCode::Constant) && depth_after == depth_before + 1 {
                 let new_pos = depth_after - 1;
                 if new_pos < num_slots {
                     let ty = next_state.stack.last().copied().unwrap_or(SlotType::Bottom);
                     next_state.write_slot(new_pos, ty);
-                    // A Constant initializes a slot only if the next op leaves it in place, not if it consumes the top.
-                    let next_op = code.get(fallthrough).and_then(|&b| OpCode::from_byte(b));
-                    let next_consumes_top = matches!(
-                        next_op,
-                        Some(OpCode::Pop)
-                            | Some(OpCode::Call)
-                            | Some(OpCode::CallNamed)
-                            | Some(OpCode::MethodCall)
-                            | Some(OpCode::Add)
-                            | Some(OpCode::Subtract)
-                            | Some(OpCode::Multiply)
-                            | Some(OpCode::Divide)
-                            | Some(OpCode::Modulo)
-                            | Some(OpCode::Equal)
-                            | Some(OpCode::NotEqual)
-                            | Some(OpCode::Less)
-                            | Some(OpCode::LessEqual)
-                            | Some(OpCode::Greater)
-                            | Some(OpCode::GreaterEqual)
-                            | Some(OpCode::BitAnd)
-                            | Some(OpCode::BitOr)
-                            | Some(OpCode::BitXor)
-                            | Some(OpCode::ShiftLeft)
-                            | Some(OpCode::ShiftRight)
-                            | Some(OpCode::Negate)
-                            | Some(OpCode::Not)
-                            | Some(OpCode::BitNot)
-                            | Some(OpCode::JumpIfFalse)
-                            | Some(OpCode::JumpIfTrue)
-                            | Some(OpCode::PopJumpIfFalse)
-                            | Some(OpCode::Unless)
-                            | Some(OpCode::SetLocal)
-                            | Some(OpCode::SetGlobal)
-                            | Some(OpCode::DefineGlobal)
-                            | Some(OpCode::DefineGlobalTyped)
-                            | Some(OpCode::SetUpvalue)
-                            | Some(OpCode::Increment)
-                            | Some(OpCode::Decrement)
-                            | Some(OpCode::Index)
-                            | Some(OpCode::IndexAssign)
-                            | Some(OpCode::IsType)
-                            | Some(OpCode::IsMut)
-                            | Some(OpCode::IsTypeMut)
-                            | Some(OpCode::BuildArray)
-                            | Some(OpCode::BuildSet)
-                            | Some(OpCode::BuildTuple)
-                            | Some(OpCode::BuildMap)
-                            | Some(OpCode::StructLiteral)
-                            | Some(OpCode::Closure)
-                            | Some(OpCode::Return)
-                    );
-                    if !next_consumes_top {
-                        let slot = new_pos as u16;
-                        let prev = first_init_ip.get(&slot).copied();
-                        // Latest wins: earlier Constants at a position are usually array-literal elements popped by BuildArray.
-                        if prev.is_none_or(|p| cursor > p) {
-                            first_init_ip.insert(slot, cursor);
-                        }
-                    }
+                }
+            }
+
+            // A range loop's limit is declared straight from `RangeLimit`'s result,
+            // so like a Constant it initializes the slot rather than passing through.
+            if matches!(op, OpCode::RangeLimit) && depth_after >= 1 {
+                let new_pos = depth_after - 1;
+                if new_pos < num_slots {
+                    next_state.write_slot(new_pos, SlotType::Int64);
                 }
             }
 
             // Any op leaving a value in the local range must join its type, not just Constant.
-            if depth_after >= 1 && !matches!(op, OpCode::Constant) {
+            if depth_after >= 1 && !matches!(op, OpCode::Constant | OpCode::RangeLimit) {
                 let new_pos = depth_after - 1;
                 if new_pos < num_slots {
                     // Only join when the slot is already initialized on this path; an earlier push there is a transient.
@@ -584,6 +656,9 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
 
             // Merge our post-op state into each branch target and enqueue if the join changed.
             for tgt in &targets {
+                if *tgt > cursor {
+                    forward_targets.insert(*tgt);
+                }
                 let entry = states
                     .entry(*tgt)
                     .or_insert_with(|| AbstractState::new(num_slots));
@@ -625,20 +700,8 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         }
     }
 
-    // Invert first_init_ip to IP -> slot; B2.1 codegen dispatches by IP.
-    let local_init_result_ip: HashMap<usize, u16> = first_init_ip
-        .into_iter()
-        .map(|(slot, ip)| (ip, slot))
-        .collect();
-
-    // Params are initialized at entry, not at any bytecode IP.
-    let mut init_sites: HashSet<u16> = HashSet::new();
-    for i in 1..=func.arity as u16 {
-        init_sites.insert(i);
-    }
-    for &slot in local_init_result_ip.values() {
-        init_sites.insert(slot);
-    }
+    let (local_init_result_ip, init_sites) =
+        collect_local_inits(func, code, chunk, &states, &forward_targets, &consumed_live);
 
     // A conditional branch whose fall-through and target both Pop is the cleanup pair to suppress.
     let condition_cleanup_pop_ips = collect_condition_cleanup_pops(code, chunk);
@@ -1236,6 +1299,14 @@ fn transfer(
             next.stack.push(top);
         }
 
+        // [start, end] -> [limit]: an Integer whenever it completes, since it
+        // raises on anything else.
+        OpCode::RangeLimit => {
+            next.stack.pop();
+            next.stack.pop();
+            next.stack.push(SlotType::Int64);
+        }
+
         // Binary int arith — Int × Int → Int, else Value.
         OpCode::Add
         | OpCode::Subtract
@@ -1591,7 +1662,7 @@ fn transfer(
             next.stack.push(SlotType::Value);
         }
         // No operand-stack effect; unreachable since scan rejects these functions.
-        OpCode::PushHandler | OpCode::PopHandler => {}
+        OpCode::PushHandler | OpCode::PopHandler | OpCode::CheckType | OpCode::SetLocalLocked => {}
     }
 
     (next, terminates, targets)
@@ -1675,9 +1746,12 @@ fn compute_lean_entry_eligible(
             | OpCode::Jump
             | OpCode::JumpIfFalse
             | OpCode::JumpIfTrue
-            | OpCode::Loop
             | OpCode::Pop
             | OpCode::Return => {}
+            // No `Loop`: a lean entry has no VM pointer, so its back-edges
+            // could not check the host's loop budget or interrupt
+            // (`vm::limits`), and such a loop could never be stopped. Loops
+            // run in the generic entry, whose back-edges poll.
             // Only a self-recursive edge re-enters the same lean entry; any other
             // callee expects a materialized stack.
             OpCode::Call => {
@@ -1709,6 +1783,157 @@ fn compute_lean_entry_eligible(
             _ => return false,
         }
         ip += len.max(1);
+    }
+    lean_value_kinds_ok(func)
+}
+
+/// What a lean entry's raw `i64` stands for at one stack position.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum LeanKind {
+    Int,
+    /// A comparison result: 0 or 1 in the lean entry, but a BOOLEAN to the
+    /// interpreter.
+    Bool,
+    /// The function value a self-call pops, or anything the walk cannot name.
+    Other,
+}
+
+/// Whether the lean entry, which carries every value as a raw `i64`, computes
+/// exactly what the interpreter does.
+///
+/// It does as long as comparison results only steer branches. One that is
+/// returned, stored and used later, passed as an argument, or fed to
+/// arithmetic or another comparison is a BOOLEAN to the interpreter (`True`,
+/// or an error for `True + 1`) but a 1 to the lean entry, and the caller boxes
+/// whatever comes back as an INTEGER. Walks the bytecode as the interpreter
+/// would, with a kind per stack position (locals are stack positions), and
+/// refuses on any such use or on a merge it cannot reconcile.
+fn lean_value_kinds_ok(func: &Function) -> bool {
+    let chunk = &func.chunk;
+    let code = &chunk.code;
+    let mut entry: Vec<LeanKind> = vec![LeanKind::Other];
+    entry.extend(std::iter::repeat_n(LeanKind::Int, func.arity as usize));
+
+    let mut states: HashMap<usize, Vec<LeanKind>> = HashMap::new();
+    states.insert(0, entry);
+    let mut worklist = vec![0usize];
+    let merge = |states: &mut HashMap<usize, Vec<LeanKind>>,
+                 worklist: &mut Vec<usize>,
+                 at: usize,
+                 st: &Vec<LeanKind>|
+     -> bool {
+        match states.get_mut(&at) {
+            None => {
+                states.insert(at, st.clone());
+                worklist.push(at);
+                true
+            }
+            Some(existing) => {
+                if existing.len() != st.len() {
+                    return false;
+                }
+                let mut changed = false;
+                for (e, n) in existing.iter_mut().zip(st) {
+                    if *e != *n && *e != LeanKind::Other {
+                        *e = LeanKind::Other;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    worklist.push(at);
+                }
+                true
+            }
+        }
+    };
+
+    while let Some(ip) = worklist.pop() {
+        let mut st = states[&ip].clone();
+        let Some(op) = code.get(ip).and_then(|&b| OpCode::from_byte(b)) else {
+            return false;
+        };
+        let Ok(len) = chunk.instruction_len(ip) else {
+            return false;
+        };
+        let next = ip + len;
+        let pop_ints = |st: &mut Vec<LeanKind>, n: usize| -> bool {
+            (0..n).all(|_| st.pop() == Some(LeanKind::Int))
+        };
+        match op {
+            OpCode::Constant => st.push(LeanKind::Int),
+            OpCode::GetLocal => {
+                let slot = read_u16(code, ip + 1) as usize;
+                match st.get(slot).copied() {
+                    Some(k) => st.push(k),
+                    None => return false,
+                }
+            }
+            OpCode::SetLocal => {
+                let slot = read_u16(code, ip + 1) as usize;
+                match (st.last().copied(), slot < st.len()) {
+                    (Some(k), true) => st[slot] = k,
+                    _ => return false,
+                }
+            }
+            OpCode::Add | OpCode::Subtract | OpCode::Multiply => {
+                if !pop_ints(&mut st, 2) {
+                    return false;
+                }
+                st.push(LeanKind::Int);
+            }
+            OpCode::Less
+            | OpCode::LessEqual
+            | OpCode::Greater
+            | OpCode::GreaterEqual
+            | OpCode::Equal
+            | OpCode::NotEqual => {
+                if !pop_ints(&mut st, 2) {
+                    return false;
+                }
+                st.push(LeanKind::Bool);
+            }
+            OpCode::Pop => {
+                if st.pop().is_none() {
+                    return false;
+                }
+            }
+            OpCode::GetGlobal => st.push(LeanKind::Other),
+            OpCode::Call => {
+                let argc = code[ip + 1] as usize;
+                if !pop_ints(&mut st, argc) || st.pop().is_none() {
+                    return false;
+                }
+                st.push(LeanKind::Int);
+            }
+            OpCode::Return => {
+                if st.last() != Some(&LeanKind::Int) {
+                    return false;
+                }
+                continue;
+            }
+            OpCode::Jump => {
+                let target = ip + 3 + read_u16(code, ip + 1) as usize;
+                if !merge(&mut states, &mut worklist, target, &st) {
+                    return false;
+                }
+                continue;
+            }
+            OpCode::JumpIfFalse | OpCode::JumpIfTrue => {
+                // Integer and boolean truthiness agree (zero is false), so either may steer.
+                if !matches!(st.last(), Some(LeanKind::Int) | Some(LeanKind::Bool)) {
+                    return false;
+                }
+                let target = ip + 3 + read_u16(code, ip + 1) as usize;
+                if !merge(&mut states, &mut worklist, target, &st) {
+                    return false;
+                }
+            }
+            // The whitelist above admits nothing else.
+            _ => return false,
+        }
+        if next >= code.len() || !merge(&mut states, &mut worklist, next, &st) {
+            return false;
+        }
     }
     true
 }
@@ -1781,9 +2006,10 @@ pub type CertifyResult = Result<(), String>;
 ///    real local.** Defensive — the walker shouldn't produce these.
 ///
 /// 5. **No `local_init_result_ip` IP points to a `Closure` opcode.**
-///    B2.1 only virtualizes `Constant(Integer)` initializers in v1;
-///    a Closure-initialized slot should stay on the Value path and
-///    never appear in this map for a virtualizable slot.
+///    B2.1 only virtualizes `Constant(Integer)` initializers, plus a range
+///    loop's `RangeLimit` (an Integer or an error); a Closure-initialized
+///    slot should stay on the Value path and never appear in this map for a
+///    virtualizable slot.
 pub fn certify(func: &Function, types: &FunctionSlotTypes) -> CertifyResult {
     // 1. Captured-slot rule.
     for slot in 0..types.slots.len() as u16 {
@@ -1848,7 +2074,7 @@ pub fn certify(func: &Function, types: &FunctionSlotTypes) -> CertifyResult {
         }
     }
 
-    // 5. No local_init_result_ip entry points at a non-Constant opcode.
+    // 5. No local_init_result_ip entry points at anything but Constant or RangeLimit.
     for (&ip, &slot) in &types.local_init_result_ip {
         if !types.is_virtualizable(slot) {
             continue; // only virtualizable slots need the Constant guard
@@ -1856,10 +2082,10 @@ pub fn certify(func: &Function, types: &FunctionSlotTypes) -> CertifyResult {
         let Some(op) = code.get(ip).copied().and_then(OpCode::from_byte) else {
             continue;
         };
-        if !matches!(op, OpCode::Constant) {
+        if !matches!(op, OpCode::Constant | OpCode::RangeLimit) {
             return Err(format!(
                 "local_init_result_ip[{}] = slot {} but opcode at that IP is {:?}, \
-                 not Constant — B2.1 v1 only supports Constant(Integer) initializers",
+                 not Constant — B2.1 only supports Constant(Integer) and RangeLimit initializers",
                 ip, slot, op
             ));
         }
@@ -2352,6 +2578,7 @@ mod tests {
             OpCode::None as u8,   // ip=3 push None
             OpCode::Return as u8, // ip=4
         ];
+        f.local_decls = vec![(3, 1)];
         let r = analyze(&f);
         assert_eq!(r.local_init_result_ip.get(&0), Some(&1));
         assert!(r.is_virtualizable(1));
@@ -2375,6 +2602,7 @@ mod tests {
             OpCode::None as u8,
             OpCode::Return as u8,
         ];
+        f.local_decls = vec![(3, 1)];
         let r = analyze(&f);
         assert_eq!(
             r.local_init_result_ip.get(&0),
@@ -2480,6 +2708,7 @@ mod tests {
             OpCode::None as u8,
             OpCode::Return as u8,
         ];
+        f.local_decls = vec![(3, 1)];
         let mut r = analyze(&f);
         assert!(r.is_virtualizable(1));
 
@@ -2505,6 +2734,7 @@ mod tests {
             OpCode::None as u8,   // ip=3 (not a Constant)
             OpCode::Return as u8, // ip=4
         ];
+        f.local_decls = vec![(3, 1)];
         let mut r = analyze(&f);
         // Point slot 1's initializer at the None at ip=3.
         r.local_init_result_ip.clear();
@@ -2516,6 +2746,49 @@ mod tests {
             "expected message about non-Constant initializer, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn init_sites_come_from_declarations_not_stack_shape() {
+        // `t := 0` reuses the slot the loop's hidden index held. Both are
+        // constant-initialized declarations, so both IPs are init sites and
+        // the slot stays virtualizable; a call argument at that depth is not.
+        let src = r#"
+            fun f(b) {
+                s := 0
+                each i in range(3) { s = s + i }
+                t := m(1, 2, 3)
+                u := 0
+                [s, t, u]
+            }
+            fun m(a, b, c) { a }
+        "#;
+        let f = compile_for_analysis(src, Some("f"));
+        let r = analyze(&f);
+        // A range loop's limit is the one non-Constant initializer.
+        for &ip in r.local_init_result_ip.keys() {
+            assert!(matches!(
+                OpCode::from_byte(f.chunk.code[ip]),
+                Some(OpCode::Constant | OpCode::RangeLimit)
+            ));
+        }
+        // Every declaration point that follows a plain Constant at the right depth is recorded.
+        let decl_slots: HashSet<u16> = f.local_decls.iter().map(|&(_, s)| s).collect();
+        for slot in r.local_init_result_ip.values() {
+            assert!(decl_slots.contains(slot));
+        }
+        // `t`'s slot is also declared by a call result, so it is never virtualized.
+        let t_slot = f
+            .local_decls
+            .iter()
+            .filter(|&&(ip, _)| {
+                ip >= 3
+                    && OpCode::from_byte(f.chunk.code[ip - 2]) == Some(OpCode::Call)
+            })
+            .map(|&(_, s)| s)
+            .next()
+            .expect("t is declared right after its call");
+        assert!(!r.is_virtualizable(t_slot));
     }
 
     #[test]

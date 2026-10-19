@@ -64,6 +64,28 @@ Integer operands are promoted to float when the other operand is a float:
 10 * 2.5
 ```
 
+### Mixed Number Types
+
+When the two operands are different kinds of number, both are converted to a
+common type first, and the operator then works as it does for that type:
+
+| Operands | Done as |
+|---|---|
+| `byte` or `uint` with `int` | `int` |
+| `byte` with `uint` | `uint` |
+| any number with `float` | `float` |
+| `byte` with `byte` | `int` |
+
+```oxi
+3 * byte(4)          // 12 (int)
+uint(7) % byte(4)    // 3 (uint)
+byte(2) - 0.5        // 1.5 (float)
+```
+
+So the converted pair follows that type's rules: `int` wraps on overflow, a
+`uint` subtraction below zero is an error, and `/` and `%` reject a zero
+divisor. A `uint` larger than the biggest `int` wraps when converted to `int`.
+
 ### String Concatenation
 
 The `+` operator concatenates strings:
@@ -236,12 +258,21 @@ byte(10) > byte(5)
 uint(100) >= uint(50)
 ```
 
-Integer and float comparisons can be mixed:
+`<`, `<=`, `>` and `>=` compare numbers with numbers, strings with strings
+and chars with chars. Numbers of different kinds compare by value:
 
 ```oxi
 3 < 5.0
 10.0 >= 10
+byte(200) > 100
+uint(7) <= byte(9)
+"apple" < "banana"
 ```
+
+Integers of any width (`int`, `uint`, `byte`) compare exactly, so a `uint`
+larger than any `int` is still greater than every `int`. A comparison with a
+`float` is done as floats. Comparing anything else, such as a number with a
+string, is an error.
 
 ## Logical Operators
 

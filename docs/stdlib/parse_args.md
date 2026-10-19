@@ -60,6 +60,7 @@ may be given with a single dash.
 |-------|------|----------|
 | `args` | `array` | the normalized argument list, every flag as `key=value` |
 | `args_map` | `map` | declared flag → value; `""` for a flag that was not passed |
+| `aliases` | `map` | alias → long name, filled by `define_flag` |
 
 Declare one with no arguments — both fields start empty:
 
@@ -77,15 +78,12 @@ p.define_flag(verbose_name="name", alias="n")
 p.define_flag(verbose_name="count")
 ```
 
-Both names become separate keys in `args_map`, so `--name=x` and `-n x` land in
-`args_map["name"]` and `args_map["n"]` respectively — they are **not** merged.
-Read whichever the user supplied:
+Both names are keys in `args_map`. A value given through the alias fills
+both, so after `-n x` `args_map["name"]` and `args_map["n"]` are both `x`;
+after `--name=x` only `args_map["name"]` is. Read the long name:
 
 ```oxi
-name := option {
-    p.args_map.name != "" -> { p.args_map.name }
-    { p.args_map.n }
-}
+name := p.args_map.name
 ```
 
 Errors:
@@ -135,8 +133,9 @@ from `os.args()` yourself.
 
 Turn a raw argument list into one where every flag carries its value:
 `["--name", "Alice"]` becomes `["--name=Alice"]`. An argument already
-containing `=`, one at the end of the list, and one followed by another
-`-`-prefixed argument are all left alone.
+containing `=`, one at the end of the list, and one followed by another flag
+are all left alone. A negative number (`-5`, `-2.5`) is a value, not a flag, so
+`--offset -5` becomes `--offset=-5`.
 
 ```oxi
 introduce parse_args
@@ -147,10 +146,12 @@ println(parse_args.normalize_array(["--name", "Alice", "-v"]))
 
 ### `k_v_pair(s)`
 
-Split `"key=value"` into a `(key, value)` tuple.
+Split `"key=value"` into a `(key, value)` tuple, at the first `=` only, so a
+value may contain `=` itself.
 
 ```oxi
-println(parse_args.k_v_pair("--name=Alice"))   // (--name, Alice)
+println(parse_args.k_v_pair("--name=Alice"))           // (--name, Alice)
+println(parse_args.k_v_pair("--url=http://x/?a=b"))    // (--url, http://x/?a=b)
 ```
 
 ### Patterns

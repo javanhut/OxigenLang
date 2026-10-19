@@ -5,6 +5,7 @@
 //     curl -X POST localhost:8000/echo -d '{"hello":"world"}'
 introduce api
 introduce json
+introduce strings
 
 users <map> = {"1": "ada", "42": "grace"}
 
@@ -25,7 +26,7 @@ fun show_user(req <map>) {
 }
 
 fun echo(req <map>) {
-    {"you_sent": api.body_json(req), "bytes": len(req.body)}
+    {"you_sent": api.body_json(req), "bytes": strings.byte_len(req.body)}
 }
 
 fun boom(req <map>) { <fail>("this handler is broken on purpose") }

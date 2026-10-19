@@ -56,7 +56,7 @@ println(time.now_ms())   // 1785000000123
 
 ### `sleep(ms)`
 
-Block the current task for `ms` milliseconds.
+Block the current task for `ms` milliseconds. A negative `ms` is an error.
 
 ```oxi
 introduce time

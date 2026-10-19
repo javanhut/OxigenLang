@@ -38,6 +38,7 @@ pub(super) struct HelperIds {
     pub iter_entry: FuncId,                // (vm) -> u32
     pub index_assign: FuncId,              // (vm) -> u32
     pub type_wrap: FuncId,                 // (vm, u32) -> u32
+    pub range_limit: FuncId,               // (vm, u32) -> u32
     pub local_add_array_mod_index: FuncId, // (vm, u32, u32, u32, i64, u32) -> u32
     pub struct_field_add_const: FuncId,    // (vm, u32, u32, i64) -> u32
     pub struct_field_add_local: FuncId,    // (vm, u32, u32, u32) -> u32
@@ -47,6 +48,8 @@ pub(super) struct HelperIds {
     pub set_local: FuncId,         // (vm, u32)
     pub set_local_checked: FuncId, // (vm, u32) -> u32
     pub check_recursion_depth: FuncId, // (vm) -> u32
+    pub check_param_types: FuncId, // (vm) -> u32
+    pub loop_stop: FuncId,             // (vm) -> u32
 
     // Arithmetic (fallible)
     pub add: FuncId,
@@ -145,6 +148,7 @@ pub(super) struct HelperRefs {
     pub iter_entry: FuncRef,
     pub index_assign: FuncRef,
     pub type_wrap: FuncRef,
+    pub range_limit: FuncRef,
     pub local_add_array_mod_index: FuncRef,
     pub struct_field_add_const: FuncRef,
     pub struct_field_add_local: FuncRef,
@@ -152,6 +156,8 @@ pub(super) struct HelperRefs {
     pub set_local: FuncRef,
     pub set_local_checked: FuncRef,
     pub check_recursion_depth: FuncRef,
+    pub check_param_types: FuncRef,
+    pub loop_stop: FuncRef,
     pub add: FuncRef,
     pub sub: FuncRef,
     pub mul: FuncRef,
@@ -243,6 +249,7 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_op_iter_entry", runtime::jit_op_iter_entry);
     reg!("jit_op_index_assign", runtime::jit_op_index_assign);
     reg!("jit_type_wrap", runtime::jit_type_wrap);
+    reg!("jit_range_limit", runtime::jit_range_limit);
     reg!(
         "jit_local_add_array_mod_index",
         runtime::jit_local_add_array_mod_index
@@ -259,6 +266,8 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_set_local", runtime::jit_set_local);
     reg!("jit_set_local_checked", runtime::jit_set_local_checked);
     reg!("jit_check_recursion_depth", runtime::jit_check_recursion_depth);
+    reg!("jit_check_param_types", runtime::jit_check_param_types);
+    reg!("jit_loop_stop", runtime::jit_loop_stop);
     reg!("jit_op_add", runtime::jit_op_add);
     reg!("jit_op_sub", runtime::jit_op_sub);
     reg!("jit_op_mul", runtime::jit_op_mul);
@@ -502,6 +511,7 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         iter_entry: decl(module, "jit_op_iter_entry", &sig_vm_to_u32),
         index_assign: decl(module, "jit_op_index_assign", &sig_vm_to_u32),
         type_wrap: decl(module, "jit_type_wrap", sig_vm_u32_fallible),
+        range_limit: decl(module, "jit_range_limit", sig_vm_u32_fallible),
         local_add_array_mod_index: decl(
             module,
             "jit_local_add_array_mod_index",
@@ -521,6 +531,8 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         set_local: decl(module, "jit_set_local", &sig_vm_u32),
         set_local_checked: decl(module, "jit_set_local_checked", &sig_vm_u32_to_u32),
         check_recursion_depth: decl(module, "jit_check_recursion_depth", &sig_vm_to_u32),
+        check_param_types: decl(module, "jit_check_param_types", &sig_vm_to_u32),
+        loop_stop: decl(module, "jit_loop_stop", &sig_vm_to_u32),
         add: decl(module, "jit_op_add", &sig_vm_to_u32),
         sub: decl(module, "jit_op_sub", &sig_vm_to_u32),
         mul: decl(module, "jit_op_mul", &sig_vm_to_u32),
@@ -594,6 +606,7 @@ pub(super) fn declare_helper_refs(
         iter_entry: r(ids.iter_entry),
         index_assign: r(ids.index_assign),
         type_wrap: r(ids.type_wrap),
+        range_limit: r(ids.range_limit),
         local_add_array_mod_index: r(ids.local_add_array_mod_index),
         struct_field_add_const: r(ids.struct_field_add_const),
         struct_field_add_local: r(ids.struct_field_add_local),
@@ -601,6 +614,8 @@ pub(super) fn declare_helper_refs(
         set_local: r(ids.set_local),
         set_local_checked: r(ids.set_local_checked),
         check_recursion_depth: r(ids.check_recursion_depth),
+        check_param_types: r(ids.check_param_types),
+        loop_stop: r(ids.loop_stop),
         add: r(ids.add),
         sub: r(ids.sub),
         mul: r(ids.mul),
