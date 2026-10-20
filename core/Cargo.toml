@@ -2,6 +2,7 @@
 name = "oxigen-core"
 version = "0.1.4"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 [features]
 # JIT on by default: the Cranelift-backed compiler is the standard backend and

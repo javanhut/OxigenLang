@@ -338,3 +338,10 @@ For detailed information, see the [docs](docs/) directory:
 | [Testing](docs/testing.md) | The built-in test runner, `expect` matchers, `oxigen test` |
 | [Embedding](docs/embedding.md) | Running Oxigen inside a Rust program: native functions, host values, sandboxing, limits, hot reload |
 | [JIT Architecture](docs/JIT_ARCHITECTURE.md) | **Experimental** — baseline Cranelift JIT: runtime flags, build options, supported opcodes, safety invariants, benchmark status vs CPython |
+
+## License
+
+Oxigen is licensed under either of the [Apache License, Version 2.0](LICENSE-APACHE)
+or the [MIT License](LICENSE-MIT), at your option. Unless you state otherwise,
+any contribution you submit for inclusion in Oxigen is licensed the same way,
+without any additional terms or conditions.
