@@ -36,19 +36,71 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
   };
 
   // ── Rendering the editor ──
+  const active = document.createElement("div");
+  active.className = "pg-active";
+  active.setAttribute("aria-hidden", "true");
+  scroller.prepend(active);
+  const lineHeight = () => parseFloat(getComputedStyle(area).lineHeight);
+  const padTop = () => parseFloat(getComputedStyle(area).paddingTop);
+  let charWidth = 0;
+  const measure = () => {
+    const probe = document.createElement("span");
+    probe.textContent = "0".repeat(64);
+    code.append(probe);
+    charWidth = probe.getBoundingClientRect().width / 64;
+    probe.remove();
+  };
+
+  // The caret's line (1-based) and visual column, tabs counted as 4.
+  const caretAt = (pos) => {
+    const before = area.value.slice(0, pos);
+    const lineStart = before.lastIndexOf("\n") + 1;
+    let col = 0;
+    for (const c of before.slice(lineStart)) col = c === "\t" ? col + 4 - (col % 4) : col + 1;
+    return { line: before.split("\n").length, col };
+  };
+  let currentLine = 0;
+  const markLine = () => {
+    const { line } = caretAt(area.selectionEnd);
+    active.style.top = `${padTop() + (line - 1) * lineHeight()}px`;
+    active.style.height = `${lineHeight()}px`;
+    active.hidden = document.activeElement !== area || area.selectionStart !== area.selectionEnd;
+    if (line !== currentLine) {
+      gutter.querySelector(".cur")?.classList.remove("cur");
+      gutter.children[line - 1]?.classList.add("cur");
+      currentLine = line;
+    }
+  };
+  // Keep the caret in view: the textarea is sized to its text, so the
+  // scroller around it, not the textarea, has to follow the caret.
+  const reveal = () => {
+    if (!charWidth) measure();
+    const { line, col } = caretAt(area.selectionEnd);
+    const lh = lineHeight();
+    const top = padTop() + (line - 1) * lh;
+    if (top < scroller.scrollTop) scroller.scrollTop = top - lh;
+    else if (top + lh > scroller.scrollTop + scroller.clientHeight) scroller.scrollTop = top + 2 * lh - scroller.clientHeight;
+    const left = 8 + col * charWidth;
+    if (left < scroller.scrollLeft + 8) scroller.scrollLeft = Math.max(0, left - 40);
+    else if (left > scroller.scrollLeft + scroller.clientWidth - 24) scroller.scrollLeft = left - scroller.clientWidth + 60;
+  };
+
   const paint = () => {
     const text = area.value;
     // A trailing newline needs a character after it to take up a line.
     code.innerHTML = (tools ? tools.highlight(text) : escapeHtml(text)) + "\n ";
     const lines = text.split("\n").length;
     let numbers = "";
-    for (let i = 1; i <= lines; i++) numbers += errorLines.has(i) ? `<span class="err-line" title="${escapeHtml(errorLines.get(i))}">${i}</span>\n` : `${i}\n`;
+    for (let i = 1; i <= lines; i++) numbers += errorLines.has(i) ? `<span class="err-line" title="${escapeHtml(errorLines.get(i))}">${i}</span>` : `<span>${i}</span>`;
     gutter.innerHTML = numbers;
+    currentLine = 0;
+    // Size the textarea to the highlighted copy. It is never collapsed to
+    // measure, which would clamp the scroll position and make it jump.
     const pre = code.parentElement;
-    area.style.height = "0px";
-    area.style.width = "0px";
-    area.style.height = `${Math.max(pre.scrollHeight, scroller.clientHeight)}px`;
-    area.style.width = `${Math.max(pre.scrollWidth, scroller.clientWidth)}px`;
+    area.style.height = `${pre.offsetHeight}px`;
+    area.style.width = `${pre.offsetWidth}px`;
+    active.style.width = `${pre.offsetWidth}px`;
+    markLine();
   };
   let frame = 0;
   const schedule = () => {
@@ -57,6 +109,13 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
   };
   scroller.addEventListener("scroll", () => (gutter.scrollTop = scroller.scrollTop));
   addEventListener("resize", schedule);
+  document.addEventListener("selectionchange", () => document.activeElement === area && markLine());
+  area.addEventListener("focus", markLine);
+  area.addEventListener("blur", markLine);
+  area.addEventListener("keyup", (e) => {
+    if (/^(Arrow|Page|Home|End)/.test(e.key)) reveal();
+  });
+  document.fonts?.ready.then(() => ((charWidth = 0), paint()));
 
   // ── Live diagnostics ──
   let checkTimer = 0;
@@ -78,41 +137,152 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
   };
 
   // ── Editing keys ──
+  // Every change goes through insert(), so each keystroke is one step in the
+  // browser's own undo history (Ctrl+Z, Ctrl+Shift+Z).
+  const INDENT = "    ";
+  const PAIRS = { "{": "}", "(": ")", "[": "]", '"': '"' };
+  const CLOSERS = new Set(["}", ")", "]"]);
+  // Pairs closed as they are typed. Not braces: a block's closing brace is
+  // typed on its own line, where it would otherwise end up twice.
+  const AUTO = new Set(["(", "[", '"']);
   const insert = (text) => {
     // execCommand keeps the browser's undo history; setRangeText is the fallback.
-    if (!document.execCommand("insertText", false, text)) area.setRangeText(text, area.selectionStart, area.selectionEnd, "end");
+    if (!document.execCommand("insertText", false, text)) {
+      area.setRangeText(text, area.selectionStart, area.selectionEnd, "end");
+      area.dispatchEvent(new Event("input"));
+    }
   };
-  let escaped = false;
-  area.addEventListener("keydown", (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") return e.preventDefault(), start();
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") return e.preventDefault(), format();
-    if (e.key === "Escape") return (escaped = true);
-    if (e.key === "Tab" && !escaped) {
-      e.preventDefault();
-      const { value, selectionStart: s } = area;
-      const lineStart = value.lastIndexOf("\n", s - 1) + 1;
-      if (e.shiftKey) {
-        const spaces = /^ {1,4}/.exec(value.slice(lineStart))?.[0].length ?? 0;
-        if (spaces) {
-          area.setSelectionRange(lineStart, lineStart + spaces);
-          insert("");
-          area.setSelectionRange(s - spaces, s - spaces);
-        }
-      } else insert("    ");
+  // Replace [from, to) with `text`, then select [selFrom, selTo).
+  const replace = (from, to, text, selFrom, selTo = selFrom) => {
+    area.setSelectionRange(from, to);
+    insert(text);
+    area.setSelectionRange(selFrom, selTo);
+  };
+  const lineStartOf = (pos) => area.value.lastIndexOf("\n", pos - 1) + 1;
+  const lineEndOf = (pos) => {
+    const end = area.value.indexOf("\n", pos);
+    return end === -1 ? area.value.length : end;
+  };
+  // The whole lines a selection touches; a selection ending at the start of
+  // a line doesn't take that line.
+  const selectedLines = () => {
+    const { selectionStart: s, selectionEnd: e } = area;
+    const from = lineStartOf(s);
+    const to = lineEndOf(e > s && area.value[e - 1] === "\n" ? e - 1 : e);
+    return { from, to, lines: area.value.slice(from, to).split("\n") };
+  };
+  const editLines = (fn) => {
+    const { from, to, lines } = selectedLines();
+    const text = lines.map(fn).join("\n");
+    if (text !== area.value.slice(from, to)) replace(from, to, text, from, from + text.length);
+  };
+  const outdent = (line) => line.replace(/^(\t| {1,4})/, "");
+
+  const indentKey = (shift) => {
+    const { selectionStart: s, selectionEnd: e, value } = area;
+    if (shift) {
+      // Shift+Tab with a bare caret outdents its line and keeps the caret on the same text.
+      if (s === e) {
+        const from = lineStartOf(s);
+        const line = value.slice(from, lineEndOf(s));
+        const removed = line.length - outdent(line).length;
+        if (removed) replace(from, from + removed, "", Math.max(from, s - removed));
+        return;
+      }
+      return editLines(outdent);
+    }
+    if (s !== e) return editLines((line) => (line.trim() ? INDENT + line : line));
+    const col = s - lineStartOf(s);
+    insert(" ".repeat(4 - (col % 4)));
+  };
+
+  const enterKey = () => {
+    const { selectionStart: s, selectionEnd: e, value } = area;
+    const line = value.slice(lineStartOf(s), s);
+    let indent = /^[ \t]*/.exec(line)[0];
+    const opener = /[{(\[]\s*$/.exec(line);
+    if (opener) indent += INDENT;
+    // Between a pair, as in `{|}`: open the block, closer on its own line.
+    if (opener && value[e] === PAIRS[opener[0].trim()]) {
+      const outer = indent.slice(INDENT.length);
+      replace(s, e, `\n${indent}\n${outer}`, s + 1 + indent.length);
       return;
     }
-    escaped = false;
-    if (e.key === "Enter" && !e.shiftKey && !e.altKey) {
-      e.preventDefault();
-      const { value, selectionStart: s } = area;
-      const line = value.slice(value.lastIndexOf("\n", s - 1) + 1, s);
-      let indent = /^\s*/.exec(line)[0];
-      if (/[{(\[:]\s*$/.test(line)) indent += "    ";
-      insert("\n" + indent);
+    insert("\n" + indent);
+  };
+
+  const backspaceKey = () => {
+    const { selectionStart: s, selectionEnd: e, value } = area;
+    if (s !== e || s === 0) return false;
+    // An empty pair: delete both halves.
+    if (PAIRS[value[s - 1]] && PAIRS[value[s - 1]] === value[s]) return replace(s - 1, s + 1, "", s - 1), true;
+    // In the indentation: back to the previous tab stop.
+    const from = lineStartOf(s);
+    const before = value.slice(from, s);
+    if (before.length && /^ +$/.test(before)) {
+      const n = before.length % 4 || 4;
+      return replace(s - n, s, "", s - n), true;
     }
+    return false;
+  };
+
+  const typed = (ch) => {
+    const { selectionStart: s, selectionEnd: e, value } = area;
+    const next = value[e] ?? "";
+    const prev = value[s - 1] ?? "";
+    // An odd number of quotes before the caret on this line means it is inside a string.
+    const inString = (value.slice(lineStartOf(s), s).match(/(?<!\\)"/g)?.length ?? 0) % 2 === 1;
+    // Typing a closer that is already there steps over it; a quote only when it ends the string.
+    if (s === e && next === ch && (CLOSERS.has(ch) || (ch === '"' && inString))) return area.setSelectionRange(s + 1, s + 1), true;
+    if (CLOSERS.has(ch)) {
+      // A closer typed as the first thing on a line moves out one level.
+      const from = lineStartOf(s);
+      const before = value.slice(from, s);
+      if (s === e && before.length >= 4 && /^\s+$/.test(before)) {
+        const kept = before.slice(0, -(before.length % 4 || 4));
+        return replace(from, s, kept + ch, from + kept.length + 1), true;
+      }
+      return false;
+    }
+    if (!PAIRS[ch]) return false;
+    // A selection gets wrapped: (selection).
+    if (s !== e) return replace(s, e, ch + value.slice(s, e) + PAIRS[ch], s + 1, e + 1), true;
+    if (!AUTO.has(ch)) return false;
+    if (ch === '"' && (inString || /[\w"\\]/.test(prev) || /\w/.test(next))) return false;
+    if (next && !/[\s)\]},;]/.test(next)) return false;
+    return replace(s, e, ch + PAIRS[ch], s + 1), true;
+  };
+
+  // Ctrl+/: comment the selected lines out, or back in.
+  const toggleComment = () => {
+    const { lines } = selectedLines();
+    const filled = lines.filter((l) => l.trim());
+    if (!filled.length) return;
+    const commented = filled.every((l) => /^\s*\/\//.test(l));
+    if (commented) return editLines((l) => l.replace(/^(\s*)\/\/ ?/, "$1"));
+    const depth = Math.min(...filled.map((l) => /^\s*/.exec(l)[0].length));
+    editLines((l) => (l.trim() ? l.slice(0, depth) + "// " + l.slice(depth) : l));
+  };
+
+  let escaped = false;
+  area.addEventListener("keydown", (e) => {
+    if (e.isComposing) return;
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && e.key === "Enter") return e.preventDefault(), start();
+    if (mod && e.key.toLowerCase() === "s") return e.preventDefault(), format();
+    if (mod && e.key === "/") return e.preventDefault(), toggleComment();
+    // Escape, then Tab, leaves the editor, so keyboard users aren't trapped in it.
+    if (e.key === "Escape") return (escaped = true);
+    if (e.key === "Tab" && !escaped && !mod && !e.altKey) return e.preventDefault(), indentKey(e.shiftKey);
+    escaped = false;
+    if (mod || e.altKey) return;
+    if (e.key === "Enter" && !e.shiftKey) return e.preventDefault(), enterKey();
+    if (e.key === "Backspace" && backspaceKey()) return e.preventDefault();
+    if (e.key.length === 1 && typed(e.key)) return e.preventDefault();
   });
   area.addEventListener("input", () => {
     paint();
+    reveal();
     check();
     store.set(DRAFT, area.value);
   });
@@ -153,9 +323,16 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
       setStatus("Fix the syntax errors before formatting", "error");
       return check();
     }
+    if (result.source === area.value) return setStatus("Already formatted");
+    // Keep the caret on the same line, as near the same place as the new text allows.
+    const { line } = caretAt(area.selectionStart);
     area.focus();
     area.select();
     insert(result.source);
+    const lines = result.source.split("\n");
+    const at = lines.slice(0, Math.min(line, lines.length) - 1).reduce((n, l) => n + l.length + 1, 0);
+    area.setSelectionRange(at, at);
+    reveal();
     setStatus("Formatted");
   }
   el("pg-format").addEventListener("click", format);
