@@ -1,0 +1,86 @@
+# The oxigenlang.com website: what `imlazy site` builds into target/site.
+# The documentation pages are rendered from docs/*.md, so the site and the
+# repository never disagree; this file only says how they are arranged.
+
+# The canonical address. oxigenlang.org redirects here, so search engines see
+# one site rather than two copies competing with each other.
+url = "https://oxigenlang.com"
+name = "OxigenLang"
+description = "OxigenLang is a modern general-purpose programming language created by Javan Hutchinson: a Rust-built bytecode VM with a Cranelift JIT, pattern matching, enums, structs, a two-tier error model, share-nothing concurrency and a 21-module standard library."
+repo = "https://github.com/javanhut/OxigenLang"
+branch = "main"
+
+[author]
+name = "Javan Hutchinson"
+url = "https://github.com/javanhut"
+# A photo of you for the home and about pages and for search engines, such as
+# "/javan.jpg" for website/static/javan.jpg. Without one the pages show a
+# monogram.
+photo = ""
+# Profiles that are the same person, for search engines' knowledge graphs
+# (schema.org `sameAs`). Add LinkedIn, X, a personal site...
+same_as = ["https://github.com/javanhut"]
+
+# The docs sidebar, in order. `file` is relative to docs/; `slug` becomes
+# /docs/<slug>/. `title` overrides the page's first heading in the sidebar,
+# and `description` its meta description (otherwise its first paragraph).
+[[section]]
+title = "Start here"
+pages = [
+    { file = "getting_started.md", slug = "getting-started", title = "Getting started", description = "Install OxigenLang, run your first program, and learn the oxigen command: the REPL, fmt, check, test and explain." },
+    { file = "syntax.md", slug = "syntax", title = "Syntax quick reference", description = "All of OxigenLang's syntax on one page: variables, types, functions, control flow, structs, enums, patterns, errors and imports." },
+    { file = "conventions.md", slug = "conventions", title = "Conventions", description = "How idiomatic Oxigen reads: explicit types, implicit returns, one construct per job, and naming and layout rules." },
+]
+
+[[section]]
+title = "Language guide"
+pages = [
+    { file = "variables.md", slug = "variables", title = "Variables", description = "The four ways to declare a variable in OxigenLang, and what each says about mutability and type." },
+    { file = "data_types.md", slug = "data-types", title = "Data types", description = "Integers, floats, strings, chars, booleans, arrays, tuples, maps, sets, bytes and None in OxigenLang." },
+    { file = "operators.md", slug = "operators", title = "Operators", description = "Arithmetic, comparison, logical and postfix operators in OxigenLang, and the order they bind in." },
+    { file = "control_flow.md", slug = "control-flow", title = "Control flow", description = "Decisions with option and unless, guards with when, and loops with each and repeat in OxigenLang." },
+    { file = "functions.md", slug = "functions", title = "Functions", description = "Named and anonymous functions in OxigenLang: typed, default, optional and named parameters, closures and recursion." },
+    { file = "structs.md", slug = "structs", title = "Structs", description = "Structs in OxigenLang: typed fields, methods with includes, inheritance, hidden fields and self." },
+    { file = "enums.md", slug = "enums", title = "Enums", description = "Enums in OxigenLang: unit, tuple and struct variants, discriminants, and matching on them." },
+    { file = "pattern_matching.md", slug = "pattern-matching", title = "Pattern matching", description = "Name a condition once with pattern, then dispatch on it with choose. Pattern matching in OxigenLang." },
+    { file = "type_system.md", slug = "type-system", title = "Type system", description = "OxigenLang is dynamic by default. Add an annotation and a variable's type is locked and checked by the VM." },
+    { file = "angle_forms.md", slug = "angle-forms", title = "Angle forms and errors", description = "OxigenLang's <...> forms: type annotations, casts, Error and Value results, <guard>, <log>, <fail> and <test>." },
+    { file = "imports.md", slug = "imports", title = "Imports and modules", description = "Import the standard library or your own files with introduce: namespaces, selective imports and module caching." },
+    { file = "concurrency.md", slug = "concurrency", title = "Concurrency", description = "Run work on every core with diverge and converge. Share-nothing tasks on real OS threads, with no locks." },
+    { file = "testing.md", slug = "testing", title = "Testing", description = "Write <test> blocks with expect() matchers next to your code and run them with oxigen test." },
+    { file = "builtins.md", slug = "builtins", title = "Built-in functions", description = "Every built-in OxigenLang function, from print and len to range, type and the collection helpers." },
+]
+
+[[section]]
+title = "Standard library"
+pages = [
+    { file = "stdlib/README.md", slug = "stdlib", title = "Overview", description = "The 21 modules of the OxigenLang standard library, what each is for, and how to import them." },
+    { file = "stdlib/math.md", slug = "stdlib/math", title = "math", description = "The OxigenLang math module: arithmetic, rounding, trigonometry, logarithms and integer number theory." },
+    { file = "stdlib/strings.md", slug = "stdlib/strings", title = "strings", description = "The OxigenLang strings module: splitting, joining, trimming, case conversion, searching and padding." },
+    { file = "stdlib/array.md", slug = "stdlib/array", title = "array", description = "The OxigenLang array module: map, filter, reduce, folds, searching, grouping and sorting." },
+    { file = "stdlib/json.md", slug = "stdlib/json", title = "json", description = "The OxigenLang json module: parse and serialize JSON, read and write JSON files, and query nested maps by dotted path." },
+    { file = "stdlib/toml.md", slug = "stdlib/toml", title = "toml", description = "The OxigenLang toml module: parse and serialize TOML, read and write TOML files, and query nested tables by dotted path." },
+    { file = "stdlib/regex.md", slug = "stdlib/regex", title = "regex", description = "The OxigenLang regex module: matching, searching, capturing and replacing with regular expressions." },
+    { file = "stdlib/result.md", slug = "stdlib/result", title = "result", description = "The OxigenLang result module: check, default, chain and recover Error || Value results without an option block." },
+    { file = "stdlib/io.md", slug = "stdlib/io", title = "io", description = "The OxigenLang io module: whole-file reads and writes, and line input from the console." },
+    { file = "stdlib/os.md", slug = "stdlib/os", title = "os", description = "The OxigenLang os module: processes, environment variables, directories, script arguments and facts about the machine." },
+    { file = "stdlib/path.md", slug = "stdlib/path", title = "path", description = "The OxigenLang path module: build, split and inspect path strings, and check that one path is inside another." },
+    { file = "stdlib/net.md", slug = "stdlib/net", title = "net", description = "The OxigenLang net module: an HTTP and HTTPS client with streaming, plus TCP and UDP sockets." },
+    { file = "stdlib/api.md", slug = "stdlib/api", title = "api", description = "The OxigenLang api module: an HTTP server with routing, JSON, HTML and static-file responses and a threaded accept loop." },
+    { file = "stdlib/time.md", slug = "stdlib/time", title = "time", description = "The OxigenLang time module: clocks, sleeping and measuring elapsed time." },
+    { file = "stdlib/datetime.md", slug = "stdlib/datetime", title = "datetime", description = "The OxigenLang datetime module: UTC calendar dates and times, formatting and parsing." },
+    { file = "stdlib/random.md", slug = "stdlib/random", title = "random", description = "The OxigenLang random module: random integers, floats, booleans and picks from an array." },
+    { file = "stdlib/encoding.md", slug = "stdlib/encoding", title = "encoding", description = "The OxigenLang encoding module: Base64, hex and URL percent-encoding." },
+    { file = "stdlib/hash.md", slug = "stdlib/hash", title = "hash", description = "The OxigenLang hash module: SHA-256, SHA-1 and MD5 digests as lowercase hex." },
+    { file = "stdlib/ansi.md", slug = "stdlib/ansi", title = "ansi", description = "The OxigenLang ansi module: terminal colours, text styles and cursor control." },
+    { file = "stdlib/parse_args.md", slug = "stdlib/parse-args", title = "parse_args", description = "The OxigenLang parse_args module: a command-line flag parser built on os.args()." },
+    { file = "stdlib/env.md", slug = "stdlib/env", title = "env", description = "The OxigenLang env module: load key/value pairs from a .env file." },
+    { file = "stdlib/test.md", slug = "stdlib/test", title = "test", description = "The OxigenLang test module: the expect() assertion matchers behind oxigen test." },
+]
+
+[[section]]
+title = "Embedding and internals"
+pages = [
+    { file = "embedding.md", slug = "embedding", title = "Embedding in Rust", description = "Embed OxigenLang in a Rust program such as a game engine: native functions, host values, capability sandboxing, loop budgets and hot reload." },
+    { file = "JIT_ARCHITECTURE.md", slug = "jit-architecture", title = "JIT architecture", description = "How OxigenLang's Cranelift baseline JIT works: tiering, supported opcodes, inline caches, specialized entries, safety invariants and benchmarks." },
+]

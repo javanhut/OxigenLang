@@ -1,0 +1,26 @@
+fun is_prime(n <int>) {
+    give False when n < 2
+    d := 2
+    repeat when d * d <= n {
+        give False when n % d == 0
+        d++
+    }
+    True
+}
+
+fun count_primes(lo <int>, hi <int>) {
+    count := 0
+    each n in range(lo, hi) {
+        count++ when is_prime(n)
+    }
+    count
+}
+
+main {
+    // Four tasks, one per core. Results come back in order.
+    counts := diverge each start in [0, 250000, 500000, 750000] {
+        count_primes(start, start + 250000)
+    }
+    total := counts[0] + counts[1] + counts[2] + counts[3]
+    println("primes below a million: {total}")
+}

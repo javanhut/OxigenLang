@@ -1,0 +1,67 @@
+name: Website
+
+# Builds oxigenlang.com and deploys it to GitHub Pages. Pull requests build it
+# too, without deploying: a docs example the playground can no longer run, a
+# showcase example that fails, or a change that breaks the WebAssembly build
+# fails here before it reaches the site. The steps are `imlazy site`'s, spelled
+# out because the runner has no imlazy.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  WASM: target/wasm32-unknown-unknown/wasm/oxigen_playground.wasm
+
+jobs:
+  build:
+    name: Build the website
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-opt
+        run: sudo apt-get update && sudo apt-get install -y binaryen
+      - name: Build the playground's WebAssembly
+        run: cargo build -p oxigen-playground --target wasm32-unknown-unknown --profile wasm
+      - name: Shrink it
+        run: >-
+          wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int
+          --enable-sign-ext --enable-mutable-globals --enable-multivalue
+          --enable-reference-types "$WASM" -o "${WASM%.wasm}.opt.wasm"
+      - name: Build the site
+        run: cargo run --release -p oxigen-site -- --wasm "${WASM%.wasm}.opt.wasm"
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: target/site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

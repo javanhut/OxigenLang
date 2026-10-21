@@ -1,0 +1,13 @@
+#[indent]
+// Indentation blocks
+// The #[indent] directive swaps braces for Python-style indentation.
+fun fizzbuzz(n):
+    option:
+        n % 15 == 0 -> "FizzBuzz",
+        n % 3 == 0 -> "Fizz",
+        n % 5 == 0 -> "Buzz",
+        str(n)
+
+main:
+    each i in range(1, 16):
+        println(fizzbuzz(i))

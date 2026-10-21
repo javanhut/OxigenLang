@@ -1,0 +1,12 @@
+// Hello, Oxigen
+// `main` runs when the file is executed directly.
+introduce strings
+
+main {
+    name := "Oxigen"
+    println("Hello from {name}!")
+
+    each word in strings.split("read it out loud", " ") {
+        println("{word} has {len(word)} letters")
+    }
+}

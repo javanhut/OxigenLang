@@ -1,0 +1,48 @@
++++
+title = "OxigenLang benchmarks: Oxigen vs CPython, Node.js and Bun"
+description = "How fast is OxigenLang? Benchmark results for the Oxigen JIT and interpreter against CPython, Node.js and Bun: loops, recursion, closures, struct methods and parallel work."
+path = "/benchmarks/"
+nav = "benchmarks"
+class = "page-bench"
++++
+<header class="page-head">
+  <div class="wrap">
+    <h1>A median {{bench_median}}× faster than CPython.</h1>
+    <p class="intro">This is Oxigen's default build, JIT on, running the {{bench_count}} programs in the repository's benchmark suite against CPython {{bench_python}} (with its JIT on), Node.js {{bench_node}} and Bun {{bench_bun}}.</p>
+    <dl class="facts">
+      <div><dt>Measured</dt><dd>{{bench_date}}</dd></div>
+      <div><dt>Machine</dt><dd>{{bench_platform}}</dd></div>
+      <div><dt>Oxigen</dt><dd>{{bench_oxigen}}</dd></div>
+      <div><dt>Faster than CPython</dt><dd>{{bench_wins}} of {{bench_count}}</dd></div>
+    </dl>
+  </div>
+</header>
+
+<section class="wrap" style="padding-bottom:32px">
+  {{bench_chart}}
+</section>
+
+<section class="section" style="padding-top:64px">
+  <div class="wrap">
+    <h2>All of it</h2>
+    <p class="intro">Fastest run of each program, in milliseconds. <strong>Default</strong> is plain <code>oxigen file.oxi</code>: hot functions go native after about 50 calls. <code>--jit</code> compiles on the first call. <code>--no-jit</code> is the interpreter alone, and it's slower than CPython. The JIT is what makes the difference.</p>
+    {{bench_table}}
+  </div>
+</section>
+
+<section class="section tint">
+  <div class="wrap split">
+    <div class="text">
+      <h2 id="methodology">How they were measured</h2>
+      <p><code>scripts/bench.sh</code> runs each <code>example/bench_*.oxi</code> next to its Python twin, plus the TypeScript versions under Bun and Node where there are any. Runs are interleaved, A then B then A, so every runtime sees the same thermal state on a laptop that throttles. Each number is the fastest run after warm-ups.</p>
+      <p>Click a label in the chart to read that program. The JIT itself is written up in <a href="/docs/jit-architecture/">JIT architecture</a>.</p>
+    </div>
+    <div class="media">
+      <h3 style="margin:0 0 14px;font-weight:600">Run them yourself</h3>
+      <div class="code"><div class="code-bar"><span class="code-lang">shell</span><button class="btn-copy" type="button">Copy</button></div><pre><code>git clone {{repo}}.git
+cd OxigenLang
+cargo build --release -p oxigen
+scripts/bench.sh</code></pre></div>
+    </div>
+  </div>
+</section>

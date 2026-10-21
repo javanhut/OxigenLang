@@ -1,0 +1,25 @@
+// Maps, sets and JSON
+// Built-in collections, index assignment, unpacking and the json module.
+introduce json
+
+main {
+    inventory <map>
+    inventory["apples"] = 12
+    inventory["pears"] = 4
+    inventory["plums"] = 9
+
+    each name in keys(inventory) {
+        println("{name}: {inventory[name]}")
+    }
+
+    tags := set("fast", "simple", "fast")
+    println("unique tags:", len(tags))
+
+    first, second := ["x", "y"]
+    println(first, second)
+
+    text := json.stringify({"lang": "Oxigen", "jit": True, "modules": 19})
+    println(text)
+    data := json.parse(text)
+    println("modules:", data["modules"])
+}

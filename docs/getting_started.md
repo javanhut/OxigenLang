@@ -24,26 +24,25 @@ Check the installed version:
 oxigen --version
 ```
 
-### Optional: enable the experimental JIT
+### The JIT
 
-OxigenLang has a Cranelift-backed baseline JIT that's off by default.
-Enable it at build time with the `jit` feature:
-
-```bash
-cargo build --release --features jit -p oxigen
-```
-
-Or install a JIT-enabled binary directly:
+OxigenLang ships with a Cranelift-backed baseline JIT, compiled in and on
+by default: a default build tiers hot functions up to native code
+automatically after about 50 calls. Two run-time flags control it:
 
 ```bash
-sudo make install-with-jit
+oxigen --jit file.oxi      # eager: compile on first call
+oxigen --no-jit file.oxi   # pure interpreter
 ```
 
-Then opt in at run time with `--jit` (eager) or rely on the default
-tiering threshold. Pass `--no-jit` to force the pure interpreter.
-Without `--features jit` the flag is silently ignored and the binary
-stays interpreter-only. See
-[JIT Architecture](JIT_ARCHITECTURE.md) for details, supported
+To build a smaller, interpreter-only binary without the Cranelift
+dependency tree, drop the default feature:
+
+```bash
+cargo build --release --no-default-features -p oxigen
+```
+
+See [JIT Architecture](JIT_ARCHITECTURE.md) for details, supported
 opcodes, safety notes, and benchmark methodology.
 
 ## Your First Program
@@ -118,7 +117,7 @@ The REPL maintains state across lines — variables, functions, structs, and pat
 | Command / Flag | Description |
 |----------------|-------------|
 | `oxigen file.oxi [args...]` | Execute a script (bytecode VM) |
-| `oxigen --jit file.oxi` | Experimental: tier up to the baseline JIT on first call. Only available in builds produced with `--features jit`; ignored otherwise. `OXIGEN_JIT=1` is an equivalent env toggle. |
+| `oxigen --jit file.oxi` | Tier up to the baseline JIT on first call instead of after ~50 calls. `OXIGEN_JIT=1` is an equivalent env toggle. Ignored by an interpreter-only (`--no-default-features`) build. |
 | `oxigen --no-jit file.oxi` | Force the pure interpreter even in a JIT-enabled build. |
 | `oxigen` | Start the interactive REPL |
 | `oxigen fmt file.oxi [...]` | Format one or more `.oxi` files in-place |

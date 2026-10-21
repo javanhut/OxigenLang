@@ -139,6 +139,9 @@ fn display_path(path: &Path, cwd: Option<&Path>) -> String {
 }
 
 /// `display_path` against the real working directory.
+/// See `VM::set_module_source`.
+type ModuleSource = Rc<dyn Fn(&str) -> Option<String>>;
+
 fn display_path_cwd(path: &Path) -> String {
     display_path(path, std::env::current_dir().ok().as_deref())
 }
@@ -351,6 +354,8 @@ pub struct VM {
     // Module system
     pub current_file: Option<PathBuf>,
     pub stdlib_path: PathBuf,
+    /// Supplies module sources ahead of the filesystem; see `set_module_source`.
+    module_source: Option<ModuleSource>,
     module_cache: HashMap<PathBuf, Rc<ObjModule>>,
     import_stack: Vec<PathBuf>,
     pub is_main_context: bool,
@@ -462,6 +467,7 @@ impl VM {
             open_upvalues: Vec::new(),
             current_file: None,
             stdlib_path: find_stdlib_path(),
+            module_source: None,
             module_cache: HashMap::new(),
             import_stack: Vec::new(),
             is_main_context: true,
@@ -689,6 +695,17 @@ impl VM {
         }
     }
 
+    /// Ask `source` for a module's text before looking on disk. It gets the
+    /// path as the script wrote it (`math`, `./util`) and returns the source,
+    /// or `None` to fall back to the filesystem. A host without one, such as
+    /// a web page, serves the stdlib this way; a game can serve scripts from
+    /// its asset archive. Imported modules ask it too.
+    pub fn set_module_source(&mut self, source: impl Fn(&str) -> Option<String> + 'static) {
+        self.module_source = Some(Rc::new(source));
+        self.module_cache.clear();
+        self.module_deps.clear();
+    }
+
     /// The capabilities scripts in this VM may use; `None` is all of them.
     pub fn capabilities(&self) -> Option<&[Capability]> {
         self.capabilities.as_deref()
@@ -771,6 +788,7 @@ impl VM {
             child.natives.push((name.clone(), native.clone()));
             child.set_host_global(name, native.clone());
         }
+        child.module_source = self.module_source.clone();
         child
     }
 
@@ -1046,9 +1064,7 @@ impl VM {
         };
         let msg_str = msg.map(|m| format!("{}", m));
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
+        let now = crate::clock::since_epoch().unwrap_or_default();
         let secs = now.as_secs();
         let (hours, mins, seconds) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
         let days = secs / 86400;
@@ -1074,7 +1090,7 @@ impl VM {
             (true, None) => format!("{}: <empty log>", timestamp),
         };
 
-        println!("{}", output);
+        crate::output::write(&format!("{output}\n"));
         self.push(Value::None);
     }
 
@@ -4976,7 +4992,13 @@ impl VM {
     // ── Module System ───────────────────────────────────────────────────
 
     fn import_module(&mut self, path_str: &str, selective_names: &[String]) -> Result<(), VMError> {
-        let module_path = self.resolve_module_path(path_str)?;
+        let supplied = self.module_source.as_ref().and_then(|source| source(path_str));
+        // A supplied module has no file; its name in angle brackets keys the
+        // cache and names it in errors, and cannot collide with a real path.
+        let module_path = match supplied {
+            Some(_) => PathBuf::from(format!("<{path_str}>")),
+            None => self.resolve_module_path(path_str)?,
+        };
         self.imported_here.insert(module_path.clone());
 
         if let Some(cached) = self.module_cache.get(&module_path).cloned() {
@@ -4997,9 +5019,12 @@ impl VM {
         }
 
         // Read, lex, parse, compile, and execute the module
-        let source = std::fs::read_to_string(&module_path).map_err(|e| {
-            self.runtime_error(&format!("cannot read module '{}': {}", path_str, e))
-        })?;
+        let source = match supplied {
+            Some(source) => source,
+            None => std::fs::read_to_string(&module_path).map_err(|e| {
+                self.runtime_error(&format!("cannot read module '{}': {}", path_str, e))
+            })?,
+        };
 
         let lexer = crate::lexer::Lexer::new(&source);
         let mut parser = crate::parser::Parser::new(lexer, &source);

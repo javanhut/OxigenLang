@@ -3,6 +3,8 @@ resolver = "3"
 members = [
     "core",
     "crates/oxigen-cli",
+    "crates/oxigen-playground",
+    "crates/oxigen-site",
 ]
 
 [profile.release]
@@ -18,3 +20,9 @@ panic = "unwind"
 # Turning off debuginfo for test builds keeps `cargo test` from ballooning
 # memory during codegen/link while leaving normal dev builds unchanged.
 debug = 0
+
+[profile.wasm]
+# The playground's WebAssembly build (`imlazy wasm`). wasm32's prebuilt std
+# cannot unwind; a panic traps and the page reports the message it was sent.
+inherits = "release"
+panic = "abort"

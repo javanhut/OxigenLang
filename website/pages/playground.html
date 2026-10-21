@@ -1,0 +1,35 @@
++++
+title = "OxigenLang Playground: run Oxigen code in your browser"
+description = "Write and run OxigenLang programs in your browser. The real Oxigen interpreter, compiled to WebAssembly, with syntax highlighting, live error checking, formatting and shareable links."
+path = "/playground/"
+nav = "playground"
+class = "page-playground"
++++
+<div class="pg">
+  <div class="pg-toolbar">
+    <h1>Playground</h1>
+    <label class="visually-hidden" for="pg-example">Example</label>
+    <select id="pg-example" aria-label="Load an example">{{playground_options}}</select>
+    <button class="tbtn run" id="pg-run" type="button" title="Run (Ctrl+Enter)"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg> Run</button>
+    <button class="tbtn" id="pg-format" type="button" title="Format (Ctrl+S)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h14"/></svg>Format</button>
+    <button class="tbtn" id="pg-share" type="button" title="Copy a link to this code"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>Share</button>
+    <button class="tbtn" id="pg-reset" type="button" title="Reload the selected example"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>Reset</button>
+    <span class="spacer"></span>
+    <span class="pg-status" id="pg-status" data-state="loading" role="status">Loading…</span>
+  </div>
+  <div class="pg-panes">
+    <div class="pg-editor">
+      <div class="pg-gutter" id="pg-gutter" aria-hidden="true"></div>
+      <div class="pg-code" id="pg-code">
+        <pre aria-hidden="true"><code id="pg-hl">{{playground_initial}}</code></pre>
+        <textarea id="pg-src" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off" aria-label="OxigenLang source code">{{playground_initial_raw}}</textarea>
+      </div>
+    </div>
+    <div class="pg-output">
+      <div class="pg-output-bar"><span>Output</span><button id="pg-clear" type="button">Clear</button></div>
+      <pre id="pg-out" aria-live="polite"><span class="placeholder">Press Run or Ctrl+Enter to run this program.</span></pre>
+      <p class="pg-help">Runs the real OxigenLang interpreter, compiled to WebAssembly, in a sandbox: no files, network, processes or threads, and runs stop after 20 seconds. Everything else in the language and the standard library works. <a href="/docs/syntax/">Syntax reference</a> · <a href="/docs/getting-started/">Install Oxigen</a></p>
+    </div>
+  </div>
+</div>
+<script type="application/json" id="pg-examples">{{playground_examples}}</script>

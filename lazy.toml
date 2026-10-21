@@ -149,3 +149,29 @@ run = ["cd ./lsp-go/ && go test ./..."]
 [commands.fix-go]
 desc = "Fix the go lsp code"
 run = ["cd ./lsp-go/ && go fix ./..."]
+
+# ── oxigenlang.com ─────────────────────────────────────────────────────
+
+[commands.system-deps]
+desc = "Install what the website build needs (the wasm32 Rust target, wasm-opt) with rvn"
+alias = ["setup"]
+run = ["scripts/system-deps.sh"]
+
+[commands.wasm]
+desc = "Build the playground's interpreter for the browser (target/site uses it)"
+dep = ["system-deps"]
+run = [
+  "cargo build -p oxigen-playground --target wasm32-unknown-unknown --profile wasm",
+  # About a third smaller; the features are the ones rustc's wasm32 target enables.
+  "wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-multivalue --enable-reference-types target/wasm32-unknown-unknown/wasm/oxigen_playground.wasm -o target/wasm32-unknown-unknown/wasm/oxigen_playground.opt.wasm",
+]
+
+[commands.site]
+desc = "Build oxigenlang.com into target/site from docs/ and website/"
+dep = ["wasm"]
+run = ["cargo run --release -p oxigen-site -- --wasm target/wasm32-unknown-unknown/wasm/oxigen_playground.opt.wasm"]
+
+[commands.site-serve]
+desc = "Build the website and serve it at http://localhost:8000"
+dep = ["site"]
+run = ["python3 -m http.server 8000 --directory target/site"]

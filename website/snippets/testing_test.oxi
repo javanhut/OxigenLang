@@ -1,0 +1,13 @@
+introduce strings
+
+fun slug(title <str>) {
+    strings.replace(strings.lower(strings.trim(title)), " ", "-")
+}
+
+<test>("slug lower-cases and hyphenates") {
+    expect(slug("  Hello Oxigen ")).eq("hello-oxigen")
+}
+
+<test>("slug keeps words in order") {
+    expect(slug("A B C")).eq("a-b-c")
+}

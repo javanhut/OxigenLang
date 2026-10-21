@@ -1,0 +1,32 @@
+// Structs and methods
+// Typed fields, methods with `includes`, and single inheritance.
+struct Account {
+    owner <str>
+    balance <float>
+}
+
+Account includes {
+    fun deposit(amount <float>) {
+        self.balance = self.balance + amount
+        give self
+    }
+    fun describe() { "{self.owner}: ${self.balance}" }
+}
+
+struct Savings(Account) {
+    rate <float>
+}
+
+Savings includes {
+    fun add_interest() { self.deposit(self.balance * self.rate) }
+}
+
+main {
+    acct := Account("Ada", 120.0)
+    acct.deposit(30.0)
+    println(acct.describe())
+
+    savings := Savings { owner: "Grace", balance: 1000.0, rate: 0.05 }
+    savings.add_interest()
+    println(savings.describe())
+}

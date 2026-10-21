@@ -1,0 +1,26 @@
+// Sieve of Eratosthenes
+// A classic algorithm: arrays, index assignment, guards and while-style loops.
+fun primes_below(limit <int>) {
+    marked := []
+    each i in range(limit) {
+        push(marked, False)
+    }
+    primes := []
+    each n in range(2, limit) {
+        skip when marked[n]
+        push(primes, n)
+        m := n * n
+        repeat when m < limit {
+            marked[m] = True
+            m = m + n
+        }
+    }
+    primes
+}
+
+main {
+    primes := primes_below(100)
+    println("{len(primes)} primes below 100:")
+    println(primes)
+    println("the largest is {last(primes)}")
+}

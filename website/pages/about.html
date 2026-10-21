@@ -1,0 +1,76 @@
++++
+title = "About OxigenLang and its creator, Javan Hutchinson"
+description = "OxigenLang is a general-purpose programming language created by Javan Hutchinson. Learn what it is, how it is built, the principles behind its design, and who makes it."
+path = "/about/"
+nav = "about"
+class = "page-about"
++++
+<header class="page-head">
+  <div class="wrap">
+    <h1>OxigenLang is a programming language made by {{author}}.</h1>
+    <p class="intro">It's a general-purpose language with a readable, intent-first syntax, running on a bytecode VM written in Rust with a Cranelift JIT. It's open source, and it has documentation, a standard library, real tooling and a playground in the browser.</p>
+  </div>
+</header>
+
+<div class="wrap about-grid">
+  <div class="prose">
+    <h2 id="what-is-oxigenlang">What is OxigenLang?</h2>
+    <p><strong>OxigenLang</strong>, or just <strong>Oxigen</strong>, is a general-purpose programming language. Source files use the <code>.oxi</code> extension and run with the <code>oxigen</code> command. The language is dynamically typed by default and lets you opt into type annotations that lock a value's type and mutability, which the virtual machine enforces.</p>
+    <p>You get first-class functions and closures, structs with methods and inheritance, Rust-style enums, named patterns you match with <code>choose</code>, errors you can treat as values, string interpolation, and your pick of braces or indentation for blocks. The standard library has {{stdlib_count}} modules: text, collections, JSON and TOML, regular expressions, files and processes, HTTP clients and servers, TCP and UDP, time, hashing and encoding.</p>
+
+    <h2 id="who-created-oxigenlang">Who created OxigenLang?</h2>
+    <p>OxigenLang was created by <a href="{{author_url}}" rel="author me noopener">{{author}}</a>, who designed the language and develops its implementation: the lexer and parser, the bytecode compiler and virtual machine, the Cranelift-backed JIT, the standard library, the formatter and test runner, and the language server and editor support. The project is developed in the open on <a href="{{repo}}" rel="noopener">GitHub</a>.</p>
+
+    <h2 id="design-principles">Design principles</h2>
+    <p>Oxigen is built around one idea: code should say plainly what it's for. So the language drops constructs that overlap and keeps one clear tool for each job.</p>
+    <ul>
+      <li><strong>Read like intent.</strong> <code>option</code> for a decision, <code>unless</code> and <code>when</code> for the clearer condition, named arguments at the call site, interpolation over concatenation.</li>
+      <li><strong>Be explicit about types.</strong> A declared type is locked, turning whole classes of bugs into errors and documenting what a value is.</li>
+      <li><strong>Returns are implicit.</strong> The last expression is the result; <code>give</code> is the escape hatch.</li>
+      <li><strong>One tool per job.</strong> <code>option</code> for local decisions, <code>pattern</code> with <code>choose</code> for reusable matching, <code>each</code> for collections, <code>repeat</code> for conditions.</li>
+      <li><strong>Failure is a first-class value.</strong> Errors propagate by default, and <code>&lt;Error&gt;</code>, <code>&lt;Value&gt;</code> and <code>&lt;guard&gt;</code> make them explicit where it matters.</li>
+    </ul>
+    <p>The <a href="/docs/conventions/">conventions guide</a> goes through all of them.</p>
+
+    <h2 id="how-it-works">How it works</h2>
+    <p>Oxigen is implemented in Rust. A program goes through a hand-written lexer and parser into an abstract syntax tree, is compiled to bytecode, and runs on a stack-based virtual machine. Functions that get hot are compiled by a baseline JIT, built on the Cranelift code generator, to native machine code; the JIT is on by default and falls back to the interpreter cleanly whenever it needs to.</p>
+    <div class="pipeline" aria-label="Compilation pipeline: source, lexer, parser, bytecode compiler, VM, Cranelift JIT">
+      <span>.oxi source</span><span>lexer</span><span>parser</span><span>bytecode compiler</span><span>VM</span><span>Cranelift JIT</span>
+    </div>
+    <p>Parallel work runs on real OS threads, with a separate VM and heap for each task, so values cross threads by transfer rather than by sharing. The same VM can be embedded in a Rust program, such as a game engine, with capability sandboxing and loop budgets for running untrusted scripts. For the <a href="/playground/">playground</a>, the interpreter is compiled to WebAssembly and runs in your browser.</p>
+
+    <h2 id="project-facts">Project facts</h2>
+    <div class="table-wrap"><table>
+      <tbody>
+        <tr><th scope="row">Name</th><td>OxigenLang (Oxigen)</td></tr>
+        <tr><th scope="row">Creator</th><td><a href="{{author_url}}" rel="author noopener">{{author}}</a></td></tr>
+        <tr><th scope="row">Current version</th><td>{{version}}</td></tr>
+        <tr><th scope="row">Implementation</th><td>Rust: bytecode VM with a Cranelift baseline JIT; language server in Go</td></tr>
+        <tr><th scope="row">Typing</th><td>Dynamic, with optional enforced type annotations</td></tr>
+        <tr><th scope="row">File extension</th><td><code>.oxi</code></td></tr>
+        <tr><th scope="row">Platforms</th><td>Linux, macOS, and WebAssembly in the browser</td></tr>
+        <tr><th scope="row">License</th><td>MIT or Apache-2.0</td></tr>
+        <tr><th scope="row">Source</th><td><a href="{{repo}}" rel="noopener">{{repo}}</a></td></tr>
+        <tr><th scope="row">Website</th><td><a href="/">oxigenlang.com</a> (also oxigenlang.org)</td></tr>
+      </tbody>
+    </table></div>
+
+    <h2 id="faq">Frequently asked questions</h2>
+    <div class="faq">
+      <details open><summary>Who created OxigenLang?</summary><p>OxigenLang was created by {{author}}, who designed the language and develops its compiler, bytecode virtual machine, Cranelift JIT, standard library and tooling.</p></details>
+      <details><summary>What is OxigenLang written in?</summary><p>Rust. Source code compiles to bytecode for a virtual machine, and a baseline JIT built on Cranelift compiles hot functions to native machine code. The language server is written in Go.</p></details>
+      <details><summary>How fast is it?</summary><p>On the project's benchmark suite the default build is a median {{bench_median}}× faster than CPython {{bench_python}}, and faster on {{bench_wins}} of {{bench_count}} benchmarks. The <a href="/benchmarks/">benchmarks page</a> has every number, including the slower interpreter-only build.</p></details>
+      <details><summary>Is OxigenLang free and open source?</summary><p>Yes, under the MIT or Apache-2.0 license, at your choice. The source is on <a href="{{repo}}" rel="noopener">GitHub</a>.</p></details>
+      <details><summary>Can I try it without installing anything?</summary><p>Yes. The <a href="/playground/">playground</a> runs the real interpreter in your browser through WebAssembly.</p></details>
+      <details><summary>Can I embed Oxigen in my own application?</summary><p>Yes. A Rust program can compile and run Oxigen scripts, call their functions, expose native functions and host values, and restrict what scripts may touch. See <a href="/docs/embedding/">Embedding Oxigen</a>.</p></details>
+      <details><summary>Which editors support Oxigen?</summary><p>Oxigen ships a language server with diagnostics, completion, hover, document symbols and formatting, and a ready-made Neovim setup. Any editor with LSP support can use it.</p></details>
+    </div>
+  </div>
+
+  <aside class="about-aside">
+    {{creator_portrait}}
+    <h2 id="javan-hutchinson">{{author}}</h2>
+    <p>Creator of OxigenLang</p>
+    <a href="{{author_url}}" rel="me noopener">github.com/javanhut</a>
+  </aside>
+</div>

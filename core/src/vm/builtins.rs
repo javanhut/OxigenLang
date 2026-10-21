@@ -262,18 +262,16 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
 // ── Core builtins ──────────────────────────────────────────────────────
 
 fn builtin_print(args: &[Value]) -> Value {
-    use std::io::Write;
     let parts: Vec<String> = args.iter().map(|a| format!("{}", a)).collect();
-    // print has no trailing newline, so flush or streaming output never appears.
-    let mut out = std::io::stdout().lock();
-    let _ = write!(out, "{}", parts.join(" "));
-    let _ = out.flush();
+    crate::output::write(&parts.join(" "));
     Value::None
 }
 
 fn builtin_println(args: &[Value]) -> Value {
     let parts: Vec<String> = args.iter().map(|a| format!("{}", a)).collect();
-    println!("{}", parts.join(" "));
+    let mut line = parts.join(" ");
+    line.push('\n');
+    crate::output::write(&line);
     Value::None
 }
 
@@ -1209,7 +1207,7 @@ fn builtin_dt_now(args: &[Value]) -> Value {
     if !args.is_empty() {
         return vm_hard_err("__dt_now: expected 0 arguments");
     }
-    Value::Integer(chrono::Utc::now().timestamp())
+    Value::Integer(crate::clock::since_epoch().map_or(0, |d| d.as_secs() as i64))
 }
 
 fn builtin_dt_format(args: &[Value]) -> Value {
@@ -1358,9 +1356,7 @@ fn builtin_md5(args: &[Value]) -> Value {
 
 fn builtin_input(args: &[Value]) -> Value {
     if !args.is_empty() {
-        print!("{}", args[0]);
-        use std::io::Write;
-        std::io::stdout().flush().ok();
+        crate::output::write(&args[0].to_string());
     }
     let mut line = String::new();
     match std::io::stdin().read_line(&mut line) {
@@ -1779,18 +1775,16 @@ fn builtin_is_file(args: &[Value]) -> Value {
 // ── Time builtins ──────────────────────────────────────────────────────
 
 fn builtin_time_now(_args: &[Value]) -> Value {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(d) => Value::Float(d.as_secs_f64()),
-        Err(_) => Value::Error(rc_str("time error")),
+    match crate::clock::since_epoch() {
+        Some(d) => Value::Float(d.as_secs_f64()),
+        None => Value::Error(rc_str("time error")),
     }
 }
 
 fn builtin_time_now_ms(_args: &[Value]) -> Value {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(d) => Value::Integer(d.as_millis() as i64),
-        Err(_) => Value::Error(rc_str("time error")),
+    match crate::clock::since_epoch() {
+        Some(d) => Value::Integer(d.as_millis() as i64),
+        None => Value::Error(rc_str("time error")),
     }
 }
 
@@ -1812,12 +1806,8 @@ fn builtin_time_sleep(args: &[Value]) -> Value {
 }
 
 fn builtin_time_monotonic(_args: &[Value]) -> Value {
-    use std::time::Instant;
     // Return monotonic time as nanoseconds integer (matches tree-walker)
-    thread_local! {
-        static EPOCH: Instant = Instant::now();
-    }
-    EPOCH.with(|epoch| Value::Integer(epoch.elapsed().as_nanos() as i64))
+    Value::Integer(crate::clock::monotonic_nanos())
 }
 
 // ── Random builtins ────────────────────────────────────────────────────
@@ -1829,11 +1819,7 @@ thread_local! {
 fn xorshift64(state: u64) -> u64 {
     let mut s = if state == 0 {
         // Auto-seed from time
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64
-            | 1
+        crate::clock::since_epoch().unwrap_or_default().as_nanos() as u64 | 1
     } else {
         state
     };
@@ -2651,11 +2637,22 @@ fn builtin_http_request(args: &[Value]) -> Value {
     } else {
         None
     };
+    http_request(&method, &url, &headers, body.as_deref())
+}
 
+/// A browser build has no HTTP client: rustls's `ring` cannot target
+/// wasm32-unknown-unknown, and a page has fetch() for that anyway.
+#[cfg(target_arch = "wasm32")]
+fn http_request(_: &str, _: &str, _: &[(String, String)], _: Option<&str>) -> Value {
+    Value::Error(rc_str(crate::netres::NO_HTTP))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn http_request(method: &str, url: &str, headers: &[(String, String)], body: Option<&str>) -> Value {
     macro_rules! apply_headers {
         ($req:expr) => {{
             let mut r = $req;
-            for (k, v) in &headers {
+            for (k, v) in headers {
                 r = r.header(k.as_str(), v.as_str());
             }
             r
@@ -2697,27 +2694,27 @@ fn builtin_http_request(args: &[Value]) -> Value {
         };
     }
 
-    match method.as_str() {
-        "GET" => handle_response!(apply_headers!(ureq::get(&url)).call()),
-        "HEAD" => handle_response!(apply_headers!(ureq::head(&url)).call()),
-        "DELETE" => handle_response!(apply_headers!(ureq::delete(&url)).call()),
+    match method {
+        "GET" => handle_response!(apply_headers!(ureq::get(url)).call()),
+        "HEAD" => handle_response!(apply_headers!(ureq::head(url)).call()),
+        "DELETE" => handle_response!(apply_headers!(ureq::delete(url)).call()),
         "POST" => {
-            let req = apply_headers!(ureq::post(&url));
-            handle_response!(match &body {
+            let req = apply_headers!(ureq::post(url));
+            handle_response!(match body {
                 Some(b) => req.send(b.as_bytes()),
                 None => req.send_empty(),
             })
         }
         "PUT" => {
-            let req = apply_headers!(ureq::put(&url));
-            handle_response!(match &body {
+            let req = apply_headers!(ureq::put(url));
+            handle_response!(match body {
                 Some(b) => req.send(b.as_bytes()),
                 None => req.send_empty(),
             })
         }
         "PATCH" => {
-            let req = apply_headers!(ureq::patch(&url));
-            handle_response!(match &body {
+            let req = apply_headers!(ureq::patch(url));
+            handle_response!(match body {
                 Some(b) => req.send(b.as_bytes()),
                 None => req.send_empty(),
             })

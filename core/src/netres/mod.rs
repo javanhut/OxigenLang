@@ -32,6 +32,8 @@ enum Resource {
     Listener(TcpListener),
     Udp(UdpSocket),
     // Own Arc<Mutex> so the registry lock is dropped before the channel wait.
+    // Only an HTTP response makes one, and the wasm build has no HTTP client.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     HttpBody(Arc<Mutex<HttpStream>>),
 }
 
@@ -48,6 +50,7 @@ struct HttpStream {
 
 /// How many 8 KiB chunks may sit unread before the reader thread blocks; see
 /// `spawn_body_reader`.
+#[cfg(not(target_arch = "wasm32"))]
 const BODY_QUEUE_CHUNKS: usize = 8;
 
 /// The longest line `http_read_line` will collect. A server that never sends
@@ -295,8 +298,28 @@ pub fn close(id: u64) {
 
 // ── Streaming HTTP ────────────────────────────────────────────────────────
 
+/// Why HTTP fails in a browser build: rustls's `ring` cannot target
+/// wasm32-unknown-unknown, so that build has no HTTP client.
+pub const NO_HTTP: &str = "http is not available in this build of Oxigen (WebAssembly)";
+
+#[cfg(target_arch = "wasm32")]
+pub fn http_download(_: &str, _: &str) -> Result<i64, String> {
+    Err(NO_HTTP.into())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn http_open(_: &str, _: &str, _: &[(String, String)], _: Option<&str>) -> Result<u64, String> {
+    Err(NO_HTTP.into())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn http_upload(_: &str, _: &str, _: &str, _: Vec<(String, String)>) -> Result<(i64, String), String> {
+    Err(NO_HTTP.into())
+}
+
 /// Streams a GET response body to `path` without buffering it in memory.
 /// Returns the HTTP status code.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn http_download(url: &str, path: &str) -> Result<i64, String> {
     let resp = ureq::get(url)
         .call()
@@ -316,6 +339,7 @@ pub fn http_download(url: &str, path: &str) -> Result<i64, String> {
 /// `method` is GET/POST/PUT/PATCH; `body` is sent for the body methods and
 /// ignored for GET. This is what lets you stream a real LLM API — POST the
 /// model+prompt and read the tokens back.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn http_open(
     method: &str,
     url: &str,
@@ -366,6 +390,7 @@ pub fn http_open(
 /// drops the stream while the reader is parked in `send` wakes it with a
 /// disconnect error, so the close path terminates the thread as before (it now
 /// terminates in strictly more cases than the unbounded version did).
+#[cfg(not(target_arch = "wasm32"))]
 fn spawn_body_reader(mut reader: Box<dyn Read + Send>) -> u64 {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(BODY_QUEUE_CHUNKS);
     std::thread::spawn(move || {
@@ -514,6 +539,7 @@ fn has_whole_char(buf: &[u8]) -> bool {
 
 /// Streams the file at `file_path` as the request body without buffering it.
 /// Returns `(status, response_body)`.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn http_upload(
     method: &str,
     url: &str,

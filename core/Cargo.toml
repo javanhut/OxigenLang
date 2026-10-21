@@ -20,7 +20,6 @@ jit = [
 
 [dependencies]
 toml = "1.1.2"
-ureq = "3"
 regex = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 base64 = "0.23"
@@ -32,6 +31,11 @@ urlencoding = "2"
 # Diagnostics render to JSON for `oxigen check` / the LSP; the renderer lives
 # here so every stage shares one implementation.
 serde_json = "1.0.150"
+
+# Not on wasm32: rustls's `ring` cannot target wasm32-unknown-unknown, so the
+# browser build has no HTTP client (see `netres::NO_HTTP`).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

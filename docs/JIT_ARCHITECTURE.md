@@ -1,12 +1,13 @@
 # OxigenLang JIT Architecture
 
-> **Status: experimental.** The baseline JIT is off by default. It's
-> feature-gated and ships as an opt-in build. As of the self-recursion
-> direct-call and specialized-entry work, it now **beats CPython 3.14 on
-> every bench in the suite** at `example/bench_*.oxi` (4.6×–19.8×,
-> including the formerly-trailing recursion and struct-method cases). It
-> stays labelled experimental pending broader real-world hardening, not
-> because any suite bench is behind. See [Benchmark status](#benchmark-status).
+> **Status: on by default.** The baseline JIT is compiled into the
+> standard build and tiers hot functions up to native code
+> automatically. As of the self-recursion direct-call and
+> specialized-entry work, it **beats CPython 3.14 on every bench in the
+> suite** at `example/bench_*.oxi`, including the formerly-trailing
+> recursion and struct-method cases. It is still labelled experimental
+> pending broader real-world hardening, not because any suite bench is
+> behind. See [Benchmark status](#benchmark-status).
 
 This document covers:
 
@@ -58,20 +59,21 @@ beats `opt_level=none` on every loop bench in the suite.
 
 ### Build with the `jit` feature
 
-The `jit` feature is off by default because Cranelift pulls in a heavy
-dependency tree. To enable:
+The `jit` feature is on by default, so a plain build has the JIT.
+Cranelift pulls in a heavy dependency tree; to leave it out, build
+without default features:
 
 ```bash
-# Cargo (dev)
-cargo build --release --features jit -p oxigen
-cargo run --release --features jit -p oxigen -- --jit path/to/script.oxi
+# Cargo (dev): JIT included
+cargo build --release -p oxigen
+cargo run --release -p oxigen -- --jit path/to/script.oxi
 
-# Makefile install
-make build-with-jit
-sudo make install-with-jit
+# Interpreter only, no Cranelift
+cargo build --release --no-default-features -p oxigen
 
-# Test with the JIT
-cargo test --release --features jit
+# Install
+sudo imlazy install           # JIT included
+sudo imlazy install-no-jit    # interpreter only
 ```
 
 The feature lives on two crates. `oxigen-core` owns the JIT module
@@ -81,12 +83,12 @@ feature flag and surfaces the `--jit` / `--no-jit` CLI switches:
 ```toml
 # crates/oxigen-cli/Cargo.toml
 [features]
-default = []
+default = ["jit"]
 jit = ["oxigen-core/jit"]
 
 # core/Cargo.toml
 [features]
-default = []
+default = ["jit"]
 jit = [
     "dep:cranelift-jit",
     "dep:cranelift-module",
@@ -96,9 +98,9 @@ jit = [
 ]
 ```
 
-Without `--features jit` the binary still builds and runs — the `--jit`
-flag is just unrecognized and the JIT engine is a ZST stub that always
-takes the interpreter path.
+Without the feature (`--no-default-features`) the binary still builds
+and runs — the `--jit` flag has no effect and the JIT engine is a ZST
+stub that always takes the interpreter path.
 
 ### Verify
 

@@ -1,0 +1,17 @@
+[package]
+name = "oxigen-playground"
+version = "0.1.4"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "OxigenLang compiled to WebAssembly for the playground on oxigenlang.com"
+publish = false
+
+[lib]
+# cdylib is the browser's module; rlib lets the website generator check the
+# documentation's examples through the same sandboxed run.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# No JIT: Cranelift emits native code, which a browser cannot run.
+oxigen-core = { path = "../../core", default-features = false }
+serde_json = "1.0.150"
