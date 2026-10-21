@@ -30,6 +30,9 @@ jobs:
   build:
     name: Build the website
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: read
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -45,8 +48,18 @@ jobs:
           wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int
           --enable-sign-ext --enable-mutable-globals --enable-multivalue
           --enable-reference-types "$WASM" -o "${WASM%.wasm}.opt.wasm"
+      # Where Pages serves the site: "/OxigenLang" at javanhut.github.io until
+      # the custom domain is set, then "" at oxigenlang.com. Pull requests only
+      # check the build, so they skip this and build for the root.
+      - name: Find the Pages base path
+        id: pages
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v5
       - name: Build the site
-        run: cargo run --release -p oxigen-site -- --wasm "${WASM%.wasm}.opt.wasm"
+        run: >-
+          cargo run --release -p oxigen-site --
+          --wasm "${WASM%.wasm}.opt.wasm"
+          --base "${{ steps.pages.outputs.base_path }}"
         env:
           # Reading the latest release from the GitHub API, without its anonymous rate limit.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

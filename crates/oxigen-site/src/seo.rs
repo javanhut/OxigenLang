@@ -238,14 +238,14 @@ pub fn manifest() -> String {
         "name": "OxigenLang",
         "short_name": "Oxigen",
         "description": "The OxigenLang programming language: documentation and playground.",
-        "start_url": "/",
+        "start_url": "./",
         "display": "standalone",
         "background_color": "#f3efe6",
         "theme_color": "#16140f",
         "icons": [
-            { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
-            { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
-            { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }
+            { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+            { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+            { "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml" }
         ]
     })
     .to_string()

@@ -40,3 +40,44 @@ pub fn fingerprint(bytes: &[u8]) -> String {
     }
     format!("{:08x}", hash as u32)
 }
+
+/// Put `base` in front of the root-relative URLs in `html`'s attributes, for
+/// a site served below the root of its host: a GitHub project page lives at
+/// `user.github.io/Repo/`, so `/docs/` must become `/Repo/docs/`. Protocol-
+/// relative `//host` URLs and text are left alone; an empty `base` changes
+/// nothing.
+pub fn rebase(html: &str, base: &str) -> String {
+    if base.is_empty() {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len() + html.len() / 16);
+    let mut rest = html;
+    while let Some(at) = rest.find("=\"/") {
+        let (before, after) = rest.split_at(at + 2);
+        out.push_str(before);
+        let attribute = ["href", "src", "content", "action"]
+            .iter()
+            .any(|a| before.ends_with(&format!("{a}=\"")));
+        if attribute && !after.starts_with("//") {
+            out.push_str(base);
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rebase;
+
+    #[test]
+    fn rebases_root_relative_attributes_only() {
+        let html = r##"<a href="/docs/">d</a><img src="/x.png"><meta name="m" content="/a.js"><a href="//cdn.example">c</a><a href="https://x/y">e</a><a href="#top">t</a><p data-x="/keep">/text</p>"##;
+        assert_eq!(
+            rebase(html, "/Repo"),
+            r##"<a href="/Repo/docs/">d</a><img src="/Repo/x.png"><meta name="m" content="/Repo/a.js"><a href="//cdn.example">c</a><a href="https://x/y">e</a><a href="#top">t</a><p data-x="/keep">/text</p>"##
+        );
+        assert_eq!(rebase(html, ""), html);
+    }
+}

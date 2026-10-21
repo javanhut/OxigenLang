@@ -9,6 +9,8 @@ const store = {
   set: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
 };
 const runnerUrl = document.querySelector('meta[name="oxigen-runner"]')?.content;
+// The path the site is served under ("/OxigenLang" on a GitHub project page).
+const BASE = document.documentElement.dataset.base || "";
 const runner = () => import(runnerUrl);
 
 // ── Theme ──
@@ -185,7 +187,7 @@ let index;
 let selected = 0;
 
 async function loadIndex() {
-  index ??= fetch("/search.json").then((r) => r.json()).then((entries) =>
+  index ??= fetch(`${BASE}/search.json`).then((r) => r.json()).then((entries) =>
     entries.map((e) => ({ ...e, lt: e.t.toLowerCase(), lp: e.p.toLowerCase(), lx: e.x.toLowerCase() })),
   );
   return index;
@@ -234,7 +236,7 @@ async function search() {
   selected = 0;
   results.innerHTML = scored.length
     ? scored.slice(0, 12).map(([, e], i) =>
-        `<li aria-selected="${i === 0}"><a href="${e.u}"><small>${escapeHtml(e.p)}</small>${mark(e.t, terms)}<span>${escapeHtml(e.x)}</span></a></li>`).join("")
+        `<li aria-selected="${i === 0}"><a href="${BASE}${e.u}"><small>${escapeHtml(e.p)}</small>${mark(e.t, terms)}<span>${escapeHtml(e.x)}</span></a></li>`).join("")
     : `<li class="search-empty">No results for “${escapeHtml(input.value)}”.</li>`;
 }
 
@@ -319,7 +321,7 @@ if (detectBox) {
     if (os === "ios" || os === "android" || !os) {
       name.textContent = os === "ios" ? "iPhone or iPad" : os === "android" ? "Android" : "Unknown";
       label.textContent = "Open the playground";
-      link.href = "/playground/";
+      link.href = `${BASE}/playground/`;
       note.textContent = "Oxigen installs on Linux and macOS. On this device, the playground runs it in the browser.";
       return;
     }

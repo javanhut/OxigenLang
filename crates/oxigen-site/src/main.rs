@@ -1,13 +1,15 @@
 //! Builds oxigenlang.com into a directory of static files.
 //!
-//!     oxigen-site [--out DIR] [--wasm FILE] [--offline]
+//!     oxigen-site [--out DIR] [--wasm FILE] [--base PATH] [--offline]
 //!
 //! Run from the repository root (`imlazy site` does). The documentation comes
 //! from docs/, the hand-written pages, examples, styles and scripts from
 //! website/, the benchmark figures from benchmark_reports/, and the
 //! playground's interpreter from the WebAssembly build (`imlazy wasm`), and the
 //! download page's files from the latest GitHub release (`--offline` skips
-//! that, and the page then links to the releases list instead).
+//! that, and the page then links to the releases list instead). `--base` is
+//! the path the site is served under: `/OxigenLang` on a GitHub project page,
+//! nothing at the root of a domain.
 
 mod bench;
 mod config;
@@ -30,19 +32,27 @@ fn main() {
     let mut out = PathBuf::from("target/site");
     let mut wasm = PathBuf::from(DEFAULT_WASM);
     let mut offline = false;
+    let mut base = String::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--out" => out = args.next().map(PathBuf::from).unwrap_or_else(|| usage()),
             "--wasm" => wasm = args.next().map(PathBuf::from).unwrap_or_else(|| usage()),
             "--offline" => offline = true,
+            "--base" => {
+                base = args
+                    .next()
+                    .unwrap_or_else(|| usage())
+                    .trim_end_matches('/')
+                    .to_string()
+            }
             _ => usage(),
         }
     }
     // Docs examples run in-process; give the interpreter the stack the CLI gives it.
     let build = std::thread::Builder::new()
         .stack_size(256 << 20)
-        .spawn(move || build(&out, &wasm, offline))
+        .spawn(move || build(&out, &wasm, &base, offline))
         .expect("spawn build thread");
     match build.join() {
         Ok(Ok(())) => {}
@@ -55,7 +65,7 @@ fn main() {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: oxigen-site [--out DIR] [--wasm FILE] [--offline]");
+    eprintln!("usage: oxigen-site [--out DIR] [--wasm FILE] [--base PATH] [--offline]");
     std::process::exit(2);
 }
 
@@ -73,16 +83,16 @@ fn write(out: &Path, path: &str, contents: impl AsRef<[u8]>) -> Result<(), Strin
 }
 
 /// `/docs/x/` is written as `/docs/x/index.html`.
-fn write_page(out: &Path, path: &str, html: &str) -> Result<(), String> {
+fn write_page(out: &Path, base: &str, path: &str, html: &str) -> Result<(), String> {
     let file = if path.ends_with('/') {
         format!("{path}index.html")
     } else {
         path.to_string()
     };
-    write(out, &file, html)
+    write(out, &file, html::rebase(html, base))
 }
 
-fn build(out: &Path, wasm: &Path, offline: bool) -> Result<(), String> {
+fn build(out: &Path, wasm: &Path, base: &str, offline: bool) -> Result<(), String> {
     let config = Config::load(Path::new("website/site.toml"))?;
     let latest = if offline {
         None
@@ -126,6 +136,7 @@ fn build(out: &Path, wasm: &Path, offline: bool) -> Result<(), String> {
     let assets = Assets {
         css: print("site.css"),
         js: print("site.js"),
+        base: base.to_string(),
         version: latest
             .as_ref()
             .map_or(env!("CARGO_PKG_VERSION").to_string(), |r| r.version.clone()),
@@ -204,6 +215,7 @@ fn build(out: &Path, wasm: &Path, offline: bool) -> Result<(), String> {
         };
         write_page(
             out,
+            base,
             &doc.url,
             &layout::render(&config, &assets, &page, year),
         )?;
@@ -253,6 +265,7 @@ fn build(out: &Path, wasm: &Path, offline: bool) -> Result<(), String> {
         }
         write_page(
             out,
+            base,
             &page.path,
             &layout::render(&config, &assets, &page, year),
         )?;

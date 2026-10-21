@@ -61,19 +61,11 @@ and deploys `main` to GitHub Pages. Once, on GitHub:
 2. **Settings → Pages → Custom domain: `oxigenlang.com`**, then tick
    **Enforce HTTPS** once the certificate is issued.
 
-At the registrar for **oxigenlang.com**:
-
-| Type | Name | Value |
-|---|---|---|
-| A | `@` | 185.199.108.153 |
-| A | `@` | 185.199.109.153 |
-| A | `@` | 185.199.110.153 |
-| A | `@` | 185.199.111.153 |
-| AAAA | `@` | 2606:50c0:8000::153 |
-| AAAA | `@` | 2606:50c0:8001::153 |
-| AAAA | `@` | 2606:50c0:8002::153 |
-| AAAA | `@` | 2606:50c0:8003::153 |
-| CNAME | `www` | `javanhut.github.io` |
+At the registrar for **oxigenlang.com**, point the apex domain and `www` at
+GitHub Pages as GitHub's
+[Managing a custom domain for your GitHub Pages site](https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/managing-a-custom-domain-for-your-github-pages-site)
+describes. Its record values are the current ones; GitHub has changed them
+before.
 
 For **oxigenlang.org**, set up a **permanent (301) URL forward** at its
 registrar to `https://oxigenlang.com`, keeping the path. A second copy of the

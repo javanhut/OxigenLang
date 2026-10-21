@@ -10,6 +10,10 @@ pub struct Assets {
     pub js: String,
     /// The released version, which the structured data names.
     pub version: String,
+    /// The path the site is served under, such as `/OxigenLang`; empty at a
+    /// domain's root. The scripts read it from `<html data-base>`, which
+    /// `html::rebase` leaves alone.
+    pub base: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -65,6 +69,7 @@ pub fn render(config: &Config, assets: &Assets, page: &Page, year: i32) -> Strin
     let head = &page.head;
     let class = page.class;
     let css = &assets.css;
+    let base = escape(&assets.base);
     let js = &assets.js;
     let article_meta = if page.article {
         format!(
@@ -76,7 +81,7 @@ pub fn render(config: &Config, assets: &Assets, page: &Page, year: i32) -> Strin
     };
     format!(
         r##"<!doctype html>
-<html lang="en">
+<html lang="en" data-base="{base}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

@@ -137,5 +137,6 @@ export async function decodeSource(encoded) {
 }
 
 export async function playgroundUrl(source) {
-  return `/playground/#code=${await encodeSource(source)}`;
+  const base = document.documentElement.dataset.base || "";
+  return `${base}/playground/#code=${await encodeSource(source)}`;
 }
