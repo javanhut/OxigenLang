@@ -69,7 +69,10 @@ impl<'a> Renderer<'a> {
     pub fn new(config: &'a Config, docs: &[Doc]) -> Self {
         Renderer {
             config,
-            urls: docs.iter().map(|d| (d.file.clone(), d.url.clone())).collect(),
+            urls: docs
+                .iter()
+                .map(|d| (d.file.clone(), d.url.clone()))
+                .collect(),
             runnable: RefCell::new(HashMap::new()),
             stats: RefCell::new(Stats::default()),
         }
@@ -84,7 +87,12 @@ impl<'a> Renderer<'a> {
         let mut heading: Option<(HeadingLevel, Vec<Event>)> = None;
         let mut code: Option<(String, String)> = None;
         // The search entry being filled: the text under the latest heading.
-        let mut entry = SearchEntry { title: doc.heading.clone(), page: doc.title.clone(), url: doc.url.clone(), text: String::new() };
+        let mut entry = SearchEntry {
+            title: doc.heading.clone(),
+            page: doc.title.clone(),
+            url: doc.url.clone(),
+            text: String::new(),
+        };
 
         for event in Parser::new_ext(&doc.source, options()) {
             if let Some((_, inner)) = &mut heading {
@@ -105,12 +113,18 @@ impl<'a> Renderer<'a> {
                     }
                     if n <= 3 {
                         if n > 1 {
-                            push_entry(&mut search, std::mem::replace(&mut entry, SearchEntry {
-                                title: text.clone(),
-                                page: doc.title.clone(),
-                                url: format!("{}#{id}", doc.url),
-                                text: String::new(),
-                            }));
+                            push_entry(
+                                &mut search,
+                                std::mem::replace(
+                                    &mut entry,
+                                    SearchEntry {
+                                        title: text.clone(),
+                                        page: doc.title.clone(),
+                                        url: format!("{}#{id}", doc.url),
+                                        text: String::new(),
+                                    },
+                                ),
+                            );
                         }
                         headings.push(Heading { level: n, id, text });
                     }
@@ -134,7 +148,9 @@ impl<'a> Renderer<'a> {
                 Event::Start(Tag::Heading { level, .. }) => heading = Some((level, Vec::new())),
                 Event::Start(Tag::CodeBlock(kind)) => {
                     let lang = match kind {
-                        CodeBlockKind::Fenced(lang) => lang.split_whitespace().next().unwrap_or("").to_string(),
+                        CodeBlockKind::Fenced(lang) => {
+                            lang.split_whitespace().next().unwrap_or("").to_string()
+                        }
                         CodeBlockKind::Indented => String::new(),
                     };
                     code = Some((lang, String::new()));
@@ -161,17 +177,32 @@ impl<'a> Renderer<'a> {
 
         let mut html = String::new();
         pulldown_cmark::html::push_html(&mut html, out.into_iter());
-        Rendered { html, headings, search }
+        Rendered {
+            html,
+            headings,
+            search,
+        }
     }
 
     /// Point a link at the site: another doc becomes its page, a file
     /// elsewhere in the repository its GitHub page.
     fn link<'e>(&self, from: &str, event: Event<'e>) -> Event<'e> {
-        let Event::Start(Tag::Link { link_type, dest_url, title, id }) = event else {
+        let Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) = event
+        else {
             return event;
         };
         let dest_url = CowStr::from(self.resolve(from, &dest_url));
-        Event::Start(Tag::Link { link_type, dest_url, title, id })
+        Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        })
     }
 
     pub fn abs(&self, path: &str) -> String {
@@ -179,7 +210,11 @@ impl<'a> Renderer<'a> {
     }
 
     pub fn resolve(&self, from: &str, dest: &str) -> String {
-        if dest.starts_with('#') || dest.contains("://") || dest.starts_with("mailto:") || dest.starts_with('/') {
+        if dest.starts_with('#')
+            || dest.contains("://")
+            || dest.starts_with("mailto:")
+            || dest.starts_with('/')
+        {
             return dest.to_string();
         }
         let (path, anchor) = match dest.split_once('#') {
@@ -188,7 +223,12 @@ impl<'a> Renderer<'a> {
         };
         // Resolve against the linking doc's directory, inside the repository.
         let mut parts: Vec<&str> = std::iter::once("docs")
-            .chain(from.rsplit_once('/').map(|(dir, _)| dir).into_iter().flat_map(|d| d.split('/')))
+            .chain(
+                from.rsplit_once('/')
+                    .map(|(dir, _)| dir)
+                    .into_iter()
+                    .flat_map(|d| d.split('/')),
+            )
             .collect();
         for segment in path.split('/') {
             match segment {
@@ -222,7 +262,10 @@ impl<'a> Renderer<'a> {
                 crate::html::oxi_block(text, runnable)
             }
             "" | "text" | "output" => {
-                format!("<div class=\"code code-plain\"><pre><code>{}</code></pre></div>\n", escape(text))
+                format!(
+                    "<div class=\"code code-plain\"><pre><code>{}</code></pre></div>\n",
+                    escape(text)
+                )
             }
             lang => format!(
                 "<div class=\"code\" data-lang=\"{lang}\"><div class=\"code-bar\"><span class=\"code-lang\">{lang}</span><button class=\"btn-copy\" type=\"button\">Copy</button></div><pre><code class=\"language-{lang}\">{}</code></pre></div>\n",
@@ -246,14 +289,20 @@ impl<'a> Renderer<'a> {
         let outcome = std::panic::catch_unwind(|| oxigen_playground::run(code, SNIPPET_BUDGET));
         std::panic::set_hook(hook);
         oxigen_core::output::set_sink(None);
-        let runnable = matches!(outcome, Ok(Outcome::Finished)) && !printed.borrow().trim().is_empty();
-        self.runnable.borrow_mut().insert(code.to_string(), runnable);
+        let runnable =
+            matches!(outcome, Ok(Outcome::Finished)) && !printed.borrow().trim().is_empty();
+        self.runnable
+            .borrow_mut()
+            .insert(code.to_string(), runnable);
         runnable
     }
 }
 
 fn options() -> Options {
-    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_FOOTNOTES | Options::ENABLE_TASKLISTS
+    Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_TASKLISTS
 }
 
 fn push_entry(search: &mut Vec<SearchEntry>, mut entry: SearchEntry) {
@@ -287,7 +336,11 @@ pub fn github_slug(text: &str) -> String {
 
 fn unique(ids: &mut HashMap<String, usize>, slug: String) -> String {
     let count = ids.entry(slug.clone()).or_insert(0);
-    let id = if *count == 0 { slug.clone() } else { format!("{slug}-{count}") };
+    let id = if *count == 0 {
+        slug.clone()
+    } else {
+        format!("{slug}-{count}")
+    };
     *count += 1;
     id
 }
@@ -326,7 +379,10 @@ pub fn first_heading(source: &str) -> Option<String> {
     let mut text = String::new();
     for event in Parser::new_ext(source, options()) {
         match event {
-            Event::Start(Tag::Heading { level: HeadingLevel::H1, .. }) => inside = true,
+            Event::Start(Tag::Heading {
+                level: HeadingLevel::H1,
+                ..
+            }) => inside = true,
             Event::End(TagEnd::Heading(HeadingLevel::H1)) => return Some(text),
             Event::Text(t) | Event::Code(t) if inside => text.push_str(&t),
             _ => {}
@@ -342,8 +398,14 @@ mod tests {
     #[test]
     fn slugs_match_github() {
         assert_eq!(github_slug("sin(x), cos(x), tan(x)"), "sinx-cosx-tanx");
-        assert_eq!(github_slug("stream_get, stream_post, stream_put, stream_patch"), "stream_get-stream_post-stream_put-stream_patch");
-        assert_eq!(github_slug("read_chunk(stream, max, timeout_ms)"), "read_chunkstream-max-timeout_ms");
+        assert_eq!(
+            github_slug("stream_get, stream_post, stream_put, stream_patch"),
+            "stream_get-stream_post-stream_put-stream_patch"
+        );
+        assert_eq!(
+            github_slug("read_chunk(stream, max, timeout_ms)"),
+            "read_chunkstream-max-timeout_ms"
+        );
         assert_eq!(github_slug("Safety invariants"), "safety-invariants");
     }
 

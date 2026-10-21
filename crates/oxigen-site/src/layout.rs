@@ -8,6 +8,8 @@ use serde_json::Value;
 pub struct Assets {
     pub css: String,
     pub js: String,
+    /// The released version, which the structured data names.
+    pub version: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -16,6 +18,7 @@ pub enum Nav {
     Docs,
     Stdlib,
     Playground,
+    Download,
     Benchmarks,
     About,
     None,
@@ -43,12 +46,18 @@ pub fn render(config: &Config, assets: &Assets, page: &Page, year: i32) -> Strin
     let title = escape(&page.title);
     let description = escape(&page.description);
     let author = escape(&config.author.name);
-    let mut graph = crate::seo::site_graph(config);
+    let mut graph = crate::seo::site_graph(config, &assets.version);
     graph.extend(page.json_ld.iter().cloned());
-    let json_ld = serde_json::json!({ "@context": "https://schema.org", "@graph": graph }).to_string().replace("</", "<\\/");
+    let json_ld = serde_json::json!({ "@context": "https://schema.org", "@graph": graph })
+        .to_string()
+        .replace("</", "<\\/");
     let og_type = if page.article { "article" } else { "website" };
     // The 404 page is served for every missing URL; it must not be indexed as one.
-    let robots = if page.path == "/404.html" { "noindex, follow" } else { "index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" };
+    let robots = if page.path == "/404.html" {
+        "noindex, follow"
+    } else {
+        "index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1"
+    };
     let og_image = config.abs("/og.png");
     let nav = nav(page.nav);
     let repo = &config.repo;
@@ -58,7 +67,10 @@ pub fn render(config: &Config, assets: &Assets, page: &Page, year: i32) -> Strin
     let css = &assets.css;
     let js = &assets.js;
     let article_meta = if page.article {
-        format!("\n<meta property=\"article:author\" content=\"{}\">", escape(&config.author.url))
+        format!(
+            "\n<meta property=\"article:author\" content=\"{}\">",
+            escape(&config.author.url)
+        )
     } else {
         String::new()
     };
@@ -134,7 +146,7 @@ pub fn render(config: &Config, assets: &Assets, page: &Page, year: i32) -> Strin
     </div>
     <div class="footer-cols">
       <div><h2>Learn</h2><a href="/docs/getting-started/">Getting started</a><a href="/docs/syntax/">Syntax reference</a><a href="/docs/">Documentation</a><a href="/docs/stdlib/">Standard library</a></div>
-      <div><h2>Try</h2><a href="/playground/">Playground</a><a href="/benchmarks/">Benchmarks</a><a href="/docs/embedding/">Embedding</a></div>
+      <div><h2>Try</h2><a href="/download/">Download</a><a href="/playground/">Playground</a><a href="/benchmarks/">Benchmarks</a><a href="/docs/embedding/">Embedding</a></div>
       <div><h2>Project</h2><a href="/about/">About</a><a href="{repo}" rel="noopener">GitHub</a><a href="{repo}/issues" rel="noopener">Issues</a><a href="/llms.txt">llms.txt</a></div>
     </div>
   </div>
@@ -160,13 +172,18 @@ fn nav(active: Nav) -> String {
         (Nav::Docs, "/docs/", "Docs"),
         (Nav::Stdlib, "/docs/stdlib/", "Library"),
         (Nav::Playground, "/playground/", "Playground"),
+        (Nav::Download, "/download/", "Download"),
         (Nav::Benchmarks, "/benchmarks/", "Benchmarks"),
         (Nav::About, "/about/", "About"),
     ];
     items
         .iter()
         .map(|(nav, href, label)| {
-            let current = if *nav == active { " aria-current=\"page\"" } else { "" };
+            let current = if *nav == active {
+                " aria-current=\"page\""
+            } else {
+                ""
+            };
             format!("<a href=\"{href}\"{current}>{label}</a>")
         })
         .collect()

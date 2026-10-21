@@ -18,3 +18,5 @@ oxigen-playground = { path = "../oxigen-playground" }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 serde_json = "1.0.150"
 toml = "1.1.2"
+# Reads the latest GitHub release for the download page (see src/release.rs).
+ureq = "3"

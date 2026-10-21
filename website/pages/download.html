@@ -1,0 +1,88 @@
++++
+title = "Download OxigenLang for Linux and macOS"
+description = "Install OxigenLang with one command, or download a prebuilt release for Linux or macOS on x86-64 and ARM64. Static Linux builds, SHA-256 checksums, Docker and source."
+path = "/download/"
+nav = "download"
+class = "page-download"
++++
+<header class="page-head">
+  <div class="wrap">
+    <h1>Download Oxigen</h1>
+    <p class="intro">{{release_summary}} Prebuilt for Linux and macOS, on x86-64 and ARM64. The Linux builds are static, so they run on any distribution.</p>
+  </div>
+</header>
+
+<section class="wrap install-split">
+  <div class="install-main">
+    <h2>One command</h2>
+    <p>Paste this into a terminal. It works out your system, downloads the matching build, checks its SHA-256 against the one GitHub published, and installs it.</p>
+    <div class="code"><div class="code-bar"><span class="code-lang">shell</span><button class="btn-copy" type="button">Copy</button></div><pre><code>{{install_command}}</code></pre></div>
+    <p class="fine">It installs to <code>~/.local</code>, or to <code>/usr/local</code> when run as root, and tells you if that isn't on your <code>PATH</code>. <a href="/install.sh">Read the script</a> before you run it; it's short.</p>
+    <details class="options">
+      <summary>Choose a version or a location, or uninstall</summary>
+      <div class="code"><div class="code-bar"><span class="code-lang">shell</span><button class="btn-copy" type="button">Copy</button></div><pre><code># a specific version
+curl -fsSL https://oxigenlang.com/install.sh | sh -s -- --version {{version}}
+
+# somewhere else
+curl -fsSL https://oxigenlang.com/install.sh | sh -s -- --prefix /opt/oxigen
+
+# remove it again
+curl -fsSL https://oxigenlang.com/install.sh | sh -s -- --uninstall</code></pre></div>
+    </details>
+  </div>
+
+  <aside class="detected" data-detect aria-live="polite">
+    <p class="detected-label">Your system</p>
+    <p class="detected-name" data-detect-name>Linux or macOS</p>
+    <a class="btn btn-solid" href="{{release_url}}" data-detect-link><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1v9m0 0L4.5 6.5M8 10l3.5-3.5M2 13h12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span data-detect-label>See all downloads</span></a>
+    <p class="detected-note" data-detect-note>The command on the left picks the right build for you.</p>
+  </aside>
+</section>
+
+<section class="section tight" id="files">
+  <div class="wrap">
+    <h2>All downloads</h2>
+    <p class="intro">Each archive holds the <code>oxigen</code> binary with its standard library in <code>stdlib/</code> beside it. Unpack it anywhere and run it.</p>
+    {{downloads_table}}
+    <p class="fine">Older versions are on <a href="{{repo}}/releases" rel="noopener">GitHub releases</a>.</p>
+  </div>
+</section>
+
+<section class="section tint">
+  <div class="wrap ways">
+    <div>
+      <h3>By hand</h3>
+      <p>Unpack the archive and put it on your <code>PATH</code>. Keep <code>stdlib/</code> next to the binary.</p>
+      <div class="code"><div class="code-bar"><span class="code-lang">shell</span><button class="btn-copy" type="button">Copy</button></div><pre><code>tar -xzf oxigen_lang_*.tar.gz
+cd oxigen_lang_*/
+./oxigen --version</code></pre></div>
+      <p class="fine">On a Mac, a file downloaded in a browser is quarantined. If macOS refuses to open it, run <code>xattr -d com.apple.quarantine oxigen</code>, or use the one-line installer, which doesn't have the problem.</p>
+    </div>
+    <div>
+      <h3>Docker</h3>
+      <p>The same static binaries, on Alpine, for x86-64 and ARM64. Mount your code at <code>/work</code>.</p>
+      <div class="code"><div class="code-bar"><span class="code-lang">shell</span><button class="btn-copy" type="button">Copy</button></div><pre><code>docker run --rm -v "$PWD:/work" javanhut/oxigen:{{version}} hello.oxi</code></pre></div>
+    </div>
+    <div>
+      <h3>From source</h3>
+      <p>Any system Rust supports. You get the JIT, the LSP if you want it, and the newest code on <code>main</code>.</p>
+      <div class="code"><div class="code-bar"><span class="code-lang">shell</span><button class="btn-copy" type="button">Copy</button></div><pre><code>git clone {{repo}}.git
+cd OxigenLang
+./scripts/install.sh</code></pre></div>
+      <p class="fine"><a href="/docs/getting-started/">Getting started</a> has the details.</p>
+    </div>
+  </div>
+</section>
+
+<section class="section tight" id="windows">
+  <div class="wrap split">
+    <div class="text">
+      <h2>On Windows</h2>
+      <p>There's no native Windows build yet. Oxigen runs well under WSL: install it with <code>wsl --install</code>, open the Linux terminal it gives you, and run the one-line installer there.</p>
+    </div>
+    <div class="media">
+      <p class="fine">Not near a terminal? The <a href="/playground/">playground</a> runs the real interpreter in your browser, nothing to install.</p>
+    </div>
+  </div>
+</section>
+<script type="application/json" id="downloads">{{downloads_json}}</script>

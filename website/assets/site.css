@@ -338,9 +338,9 @@ code, kbd, pre, textarea { font-family: var(--mono); font-variant-ligatures: non
 .prose blockquote p:last-child { margin-bottom: 0; }
 .prose hr { border: 0; border-top: 1px solid var(--rule); margin: 44px 0; }
 .table-wrap { margin: 24px 0; overflow-x: auto; }
-.prose table, .bench-table { width: 100%; border-collapse: collapse; font-size: 15px; line-height: 1.5; }
-.prose th, .prose td, .bench-table th, .bench-table td { padding: 11px 16px 11px 0; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
-.prose thead th, .bench-table thead th { color: var(--ink); font-weight: 600; font-size: 14px; border-bottom: 1.5px solid var(--ink); }
+.prose table, .bench-table, .downloads { width: 100%; border-collapse: collapse; font-size: 15px; line-height: 1.5; }
+.prose th, .prose td, .bench-table th, .bench-table td, .downloads th, .downloads td { padding: 11px 16px 11px 0; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.prose thead th, .bench-table thead th, .downloads thead th { color: var(--ink); font-weight: 600; font-size: 14px; border-bottom: 1.5px solid var(--ink); }
 .prose td code { white-space: nowrap; }
 
 /* ── Docs layout ──────────────────────────────────────────────────── */
@@ -546,3 +546,41 @@ code, kbd, pre, textarea { font-family: var(--mono); font-variant-ligatures: non
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
 @media print { .site-header, .site-footer, .docs-sidebar, .docs-toc, .pager, .code-actions, .docs-nav-toggle { display: none !important; } .docs-layout { display: block; } }
+
+/* ── Download ─────────────────────────────────────────────────────── */
+
+.install-split { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); column-gap: 24px; padding-bottom: 48px; }
+.install-main { grid-column: 1 / span 7; }
+.install-main h2, .ways h3 { margin: 0; font-size: 24px; letter-spacing: -0.02em; font-weight: 600; }
+.install-main > p { margin: 14px 0 0; font-size: 18px; color: var(--ink-2); }
+.install-main .code pre { font-size: 15px; }
+.fine { color: var(--muted); font-size: 15px; }
+.muted { color: var(--muted); }
+.options { margin-top: 18px; }
+.options summary { cursor: pointer; color: var(--ink-2); font-size: 15.5px; }
+.options summary:hover { color: var(--ink); }
+.detected { grid-column: 9 / span 4; align-self: start; margin-top: 52px; padding: 28px; border-radius: var(--radius); background: var(--band); color: var(--band-ink); }
+.detected-label { margin: 0; font: 12.5px var(--mono); color: var(--band-muted); }
+.detected-name { margin: 8px 0 22px; font-size: 26px; line-height: 1.15; letter-spacing: -0.025em; font-weight: 600; }
+.detected .btn { width: 100%; justify-content: center; height: auto; min-height: 48px; padding: 12px 16px; line-height: 1.3; text-align: center; background: var(--signal); border-color: var(--signal); color: var(--on-signal); }
+.detected .btn:hover { background: var(--band-ink); border-color: var(--band-ink); color: var(--band); }
+.detected .btn svg { flex-shrink: 0; }
+.detected-note { margin: 16px 0 0; font-size: 14.5px; line-height: 1.5; color: var(--band-muted); }
+.downloads td, .downloads th { vertical-align: middle; }
+.downloads tbody th { font-weight: 600; color: var(--ink); white-space: nowrap; }
+.downloads td.num, .downloads th.num { text-align: right; font-family: var(--mono); font-size: 14px; }
+.downloads td a { font-family: var(--mono); font-size: 14px; }
+.downloads .sha { font-size: 13px; color: var(--ink-2); }
+.downloads tr.is-yours th::after { content: "your system"; margin-left: 10px; padding: 2px 7px; border-radius: 3px; background: var(--signal); color: var(--on-signal); font: 11.5px var(--mono); vertical-align: 2px; }
+.btn-copy.mini { margin-left: 8px; padding: 2px 8px; border: 0; border-radius: 3px; background: var(--paper-2); color: var(--ink-2); font: 12px var(--mono); cursor: pointer; }
+.btn-copy.mini:hover { background: var(--paper-3); color: var(--ink); }
+.ways { display: grid; grid-template-columns: 1.1fr 1fr 1fr; gap: 48px; align-items: start; }
+.ways p { color: var(--ink-2); margin: 12px 0 0; }
+.ways .code { margin-top: 18px; }
+.ways .code pre { white-space: pre-wrap; word-break: break-all; }
+.ways .code pre code { white-space: inherit; }
+@media (max-width: 960px) {
+  .install-main, .detected { grid-column: 1 / -1; }
+  .detected { margin-top: 36px; }
+  .ways { grid-template-columns: 1fr; gap: 40px; }
+}

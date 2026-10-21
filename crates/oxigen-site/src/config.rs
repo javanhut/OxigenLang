@@ -38,22 +38,46 @@ pub struct PageRef {
 impl Config {
     pub fn load(path: &Path) -> Result<Config, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let table: Table = text.parse().map_err(|e| format!("{}: {e}", path.display()))?;
-        let author = table.get("author").and_then(Value::as_table).ok_or("site.toml: missing [author]")?;
+        let table: Table = text
+            .parse()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let author = table
+            .get("author")
+            .and_then(Value::as_table)
+            .ok_or("site.toml: missing [author]")?;
         let mut sections = Vec::new();
-        for section in table.get("section").and_then(Value::as_array).ok_or("site.toml: no [[section]]")? {
-            let section = section.as_table().ok_or("site.toml: [[section]] is not a table")?;
+        for section in table
+            .get("section")
+            .and_then(Value::as_array)
+            .ok_or("site.toml: no [[section]]")?
+        {
+            let section = section
+                .as_table()
+                .ok_or("site.toml: [[section]] is not a table")?;
             let mut pages = Vec::new();
-            for page in section.get("pages").and_then(Value::as_array).ok_or("site.toml: section without pages")? {
+            for page in section
+                .get("pages")
+                .and_then(Value::as_array)
+                .ok_or("site.toml: section without pages")?
+            {
                 let page = page.as_table().ok_or("site.toml: a page is not a table")?;
                 pages.push(PageRef {
                     file: string(page, "file")?,
                     slug: string(page, "slug")?,
-                    title: page.get("title").and_then(Value::as_str).map(str::to_string),
-                    description: page.get("description").and_then(Value::as_str).map(str::to_string),
+                    title: page
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    description: page
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                 });
             }
-            sections.push(Section { title: string(section, "title")?, pages });
+            sections.push(Section {
+                title: string(section, "title")?,
+                pages,
+            });
         }
         Ok(Config {
             url: string(&table, "url")?.trim_end_matches('/').to_string(),
@@ -64,11 +88,20 @@ impl Config {
             author: Author {
                 name: string(author, "name")?,
                 url: string(author, "url")?,
-                photo: author.get("photo").and_then(Value::as_str).filter(|p| !p.is_empty()).map(str::to_string),
+                photo: author
+                    .get("photo")
+                    .and_then(Value::as_str)
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string),
                 same_as: author
                     .get("same_as")
                     .and_then(Value::as_array)
-                    .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
                     .unwrap_or_default(),
             },
             sections,
@@ -82,8 +115,17 @@ impl Config {
 
     /// The repository URL of `path`, relative to the repository root.
     pub fn blob(&self, path: &str) -> String {
-        let kind = if path.ends_with('/') || !path.rsplit('/').next().unwrap_or("").contains('.') { "tree" } else { "blob" };
-        format!("{}/{kind}/{}/{}", self.repo, self.branch, path.trim_end_matches('/'))
+        let kind = if path.ends_with('/') || !path.rsplit('/').next().unwrap_or("").contains('.') {
+            "tree"
+        } else {
+            "blob"
+        };
+        format!(
+            "{}/{kind}/{}/{}",
+            self.repo,
+            self.branch,
+            path.trim_end_matches('/')
+        )
     }
 }
 

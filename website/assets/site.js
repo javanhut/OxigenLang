@@ -264,3 +264,77 @@ if (dialog) {
   });
   results.addEventListener("click", (e) => e.target.closest("a") && closeSearch());
 }
+
+// ── Download page: suggest the build for this machine ──
+// The installer works the platform out exactly; this is the browser's best
+// guess, for people who would rather download the archive themselves.
+async function detectPlatform() {
+  const ua = navigator.userAgent;
+  let os = null;
+  if (/Windows/.test(ua)) os = "windows";
+  else if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) os = "ios";
+  else if (/Android/.test(ua)) os = "android";
+  else if (/Macintosh|Mac OS X/.test(ua)) os = "macos";
+  else if (/Linux|X11|CrOS/.test(ua)) os = "linux";
+
+  let arch = null;
+  try {
+    // Chromium browsers say outright, when asked.
+    const hints = await navigator.userAgentData?.getHighEntropyValues(["architecture", "bitness"]);
+    if (hints?.architecture === "arm") arch = "arm64";
+    else if (hints?.architecture === "x86" && hints.bitness !== "32") arch = "x86";
+  } catch {}
+  if (!arch && os === "linux") {
+    if (/aarch64|arm64/i.test(ua)) arch = "arm64";
+    else if (/x86_64|amd64/i.test(ua)) arch = "x86";
+  }
+  if (!arch && os === "macos") {
+    // Safari and Firefox call every Mac "Intel"; the GPU's name tells.
+    try {
+      const gl = document.createElement("canvas").getContext("webgl");
+      const info = gl?.getExtension("WEBGL_debug_renderer_info");
+      const gpu = info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : "";
+      if (/Apple (M\d|GPU)/i.test(gpu)) arch = "arm64";
+      else if (/Intel|AMD|Radeon|NVIDIA/i.test(gpu)) arch = "x86";
+    } catch {}
+  }
+  return { os, arch };
+}
+
+const detectBox = $("[data-detect]");
+if (detectBox) {
+  const files = JSON.parse($("#downloads")?.textContent || "[]");
+  const name = $("[data-detect-name]", detectBox);
+  const link = $("[data-detect-link]", detectBox);
+  const label = $("[data-detect-label]", detectBox);
+  const note = $("[data-detect-note]", detectBox);
+  detectPlatform().then(({ os, arch }) => {
+    if (os === "windows") {
+      name.textContent = "Windows";
+      label.textContent = "Install WSL";
+      link.href = "https://learn.microsoft.com/windows/wsl/install";
+      note.textContent = "No native Windows build yet. Run the one-line installer inside WSL.";
+      return;
+    }
+    if (os === "ios" || os === "android" || !os) {
+      name.textContent = os === "ios" ? "iPhone or iPad" : os === "android" ? "Android" : "Unknown";
+      label.textContent = "Open the playground";
+      link.href = "/playground/";
+      note.textContent = "Oxigen installs on Linux and macOS. On this device, the playground runs it in the browser.";
+      return;
+    }
+    // A Mac we couldn't read is most likely Apple silicon: every Mac since 2020.
+    const guess = arch ?? (os === "macos" ? "arm64" : "x86");
+    const file = files.find((f) => f.platform === `${os}_${guess}`);
+    if (!file) return;
+    name.textContent = `${file.os} on ${file.cpu}`;
+    label.textContent = `Download for ${file.os} (${file.cpu}) · ${file.size}`;
+    link.href = file.url;
+    link.setAttribute("download", "");
+    const other = files.find((f) => f.platform.startsWith(os) && f !== file);
+    note.textContent = arch
+      ? `Or use the one-line installer, which does this for you.`
+      : `Your browser didn't say which CPU this is. If that's wrong, get the ${other ? other.cpu : "other"} build below, or use the one-line installer, which checks.`;
+    $$(`tr[data-platform="${file.platform}"]`).forEach((row) => row.classList.add("is-yours"));
+  });
+}

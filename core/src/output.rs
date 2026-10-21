@@ -33,6 +33,8 @@ pub fn write(text: &str) {
     });
     if !sent {
         // `print` has no trailing newline, so flush or streaming output never appears.
+        // A closed stdout (`oxigen x.oxi | head`) is not the script's error; it
+        // was ignored the same way before output moved here from builtins.rs.
         let mut out = std::io::stdout().lock();
         let _ = out.write_all(text.as_bytes());
         let _ = out.flush();

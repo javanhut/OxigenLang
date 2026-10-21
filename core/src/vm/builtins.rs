@@ -1819,6 +1819,7 @@ thread_local! {
 fn xorshift64(state: u64) -> u64 {
     let mut s = if state == 0 {
         // Auto-seed from time
+        // A clock before 1970 still seeds (with 1); this used to panic instead.
         crate::clock::since_epoch().unwrap_or_default().as_nanos() as u64 | 1
     } else {
         state
@@ -2648,7 +2649,12 @@ fn http_request(_: &str, _: &str, _: &[(String, String)], _: Option<&str>) -> Va
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn http_request(method: &str, url: &str, headers: &[(String, String)], body: Option<&str>) -> Value {
+fn http_request(
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: Option<&str>,
+) -> Value {
     macro_rules! apply_headers {
         ($req:expr) => {{
             let mut r = $req;

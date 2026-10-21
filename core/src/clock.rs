@@ -14,6 +14,7 @@ static HOST_CLOCK: std::sync::OnceLock<fn() -> f64> = std::sync::OnceLock::new()
 /// first call has an effect.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub fn set_host_clock(now_ms: fn() -> f64) {
+    // Losing to an earlier call is the documented behaviour: one clock per process.
     let _ = HOST_CLOCK.set(now_ms);
 }
 
@@ -46,6 +47,8 @@ pub fn monotonic_nanos() -> i64 {
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub fn monotonic_nanos() -> i64 {
     use std::cell::Cell;
+    // A host clock set before 1970 reads as the epoch; the value only has to
+    // move forward, which LAST guarantees.
     thread_local! {
         static EPOCH: Duration = since_epoch().unwrap_or_default();
         // The host clock is wall time, which can be set back.

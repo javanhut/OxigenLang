@@ -2,12 +2,14 @@
 
 [![CI](https://github.com/javanhut/OxigenLang/actions/workflows/ci.yml/badge.svg)](https://github.com/javanhut/OxigenLang/actions/workflows/ci.yml)
 
+**Website, documentation and a browser playground: [oxigenlang.com](https://oxigenlang.com)**
+
 OxigenLang is a modern, lightweight programming language implemented in Rust. It runs on a bytecode virtual machine with a baseline Cranelift JIT, and features a clean, expressive syntax, pattern matching, enums, a two-tier error model, a built-in test runner, a module system with a standard library, and an optional indentation-based block syntax.
 
 ## Features
 
 - **Module System**: Import standard library modules or local files with `introduce`/`intro`. Namespace imports, selective imports, and module caching.
-- **Standard Library**: 19 modules — math, strings, array, io, os, path, time, datetime, random, json, toml, encoding, hash, regex, net (HTTP/HTTPS client with streaming download/upload, plus TCP and UDP sockets), api (HTTP servers — routing, JSON/HTML/static-file responses, and a threaded server in one module), ansi (terminal colors), parse_args (CLI flag parsing), and result (Error/Value helpers).
+- **Standard Library**: 21 modules — math, strings, array, io, os, path, time, datetime, random, json, toml, encoding, hash, regex, net (HTTP/HTTPS client with streaming download/upload, plus TCP and UDP sockets), api (HTTP servers — routing, JSON/HTML/static-file responses, and a threaded server in one module), ansi (terminal colors), parse_args (CLI flag parsing), env (.env files), test (the `expect` matchers), and result (Error/Value helpers).
 - **Flexible Block Styles**: Choose between traditional brace-based blocks or Python-style indentation blocks with the `#[indent]` directive.
 - **Conditional Expressions**: Multi-arm `option` blocks, ternary shorthand, `unless` inverse conditionals, `unless ... then ...` fallback expressions, `when`/`unless` postfix guards, and short-circuit `and`/`or` logical operators.
 - **Pattern Matching**: Define reusable patterns with the `pattern` keyword and match against them with `choose`.
@@ -25,9 +27,17 @@ OxigenLang is a modern, lightweight programming language implemented in Rust. It
 
 ## Installation
 
-Requires [Rust](https://www.rust-lang.org/).
+### Prebuilt (Linux / macOS, x86-64 and ARM64)
 
-### Quick Install (Linux / macOS)
+```bash
+curl -fsSL https://oxigenlang.com/install.sh | sh
+```
+
+Detects your system, downloads the matching release build, verifies its SHA-256 and installs to `~/.local` (or `/usr/local` as root). Archives and checksums: [oxigenlang.com/download](https://oxigenlang.com/download/).
+
+### From source
+
+Requires [Rust](https://www.rust-lang.org/).
 
 ```bash
 git clone https://github.com/javanhut/OxigenLang.git

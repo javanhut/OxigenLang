@@ -15,7 +15,7 @@ class = "page-home"
         <a class="btn btn-solid" href="/playground/"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>Run it in your browser</a>
         <a class="btn btn-link" href="/docs/getting-started/">Read the docs</a>
       </div>
-      <p class="hero-install"><code>git clone {{repo}}</code><br>then <code>./scripts/install.sh</code></p>
+      <p class="hero-install"><code>{{install_command}}</code><br><a href="/download/">Other ways to install</a></p>
     </div>
     <div class="hero-card">
       {{example:hello}}
@@ -104,18 +104,17 @@ class = "page-home"
 <section class="section tint" id="install">
   <div class="wrap">
     <h2>Install it.</h2>
-    <p class="intro">You need Rust. It builds on Linux and macOS.</p>
+    <p class="intro">One command on Linux or macOS. It picks the build for your system, checks it, and puts <code>oxigen</code> on your machine. No Rust needed.</p>
     <div class="steps">
       <div>
-        <h3>Get the source</h3>
-        <p>Clone it from GitHub.</p>
-        <div class="code"><div class="code-bar"><span class="code-lang">shell</span><button class="btn-copy" type="button">Copy</button></div><pre><code>git clone {{repo}}.git
-cd OxigenLang</code></pre></div>
+        <h3>Install</h3>
+        <p>x86-64 or ARM, any Linux distribution, any recent Mac.</p>
+        <div class="code"><div class="code-bar"><span class="code-lang">shell</span><button class="btn-copy" type="button">Copy</button></div><pre><code>{{install_command}}</code></pre></div>
       </div>
       <div>
-        <h3>Build and install</h3>
-        <p>Puts <code>oxigen</code> and the standard library on your path.</p>
-        <div class="code"><div class="code-bar"><span class="code-lang">shell</span><button class="btn-copy" type="button">Copy</button></div><pre><code>./scripts/install.sh</code></pre></div>
+        <h3>Check it</h3>
+        <p>Prints the version you got.</p>
+        <div class="code"><div class="code-bar"><span class="code-lang">shell</span><button class="btn-copy" type="button">Copy</button></div><pre><code>oxigen --version</code></pre></div>
       </div>
       <div>
         <h3>Run something</h3>
@@ -123,7 +122,7 @@ cd OxigenLang</code></pre></div>
         <div class="code"><div class="code-bar"><span class="code-lang">shell</span><button class="btn-copy" type="button">Copy</button></div><pre><code>oxigen hello.oxi</code></pre></div>
       </div>
     </div>
-    <p style="margin-top:40px"><a href="/docs/getting-started/">The getting started guide</a> goes further: the REPL, script arguments, and the rest of the <code>oxigen</code> command.</p>
+    <p style="margin-top:40px">Rather download the archive, use Docker, or build from source? It's all on the <a href="/download/">download page</a>.</p>
   </div>
 </section>
 

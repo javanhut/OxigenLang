@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::html::{escape, oxi_block};
 use crate::layout::{Nav, Page};
 use crate::markdown::{Doc, Rendered};
+use crate::release::Release;
 use oxigen_playground::Outcome;
 use serde_json::json;
 use std::cell::RefCell;
@@ -35,6 +36,8 @@ pub struct Context<'a> {
     pub examples: &'a [Example],
     /// website/snippets: shown, not run (they need threads or the test runner).
     pub snippets: &'a [(String, String)],
+    /// The latest GitHub release; none when built with --offline.
+    pub release: Option<&'a Release>,
 }
 
 /// website/examples, in file-name order. Each must run in the playground's
@@ -48,7 +51,8 @@ pub fn load_examples(dir: &Path) -> Result<Vec<Example>, String> {
     paths.sort();
     let mut examples = Vec::new();
     for path in paths {
-        let source = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let source =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let comments: Vec<&str> = source
             .lines()
             .filter(|l| !l.starts_with("#["))
@@ -60,7 +64,11 @@ pub fn load_examples(dir: &Path) -> Result<Vec<Example>, String> {
         let mut lines: Vec<&str> = source.lines().collect();
         let first_comment = lines.iter().position(|l| l.starts_with("//")).unwrap_or(0);
         let mut taken = 0;
-        while taken < 2 && lines.get(first_comment).is_some_and(|l| l.starts_with("//")) {
+        while taken < 2
+            && lines
+                .get(first_comment)
+                .is_some_and(|l| l.starts_with("//"))
+        {
             lines.remove(first_comment);
             taken += 1;
         }
@@ -74,7 +82,10 @@ pub fn load_examples(dir: &Path) -> Result<Vec<Example>, String> {
         let outcome = oxigen_playground::run(&source, oxigen_playground::LOOP_BUDGET);
         oxigen_core::output::set_sink(None);
         if let Outcome::Failed(error) = outcome {
-            return Err(format!("{}: the example fails in the playground:\n{error}", path.display()));
+            return Err(format!(
+                "{}: the example fails in the playground:\n{error}",
+                path.display()
+            ));
         }
         let output = printed.borrow().clone();
         examples.push(Example {
@@ -96,27 +107,47 @@ pub fn load_snippets(dir: &Path) -> Result<Vec<(String, String)>, String> {
         if path.extension().is_none_or(|e| e != "oxi") {
             continue;
         }
-        let source = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let source =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let diagnostics = oxigen_playground::check(&source);
         if diagnostics.contains("\"severity\":\"error\"") {
-            return Err(format!("{}: does not compile: {diagnostics}", path.display()));
+            return Err(format!(
+                "{}: does not compile: {diagnostics}",
+                path.display()
+            ));
         }
-        snippets.push((path.file_stem().unwrap().to_string_lossy().into_owned(), source));
+        snippets.push((
+            path.file_stem().unwrap().to_string_lossy().into_owned(),
+            source,
+        ));
     }
     Ok(snippets)
 }
 
 pub fn load(path: &Path, cx: &Context) -> Result<Page, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let rest = text.strip_prefix("+++\n").ok_or_else(|| format!("{}: no +++ header", path.display()))?;
-    let (header, body) = rest.split_once("\n+++\n").ok_or_else(|| format!("{}: unterminated +++ header", path.display()))?;
-    let header: toml::Table = header.parse().map_err(|e| format!("{}: {e}", path.display()))?;
-    let get = |key: &str| header.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let rest = text
+        .strip_prefix("+++\n")
+        .ok_or_else(|| format!("{}: no +++ header", path.display()))?;
+    let (header, body) = rest
+        .split_once("\n+++\n")
+        .ok_or_else(|| format!("{}: unterminated +++ header", path.display()))?;
+    let header: toml::Table = header
+        .parse()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let get = |key: &str| {
+        header
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
     let page_path = get("path");
     let nav = match get("nav").as_str() {
         "home" => Nav::Home,
         "docs" => Nav::Docs,
         "playground" => Nav::Playground,
+        "download" => Nav::Download,
         "benchmarks" => Nav::Benchmarks,
         "about" => Nav::About,
         _ => Nav::None,
@@ -126,6 +157,7 @@ pub fn load(path: &Path, cx: &Context) -> Result<Page, String> {
         "page-playground" => "page-playground",
         "page-about" => "page-about",
         "page-bench" => "page-bench",
+        "page-download" => "page-download",
         "page-docs-index" => "page-docs-index",
         _ => "page-plain",
     };
@@ -148,9 +180,15 @@ fn fill(body: &str, cx: &Context, path: &Path) -> Result<String, String> {
     let mut rest = body;
     while let Some(start) = rest.find("{{") {
         out.push_str(&rest[..start]);
-        let end = rest[start..].find("}}").ok_or_else(|| format!("{}: unclosed {{{{", path.display()))? + start;
+        let end = rest[start..]
+            .find("}}")
+            .ok_or_else(|| format!("{}: unclosed {{{{", path.display()))?
+            + start;
         let key = rest[start + 2..end].trim();
-        out.push_str(&placeholder(key, cx).ok_or_else(|| format!("{}: unknown placeholder {{{{{key}}}}}", path.display()))?);
+        out.push_str(
+            &placeholder(key, cx)
+                .ok_or_else(|| format!("{}: unknown placeholder {{{{{key}}}}}", path.display()))?,
+        );
         rest = &rest[end + 2..];
     }
     out.push_str(rest);
@@ -161,7 +199,41 @@ fn placeholder(key: &str, cx: &Context) -> Option<String> {
     let example = |slug: &str| cx.examples.iter().find(|e| e.slug == slug);
     let r = cx.report;
     Some(match key {
-        "version" => env!("CARGO_PKG_VERSION").to_string(),
+        "version" => cx
+            .release
+            .map_or(env!("CARGO_PKG_VERSION"), |r| &r.version)
+            .to_string(),
+        "install_command" => format!("curl -fsSL {} | sh", cx.config.abs("/install.sh")),
+        "release_summary" => match cx.release {
+            Some(r) => format!(
+                "Version {}, released {}.",
+                escape(&r.version),
+                long_date(&r.date)
+            ),
+            None => format!(
+                "The latest version is on the <a href=\"{}/releases/latest\">releases page</a>.",
+                escape(&cx.config.repo)
+            ),
+        },
+        "release_url" => escape(
+            &cx.release
+                .map_or(format!("{}/releases/latest", cx.config.repo), |r| {
+                    r.url.clone()
+                }),
+        ),
+        "downloads_table" => downloads_table(cx),
+        "downloads_json" => {
+            let files: Vec<_> = cx
+                .release
+                .into_iter()
+                .flat_map(|r| &r.files)
+                .map(|f| {
+                    let (os, cpu) = f.label();
+                    json!({ "platform": f.platform, "os": os, "cpu": cpu, "name": f.name, "size": size(f.size), "url": f.url })
+                })
+                .collect();
+            serde_json::to_string(&files).unwrap().replace("</", "<\\/")
+        }
         "author" => escape(&cx.config.author.name),
         "author_url" => escape(&cx.config.author.url),
         "repo" => escape(&cx.config.repo),
@@ -179,7 +251,13 @@ fn placeholder(key: &str, cx: &Context) -> Option<String> {
         "playground_options" => cx
             .examples
             .iter()
-            .map(|e| format!("<option value=\"{}\">{}</option>", escape(&e.slug), escape(&e.title)))
+            .map(|e| {
+                format!(
+                    "<option value=\"{}\">{}</option>",
+                    escape(&e.slug),
+                    escape(&e.title)
+                )
+            })
             .collect(),
         "bench_chart" => r.chart(|p| cx.config.blob(p)),
         "bench_table" => r.table(),
@@ -190,7 +268,11 @@ fn placeholder(key: &str, cx: &Context) -> Option<String> {
             if r.wins_over_python() == r.rows.len() {
                 "Faster than CPython on every benchmark in the suite.".to_string()
             } else {
-                format!("Faster than CPython on {} of {} benchmarks.", r.wins_over_python(), r.rows.len())
+                format!(
+                    "Faster than CPython on {} of {} benchmarks.",
+                    r.wins_over_python(),
+                    r.rows.len()
+                )
             }
         }
         "bench_count" => r.rows.len().to_string(),
@@ -208,10 +290,8 @@ fn placeholder(key: &str, cx: &Context) -> Option<String> {
                 oxi_block(source, false)
             } else if let Some(slug) = key.strip_prefix("output:") {
                 escape(example(slug)?.output.trim_end())
-            } else if let Some(file) = key.strip_prefix("blob:") {
-                escape(&cx.config.blob(file))
             } else {
-                return None;
+                escape(&cx.config.blob(key.strip_prefix("blob:")?))
             }
         }
     })
@@ -219,7 +299,12 @@ fn placeholder(key: &str, cx: &Context) -> Option<String> {
 
 /// Structured data for a hand-written page: the about page is the creator's
 /// profile, with the questions people ask about the language.
-fn page_graph(config: &Config, path: &str, title: &str, description: &str) -> Vec<serde_json::Value> {
+fn page_graph(
+    config: &Config,
+    path: &str,
+    title: &str,
+    description: &str,
+) -> Vec<serde_json::Value> {
     let url = config.abs(path);
     let mut graph = vec![json!({
         "@type": match path { "/about/" => "AboutPage", "/playground/" => "WebApplication", _ => "WebPage" },
@@ -234,8 +319,14 @@ fn page_graph(config: &Config, path: &str, title: &str, description: &str) -> Ve
     if path == "/playground/" {
         let page = graph[0].as_object_mut().unwrap();
         page.insert("applicationCategory".into(), json!("DeveloperApplication"));
-        page.insert("operatingSystem".into(), json!("Any (runs in the browser via WebAssembly)"));
-        page.insert("offers".into(), json!({ "@type": "Offer", "price": "0", "priceCurrency": "USD" }));
+        page.insert(
+            "operatingSystem".into(),
+            json!("Any (runs in the browser via WebAssembly)"),
+        );
+        page.insert(
+            "offers".into(),
+            json!({ "@type": "Offer", "price": "0", "priceCurrency": "USD" }),
+        );
     }
     if path == "/about/" {
         let author = &config.author.name;
@@ -254,19 +345,90 @@ fn page_graph(config: &Config, path: &str, title: &str, description: &str) -> Ve
         }));
     }
     if path != "/" {
-        graph.push(crate::seo::breadcrumbs(config, &[(title.split(" · ").next().unwrap_or(title), path)]));
+        graph.push(crate::seo::breadcrumbs(
+            config,
+            &[(title.split(" · ").next().unwrap_or(title), path)],
+        ));
     }
     graph
+}
+
+/// `2026-08-20` as `20 August 2026`.
+fn long_date(date: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let parts: Vec<&str> = date.split('-').collect();
+    match parts.as_slice() {
+        [y, m, d] => match m.parse::<usize>() {
+            Ok(m @ 1..=12) => format!("{} {} {y}", d.trim_start_matches('0'), MONTHS[m - 1]),
+            _ => date.to_string(),
+        },
+        _ => date.to_string(),
+    }
+}
+
+fn size(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+}
+
+/// Every file of the latest release, with its size and SHA-256.
+fn downloads_table(cx: &Context) -> String {
+    let Some(release) = cx.release.filter(|r| !r.files.is_empty()) else {
+        return format!(
+            "<p>The files are listed on the <a href=\"{}/releases/latest\" rel=\"noopener\">latest release</a>.</p>",
+            escape(&cx.config.repo)
+        );
+    };
+    let mut rows = String::new();
+    for f in &release.files {
+        let (os, cpu) = f.label();
+        let sum = f.sha256.as_deref().map_or("<span class=\"muted\">not published</span>".to_string(), |s| {
+            format!("<code class=\"sha\" title=\"{s}\">{}…</code><button class=\"btn-copy mini\" type=\"button\" data-copy=\"{s}\">Copy</button>", &s[..s.len().min(12)])
+        });
+        rows.push_str(&format!(
+            "<tr data-platform=\"{p}\"><th scope=\"row\">{os}</th><td>{cpu}</td><td><a href=\"{url}\" download>{name}</a></td><td class=\"num\">{size}</td><td>{sum}</td></tr>",
+            p = escape(&f.platform),
+            url = escape(&f.url),
+            name = escape(&f.name),
+            size = size(f.size),
+        ));
+    }
+    format!(
+        "<div class=\"table-wrap\"><table class=\"downloads\"><thead><tr><th scope=\"col\">System</th><th scope=\"col\">CPU</th><th scope=\"col\">File</th><th scope=\"col\" class=\"num\">Size</th><th scope=\"col\">SHA-256</th></tr></thead><tbody>{rows}</tbody></table></div>"
+    )
 }
 
 /// The author's photo, or a monogram until site.toml names one.
 fn portrait(config: &Config) -> String {
     let name = escape(&config.author.name);
     match &config.author.photo {
-        Some(photo) => format!("<img src=\"{}\" alt=\"{name}\" width=\"480\" height=\"600\" loading=\"lazy\">", escape(photo)),
+        Some(photo) => format!(
+            "<img src=\"{}\" alt=\"{name}\" width=\"480\" height=\"600\" loading=\"lazy\">",
+            escape(photo)
+        ),
         None => {
-            let initials: String = config.author.name.split_whitespace().filter_map(|w| w.chars().next()).collect();
-            format!("<div class=\"monogram\" role=\"img\" aria-label=\"{name}\"><span>{}</span></div>", escape(&initials))
+            let initials: String = config
+                .author
+                .name
+                .split_whitespace()
+                .filter_map(|w| w.chars().next())
+                .collect();
+            format!(
+                "<div class=\"monogram\" role=\"img\" aria-label=\"{name}\"><span>{}</span></div>",
+                escape(&initials)
+            )
         }
     }
 }
@@ -275,14 +437,21 @@ fn docs_index(cx: &Context) -> String {
     let mut html = String::new();
     for section in &cx.config.sections {
         let stdlib = section.title == "Standard library";
-        html.push_str(&format!("<section class=\"index-section\"><h2>{}</h2><div class=\"doc-list\">", escape(&section.title)));
+        html.push_str(&format!(
+            "<section class=\"index-section\"><h2>{}</h2><div class=\"doc-list\">",
+            escape(&section.title)
+        ));
         for doc in cx.docs.iter().filter(|d| d.section == section.title) {
             let name = if stdlib && doc.file != "stdlib/README.md" {
                 format!("<code>{}</code>", escape(&doc.title))
             } else {
                 format!("<strong>{}</strong>", escape(&doc.title))
             };
-            html.push_str(&format!("<a href=\"{}\">{name}<span>{}</span></a>", doc.url, escape(&doc.description)));
+            html.push_str(&format!(
+                "<a href=\"{}\">{name}<span>{}</span></a>",
+                doc.url,
+                escape(&doc.description)
+            ));
         }
         html.push_str("</div></section>");
     }
@@ -293,7 +462,13 @@ fn stdlib_list(cx: &Context) -> String {
     cx.docs
         .iter()
         .filter(|d| d.file.starts_with("stdlib/") && d.file != "stdlib/README.md")
-        .map(|d| format!("<a href=\"{}\"><code>{}</code></a>", d.url, escape(&d.title)))
+        .map(|d| {
+            format!(
+                "<a href=\"{}\"><code>{}</code></a>",
+                d.url,
+                escape(&d.title)
+            )
+        })
         .collect()
 }
 
@@ -318,7 +493,9 @@ fn example_tabs(cx: &Context) -> String {
             card = oxi_block(&e.source, true),
         ));
     }
-    format!("<div class=\"examples\" data-tabs><div class=\"example-index\" role=\"tablist\" aria-label=\"Examples\" aria-orientation=\"vertical\">{tabs}</div><div>{panels}</div></div>")
+    format!(
+        "<div class=\"examples\" data-tabs><div class=\"example-index\" role=\"tablist\" aria-label=\"Examples\" aria-orientation=\"vertical\">{tabs}</div><div>{panels}</div></div>"
+    )
 }
 
 /// The documentation page: sidebar, the rendered doc, its table of contents,
@@ -334,8 +511,16 @@ pub fn doc_page(config: &Config, docs: &[Doc], index: usize, rendered: &Rendered
             escape(&section.title)
         ));
         for d in docs.iter().filter(|d| d.section == section.title) {
-            let current = if d.url == doc.url { " aria-current=\"page\"" } else { "" };
-            sidebar.push_str(&format!("<li><a href=\"{}\"{current}>{}</a></li>", d.url, escape(&d.title)));
+            let current = if d.url == doc.url {
+                " aria-current=\"page\""
+            } else {
+                ""
+            };
+            sidebar.push_str(&format!(
+                "<li><a href=\"{}\"{current}>{}</a></li>",
+                d.url,
+                escape(&d.title)
+            ));
         }
         sidebar.push_str("</ul></details>");
     }
@@ -344,12 +529,21 @@ pub fn doc_page(config: &Config, docs: &[Doc], index: usize, rendered: &Rendered
         .headings
         .iter()
         .filter(|h| h.level == 2 || h.level == 3)
-        .map(|h| format!("<li class=\"toc-h{}\"><a href=\"#{}\">{}</a></li>", h.level, h.id, escape(&h.text)))
+        .map(|h| {
+            format!(
+                "<li class=\"toc-h{}\"><a href=\"#{}\">{}</a></li>",
+                h.level,
+                h.id,
+                escape(&h.text)
+            )
+        })
         .collect();
     let toc = if toc.is_empty() {
         String::new()
     } else {
-        format!("<aside class=\"docs-toc\" aria-label=\"On this page\"><p class=\"toc-title\">On this page</p><ol>{toc}</ol></aside>")
+        format!(
+            "<aside class=\"docs-toc\" aria-label=\"On this page\"><p class=\"toc-title\">On this page</p><ol>{toc}</ol></aside>"
+        )
     };
 
     let pager_link = |d: Option<&Doc>, rel: &str, label: &str| match d {
@@ -362,7 +556,11 @@ pub fn doc_page(config: &Config, docs: &[Doc], index: usize, rendered: &Rendered
     };
     let prev = index.checked_sub(1).map(|i| &docs[i]);
     let next = docs.get(index + 1);
-    let section_first = docs.iter().find(|d| d.section == doc.section).map(|d| d.url.as_str()).unwrap_or("/docs/");
+    let section_first = docs
+        .iter()
+        .find(|d| d.section == doc.section)
+        .map(|d| d.url.as_str())
+        .unwrap_or("/docs/");
 
     format!(
         "<div class=\"docs-layout\">\
@@ -371,13 +569,17 @@ pub fn doc_page(config: &Config, docs: &[Doc], index: usize, rendered: &Rendered
 <article class=\"docs-content\">\
 <nav class=\"breadcrumbs\" aria-label=\"Breadcrumb\"><a href=\"/docs/\">Docs</a><span>/</span><a href=\"{section_first}\">{section}</a></nav>\
 <div class=\"prose\">{body}</div>\
-<div class=\"doc-meta\"><a href=\"{edit}\" rel=\"noopener\">Edit this page on GitHub</a><a href=\"{md}\">View as Markdown</a></div>\
+<div class=\"doc-meta\"><a href=\"{edit}\" rel=\"noopener\">Edit this page on GitHub</a><a href=\"{md}index.md\">View as Markdown</a></div>\
 <nav class=\"pager\" aria-label=\"Pages\">{prev}{next}</nav>\
 </article>{toc}</div>",
         section = escape(&doc.section),
         body = rendered.html,
-        edit = escape(&config.blob(&format!("docs/{}", doc.file)).replace("/blob/", "/edit/")),
-        md = format!("{}index.md", doc.url),
+        edit = escape(
+            &config
+                .blob(&format!("docs/{}", doc.file))
+                .replace("/blob/", "/edit/")
+        ),
+        md = doc.url,
         prev = pager_link(prev, "prev", "Previous"),
         next = pager_link(next, "next", "Next"),
     )

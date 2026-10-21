@@ -14,7 +14,8 @@ pub fn person_id(config: &Config) -> String {
     config.abs("/about/#javan-hutchinson")
 }
 
-pub fn site_graph(config: &Config) -> Vec<Value> {
+/// `version` is the latest release.
+pub fn site_graph(config: &Config, version: &str) -> Vec<Value> {
     let person = person_id(config);
     let mut same_as = config.author.same_as.clone();
     if !same_as.contains(&config.author.url) {
@@ -64,11 +65,11 @@ pub fn site_graph(config: &Config) -> Vec<Value> {
             "applicationCategory": "DeveloperApplication",
             "applicationSubCategory": "Programming language",
             "operatingSystem": "Linux, macOS",
-            "softwareVersion": env!("CARGO_PKG_VERSION"),
+            "softwareVersion": version,
             "license": ["https://opensource.org/licenses/MIT", "https://www.apache.org/licenses/LICENSE-2.0"],
             "url": config.abs("/"),
-            "downloadUrl": config.repo,
-            "installUrl": config.abs("/docs/getting-started/"),
+            "downloadUrl": config.abs("/download/"),
+            "installUrl": config.abs("/download/"),
             "author": { "@id": person },
             "creator": { "@id": person },
             "isAccessibleForFree": true,
@@ -109,12 +110,21 @@ pub fn doc_graph(config: &Config, doc: &Doc, section_url: &str) -> Vec<Value> {
             "inLanguage": "en",
             "image": config.abs("/og.png"),
         }),
-        breadcrumbs(config, &[("Docs", "/docs/"), (&doc.section, section_url), (&doc.title, &doc.url)]),
+        breadcrumbs(
+            config,
+            &[
+                ("Docs", "/docs/"),
+                (&doc.section, section_url),
+                (&doc.title, &doc.url),
+            ],
+        ),
     ]
 }
 
 pub fn breadcrumbs(config: &Config, trail: &[(&str, &str)]) -> Value {
-    let mut items = vec![json!({ "@type": "ListItem", "position": 1, "name": "OxigenLang", "item": config.abs("/") })];
+    let mut items = vec![
+        json!({ "@type": "ListItem", "position": 1, "name": "OxigenLang", "item": config.abs("/") }),
+    ];
     let mut seen = vec!["/".to_string()];
     for (name, path) in trail {
         if seen.iter().any(|p| p == path) {
@@ -127,9 +137,14 @@ pub fn breadcrumbs(config: &Config, trail: &[(&str, &str)]) -> Value {
 }
 
 pub fn sitemap(config: &Config, paths: &[(String, f32)]) -> String {
-    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n",
+    );
     for (path, priority) in paths {
-        xml.push_str(&format!("  <url><loc>{}</loc><priority>{priority:.1}</priority></url>\n", config.abs(path)));
+        xml.push_str(&format!(
+            "  <url><loc>{}</loc><priority>{priority:.1}</priority></url>\n",
+            config.abs(path)
+        ));
     }
     xml.push_str("</urlset>\n");
     xml
@@ -139,12 +154,31 @@ pub fn sitemap(config: &Config, paths: &[(String, f32)]) -> String {
 /// is explicit: being in their indexes is how the language gets found.
 pub fn robots(config: &Config) -> String {
     let bots = [
-        "Googlebot", "Bingbot", "DuckDuckBot", "Applebot", "Applebot-Extended", "Google-Extended",
-        "GPTBot", "OAI-SearchBot", "ChatGPT-User", "ClaudeBot", "Claude-SearchBot", "Claude-User",
-        "anthropic-ai", "PerplexityBot", "Perplexity-User", "CCBot", "Meta-ExternalAgent", "cohere-ai",
-        "YouBot", "Amazonbot", "MistralAI-User",
+        "Googlebot",
+        "Bingbot",
+        "DuckDuckBot",
+        "Applebot",
+        "Applebot-Extended",
+        "Google-Extended",
+        "GPTBot",
+        "OAI-SearchBot",
+        "ChatGPT-User",
+        "ClaudeBot",
+        "Claude-SearchBot",
+        "Claude-User",
+        "anthropic-ai",
+        "PerplexityBot",
+        "Perplexity-User",
+        "CCBot",
+        "Meta-ExternalAgent",
+        "cohere-ai",
+        "YouBot",
+        "Amazonbot",
+        "MistralAI-User",
     ];
-    let mut text = String::from("# oxigenlang.com welcomes search engines and AI crawlers.\n# A summary for language models is at /llms.txt, the full docs at /llms-full.txt.\n\nUser-agent: *\nAllow: /\n\n");
+    let mut text = String::from(
+        "# oxigenlang.com welcomes search engines and AI crawlers.\n# A summary for language models is at /llms.txt, the full docs at /llms-full.txt.\n\nUser-agent: *\nAllow: /\n\n",
+    );
     for bot in bots {
         text.push_str(&format!("User-agent: {bot}\n"));
     }
@@ -170,14 +204,23 @@ Key facts:\n\n\
 Syntax at a glance:\n\n```oxi\nintroduce strings\n\nstruct Person {{\n    name <str>\n    age <int>\n}}\n\nPerson includes {{\n    fun greet() {{ \"Hello, {{self.name}}\" }}\n}}\n\npattern is_even(n) when n % 2 == 0\n\nmain {{\n    p := Person(\"Ada\", 36)\n    println(p.greet())\n    each i in range(4) {{\n        choose i {{\n            is_even -> println(\"{{i}} is even\"),\n            else -> println(\"{{i}} is odd\")\n        }}\n    }}\n}}\n```\n\n",
         author_url = config.author.url,
         modules = oxigen_playground::STDLIB.len(),
-        module_list = oxigen_playground::STDLIB.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", "),
+        module_list = oxigen_playground::STDLIB
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+            .join(", "),
         url = config.url,
         repo = config.repo,
     );
     for (title, docs) in sections {
         text.push_str(&format!("## {title}\n\n"));
         for doc in docs {
-            text.push_str(&format!("- [{}]({}): {}\n", doc.title, config.abs(&format!("{}index.md", doc.url)), doc.description));
+            text.push_str(&format!(
+                "- [{}]({}): {}\n",
+                doc.title,
+                config.abs(&format!("{}index.md", doc.url)),
+                doc.description
+            ));
         }
         text.push('\n');
     }

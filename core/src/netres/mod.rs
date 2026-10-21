@@ -313,7 +313,12 @@ pub fn http_open(_: &str, _: &str, _: &[(String, String)], _: Option<&str>) -> R
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn http_upload(_: &str, _: &str, _: &str, _: Vec<(String, String)>) -> Result<(i64, String), String> {
+pub fn http_upload(
+    _: &str,
+    _: &str,
+    _: &str,
+    _: Vec<(String, String)>,
+) -> Result<(i64, String), String> {
     Err(NO_HTTP.into())
 }
 

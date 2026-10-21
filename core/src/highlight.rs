@@ -208,8 +208,8 @@ fn gap(source: &str, range: Range<usize>, push: &mut impl FnMut(Range<usize>, Cl
             };
             push(start..start + len, class);
             at += len;
-        } else if rest.starts_with("/*") {
-            let len = rest[2..].find("*/").map_or(rest.len(), |e| e + 4);
+        } else if let Some(body) = rest.strip_prefix("/*") {
+            let len = body.find("*/").map_or(rest.len(), |e| e + 4);
             push(start..start + len, Class::Comment);
             at += len;
         } else if rest.starts_with("#[") {

@@ -42,6 +42,7 @@ use std::path::{Path, PathBuf};
 
 /// Frozen per-file totals. See the module docs before changing a number.
 const BASELINE: &[(&str, usize)] = &[
+    ("core/src/clock.rs", 3),
     ("core/src/compiler/slot_types.rs", 1),
     ("core/src/concurrent.rs", 7),
     ("core/src/diagnostics/render.rs", 2),
@@ -49,7 +50,8 @@ const BASELINE: &[(&str, usize)] = &[
     ("core/src/jit/engine/mod.rs", 9),
     ("core/src/jit/mod.rs", 5),
     ("core/src/keyinput.rs", 1),
-    ("core/src/vm/builtins.rs", 5),
+    ("core/src/output.rs", 2),
+    ("core/src/vm/builtins.rs", 3),
     ("core/src/vm/mod.rs", 5),
     ("core/src/vm/nanvalue.rs", 2),
     ("core/src/vm/value.rs", 2),

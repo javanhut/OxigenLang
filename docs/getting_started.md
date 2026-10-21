@@ -4,6 +4,24 @@ Welcome to OxigenLang! This guide walks you through installation, running your f
 
 ## Installation
 
+### Install a prebuilt release
+
+On Linux or macOS (x86-64 or ARM64), one command installs the latest
+release. It works out your system, downloads the matching build from GitHub,
+checks its SHA-256, and installs `oxigen` with its standard library under
+`~/.local` (or `/usr/local` when run as root):
+
+```bash
+curl -fsSL https://oxigenlang.com/install.sh | sh
+```
+
+Add `-s -- --version 0.1.4` to pick a version, `-s -- --prefix DIR` to install
+somewhere else, or `-s -- --uninstall` to remove it. The archives themselves,
+with their checksums, are on the [download page](https://oxigenlang.com/download/).
+On Windows, run the installer inside WSL.
+
+### Build from source
+
 Ensure you have [Rust](https://www.rust-lang.org/) installed. Clone the repository and build the project:
 
 ```bash

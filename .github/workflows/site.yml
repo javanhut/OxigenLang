@@ -10,6 +10,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # release.yml dispatches this on main after publishing a release, so the
+  # download page lists the new files. (A `release` trigger would run on the
+  # tag, which the github-pages environment refuses to deploy.)
   workflow_dispatch:
 
 permissions:
@@ -44,9 +47,36 @@ jobs:
           --enable-reference-types "$WASM" -o "${WASM%.wasm}.opt.wasm"
       - name: Build the site
         run: cargo run --release -p oxigen-site -- --wasm "${WASM%.wasm}.opt.wasm"
+        env:
+          # Reading the latest release from the GitHub API, without its anonymous rate limit.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/upload-pages-artifact@v4
         with:
           path: target/site
+
+  # https://oxigenlang.com/install.sh, run for real on every platform it
+  # installs for, against the latest release.
+  installer:
+    name: Installer on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Lint
+        if: runner.os == 'Linux'
+        run: shellcheck -s sh -S warning website/static/install.sh
+      - name: Install, run, uninstall
+        run: |
+          prefix="$RUNNER_TEMP/oxigen"
+          sh website/static/install.sh --prefix "$prefix"
+          "$prefix/bin/oxigen" --version
+          printf 'introduce math\nprintln(math.sqrt(16))\n' > "$RUNNER_TEMP/t.oxi"
+          test "$("$prefix/bin/oxigen" "$RUNNER_TEMP/t.oxi")" = 4
+          sh website/static/install.sh --prefix "$prefix" --uninstall
+          test ! -e "$prefix/bin/oxigen"
 
   deploy:
     name: Deploy to GitHub Pages

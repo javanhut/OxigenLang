@@ -35,17 +35,23 @@ pub fn parse(text: &str) -> Result<Report, String> {
     };
     let kernel = meta("Kernel:");
     let platform = match kernel.split_whitespace().last() {
-        Some("arm64") if kernel.starts_with("Darwin") => "Apple Silicon Mac (macOS, arm64)".to_string(),
+        Some("arm64") if kernel.starts_with("Darwin") => {
+            "Apple Silicon Mac (macOS, arm64)".to_string()
+        }
         _ => kernel.clone(),
     };
-    let table = text.split("## Min times (ms)").nth(1).ok_or("benchmark report: no `## Min times (ms)` table")?;
+    let table = text
+        .split("## Min times (ms)")
+        .nth(1)
+        .ok_or("benchmark report: no `## Min times (ms)` table")?;
     // Only this section: the next table's rows also start with `| bench_`.
     let table = table.split("\n## ").next().unwrap_or(table);
     let mut rows = Vec::new();
     for line in table.lines().filter(|l| l.starts_with("| bench_")) {
         let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
         let num = |i: usize| cells.get(i).and_then(|c| c.parse::<f64>().ok());
-        let need = |i: usize| num(i).ok_or_else(|| format!("benchmark report: bad cell in `{line}`"));
+        let need =
+            |i: usize| num(i).ok_or_else(|| format!("benchmark report: bad cell in `{line}`"));
         rows.push(Row {
             name: cells[0].to_string(),
             no_jit: need(1)?,
@@ -61,7 +67,11 @@ pub fn parse(text: &str) -> Result<Report, String> {
     }
     let first_line = |key: &str| meta(key).split(" (").next().unwrap_or("").to_string();
     Ok(Report {
-        generated: meta("Generated:").split('T').next().unwrap_or("").to_string(),
+        generated: meta("Generated:")
+            .split('T')
+            .next()
+            .unwrap_or("")
+            .to_string(),
         platform,
         oxigen: meta("Oxigen:").replace("Oxigen Version: ", ""),
         python: first_line("Python:").replace("Python ", ""),
@@ -78,12 +88,18 @@ fn describe(name: &str) -> (&'static str, &'static str) {
     match name {
         "bench_arith" => ("Arithmetic", "integer and float arithmetic in a hot loop"),
         "bench_closure" => ("Closures", "calling closures that capture variables"),
-        "bench_collatz" => ("Collatz", "Collatz sequence lengths, branches and integer maths"),
+        "bench_collatz" => (
+            "Collatz",
+            "Collatz sequence lengths, branches and integer maths",
+        ),
         "bench_fib" => ("Recursive Fibonacci", "deep recursive function calls"),
         "bench_loop" => ("Counting loop", "a tight counting loop"),
         "bench_nested_loop" => ("Nested loops", "two nested counting loops"),
         "bench_nested_loop_big" => ("Nested loops, large", "nested loops over a larger range"),
-        "bench_primes_parallel" => ("Primes, parallel", "prime counting split across cores with diverge/converge"),
+        "bench_primes_parallel" => (
+            "Primes, parallel",
+            "prime counting split across cores with diverge/converge",
+        ),
         "bench_primes_serial" => ("Primes, serial", "prime counting on one core"),
         "bench_struct_method" => ("Struct methods", "method calls on struct instances"),
         _ => ("Benchmark", ""),
@@ -95,7 +111,11 @@ fn ratio(base: f64, value: f64) -> f64 {
 }
 
 fn times(x: f64) -> String {
-    if x >= 10.0 { format!("{x:.0}×") } else { format!("{x:.1}×") }
+    if x >= 10.0 {
+        format!("{x:.0}×")
+    } else {
+        format!("{x:.1}×")
+    }
 }
 
 fn tip_ms(x: Option<f64>) -> String {
@@ -108,10 +128,18 @@ fn ms(x: Option<f64>) -> String {
 
 impl Report {
     pub fn median_speedup(&self, jit: bool) -> f64 {
-        let mut s: Vec<f64> = self.rows.iter().map(|r| ratio(r.python, if jit { r.jit } else { r.default })).collect();
+        let mut s: Vec<f64> = self
+            .rows
+            .iter()
+            .map(|r| ratio(r.python, if jit { r.jit } else { r.default }))
+            .collect();
         s.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let n = s.len();
-        if n % 2 == 1 { s[n / 2] } else { (s[n / 2 - 1] + s[n / 2]) / 2.0 }
+        if n % 2 == 1 {
+            s[n / 2]
+        } else {
+            (s[n / 2 - 1] + s[n / 2]) / 2.0
+        }
     }
 
     pub fn wins_over_python(&self) -> usize {
@@ -119,22 +147,46 @@ impl Report {
     }
 
     pub fn max_speedup(&self) -> f64 {
-        self.rows.iter().map(|r| ratio(r.python, r.default)).fold(0.0, f64::max)
+        self.rows
+            .iter()
+            .map(|r| ratio(r.python, r.default))
+            .fold(0.0, f64::max)
     }
 
     /// The bar chart: Oxigen's speed-up over CPython per benchmark, for the
     /// default build and for `--jit`. Rows are sorted by the default build.
     pub fn chart(&self, repo_blob: impl Fn(&str) -> String) -> String {
         let mut rows: Vec<&Row> = self.rows.iter().collect();
-        rows.sort_by(|a, b| ratio(b.python, b.default).partial_cmp(&ratio(a.python, a.default)).unwrap());
-        let max = rows.iter().map(|r| ratio(r.python, r.default).max(ratio(r.python, r.jit))).fold(1.0, f64::max);
+        rows.sort_by(|a, b| {
+            ratio(b.python, b.default)
+                .partial_cmp(&ratio(a.python, a.default))
+                .unwrap()
+        });
+        let max = rows
+            .iter()
+            .map(|r| ratio(r.python, r.default).max(ratio(r.python, r.jit)))
+            .fold(1.0, f64::max);
         // Round the scale up to a clean tick.
-        let step = if max > 40.0 { 20.0 } else if max > 20.0 { 10.0 } else { 5.0 };
+        let step = if max > 40.0 {
+            20.0
+        } else if max > 20.0 {
+            10.0
+        } else {
+            5.0
+        };
         let top = (max / step).ceil() * step;
         let ticks: String = (0..=((top / step) as usize))
             .map(|i| {
                 let v = i as f64 * step;
-                format!("<span style=\"left:{:.3}%\">{}</span>", v / top * 100.0, if i == 0 { "0".into() } else { format!("{v:.0}×") })
+                format!(
+                    "<span style=\"left:{:.3}%\">{}</span>",
+                    v / top * 100.0,
+                    if i == 0 {
+                        "0".into()
+                    } else {
+                        format!("{v:.0}×")
+                    }
+                )
             })
             .collect();
         let mut bars = String::new();
