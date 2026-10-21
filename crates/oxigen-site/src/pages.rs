@@ -8,7 +8,7 @@
 
 use crate::bench::Report;
 use crate::config::Config;
-use crate::html::{escape, oxi_block};
+use crate::html::{escape, oxi_block, oxi_card};
 use crate::layout::{Nav, Page};
 use crate::markdown::{Doc, Rendered};
 use crate::release::Release;
@@ -288,6 +288,9 @@ fn placeholder(key: &str, cx: &Context) -> Option<String> {
             } else if let Some(name) = key.strip_prefix("snippet:") {
                 let (_, source) = cx.snippets.iter().find(|(n, _)| n == name)?;
                 oxi_block(source, false)
+            } else if let Some(slug) = key.strip_prefix("example_output:") {
+                let e = example(slug)?;
+                oxi_card(&e.source, true, Some(&e.output))
             } else if let Some(slug) = key.strip_prefix("output:") {
                 escape(example(slug)?.output.trim_end())
             } else {
@@ -472,16 +475,29 @@ fn stdlib_list(cx: &Context) -> String {
         .collect()
 }
 
-/// The home page's examples: a numbered index beside the selected one.
+/// `code` spans in an example's one-line summary.
+fn inline_code(text: &str) -> String {
+    text.split('`')
+        .enumerate()
+        .map(|(i, part)| {
+            if i % 2 == 1 {
+                format!("<code>{part}</code>")
+            } else {
+                part.to_string()
+            }
+        })
+        .collect()
+}
+
+/// The home page's examples: a list of titles beside the selected one.
 fn example_tabs(cx: &Context) -> String {
     let mut tabs = String::new();
     let mut panels = String::new();
     for (i, e) in cx.examples.iter().enumerate() {
         let selected = i == 0;
         tabs.push_str(&format!(
-            "<button role=\"tab\" type=\"button\" id=\"tab-{slug}\" aria-controls=\"panel-{slug}\" aria-selected=\"{selected}\" tabindex=\"{tabindex}\"><span>{n:02}</span><span>{title}</span></button>",
+            "<button role=\"tab\" type=\"button\" id=\"tab-{slug}\" aria-controls=\"panel-{slug}\" aria-selected=\"{selected}\" tabindex=\"{tabindex}\">{title}</button>",
             slug = escape(&e.slug),
-            n = i + 1,
             title = escape(&e.title),
             tabindex = if selected { 0 } else { -1 },
         ));
@@ -489,7 +505,7 @@ fn example_tabs(cx: &Context) -> String {
             "<div role=\"tabpanel\" id=\"panel-{slug}\" aria-labelledby=\"tab-{slug}\"{hidden}><p class=\"example-summary\">{summary}</p>{card}</div>",
             slug = escape(&e.slug),
             hidden = if selected { "" } else { " hidden" },
-            summary = escape(&e.summary),
+            summary = inline_code(&escape(&e.summary)),
             card = oxi_block(&e.source, true),
         ));
     }

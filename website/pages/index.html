@@ -7,52 +7,88 @@ class = "page-home"
 +++
 <section class="hero">
   <div class="wrap hero-grid">
-    <h1>Oxigen is a programming language for code that <em>says what it means.</em></h1>
     <div class="hero-copy">
-      <p>You write it close to how you'd explain the problem out loud. It compiles to bytecode, and the functions you call most are compiled to machine code while the program runs.</p>
-      <p class="byline">Made by <a href="/about/" rel="author">{{author}}</a>. Free and open source under MIT or Apache-2.0.</p>
+      <h1>The Oxigen programming language</h1>
+      <p>Oxigen is a general-purpose language with readable syntax, structs and enums, pattern matching and optional type annotations that are checked when the program runs. Programs compile to bytecode, and a Cranelift JIT compiles the functions called most often to machine code.</p>
+      <p class="byline">Created by <a href="/about/" rel="author">{{author}}</a>. Open source under MIT or Apache-2.0.</p>
       <div class="actions">
-        <a class="btn btn-solid" href="/playground/"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>Run it in your browser</a>
-        <a class="btn btn-link" href="/docs/getting-started/">Read the docs</a>
+        <a class="btn btn-solid" href="/docs/getting-started/">Get started</a>
+        <a class="btn" href="/download/">Download</a>
       </div>
-      <p class="hero-install"><code>{{install_command}}</code><br><a href="/download/">Other ways to install</a></p>
     </div>
-    <div class="hero-card">
-      {{example:hello}}
+    <div class="hero-code">
+      {{example_output:hello}}
+      <p class="hero-note">This runs on the Oxigen interpreter compiled to WebAssembly. <a href="/playground/">Open the playground</a> to edit it.</p>
     </div>
   </div>
 </section>
 
-<section class="band" aria-label="OxigenLang in numbers">
-  <div class="wrap figures">
-    <div class="figure"><strong>{{bench_median}}×</strong><span>median speed-up over CPython {{bench_python}} on the benchmark suite</span></div>
-    <div class="figure"><strong>{{stdlib_count}}</strong><span>standard library modules, JSON to HTTP servers</span></div>
-    <div class="figure"><strong>0</strong><span>things to install to try it. This page runs the real interpreter</span></div>
-    <div class="figure"><strong>{{version}}</strong><span>current version</span></div>
+<section class="resources" aria-label="Where to go next">
+  <div class="wrap resource-grid">
+    <div class="resource">
+      <h2><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.5C5.5 4 8.5 4 12 6c3.5-2 6.5-2 9-.5V19c-2.5-1.5-5.5-1.5-9 .5-3.5-2-6.5-2-9-.5z"/><path d="M12 6v13.5"/></svg>Learn</h2>
+      <p>Start with the guide to installing Oxigen and writing a first program, then work through the examples.</p>
+      <ul>
+        <li><a href="/docs/getting-started/">Getting started</a></li>
+        <li><a href="/docs/syntax/">Syntax overview</a></li>
+        <li><a href="#examples">Examples</a></li>
+        <li><a href="/playground/">Playground</a></li>
+      </ul>
+    </div>
+    <div class="resource">
+      <h2><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-4.5-4.5M12 15l4.5-4.5M4 20h16"/></svg>Download</h2>
+      <p>Latest version: <strong>{{version}}</strong>. Prebuilt for Linux and macOS on x86-64 and ARM64.</p>
+      <ul>
+        <li><a href="/download/">Downloads for your system</a></li>
+        <li><a href="{{release_url}}" rel="noopener">Release notes</a></li>
+        <li><a href="{{repo}}/releases" rel="noopener">All releases</a></li>
+        <li><a href="/docs/getting-started/">Build from source</a></li>
+      </ul>
+    </div>
+    <div class="resource">
+      <h2><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h6"/></svg>Documentation</h2>
+      <p>The language guide, and a reference page for each of the {{stdlib_count}} standard library modules.</p>
+      <ul>
+        <li><a href="/docs/">Language guide</a></li>
+        <li><a href="/docs/stdlib/">Standard library</a></li>
+        <li><a href="/docs/builtins/">Built-in functions</a></li>
+        <li><a href="/docs/embedding/">Embedding in Rust</a></li>
+      </ul>
+    </div>
+    <div class="resource">
+      <h2><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 8.5v7M18 10.5c0 4-6 3-11 5.5"/></svg>Get involved</h2>
+      <p>Oxigen is developed in the open. Report bugs, suggest changes and send pull requests on GitHub.</p>
+      <ul>
+        <li><a href="{{repo}}" rel="noopener">Source code</a></li>
+        <li><a href="{{repo}}/issues" rel="noopener">Issue tracker</a></li>
+        <li><a href="{{repo}}/pulls" rel="noopener">Pull requests</a></li>
+        <li><a href="/about/">About the project</a></li>
+      </ul>
+    </div>
   </div>
 </section>
 
 <section class="section" id="language">
   <div class="wrap">
-    <h2>A small language with few surprises.</h2>
-    <p class="intro">Oxigen keeps one way to do each thing. That's deliberate: when there's one obvious way to write something, you can read anyone's code, including your own from last year.</p>
-    <ol class="points">
-      <li><h3>Fast where it matters</h3><p>Programs compile to bytecode. A function that gets called about 50 times is compiled to machine code by a Cranelift JIT. You don't ask for it.</p><a href="/docs/jit-architecture/">How the JIT works</a></li>
-      <li><h3>Patterns you can name</h3><p>Write a condition once with <code>pattern</code>, then pick between them with <code>choose</code>. A long if-chain turns into a list you can read.</p><a href="/docs/pattern-matching/">Pattern matching</a></li>
-      <li><h3>Types when you want them</h3><p>Leave a variable untyped, or write <code>&lt;int&gt;</code> and it stays an int. The VM checks parameter types on every call.</p><a href="/docs/type-system/">Type system</a></li>
-      <li><h3>Errors you can hold on to</h3><p>An error stops the program unless you catch it. Or turn it into a value with <code>&lt;Error&gt;</code>, pass it around, and decide what to do later.</p><a href="/docs/angle-forms/">Errors</a></li>
-      <li><h3>Structs and enums</h3><p>Structs with typed fields, methods and inheritance. Enums with plain, tuple and struct variants, the way Rust does them.</p><a href="/docs/structs/">Structs</a></li>
-      <li><h3>Threads without locks</h3><p><code>diverge</code> hands work to another core and <code>converge</code> gets the answer back. Tasks don't share memory, so there's nothing to lock.</p><a href="/docs/concurrency/">Concurrency</a></li>
-      <li><h3>A standard library you'll use</h3><p>{{stdlib_count}} modules: JSON, TOML, regex, an HTTP client and server, TCP and UDP, dates, hashing, files and processes.</p><a href="/docs/stdlib/">Standard library</a></li>
-      <li><h3>Runs inside your Rust program</h3><p>Embed the VM in a game or a tool, give scripts only the capabilities you choose, and cap how long they're allowed to loop.</p><a href="/docs/embedding/">Embedding</a></li>
-    </ol>
+    <h2>The language</h2>
+    <p class="intro">Oxigen aims for one obvious way to write each thing, so code reads the same whoever wrote it.</p>
+    <div class="features">
+      <div><h3>Bytecode VM and JIT</h3><p>Programs compile to bytecode. A function called about 50 times is compiled to machine code by a Cranelift JIT, without any annotation.</p><a href="/docs/jit-architecture/">How the JIT works</a></div>
+      <div><h3>Named patterns</h3><p>Write a condition once with <code>pattern</code>, then branch on it with <code>choose</code>. A long chain of <code>if</code> becomes a readable list.</p><a href="/docs/pattern-matching/">Pattern matching</a></div>
+      <div><h3>Optional types</h3><p>Leave a variable untyped, or declare it <code>&lt;int&gt;</code> and it stays an int. Parameter types are checked on every call.</p><a href="/docs/type-system/">Type system</a></div>
+      <div><h3>Errors as values</h3><p>An error stops the program unless it is caught. With <code>&lt;Error&gt;</code> it becomes a value you can pass around and inspect later.</p><a href="/docs/angle-forms/">Error handling</a></div>
+      <div><h3>Structs and enums</h3><p>Structs with typed fields, methods and single inheritance. Enums with plain, tuple and struct variants.</p><a href="/docs/structs/">Structs</a></div>
+      <div><h3>Concurrency without shared memory</h3><p><code>diverge</code> runs work on another thread and <code>converge</code> collects the result. Tasks exchange values, not memory, so there are no locks.</p><a href="/docs/concurrency/">Concurrency</a></div>
+      <div><h3>Standard library</h3><p>{{stdlib_count}} modules, including JSON, TOML, regular expressions, an HTTP client and server, TCP and UDP, dates, hashing, files and processes.</p><a href="/docs/stdlib/">Standard library</a></div>
+      <div><h3>Embeddable</h3><p>Run the VM inside a Rust program, grant scripts only the capabilities you choose, and limit how long they may run.</p><a href="/docs/embedding/">Embedding</a></div>
+    </div>
   </div>
 </section>
 
 <section class="section tint" id="examples">
   <div class="wrap">
-    <h2>Try the examples.</h2>
-    <p class="intro">Each one runs right here on the actual interpreter, compiled to WebAssembly. Open one in the <a href="/playground/">playground</a> to change it.</p>
+    <h2>Examples</h2>
+    <p class="intro">Each example runs in this page. Open one in the <a href="/playground/">playground</a> to change it.</p>
     {{example_tabs}}
   </div>
 </section>
@@ -60,26 +96,21 @@ class = "page-home"
 <section class="section" id="performance">
   <div class="wrap split">
     <div class="text">
-      <p class="big-number">{{bench_median}}×<small> median</small></p>
-      <h2>{{bench_headline}}</h2>
-      <p>With the JIT on, which is the default, Oxigen beat CPython {{bench_python}} on {{bench_wins}} of {{bench_count}} programs, by as much as {{bench_max}}× on tight loops. CPython had its own JIT switched on.</p>
-      <ul class="plain-list">
-        <li>Hot functions are compiled to native code after about 50 calls.</li>
-        <li>The interpreter on its own is slower than CPython. The JIT is what changes that.</li>
-        <li><a href="/benchmarks/">Every number, and how they were measured</a></li>
-      </ul>
+      <h2>Performance</h2>
+      <p>On the benchmark suite, Oxigen {{bench_oxigen}} with the JIT on, which is the default, was faster than CPython {{bench_python}} on {{bench_wins}} of {{bench_count}} programs. The median speed-up was {{bench_median}}×, and the largest {{bench_max}}×, on tight loops. CPython ran with its own JIT enabled.</p>
+      <p>Without the JIT, the interpreter alone is slower than CPython.</p>
+      <p><a href="/benchmarks/">All results and how they were measured</a></p>
     </div>
     <div class="media">{{bench_chart}}</div>
   </div>
 </section>
 
-<section class="section tint" id="concurrency">
-  <div class="wrap split flip">
+<section class="section tint" id="tools">
+  <div class="wrap split">
     <div class="text">
-      <h2>Use every core. Lock nothing.</h2>
-      <p><code>diverge each</code> runs a block for every item on a pool of threads and gives you the results back in order. Tasks don't share memory; values move between them. There is nothing to lock and no data race to chase.</p>
-      <p>This one counts the primes below a million on four cores. It needs real threads, so it runs on your machine rather than in the browser.</p>
-      <p><a href="/docs/concurrency/">The concurrency guide</a></p>
+      <h2>Concurrency</h2>
+      <p><code>diverge each</code> runs a block for every item on a pool of threads and returns the results in order. This example counts the primes below a million on four cores. It needs real threads, so it runs on your machine rather than in the browser.</p>
+      <p><a href="/docs/concurrency/">Concurrency guide</a></p>
     </div>
     <div class="media">{{snippet:concurrency}}</div>
   </div>
@@ -88,65 +119,23 @@ class = "page-home"
 <section class="section" id="testing">
   <div class="wrap split">
     <div class="text">
-      <h2>Tests live next to the code.</h2>
-      <p>Write <code>&lt;test&gt;</code> blocks with <code>expect(...)</code> and run <code>oxigen test</code>. It finds every <code>*_test.oxi</code> file and exits non-zero when something fails, so CI needs no setup.</p>
+      <h2>Testing and tools</h2>
+      <p>Write <code>&lt;test&gt;</code> blocks with <code>expect(...)</code> and run <code>oxigen test</code>. It finds every <code>*_test.oxi</code> file and exits non-zero when a test fails.</p>
       <ul class="plain-list">
-        <li><code>oxigen fmt</code> formats your code; <code>--check</code> fails CI when it's off.</li>
+        <li><code>oxigen fmt</code> formats code; <code>--check</code> fails when a file isn't formatted.</li>
         <li><code>oxigen check</code> prints diagnostics as JSON for editors.</li>
-        <li><code>oxigen explain E0031</code> tells you what an error code means.</li>
-        <li>A language server, with a ready Neovim setup.</li>
+        <li><code>oxigen explain E0031</code> explains an error code.</li>
+        <li>A language server, with a Neovim configuration in the repository.</li>
       </ul>
     </div>
     <div class="media">{{snippet:testing_test}}</div>
   </div>
 </section>
 
-<section class="section tint" id="install">
-  <div class="wrap">
-    <h2>Install it.</h2>
-    <p class="intro">One command on Linux or macOS. It picks the build for your system, checks it, and puts <code>oxigen</code> on your machine. No Rust needed.</p>
-    <div class="steps">
-      <div>
-        <h3>Install</h3>
-        <p>x86-64 or ARM, any Linux distribution, any recent Mac.</p>
-        <div class="code"><div class="code-bar"><span class="code-lang">shell</span><button class="btn-copy" type="button">Copy</button></div><pre><code>{{install_command}}</code></pre></div>
-      </div>
-      <div>
-        <h3>Check it</h3>
-        <p>Prints the version you got.</p>
-        <div class="code"><div class="code-bar"><span class="code-lang">shell</span><button class="btn-copy" type="button">Copy</button></div><pre><code>oxigen --version</code></pre></div>
-      </div>
-      <div>
-        <h3>Run something</h3>
-        <p>Or type <code>oxigen</code> on its own for the REPL.</p>
-        <div class="code"><div class="code-bar"><span class="code-lang">shell</span><button class="btn-copy" type="button">Copy</button></div><pre><code>oxigen hello.oxi</code></pre></div>
-      </div>
-    </div>
-    <p style="margin-top:40px">Rather download the archive, use Docker, or build from source? It's all on the <a href="/download/">download page</a>.</p>
-  </div>
-</section>
-
-<section class="section" id="creator">
+<section class="section tint" id="creator">
   <div class="wrap creator">
-    <figure class="portrait">
-      {{creator_portrait}}
-      <figcaption>{{author}}, creator of OxigenLang</figcaption>
-    </figure>
-    <div class="text">
-      <h2>Made by {{author}}.</h2>
-      <p>Oxigen is designed and built by {{author}}. That covers the language and everything around it: the compiler, the bytecode VM, the Cranelift JIT, the standard library, the formatter, the test runner and the language server.</p>
-      <p>The source, the issue tracker and the full history are on GitHub.</p>
-      <div class="actions">
-        <a class="btn" href="/about/">About the project</a>
-        <a class="btn btn-link" href="{{author_url}}" rel="noopener me">{{author}} on GitHub</a>
-      </div>
-    </div>
+    <h2>Who makes Oxigen</h2>
+    <p>Oxigen is designed and built by {{author}}: the language, the compiler, the bytecode VM, the Cranelift JIT, the standard library, the formatter, the test runner and the language server. The source and the full history are on GitHub.</p>
+    <p><a href="/about/">About the project</a> · <a href="{{author_url}}" rel="noopener me">{{author}} on GitHub</a></p>
   </div>
 </section>
-
-<div class="wrap">
-  <div class="closing">
-    <p>The playground runs the real interpreter. There's nothing to install.</p>
-    <a class="btn btn-solid" href="/playground/"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>Open the playground</a>
-  </div>
-</div>

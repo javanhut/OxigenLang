@@ -240,8 +240,8 @@ pub fn manifest() -> String {
         "description": "The OxigenLang programming language: documentation and playground.",
         "start_url": "./",
         "display": "standalone",
-        "background_color": "#f3efe6",
-        "theme_color": "#16140f",
+        "background_color": "#f4f6f8",
+        "theme_color": "#111820",
         "icons": [
             { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
             { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },

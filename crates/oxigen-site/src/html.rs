@@ -19,13 +19,26 @@ pub fn escape(text: &str) -> String {
 /// "Open in playground" when the example runs on its own. site.js wires the
 /// buttons; the code itself needs no script to read.
 pub fn oxi_block(code: &str, runnable: bool) -> String {
+    oxi_card(code, runnable, None)
+}
+
+/// [`oxi_block`] with the output of a run already shown under the code, as
+/// the build produced it. Run replaces it with a live run.
+pub fn oxi_card(code: &str, runnable: bool, output: Option<&str>) -> String {
+    let output = match output {
+        Some(text) => format!(
+            "<div class=\"code-output\"><div class=\"code-output-bar\"><span>Output</span><span class=\"time\"></span></div><pre aria-live=\"polite\">{}</pre></div>",
+            escape(text.trim_end())
+        ),
+        None => String::new(),
+    };
     let run = if runnable {
         "<button class=\"btn-run\" type=\"button\" aria-label=\"Run this example\"><svg viewBox=\"0 0 16 16\" aria-hidden=\"true\"><path d=\"M4 2.5v11l9-5.5z\"/></svg>Run</button><button class=\"btn-open\" type=\"button\" aria-label=\"Open in the playground\">Playground</button>"
     } else {
         ""
     };
     format!(
-        "<div class=\"code code-oxi{cls}\" data-lang=\"oxi\"><div class=\"code-bar\"><span class=\"code-lang\">Oxigen</span><span class=\"code-actions\">{run}<button class=\"btn-copy\" type=\"button\">Copy</button></span></div><pre><code class=\"language-oxi\">{}</code></pre></div>\n",
+        "<div class=\"code code-oxi{cls}\" data-lang=\"oxi\"><div class=\"code-bar\"><span class=\"code-lang\">Oxigen</span><span class=\"code-actions\">{run}<button class=\"btn-copy\" type=\"button\">Copy</button></span></div><pre><code class=\"language-oxi\">{}</code></pre>{output}</div>\n",
         oxigen_core::highlight::to_html(code),
         cls = if runnable { " runnable" } else { "" },
     )

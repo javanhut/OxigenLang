@@ -7,8 +7,8 @@ class = "page-bench"
 +++
 <header class="page-head">
   <div class="wrap">
-    <h1>A median {{bench_median}}× faster than CPython.</h1>
-    <p class="intro">This is Oxigen's default build, JIT on, running the {{bench_count}} programs in the repository's benchmark suite against CPython {{bench_python}} (with its JIT on), Node.js {{bench_node}} and Bun {{bench_bun}}.</p>
+    <h1>Benchmarks</h1>
+    <p class="intro">Oxigen's default build, JIT on, running the {{bench_count}} programs in the repository's benchmark suite against CPython {{bench_python}} (with its JIT on), Node.js {{bench_node}} and Bun {{bench_bun}}. The median speed-up over CPython was {{bench_median}}×.</p>
     <dl class="facts">
       <div><dt>Measured</dt><dd>{{bench_date}}</dd></div>
       <div><dt>Machine</dt><dd>{{bench_platform}}</dd></div>
@@ -22,7 +22,7 @@ class = "page-bench"
   {{bench_chart}}
 </section>
 
-<section class="section" style="padding-top:64px">
+<section class="section" style="padding-top:48px">
   <div class="wrap">
     <h2>All of it</h2>
     <p class="intro">Fastest run of each program, in milliseconds. <strong>Default</strong> is plain <code>oxigen file.oxi</code>: hot functions go native after about 50 calls. <code>--jit</code> compiles on the first call. <code>--no-jit</code> is the interpreter alone, and it's slower than CPython. The JIT is what makes the difference.</p>

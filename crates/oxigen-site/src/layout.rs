@@ -105,8 +105,7 @@ pub fn render(config: &Config, assets: &Assets, page: &Page, year: i32) -> Strin
 <meta name="twitter:title" content="{title}">
 <meta name="twitter:description" content="{description}">
 <meta name="twitter:image" content="{og_image}">
-<meta name="theme-color" content="#12110e" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" content="#f3efe6" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111820">
 <link rel="preload" href="/fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/fonts/geist-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
@@ -150,9 +149,10 @@ pub fn render(config: &Config, assets: &Assets, page: &Page, year: i32) -> Strin
       <p>A general-purpose programming language by <a href="/about/" rel="author">{author}</a>.</p>
     </div>
     <div class="footer-cols">
-      <div><h2>Learn</h2><a href="/docs/getting-started/">Getting started</a><a href="/docs/syntax/">Syntax reference</a><a href="/docs/">Documentation</a><a href="/docs/stdlib/">Standard library</a></div>
-      <div><h2>Try</h2><a href="/download/">Download</a><a href="/playground/">Playground</a><a href="/benchmarks/">Benchmarks</a><a href="/docs/embedding/">Embedding</a></div>
-      <div><h2>Project</h2><a href="/about/">About</a><a href="{repo}" rel="noopener">GitHub</a><a href="{repo}/issues" rel="noopener">Issues</a><a href="/llms.txt">llms.txt</a></div>
+      <div><h2>Learn</h2><a href="/docs/getting-started/">Getting started</a><a href="/docs/syntax/">Syntax overview</a><a href="/playground/">Playground</a></div>
+      <div><h2>Download</h2><a href="/download/">Downloads</a><a href="{repo}/releases" rel="noopener">Releases</a><a href="/benchmarks/">Benchmarks</a></div>
+      <div><h2>Documentation</h2><a href="/docs/">Language guide</a><a href="/docs/stdlib/">Standard library</a><a href="/docs/embedding/">Embedding</a></div>
+      <div><h2>Get involved</h2><a href="{repo}" rel="noopener">Source code</a><a href="{repo}/issues" rel="noopener">Issues</a><a href="/about/">About</a><a href="/llms.txt">llms.txt</a></div>
     </div>
   </div>
   <p class="footer-legal">© {year} {author}. OxigenLang is open source under the MIT or Apache-2.0 license.</p>
@@ -194,6 +194,6 @@ fn nav(active: Nav) -> String {
         .collect()
 }
 
-pub const LOGO: &str = r##"<svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><circle cx="14" cy="18" r="10" fill="none" stroke="currentColor" stroke-width="4"/><circle cx="26.5" cy="5.5" r="3.5" fill="#e0531b"/></svg>"##;
+pub const LOGO: &str = r##"<svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><circle cx="14" cy="18" r="10" fill="none" stroke="currentColor" stroke-width="4"/><circle cx="26.5" cy="5.5" r="3.5" fill="#4fa3b8"/></svg>"##;
 
 const GITHUB: &str = r##"<svg viewBox="0 0 24 24" aria-hidden="true" class="fill"><path d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.15.08 1.76 1.19 1.76 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.56-.29-5.25-1.28-5.25-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.84 1.19 3.1 0 4.42-2.7 5.39-5.27 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5z"/></svg>"##;
