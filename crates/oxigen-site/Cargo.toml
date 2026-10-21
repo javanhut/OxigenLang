@@ -3,7 +3,7 @@ name = "oxigen-site"
 version = "0.1.4"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Builds oxigenlang.com from docs/ and website/"
+description = "Builds oxigenlang.org from docs/ and website/"
 publish = false
 
 [[bin]]

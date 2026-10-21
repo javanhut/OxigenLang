@@ -1,4 +1,4 @@
-# oxigenlang.com
+# oxigenlang.org
 
 The OxigenLang website: a static site built from this repository by
 `crates/oxigen-site`, with a playground that runs the real interpreter in the
@@ -36,7 +36,7 @@ many qualified.
 
 ## Search engines and AI crawlers
 
-- Every page has a canonical URL on `https://oxigenlang.com`, a description,
+- Every page has a canonical URL on `https://www.oxigenlang.org`, a description,
   Open Graph and Twitter cards, and JSON-LD naming the language
   (`ComputerLanguage`), the software (`SoftwareApplication`,
   `SoftwareSourceCode`) and its creator (`Person`, Javan Hutchinson), linked
@@ -58,23 +58,24 @@ and set `photo` in `site.toml`; until then those pages show a monogram.
 and deploys `main` to GitHub Pages. Once, on GitHub:
 
 1. **Settings → Pages → Source: GitHub Actions.**
-2. **Settings → Pages → Custom domain: `oxigenlang.com`**, then tick
+2. **Settings → Pages → Custom domain: `www.oxigenlang.org`**, then tick
    **Enforce HTTPS** once the certificate is issued.
 
-At the registrar for **oxigenlang.com**, point the apex domain and `www` at
+At the registrar for **oxigenlang.org**, point the apex domain and `www` at
 GitHub Pages as GitHub's
 [Managing a custom domain for your GitHub Pages site](https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/managing-a-custom-domain-for-your-github-pages-site)
 describes. Its record values are the current ones; GitHub has changed them
-before.
+before. GitHub then redirects the apex to `www`.
 
-For **oxigenlang.org**, set up a **permanent (301) URL forward** at its
-registrar to `https://oxigenlang.com`, keeping the path. A second copy of the
-site would compete with the first in search results; the redirect makes
-`.org` count towards `.com`.
+For **oxigenlang.com**, set up a **permanent (301) URL forward** at its
+registrar to `https://www.oxigenlang.org`, keeping the path. A second copy of
+the site would compete with the first in search results; the redirect makes
+`.com` count towards `.org`. The address the site calls canonical is `url` in
+`site.toml`: change it there and in the custom domain together.
 
 Then add both domains to Google Search Console and Bing Webmaster Tools,
 verify ownership with a DNS TXT record, and submit
-`https://oxigenlang.com/sitemap.xml`.
+`https://www.oxigenlang.org/sitemap.xml`.
 
 ## Re-rendering the images
 

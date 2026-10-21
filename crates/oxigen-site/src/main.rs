@@ -1,4 +1,4 @@
-//! Builds oxigenlang.com into a directory of static files.
+//! Builds oxigenlang.org into a directory of static files.
 //!
 //!     oxigen-site [--out DIR] [--wasm FILE] [--base PATH] [--offline]
 //!

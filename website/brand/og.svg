@@ -10,6 +10,6 @@
     <tspan x="76" y="258">A programming language</tspan>
     <tspan x="76" y="340">for code that <tspan fill="#e0531b">says what it means.</tspan></tspan>
   </text>
-  <text x="80" y="562" font-family="Geist Mono, JetBrainsMono Nerd Font Mono, monospace" font-size="25" fill="#f3efe6">oxigenlang.com</text>
+  <text x="80" y="562" font-family="Geist Mono, JetBrainsMono Nerd Font Mono, monospace" font-size="25" fill="#f3efe6">oxigenlang.org</text>
   <text x="1120" y="562" text-anchor="end" font-family="Geist, Noto Sans, sans-serif" font-size="27" fill="#a39b8b">by <tspan fill="#f3efe6" font-weight="600">Javan Hutchinson</tspan></text>
 </svg>

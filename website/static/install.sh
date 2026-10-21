@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install OxigenLang from a prebuilt release.
 #
-#   curl -fsSL https://oxigenlang.com/install.sh | sh
+#   curl -fsSL https://www.oxigenlang.org/install.sh | sh
 #
 # Works out your operating system and CPU, downloads the matching build of the
 # latest release from GitHub, checks its SHA-256, and installs
@@ -20,7 +20,7 @@
 # The environment can say the same: OXIGEN_VERSION, OXIGEN_PREFIX. Builds exist
 # for Linux and macOS on x86-64 and ARM64; the Linux ones are static, so they
 # run on any distribution. Anywhere else, build from source:
-# https://oxigenlang.com/docs/getting-started/
+# https://www.oxigenlang.org/docs/getting-started/
 #
 # Everything happens inside main(), called on the last line, so a download cut
 # off part way through runs nothing.
@@ -51,12 +51,12 @@ platform() {
         MINGW* | MSYS* | CYGWIN* | Windows_NT)
             fail "there is no native Windows build yet. Install WSL (https://learn.microsoft.com/windows/wsl/install) and run this in its terminal."
             ;;
-        *) fail "no prebuilt OxigenLang for $os. Build it from source: https://oxigenlang.com/docs/getting-started/" ;;
+        *) fail "no prebuilt OxigenLang for $os. Build it from source: https://www.oxigenlang.org/docs/getting-started/" ;;
     esac
     case "$arch" in
         x86_64 | amd64) arch=x86 ;;
         aarch64 | arm64) arch=arm64 ;;
-        *) fail "no prebuilt OxigenLang for $os on $arch. Build it from source: https://oxigenlang.com/docs/getting-started/" ;;
+        *) fail "no prebuilt OxigenLang for $os on $arch. Build it from source: https://www.oxigenlang.org/docs/getting-started/" ;;
     esac
     # A terminal running under Rosetta reports x86_64 on Apple silicon; the
     # native build is the one to install.
@@ -245,7 +245,7 @@ main() {
         fi
     fi
     say ""
-    say "Try it:  oxigen --help    Docs: https://oxigenlang.com/docs/"
+    say "Try it:  oxigen --help    Docs: https://www.oxigenlang.org/docs/"
 }
 
 main "$@"

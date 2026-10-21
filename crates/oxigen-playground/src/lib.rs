@@ -1,4 +1,4 @@
-//! OxigenLang compiled to WebAssembly, for the playground on oxigenlang.com.
+//! OxigenLang compiled to WebAssembly, for the playground on oxigenlang.org.
 //!
 //! A script runs the way `oxigen file.oxi` runs it, but sandboxed: the VM is
 //! restricted to no capabilities (no files, network, processes, stdin,

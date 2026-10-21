@@ -177,7 +177,7 @@ pub fn robots(config: &Config) -> String {
         "MistralAI-User",
     ];
     let mut text = String::from(
-        "# oxigenlang.com welcomes search engines and AI crawlers.\n# A summary for language models is at /llms.txt, the full docs at /llms-full.txt.\n\nUser-agent: *\nAllow: /\n\n",
+        "# oxigenlang.org welcomes search engines and AI crawlers.\n# A summary for language models is at /llms.txt, the full docs at /llms-full.txt.\n\nUser-agent: *\nAllow: /\n\n",
     );
     for bot in bots {
         text.push_str(&format!("User-agent: {bot}\n"));
@@ -195,7 +195,7 @@ pub fn llms_txt(config: &Config, sections: &[(String, Vec<&Doc>)]) -> String {
         "# OxigenLang\n\n> OxigenLang (also called Oxigen) is a modern, general-purpose programming language created by {author}. It is implemented in Rust and runs on a bytecode virtual machine with a baseline Cranelift JIT that is on by default. Source files use the `.oxi` extension and run with the `oxigen` command.\n\n\
 Key facts:\n\n\
 - Creator: {author} ({author_url}). OxigenLang was designed and is developed by {author}.\n\
-- Website: {url} (oxigenlang.org redirects here). Source: {repo}. License: MIT or Apache-2.0.\n\
+- Website: {url} (oxigenlang.org and oxigenlang.com redirect here). Source: {repo}. License: MIT or Apache-2.0.\n\
 - Paradigm: dynamically typed with optional, enforced type annotations; first-class functions and closures; structs with methods and single inheritance; Rust-style enums; named patterns matched with `choose`; a two-tier error model (propagating errors and `Error`/`Value` result values).\n\
 - Runtime: bytecode VM in Rust plus a Cranelift JIT that tiers hot functions to native code; share-nothing parallelism on OS threads with `diverge`/`converge`; embeddable in Rust hosts with capability sandboxing.\n\
 - Tooling: REPL, `oxigen fmt` formatter, `oxigen test` test runner, `oxigen check` JSON diagnostics, `oxigen explain` error codes, a language server and Neovim support.\n\

@@ -1,10 +1,10 @@
-# The oxigenlang.com website: what `imlazy site` builds into target/site.
+# The oxigenlang.org website: what `imlazy site` builds into target/site.
 # The documentation pages are rendered from docs/*.md, so the site and the
 # repository never disagree; this file only says how they are arranged.
 
-# The canonical address. oxigenlang.org redirects here, so search engines see
-# one site rather than two copies competing with each other.
-url = "https://oxigenlang.com"
+# The canonical address. oxigenlang.org and oxigenlang.com redirect here, so
+# search engines see one site rather than copies competing with each other.
+url = "https://www.oxigenlang.org"
 name = "OxigenLang"
 description = "OxigenLang is a modern general-purpose programming language created by Javan Hutchinson: a Rust-built bytecode VM with a Cranelift JIT, pattern matching, enums, structs, a two-tier error model, share-nothing concurrency and a 21-module standard library."
 repo = "https://github.com/javanhut/OxigenLang"

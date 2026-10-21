@@ -150,7 +150,7 @@ run = ["cd ./lsp-go/ && go test ./..."]
 desc = "Fix the go lsp code"
 run = ["cd ./lsp-go/ && go fix ./..."]
 
-# ── oxigenlang.com ─────────────────────────────────────────────────────
+# ── oxigenlang.org ─────────────────────────────────────────────────────
 
 [commands.system-deps]
 desc = "Install what the website build needs (the wasm32 Rust target, wasm-opt) with rvn"
@@ -167,7 +167,7 @@ run = [
 ]
 
 [commands.site]
-desc = "Build oxigenlang.com into target/site from docs/ and website/"
+desc = "Build oxigenlang.org into target/site from docs/ and website/"
 dep = ["wasm"]
 run = ["cargo run --release -p oxigen-site -- --wasm target/wasm32-unknown-unknown/wasm/oxigen_playground.opt.wasm"]
 

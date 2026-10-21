@@ -142,7 +142,7 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # https://oxigenlang.com/install.sh checks each download against this.
+      # https://www.oxigenlang.org/install.sh checks each download against this.
       - name: Checksums
         run: cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
 
@@ -157,9 +157,9 @@ jobs:
             dist/SHA256SUMS
 
   # The download page and the installer's file list come from the latest
-  # release; rebuild oxigenlang.com now that this one exists.
+  # release; rebuild oxigenlang.org now that this one exists.
   website:
-    name: Rebuild oxigenlang.com
+    name: Rebuild oxigenlang.org
     needs: release
     runs-on: ubuntu-latest
     permissions:

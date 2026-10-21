@@ -1,6 +1,6 @@
 name: Website
 
-# Builds oxigenlang.com and deploys it to GitHub Pages. Pull requests build it
+# Builds oxigenlang.org and deploys it to GitHub Pages. Pull requests build it
 # too, without deploying: a docs example the playground can no longer run, a
 # showcase example that fails, or a change that breaks the WebAssembly build
 # fails here before it reaches the site. The steps are `imlazy site`'s, spelled
@@ -49,7 +49,7 @@ jobs:
           --enable-sign-ext --enable-mutable-globals --enable-multivalue
           --enable-reference-types "$WASM" -o "${WASM%.wasm}.opt.wasm"
       # Where Pages serves the site: "/OxigenLang" at javanhut.github.io until
-      # the custom domain is set, then "" at oxigenlang.com. Pull requests only
+      # the custom domain is set, then "" at www.oxigenlang.org. Pull requests only
       # check the build, so they skip this and build for the root.
       - name: Find the Pages base path
         id: pages
@@ -67,7 +67,7 @@ jobs:
         with:
           path: target/site
 
-  # https://oxigenlang.com/install.sh, run for real on every platform it
+  # https://www.oxigenlang.org/install.sh, run for real on every platform it
   # installs for, against the latest release.
   installer:
     name: Installer on ${{ matrix.os }}

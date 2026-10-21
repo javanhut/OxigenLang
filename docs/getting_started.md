@@ -12,12 +12,12 @@ checks its SHA-256, and installs `oxigen` with its standard library under
 `~/.local` (or `/usr/local` when run as root):
 
 ```bash
-curl -fsSL https://oxigenlang.com/install.sh | sh
+curl -fsSL https://www.oxigenlang.org/install.sh | sh
 ```
 
 Add `-s -- --version 0.1.4` to pick a version, `-s -- --prefix DIR` to install
 somewhere else, or `-s -- --uninstall` to remove it. The archives themselves,
-with their checksums, are on the [download page](https://oxigenlang.com/download/).
+with their checksums, are on the [download page](https://www.oxigenlang.org/download/).
 On Windows, run the installer inside WSL.
 
 ### Build from source

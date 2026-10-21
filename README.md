@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/javanhut/OxigenLang/actions/workflows/ci.yml/badge.svg)](https://github.com/javanhut/OxigenLang/actions/workflows/ci.yml)
 
-**Website, documentation and a browser playground: [oxigenlang.com](https://oxigenlang.com)**
+**Website, documentation and a browser playground: [oxigenlang.org](https://www.oxigenlang.org)**
 
 OxigenLang is a modern, lightweight programming language implemented in Rust. It runs on a bytecode virtual machine with a baseline Cranelift JIT, and features a clean, expressive syntax, pattern matching, enums, a two-tier error model, a built-in test runner, a module system with a standard library, and an optional indentation-based block syntax.
 
@@ -30,10 +30,10 @@ OxigenLang is a modern, lightweight programming language implemented in Rust. It
 ### Prebuilt (Linux / macOS, x86-64 and ARM64)
 
 ```bash
-curl -fsSL https://oxigenlang.com/install.sh | sh
+curl -fsSL https://www.oxigenlang.org/install.sh | sh
 ```
 
-Detects your system, downloads the matching release build, verifies its SHA-256 and installs to `~/.local` (or `/usr/local` as root). Archives and checksums: [oxigenlang.com/download](https://oxigenlang.com/download/).
+Detects your system, downloads the matching release build, verifies its SHA-256 and installs to `~/.local` (or `/usr/local` as root). Archives and checksums: [oxigenlang.org/download](https://www.oxigenlang.org/download/).
 
 ### From source
 
