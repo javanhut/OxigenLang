@@ -1,9 +1,9 @@
 use crate::vm::value::{ErrorValueData, Value, ValueRepr, rc_str};
 use crate::vm::vector;
-use std::collections::HashMap;
 use base64::Engine as _;
 use sha2::Digest as _;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 /// Register all built-in functions into a globals map.
@@ -11,9 +11,18 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("print".to_string(), Value::Builtin(builtin_print));
     globals.insert("println".to_string(), Value::Builtin(builtin_println));
     // Internal: the public surface is the diverge/converge keywords. `cancel` has no keyword form.
-    globals.insert("__spawn".to_string(), Value::Builtin(crate::concurrent::builtin_spawn));
-    globals.insert("__join_task".to_string(), Value::Builtin(crate::concurrent::builtin_join));
-    globals.insert("cancel".to_string(), Value::Builtin(crate::concurrent::builtin_cancel));
+    globals.insert(
+        "__spawn".to_string(),
+        Value::Builtin(crate::concurrent::builtin_spawn),
+    );
+    globals.insert(
+        "__join_task".to_string(),
+        Value::Builtin(crate::concurrent::builtin_join),
+    );
+    globals.insert(
+        "cancel".to_string(),
+        Value::Builtin(crate::concurrent::builtin_cancel),
+    );
     globals.insert("len".to_string(), Value::Builtin(builtin_len));
     globals.insert("push".to_string(), Value::Builtin(builtin_push));
     globals.insert("first".to_string(), Value::Builtin(builtin_first));
@@ -45,12 +54,30 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("vec2".to_string(), Value::Builtin(vector::builtin_vec2));
     globals.insert("vec3".to_string(), Value::Builtin(vector::builtin_vec3));
     globals.insert("vec4".to_string(), Value::Builtin(vector::builtin_vec4));
-    globals.insert("__vec_dot".to_string(), Value::Builtin(vector::builtin_vec_dot));
-    globals.insert("__vec_cross".to_string(), Value::Builtin(vector::builtin_vec_cross));
-    globals.insert("__vec_length".to_string(), Value::Builtin(vector::builtin_vec_length));
-    globals.insert("__vec_distance".to_string(), Value::Builtin(vector::builtin_vec_distance));
-    globals.insert("__vec_normalize".to_string(), Value::Builtin(vector::builtin_vec_normalize));
-    globals.insert("__vec_lerp".to_string(), Value::Builtin(vector::builtin_vec_lerp));
+    globals.insert(
+        "__vec_dot".to_string(),
+        Value::Builtin(vector::builtin_vec_dot),
+    );
+    globals.insert(
+        "__vec_cross".to_string(),
+        Value::Builtin(vector::builtin_vec_cross),
+    );
+    globals.insert(
+        "__vec_length".to_string(),
+        Value::Builtin(vector::builtin_vec_length),
+    );
+    globals.insert(
+        "__vec_distance".to_string(),
+        Value::Builtin(vector::builtin_vec_distance),
+    );
+    globals.insert(
+        "__vec_normalize".to_string(),
+        Value::Builtin(vector::builtin_vec_normalize),
+    );
+    globals.insert(
+        "__vec_lerp".to_string(),
+        Value::Builtin(vector::builtin_vec_lerp),
+    );
 
     // Internal builtins (used by stdlib wrappers)
     globals.insert("__split".to_string(), Value::Builtin(builtin_split));
@@ -68,7 +95,10 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
         "__contains_str".to_string(),
         Value::Builtin(builtin_contains_str),
     );
-    globals.insert("__str_index_of".to_string(), Value::Builtin(builtin_str_index_of));
+    globals.insert(
+        "__str_index_of".to_string(),
+        Value::Builtin(builtin_str_index_of),
+    );
     globals.insert("__str_count".to_string(), Value::Builtin(builtin_str_count));
     globals.insert("__byte_len".to_string(), Value::Builtin(builtin_byte_len));
     globals.insert("__strip".to_string(), Value::Builtin(builtin_strip));
@@ -101,23 +131,59 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("__powf".to_string(), Value::Builtin(builtin_powf));
 
     // regex
-    globals.insert("__regex_match".to_string(), Value::Builtin(builtin_regex_match));
-    globals.insert("__regex_find".to_string(), Value::Builtin(builtin_regex_find));
-    globals.insert("__regex_find_all".to_string(), Value::Builtin(builtin_regex_find_all));
-    globals.insert("__regex_replace".to_string(), Value::Builtin(builtin_regex_replace));
-    globals.insert("__regex_split".to_string(), Value::Builtin(builtin_regex_split));
-    globals.insert("__regex_captures".to_string(), Value::Builtin(builtin_regex_captures));
+    globals.insert(
+        "__regex_match".to_string(),
+        Value::Builtin(builtin_regex_match),
+    );
+    globals.insert(
+        "__regex_find".to_string(),
+        Value::Builtin(builtin_regex_find),
+    );
+    globals.insert(
+        "__regex_find_all".to_string(),
+        Value::Builtin(builtin_regex_find_all),
+    );
+    globals.insert(
+        "__regex_replace".to_string(),
+        Value::Builtin(builtin_regex_replace),
+    );
+    globals.insert(
+        "__regex_split".to_string(),
+        Value::Builtin(builtin_regex_split),
+    );
+    globals.insert(
+        "__regex_captures".to_string(),
+        Value::Builtin(builtin_regex_captures),
+    );
     // datetime
     globals.insert("__dt_now".to_string(), Value::Builtin(builtin_dt_now));
     globals.insert("__dt_format".to_string(), Value::Builtin(builtin_dt_format));
     globals.insert("__dt_parse".to_string(), Value::Builtin(builtin_dt_parse));
     // encoding
-    globals.insert("__base64_encode".to_string(), Value::Builtin(builtin_base64_encode));
-    globals.insert("__base64_decode".to_string(), Value::Builtin(builtin_base64_decode));
-    globals.insert("__hex_encode".to_string(), Value::Builtin(builtin_hex_encode));
-    globals.insert("__hex_decode".to_string(), Value::Builtin(builtin_hex_decode));
-    globals.insert("__url_encode".to_string(), Value::Builtin(builtin_url_encode));
-    globals.insert("__url_decode".to_string(), Value::Builtin(builtin_url_decode));
+    globals.insert(
+        "__base64_encode".to_string(),
+        Value::Builtin(builtin_base64_encode),
+    );
+    globals.insert(
+        "__base64_decode".to_string(),
+        Value::Builtin(builtin_base64_decode),
+    );
+    globals.insert(
+        "__hex_encode".to_string(),
+        Value::Builtin(builtin_hex_encode),
+    );
+    globals.insert(
+        "__hex_decode".to_string(),
+        Value::Builtin(builtin_hex_decode),
+    );
+    globals.insert(
+        "__url_encode".to_string(),
+        Value::Builtin(builtin_url_encode),
+    );
+    globals.insert(
+        "__url_decode".to_string(),
+        Value::Builtin(builtin_url_decode),
+    );
     // hash
     globals.insert("__sha256".to_string(), Value::Builtin(builtin_sha256));
     globals.insert("__sha1".to_string(), Value::Builtin(builtin_sha1));
@@ -138,8 +204,14 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
         "__append_file".to_string(),
         Value::Builtin(builtin_append_file),
     );
-    globals.insert("__read_bytes".to_string(), Value::Builtin(builtin_read_bytes));
-    globals.insert("__write_bytes".to_string(), Value::Builtin(builtin_write_bytes));
+    globals.insert(
+        "__read_bytes".to_string(),
+        Value::Builtin(builtin_read_bytes),
+    );
+    globals.insert(
+        "__write_bytes".to_string(),
+        Value::Builtin(builtin_write_bytes),
+    );
     globals.insert(
         "__file_exists".to_string(),
         Value::Builtin(builtin_file_exists),
@@ -237,31 +309,64 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
         "__http_request".to_string(),
         Value::Builtin(builtin_http_request),
     );
-    globals.insert("__net_download".to_string(), Value::Builtin(builtin_net_download));
-    globals.insert("__net_upload".to_string(), Value::Builtin(builtin_net_upload));
-    globals.insert("__net_http_open".to_string(), Value::Builtin(builtin_net_http_open));
-    globals.insert("__net_http_read".to_string(), Value::Builtin(builtin_net_http_read));
+    globals.insert(
+        "__net_download".to_string(),
+        Value::Builtin(builtin_net_download),
+    );
+    globals.insert(
+        "__net_upload".to_string(),
+        Value::Builtin(builtin_net_upload),
+    );
+    globals.insert(
+        "__net_http_open".to_string(),
+        Value::Builtin(builtin_net_http_open),
+    );
+    globals.insert(
+        "__net_http_read".to_string(),
+        Value::Builtin(builtin_net_http_read),
+    );
     globals.insert(
         "__net_http_read_line".to_string(),
         Value::Builtin(builtin_net_http_read_line),
     );
-    globals.insert("__net_tcp_connect".to_string(), Value::Builtin(builtin_net_tcp_connect));
-    globals.insert("__net_tcp_listen".to_string(), Value::Builtin(builtin_net_tcp_listen));
-    globals.insert("__net_tcp_accept".to_string(), Value::Builtin(builtin_net_tcp_accept));
+    globals.insert(
+        "__net_tcp_connect".to_string(),
+        Value::Builtin(builtin_net_tcp_connect),
+    );
+    globals.insert(
+        "__net_tcp_listen".to_string(),
+        Value::Builtin(builtin_net_tcp_listen),
+    );
+    globals.insert(
+        "__net_tcp_accept".to_string(),
+        Value::Builtin(builtin_net_tcp_accept),
+    );
     globals.insert("__net_send".to_string(), Value::Builtin(builtin_net_send));
     globals.insert(
         "__net_send_file".to_string(),
         Value::Builtin(builtin_net_send_file),
     );
-    globals.insert("__net_receive".to_string(), Value::Builtin(builtin_net_receive));
+    globals.insert(
+        "__net_receive".to_string(),
+        Value::Builtin(builtin_net_receive),
+    );
     globals.insert(
         "__net_set_timeout".to_string(),
         Value::Builtin(builtin_net_set_timeout),
     );
     globals.insert("__net_close".to_string(), Value::Builtin(builtin_net_close));
-    globals.insert("__net_udp_bind".to_string(), Value::Builtin(builtin_net_udp_bind));
-    globals.insert("__net_udp_send".to_string(), Value::Builtin(builtin_net_udp_send));
-    globals.insert("__net_udp_receive".to_string(), Value::Builtin(builtin_net_udp_receive));
+    globals.insert(
+        "__net_udp_bind".to_string(),
+        Value::Builtin(builtin_net_udp_bind),
+    );
+    globals.insert(
+        "__net_udp_send".to_string(),
+        Value::Builtin(builtin_net_udp_send),
+    );
+    globals.insert(
+        "__net_udp_receive".to_string(),
+        Value::Builtin(builtin_net_udp_receive),
+    );
 }
 
 // ── Core builtins ──────────────────────────────────────────────────────
@@ -444,7 +549,11 @@ fn builtin_range(args: &[Value]) -> Value {
     } else {
         i128::from(start) - i128::from(end)
     };
-    let count = if span <= 0 { 0 } else { (span - 1) / i128::from(step).abs() + 1 };
+    let count = if span <= 0 {
+        0
+    } else {
+        (span - 1) / i128::from(step).abs() + 1
+    };
     if count > RANGE_MAX_LEN {
         return Value::Error(rc_str(format!(
             "range() would build {count} elements, more than the {RANGE_MAX_LEN} it allows; loop with `each i in range(...)` instead"
@@ -1132,7 +1241,10 @@ fn vm_str_arg(v: &Value) -> Option<&str> {
 
 fn vm_str_array(items: impl IntoIterator<Item = String>) -> Value {
     Value::Array(Rc::new(RefCell::new(
-        items.into_iter().map(|s| Value::String(rc_str(s))).collect(),
+        items
+            .into_iter()
+            .map(|s| Value::String(rc_str(s)))
+            .collect(),
     )))
 }
 
@@ -1143,7 +1255,10 @@ fn vm_compile_re(pattern: &str, name: &str) -> Result<regex::Regex, Value> {
 }
 
 fn builtin_regex_match(args: &[Value]) -> Value {
-    match (args.first().and_then(vm_str_arg), args.get(1).and_then(vm_str_arg)) {
+    match (
+        args.first().and_then(vm_str_arg),
+        args.get(1).and_then(vm_str_arg),
+    ) {
         (Some(pat), Some(text)) if args.len() == 2 => match vm_compile_re(pat, "__regex_match") {
             Ok(re) => Value::Boolean(re.is_match(text)),
             Err(e) => e,
@@ -1153,7 +1268,10 @@ fn builtin_regex_match(args: &[Value]) -> Value {
 }
 
 fn builtin_regex_find(args: &[Value]) -> Value {
-    match (args.first().and_then(vm_str_arg), args.get(1).and_then(vm_str_arg)) {
+    match (
+        args.first().and_then(vm_str_arg),
+        args.get(1).and_then(vm_str_arg),
+    ) {
         (Some(pat), Some(text)) if args.len() == 2 => match vm_compile_re(pat, "__regex_find") {
             Ok(re) => match re.find(text) {
                 Some(m) => Value::String(rc_str(m.as_str())),
@@ -1166,11 +1284,16 @@ fn builtin_regex_find(args: &[Value]) -> Value {
 }
 
 fn builtin_regex_find_all(args: &[Value]) -> Value {
-    match (args.first().and_then(vm_str_arg), args.get(1).and_then(vm_str_arg)) {
-        (Some(pat), Some(text)) if args.len() == 2 => match vm_compile_re(pat, "__regex_find_all") {
-            Ok(re) => vm_str_array(re.find_iter(text).map(|m| m.as_str().to_string())),
-            Err(e) => e,
-        },
+    match (
+        args.first().and_then(vm_str_arg),
+        args.get(1).and_then(vm_str_arg),
+    ) {
+        (Some(pat), Some(text)) if args.len() == 2 => {
+            match vm_compile_re(pat, "__regex_find_all") {
+                Ok(re) => vm_str_array(re.find_iter(text).map(|m| m.as_str().to_string())),
+                Err(e) => e,
+            }
+        }
         _ => vm_hard_err("__regex_find_all: expected (pattern, text) strings"),
     }
 }
@@ -1179,7 +1302,11 @@ fn builtin_regex_replace(args: &[Value]) -> Value {
     if args.len() != 3 {
         return vm_hard_err("__regex_replace: expected 3 arguments");
     }
-    match (vm_str_arg(&args[0]), vm_str_arg(&args[1]), vm_str_arg(&args[2])) {
+    match (
+        vm_str_arg(&args[0]),
+        vm_str_arg(&args[1]),
+        vm_str_arg(&args[2]),
+    ) {
         (Some(pat), Some(text), Some(rep)) => match vm_compile_re(pat, "__regex_replace") {
             Ok(re) => Value::String(rc_str(re.replace_all(text, rep).into_owned())),
             Err(e) => e,
@@ -1189,7 +1316,10 @@ fn builtin_regex_replace(args: &[Value]) -> Value {
 }
 
 fn builtin_regex_split(args: &[Value]) -> Value {
-    match (args.first().and_then(vm_str_arg), args.get(1).and_then(vm_str_arg)) {
+    match (
+        args.first().and_then(vm_str_arg),
+        args.get(1).and_then(vm_str_arg),
+    ) {
         (Some(pat), Some(text)) if args.len() == 2 => match vm_compile_re(pat, "__regex_split") {
             Ok(re) => vm_str_array(re.split(text).map(|s| s.to_string())),
             Err(e) => e,
@@ -1199,17 +1329,22 @@ fn builtin_regex_split(args: &[Value]) -> Value {
 }
 
 fn builtin_regex_captures(args: &[Value]) -> Value {
-    match (args.first().and_then(vm_str_arg), args.get(1).and_then(vm_str_arg)) {
-        (Some(pat), Some(text)) if args.len() == 2 => match vm_compile_re(pat, "__regex_captures") {
-            Ok(re) => match re.captures(text) {
-                Some(caps) => vm_str_array(
-                    caps.iter()
-                        .map(|m| m.map(|x| x.as_str().to_string()).unwrap_or_default()),
-                ),
-                None => Value::None,
-            },
-            Err(e) => e,
-        },
+    match (
+        args.first().and_then(vm_str_arg),
+        args.get(1).and_then(vm_str_arg),
+    ) {
+        (Some(pat), Some(text)) if args.len() == 2 => {
+            match vm_compile_re(pat, "__regex_captures") {
+                Ok(re) => match re.captures(text) {
+                    Some(caps) => vm_str_array(
+                        caps.iter()
+                            .map(|m| m.map(|x| x.as_str().to_string()).unwrap_or_default()),
+                    ),
+                    None => Value::None,
+                },
+                Err(e) => e,
+            }
+        }
         _ => vm_hard_err("__regex_captures: expected (pattern, text) strings"),
     }
 }
@@ -1238,7 +1373,10 @@ fn builtin_dt_format(args: &[Value]) -> Value {
     // chrono reports a bad specifier only when the result is written, and
     // `to_string` turns that report into a panic, so check the format first.
     let items: Vec<chrono::format::Item> = chrono::format::StrftimeItems::new(fmt).collect();
-    if items.iter().any(|item| matches!(item, chrono::format::Item::Error)) {
+    if items
+        .iter()
+        .any(|item| matches!(item, chrono::format::Item::Error))
+    {
         return vm_hard_err(format!("__dt_format: invalid format string '{}'", fmt));
     }
     match chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0) {
@@ -1271,9 +1409,9 @@ fn builtin_dt_parse(args: &[Value]) -> Value {
 
 fn builtin_base64_encode(args: &[Value]) -> Value {
     match args.first().and_then(vm_str_arg) {
-        Some(s) if args.len() == 1 => {
-            Value::String(rc_str(base64::engine::general_purpose::STANDARD.encode(s.as_bytes())))
-        }
+        Some(s) if args.len() == 1 => Value::String(rc_str(
+            base64::engine::general_purpose::STANDARD.encode(s.as_bytes()),
+        )),
         _ => vm_hard_err("__base64_encode: expected 1 string argument"),
     }
 }
@@ -1548,7 +1686,9 @@ fn stdin_arg(v: Option<&Value>, name: &str) -> Result<Option<String>, Value> {
     match v.map(|v| v.repr()) {
         None | Some(ValueRepr::None) => Ok(None),
         Some(ValueRepr::String(s)) => Ok(Some(s.to_string())),
-        Some(_) => Err(Value::Error(rc_str(format!("{name}() stdin must be a string")))),
+        Some(_) => Err(Value::Error(rc_str(format!(
+            "{name}() stdin must be a string"
+        )))),
     }
 }
 
@@ -1590,7 +1730,9 @@ fn builtin_exec(args: &[Value]) -> Value {
 // Shell-free: each argv element is one verbatim argument, so "x; rm -rf /" is a filename.
 fn builtin_exec_argv(args: &[Value]) -> Value {
     if !(2..=3).contains(&args.len()) {
-        return Value::Error(rc_str("__exec_argv() takes (program, array) and optional stdin"));
+        return Value::Error(rc_str(
+            "__exec_argv() takes (program, array) and optional stdin",
+        ));
     }
     let program = match args[0].repr() {
         ValueRepr::String(s) => s.to_string(),
@@ -1666,8 +1808,8 @@ fn builtin_env_vars(_args: &[Value]) -> Value {
         .map(|(k, v)| (Value::String(rc_str(k)), Value::String(rc_str(v))))
         .collect();
     Value::Map(Rc::new(RefCell::new(
-                crate::vm::collections::OxMap::from_pairs(entries),
-            )))
+        crate::vm::collections::OxMap::from_pairs(entries),
+    )))
 }
 
 fn builtin_cwd(_args: &[Value]) -> Value {
@@ -2043,7 +2185,9 @@ fn builtin_path_is_absolute(args: &[Value]) -> Value {
         return Value::Error(rc_str("__path_is_absolute() takes 1 argument"));
     }
     match args[0].repr() {
-        ValueRepr::String(path) => Value::Boolean(std::path::Path::new(path.as_ref()).is_absolute()),
+        ValueRepr::String(path) => {
+            Value::Boolean(std::path::Path::new(path.as_ref()).is_absolute())
+        }
         _ => Value::Error(rc_str("__path_is_absolute() requires a string")),
     }
 }
@@ -2269,7 +2413,9 @@ fn json_parse_string(chars: &[char], pos: &mut usize) -> Result<Value, String> {
                         // A character outside the BMP is written as a UTF-16
                         // surrogate pair, two escapes in a row.
                         0xD800..=0xDBFF => {
-                            if chars.get(*pos + 1) != Some(&'\\') || chars.get(*pos + 2) != Some(&'u') {
+                            if chars.get(*pos + 1) != Some(&'\\')
+                                || chars.get(*pos + 2) != Some(&'u')
+                            {
                                 return Err(format!("unpaired surrogate \\u{:04x}", hi));
                             }
                             let lo = json_hex4(chars, *pos + 3)?;
@@ -2322,13 +2468,19 @@ fn json_parse_number(chars: &[char], pos: &mut usize) -> Result<Value, String> {
         return Err(format!("invalid number at position {}", start));
     }
     if int_digits > 1 && chars[int_start] == '0' {
-        return Err(format!("invalid number at position {}: leading zero", start));
+        return Err(format!(
+            "invalid number at position {}: leading zero",
+            start
+        ));
     }
     if *pos < chars.len() && chars[*pos] == '.' {
         is_float = true;
         *pos += 1;
         if digits(pos) == 0 {
-            return Err(format!("invalid number at position {}: no digits after '.'", start));
+            return Err(format!(
+                "invalid number at position {}: no digits after '.'",
+                start
+            ));
         }
     }
     if *pos < chars.len() && (chars[*pos] == 'e' || chars[*pos] == 'E') {
@@ -2338,7 +2490,10 @@ fn json_parse_number(chars: &[char], pos: &mut usize) -> Result<Value, String> {
             *pos += 1;
         }
         if digits(pos) == 0 {
-            return Err(format!("invalid number at position {}: no digits in exponent", start));
+            return Err(format!(
+                "invalid number at position {}: no digits in exponent",
+                start
+            ));
         }
     }
     let num_str: String = chars[start..*pos].iter().collect();
@@ -2353,7 +2508,10 @@ fn json_parse_number(chars: &[char], pos: &mut usize) -> Result<Value, String> {
     } else {
         // An integer past i64 is still a valid JSON number; read it the way
         // JavaScript would rather than failing the whole document.
-        num_str.parse::<i64>().map(Value::Integer).or_else(|_| as_float())
+        num_str
+            .parse::<i64>()
+            .map(Value::Integer)
+            .or_else(|_| as_float())
     }
 }
 
@@ -2411,8 +2569,8 @@ fn json_parse_object(chars: &[char], pos: &mut usize, depth: usize) -> Result<Va
     if *pos < chars.len() && chars[*pos] == '}' {
         *pos += 1;
         return Ok(Value::Map(Rc::new(RefCell::new(
-                crate::vm::collections::OxMap::from_pairs(entries),
-            ))));
+            crate::vm::collections::OxMap::from_pairs(entries),
+        ))));
     }
     loop {
         json_skip_ws(chars, pos);
@@ -2441,8 +2599,8 @@ fn json_parse_object(chars: &[char], pos: &mut usize, depth: usize) -> Result<Va
         *pos += 1;
     }
     Ok(Value::Map(Rc::new(RefCell::new(
-                crate::vm::collections::OxMap::from_pairs(entries),
-            ))))
+        crate::vm::collections::OxMap::from_pairs(entries),
+    ))))
 }
 
 fn builtin_json_stringify(args: &[Value]) -> Value {
@@ -2511,8 +2669,11 @@ fn value_to_json_inner(val: &Value, open: &mut Vec<*const ()>) -> Result<String,
         }
         ValueRepr::String(s) => Ok(json_quote(s)),
         ValueRepr::Array(arr) => {
-            let items: Result<Vec<String>, String> =
-                arr.borrow().iter().map(|v| value_to_json(v, open)).collect();
+            let items: Result<Vec<String>, String> = arr
+                .borrow()
+                .iter()
+                .map(|v| value_to_json(v, open))
+                .collect();
             Ok(format!("[{}]", items?.join(",")))
         }
         ValueRepr::Map(entries) => {
@@ -2627,8 +2788,7 @@ fn value_to_toml(val: &Value) -> Result<toml::Value, String> {
             Ok(toml::Value::Array(items?))
         }
         ValueRepr::Tuple(t) => {
-            let items: Result<Vec<toml::Value>, String> =
-                t.iter().map(value_to_toml).collect();
+            let items: Result<Vec<toml::Value>, String> = t.iter().map(value_to_toml).collect();
             Ok(toml::Value::Array(items?))
         }
         ValueRepr::Map(entries) => {
@@ -2861,7 +3021,9 @@ macro_rules! net_try {
 
 fn builtin_net_download(args: &[Value]) -> Value {
     if !(2..=5).contains(&args.len()) {
-        return Value::Error(rc_str("download: expected (url, path, method?, headers?, body?)"));
+        return Value::Error(rc_str(
+            "download: expected (url, path, method?, headers?, body?)",
+        ));
     }
     let url = net_try!(net_str(&args[0], "download url"));
     let path = net_try!(net_str(&args[1], "download path"));
@@ -2882,7 +3044,9 @@ fn builtin_net_download(args: &[Value]) -> Value {
 
 fn builtin_net_upload(args: &[Value]) -> Value {
     if args.len() < 3 || args.len() > 4 {
-        return Value::Error(rc_str("upload: expected (method, url, file_path, headers?)"));
+        return Value::Error(rc_str(
+            "upload: expected (method, url, file_path, headers?)",
+        ));
     }
     let method = net_try!(net_str(&args[0], "upload method"));
     let url = net_try!(net_str(&args[1], "upload url"));
@@ -2910,7 +3074,11 @@ fn builtin_net_http_open(args: &[Value]) -> Value {
     let url = net_try!(net_str(&args[1], "open_stream url"));
     let headers = net_headers(Some(&args[2]));
     let body = net_try!(net_str(&args[3], "open_stream body"));
-    let body = if body.is_empty() { None } else { Some(body.as_str()) };
+    let body = if body.is_empty() {
+        None
+    } else {
+        Some(body.as_str())
+    };
     match crate::netres::http_open(&method, &url, &headers, body) {
         Ok(id) => Value::Integer(id as i64),
         Err(e) => Value::Error(rc_str(e)),
@@ -3070,10 +3238,9 @@ fn builtin_net_udp_receive(args: &[Value]) -> Value {
     let id = net_try!(net_int(&args[0], "udp_receive sock"));
     let max = net_try!(net_int(&args[1], "udp_receive max"));
     match crate::netres::udp_receive(id as u64, max) {
-        Ok((data, addr)) => Value::Tuple(Rc::new(vec![
-            Value::String(rc_str(data)),
-            Value::String(rc_str(addr)),
-        ].into())),
+        Ok((data, addr)) => Value::Tuple(Rc::new(
+            vec![Value::String(rc_str(data)), Value::String(rc_str(addr))].into(),
+        )),
         Err(e) => Value::Error(rc_str(e)),
     }
 }

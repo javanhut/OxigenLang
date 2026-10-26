@@ -105,7 +105,11 @@ fn shared_module_is_evaluated_once_and_its_state_is_shared() {
             "shared.oxi",
             "runs := [0]\nruns[0] = runs[0] + 1\nhits := [0]\nfun bump() {\n  hits[0] = hits[0] + 1\n  hits[0]\n}\nfun run_count() { runs[0] }\n",
         );
-        write(&dir, "user1.oxi", "introduce .shared\nfun go() { shared.bump() }\n");
+        write(
+            &dir,
+            "user1.oxi",
+            "introduce .shared\nfun go() { shared.bump() }\n",
+        );
         let out = run_main(
             &dir,
             "introduce .shared\nintroduce .user1\na := shared.bump()\nb := user1.go()\nc := shared.bump()\n[a, b, c, shared.run_count()]",
@@ -132,11 +136,20 @@ fn diamond_import_graph_runs_each_module_once() {
     );
     write(&dir, "b.oxi", "introduce .d\nfun bv() { d.dv() }\n");
     write(&dir, "c.oxi", "introduce .d\nfun cv() { d.dv() }\n");
-    let out = run_main(&dir, "introduce .b\nintroduce .c\nintroduce .d\nb.bv() + c.cv() + d.dv()", VM::new_interpreter)
-        .unwrap_or_else(|e| panic!("diamond import failed: {e}"));
+    let out = run_main(
+        &dir,
+        "introduce .b\nintroduce .c\nintroduce .d\nb.bv() + c.cv() + d.dv()",
+        VM::new_interpreter,
+    )
+    .unwrap_or_else(|e| panic!("diamond import failed: {e}"));
     assert_eq!(out, "12");
     let evals = std::fs::read_to_string(&log).unwrap_or_default();
-    assert_eq!(evals.lines().count(), 1, "d evaluated {} times", evals.lines().count());
+    assert_eq!(
+        evals.lines().count(),
+        1,
+        "d evaluated {} times",
+        evals.lines().count()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -144,12 +157,22 @@ fn diamond_import_graph_runs_each_module_once() {
 fn restrict_drops_modules_cached_before_the_restriction() {
     let dir = temp_dir("restrict_cache");
     write(&dir, "f.txt", "secret");
-    let read = format!("introduce io\nio.read_file(\"{}\")", dir.join("f.txt").display());
+    let read = format!(
+        "introduce io\nio.read_file(\"{}\")",
+        dir.join("f.txt").display()
+    );
 
     let mut vm = VM::new_interpreter();
     vm.set_file(dir.join("main.oxi"));
-    let first = vm.run(compile(&read)).map(|v| format!("{v}")).map_err(|e| e.message);
-    assert_eq!(first.as_deref(), Ok("secret"), "unrestricted read should work");
+    let first = vm
+        .run(compile(&read))
+        .map(|v| format!("{v}"))
+        .map_err(|e| e.message);
+    assert_eq!(
+        first.as_deref(),
+        Ok("secret"),
+        "unrestricted read should work"
+    );
 
     vm.restrict(&[Capability::Network]);
     let second = vm.run(compile(&read)).map(|v| format!("{v}"));

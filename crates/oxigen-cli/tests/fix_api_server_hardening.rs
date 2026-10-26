@@ -65,7 +65,9 @@ fn free_port() -> u16 {
         .port()
 }
 
-const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe, 0x80, b'x'];
+const PNG: &[u8] = &[
+    0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe, 0x80, b'x',
+];
 
 /// Starts the test server over `root` and returns it with the first line it
 /// printed. The server leaves `host` at its default.
@@ -180,13 +182,27 @@ fn the_api_server_survives_hostile_clients() {
     assert!(banner.contains("127.0.0.1"), "banner: {banner}");
 
     // Header injection: CR/LF from a query parameter must not end the header.
-    let resp = get(port, "/go?next=/home%0d%0aSet-Cookie:%20pwned=1%0d%0a%0d%0a<script>");
+    let resp = get(
+        port,
+        "/go?next=/home%0d%0aSet-Cookie:%20pwned=1%0d%0a%0d%0a<script>",
+    );
     let head = head_of(&resp);
     assert_eq!(status_of(&resp), "302", "head: {head}");
-    assert!(!head.contains("\r\nSet-Cookie"), "injected header in: {head:?}");
-    assert!(body_of(&resp).is_empty(), "injected body: {:?}", String::from_utf8_lossy(&resp));
+    assert!(
+        !head.contains("\r\nSet-Cookie"),
+        "injected header in: {head:?}"
+    );
+    assert!(
+        body_of(&resp).is_empty(),
+        "injected body: {:?}",
+        String::from_utf8_lossy(&resp)
+    );
     let resp = get(port, "/name?q=a%0d%0aX-Evil:%201");
-    assert!(!head_of(&resp).contains("\r\nX-Evil"), "injected header in: {:?}", head_of(&resp));
+    assert!(
+        !head_of(&resp).contains("\r\nX-Evil"),
+        "injected header in: {:?}",
+        head_of(&resp)
+    );
 
     // A JSON nesting bomb is refused, and the worker lives on.
     let bomb = "[".repeat(4_000_000);
@@ -204,13 +220,25 @@ fn the_api_server_survives_hostile_clients() {
         port,
         b"POST /echo HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: 7\r\n\r\n{\"a\":1}",
     );
-    assert_eq!(body_of(&resp), b"{\"a\":1}", "server did not survive the bomb");
+    assert_eq!(
+        body_of(&resp),
+        b"{\"a\":1}",
+        "server did not survive the bomb"
+    );
 
     // Binary files are served byte for byte.
     let resp = get(port, "/img");
     assert_eq!(status_of(&resp), "200", "head: {}", head_of(&resp));
-    assert!(head_of(&resp).contains(&format!("Content-Length: {}", PNG.len())), "head: {}", head_of(&resp));
-    assert!(head_of(&resp).contains("image/png"), "head: {}", head_of(&resp));
+    assert!(
+        head_of(&resp).contains(&format!("Content-Length: {}", PNG.len())),
+        "head: {}",
+        head_of(&resp)
+    );
+    assert!(
+        head_of(&resp).contains("image/png"),
+        "head: {}",
+        head_of(&resp)
+    );
     assert_eq!(body_of(&resp), PNG);
 
     // The wildcard route from the module's docs, and a directory under it.
@@ -229,19 +257,31 @@ fn the_api_server_survives_hostile_clients() {
 
     // A body that ends before its Content-Length is refused, not truncated.
     let mut s = connect(port);
-    s.write_all(b"POST /len HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: 10\r\n\r\nabc")
-        .unwrap();
+    s.write_all(
+        b"POST /len HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: 10\r\n\r\nabc",
+    )
+    .unwrap();
     s.shutdown(Shutdown::Write).unwrap();
     let mut resp = Vec::new();
     let _ = s.read_to_end(&mut resp);
-    assert_eq!(status_of(&resp), "400", "short body answered: {:?}", String::from_utf8_lossy(&resp));
+    assert_eq!(
+        status_of(&resp),
+        "400",
+        "short body answered: {:?}",
+        String::from_utf8_lossy(&resp)
+    );
 
     // Chunked bodies are not understood, so they are refused.
     let resp = exchange(
         port,
         b"POST /len HTTP/1.1\r\nHost: x\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n",
     );
-    assert_eq!(status_of(&resp), "501", "chunked answered: {:?}", head_of(&resp));
+    assert_eq!(
+        status_of(&resp),
+        "501",
+        "chunked answered: {:?}",
+        head_of(&resp)
+    );
 
     // Slowloris: one header byte every 200ms keeps every read alive, but the
     // request as a whole must not outlive header_timeout (1s here).

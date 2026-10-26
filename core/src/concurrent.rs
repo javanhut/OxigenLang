@@ -22,13 +22,13 @@ use crate::ast::{Expression, Program, Statement};
 use crate::compiler::Compiler;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
+use crate::vm::VM;
 use crate::vm::collections::{OxMap, OxSet};
 use crate::vm::limits::InterruptHandle;
 use crate::vm::value::{
     ErrorValueData, FieldLayout, Function, ObjClosure, ObjEnumInstance, ObjStructDef,
     ObjStructInstance, Upvalue, Value, ValueRepr, VmEnumPayload,
 };
-use crate::vm::VM;
 use std::cell::RefCell as StdRefCell;
 use std::rc::Rc;
 
@@ -50,8 +50,16 @@ pub enum Sendable {
     /// `module` is the file of the module that defined the struct, `None`
     /// for the program itself: two files may each define a `Point`, and a
     /// module's struct isn't among the program's globals.
-    Struct { name: String, module: Option<PathBuf>, fields: Vec<Sendable> },
-    Enum { ename: String, variant: String, payload: SendPayload },
+    Struct {
+        name: String,
+        module: Option<PathBuf>,
+        fields: Vec<Sendable>,
+    },
+    Enum {
+        ename: String,
+        variant: String,
+        payload: SendPayload,
+    },
 }
 
 /// Transfer form of `VmEnumPayload`.
@@ -98,7 +106,10 @@ fn detach(v: &Value, vm: Option<&VM>) -> Result<Sendable, String> {
             variant: e.variant_name.clone(),
             payload: detach_payload(&e.payload, vm)?,
         }),
-        _ => Err(format!("cannot send value of type {} across threads", v.type_name())),
+        _ => Err(format!(
+            "cannot send value of type {} across threads",
+            v.type_name()
+        )),
     }
 }
 
@@ -142,18 +153,29 @@ fn attach(s: Sendable, vm: &VM) -> Result<Value, String> {
             }
             Value::Map(Rc::new(StdRefCell::new(OxMap::from_pairs(out))))
         }
-        Sendable::Set(items) => {
-            Value::Set(Rc::new(StdRefCell::new(OxSet::from_iter_dedup(all(items)?))))
-        }
-        Sendable::Struct { name, module, fields } => {
+        Sendable::Set(items) => Value::Set(Rc::new(StdRefCell::new(OxSet::from_iter_dedup(all(
+            items,
+        )?)))),
+        Sendable::Struct {
+            name,
+            module,
+            fields,
+        } => {
             let vals = all(fields)?;
             let def = struct_def(vm, &name, module.as_deref()).ok_or_else(|| {
-                format!("struct '{}' is not defined on the thread receiving it", name)
+                format!(
+                    "struct '{}' is not defined on the thread receiving it",
+                    name
+                )
             })?;
             let layout = field_layout(vm, &def)?;
             Value::StructInstance(Rc::new(ObjStructInstance::new(name, vals, layout, def)))
         }
-        Sendable::Enum { ename, variant, payload } => Value::EnumInstance(Rc::new(ObjEnumInstance {
+        Sendable::Enum {
+            ename,
+            variant,
+            payload,
+        } => Value::EnumInstance(Rc::new(ObjEnumInstance {
             enum_name: ename,
             variant_name: variant,
             payload: attach_payload(payload, vm)?,
@@ -168,7 +190,9 @@ fn attach_payload(p: SendPayload, vm: &VM) -> Result<VmEnumPayload, String> {
             None => None,
         }),
         SendPayload::Tuple(t) => VmEnumPayload::Tuple(
-            t.into_iter().map(|x| attach(x, vm)).collect::<Result<_, _>>()?,
+            t.into_iter()
+                .map(|x| attach(x, vm))
+                .collect::<Result<_, _>>()?,
         ),
         SendPayload::Fields(f) => VmEnumPayload::Struct(
             f.into_iter()
@@ -204,7 +228,10 @@ fn field_layout(vm: &VM, def: &Rc<ObjStructDef>) -> Result<Rc<FieldLayout>, Stri
         if cur.is_none()
             && let Some(p) = &d.parent
         {
-            return Err(format!("parent struct '{p}' of '{}' is not defined on this thread", d.name));
+            return Err(format!(
+                "parent struct '{p}' of '{}' is not defined on this thread",
+                d.name
+            ));
         }
         chain.push(d);
     }
@@ -245,14 +272,26 @@ struct Unit {
 }
 
 impl Unit {
-    fn parse(number: u32, source: String, file: Option<PathBuf>, is_module: bool) -> Result<Unit, String> {
+    fn parse(
+        number: u32,
+        source: String,
+        file: Option<PathBuf>,
+        is_module: bool,
+    ) -> Result<Unit, String> {
         let lexer = Lexer::new(&source);
         let mut parser = Parser::new(lexer, &source);
         let program = parser.parse_program();
         if !parser.errors().is_empty() {
             return Err(format!("worker parse error: {}", parser.format_errors()));
         }
-        Ok(Unit { number, program, source, file, is_module, previous: None })
+        Ok(Unit {
+            number,
+            program,
+            source,
+            file,
+            is_module,
+            previous: None,
+        })
     }
 
     /// This program and the ones registered before it, oldest first.
@@ -383,7 +422,10 @@ fn unit_for(closure: &ObjClosure, vm: Option<&VM>) -> Result<Arc<Unit>, String> 
     } else if let Some(src) = SRC.get() {
         Unit::parse(number, src.clone(), MAIN_FILE.get().cloned(), false)?
     } else {
-        return Err("spawn(): the program this function comes from is not registered with the worker pool".to_string());
+        return Err(
+            "spawn(): the program this function comes from is not registered with the worker pool"
+                .to_string(),
+        );
     };
     let unit = Arc::new(unit);
     units().insert(number, Arc::clone(&unit));
@@ -686,10 +728,16 @@ fn collect_fns(f: &Rc<Function>, table: &mut HashMap<u64, Rc<Function>>) {
 /// The names an `introduce` binds: the module's name, or the names it picks.
 fn introduced_names(stmt: &Statement) -> Vec<&str> {
     match stmt {
-        Statement::Introduce { selective: Some(names), .. } => {
-            names.iter().map(|n| n.value.as_str()).collect()
-        }
-        Statement::Introduce { path, .. } => path.segments.last().map(String::as_str).into_iter().collect(),
+        Statement::Introduce {
+            selective: Some(names),
+            ..
+        } => names.iter().map(|n| n.value.as_str()).collect(),
+        Statement::Introduce { path, .. } => path
+            .segments
+            .last()
+            .map(String::as_str)
+            .into_iter()
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -712,17 +760,16 @@ fn build_task_vm(
     vm.is_main_context = false; // register fun defs, skip main body
     // No registered program means no declarations to replay, not an error.
     for unit in program.map(Unit::chain).unwrap_or_default() {
-        let keep: Vec<bool> = unit
-            .program
-            .statements
-            .iter()
-            .map(|s| match s {
-                Statement::Introduce { .. } => names.is_none_or(|names| {
-                    introduced_names(s).iter().any(|n| names.contains(*n))
-                }),
-                _ => is_declaration(s),
-            })
-            .collect();
+        let keep: Vec<bool> =
+            unit.program
+                .statements
+                .iter()
+                .map(|s| match s {
+                    Statement::Introduce { .. } => names
+                        .is_none_or(|names| introduced_names(s).iter().any(|n| names.contains(*n))),
+                    _ => is_declaration(s),
+                })
+                .collect();
         let key = (unit.number, keep);
         let cached = DECLARATIONS.with(|d| d.borrow().get(&key).cloned());
         let function = match cached {
@@ -756,7 +803,8 @@ fn build_task_vm(
         if let Some(path) = &unit.file {
             vm.set_file(path.clone()); // so local `introduce .mod` imports resolve
         }
-        vm.run(function).map_err(|e| format!("worker init error: {}", e))?;
+        vm.run(function)
+            .map_err(|e| format!("worker init error: {}", e))?;
     }
     Ok(vm)
 }
@@ -772,7 +820,11 @@ fn function_table(unit: &Unit) -> Result<FunctionTable, String> {
     let compiled = Rc::new(compiled);
     if unit.is_module {
         let origin = Rc::new(crate::vm::value::ModuleOrigin {
-            file: unit.file.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+            file: unit
+                .file
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
             source: unit.source.clone(),
         });
         crate::vm::value::set_module_origin(&compiled, &origin);
@@ -850,8 +902,18 @@ fn struct_modules(s: &Sendable, out: &mut Vec<PathBuf>) {
 }
 
 /// Run a task on its own VM and produce a Sendable result.
-fn run_task(task: TaskBody, capabilities: Option<&[crate::vm::Capability]>, cancel: &Arc<Cancel>) -> Result<Sendable, String> {
-    let TaskBody { callee, args, program, globals, names } = task;
+fn run_task(
+    task: TaskBody,
+    capabilities: Option<&[crate::vm::Capability]>,
+    cancel: &Arc<Cancel>,
+) -> Result<Sendable, String> {
+    let TaskBody {
+        callee,
+        args,
+        program,
+        globals,
+        names,
+    } = task;
     if cancel.is_requested() {
         return Err("task cancelled".to_string());
     }
@@ -863,7 +925,11 @@ fn run_task(task: TaskBody, capabilities: Option<&[crate::vm::Capability]>, canc
     {
         modules.push(path.clone());
     }
-    for s in args.iter().chain(globals.iter().map(|(_, s)| s)).chain(callee.upvalues.iter()) {
+    for s in args
+        .iter()
+        .chain(globals.iter().map(|(_, s)| s))
+        .chain(callee.upvalues.iter())
+    {
         struct_modules(s, &mut modules);
     }
     for path in &modules {
@@ -1030,7 +1096,11 @@ fn spawn_inner(args: &[Value], vm: Option<&VM>) -> Value {
     }
     let closure = match args[0].repr() {
         ValueRepr::Closure(c) => Rc::clone(c),
-        _ => return Value::Error(Rc::new("spawn() first argument must be a function".to_string())),
+        _ => {
+            return Value::Error(Rc::new(
+                "spawn() first argument must be a function".to_string(),
+            ));
+        }
     };
     let unit = match unit_for(&closure, vm) {
         Ok(unit) => unit,
@@ -1220,7 +1290,13 @@ fn channel_of(v: Option<&Value>, what: &str) -> Result<Arc<Chan>, Value> {
 
 pub(crate) fn new_channel() -> u64 {
     let id = NEXT_CHANNEL.fetch_add(1, Ordering::Relaxed);
-    channels().insert(id, Arc::new(Chan { state: Mutex::default(), ready: Default::default() }));
+    channels().insert(
+        id,
+        Arc::new(Chan {
+            state: Mutex::default(),
+            ready: Default::default(),
+        }),
+    );
     id
 }
 
@@ -1283,7 +1359,8 @@ fn channel_recv(vm: &VM, args: &[Value]) -> Value {
     loop {
         if let Some(msg) = st.items.pop_front() {
             drop(st);
-            return attach(msg, vm).unwrap_or_else(|e| Value::Error(Rc::new(format!("channel.recv: {e}"))));
+            return attach(msg, vm)
+                .unwrap_or_else(|e| Value::Error(Rc::new(format!("channel.recv: {e}"))));
         }
         if st.closed {
             return Value::None;
@@ -1295,7 +1372,10 @@ fn channel_recv(vm: &VM, args: &[Value]) -> Value {
                 if left.is_zero() {
                     return Value::None;
                 }
-                ch.ready.wait_timeout(st, left).unwrap_or_else(|e| e.into_inner()).0
+                ch.ready
+                    .wait_timeout(st, left)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0
             }
         };
     }
@@ -1314,7 +1394,13 @@ fn builtin_channel_close(args: &[Value]) -> Value {
 
 fn builtin_channel_len(args: &[Value]) -> Value {
     match channel_of(args.first(), "len") {
-        Ok(ch) => Value::Integer(ch.state.lock().unwrap_or_else(|e| e.into_inner()).items.len() as i64),
+        Ok(ch) => Value::Integer(
+            ch.state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .items
+                .len() as i64,
+        ),
         Err(e) => e,
     }
 }
@@ -1327,12 +1413,30 @@ fn builtin_channel_is_closed(args: &[Value]) -> Value {
 }
 
 pub(crate) fn register_channel_builtins(globals: &mut HashMap<String, Value>) {
-    globals.insert("__channel_new".to_string(), Value::Builtin(builtin_channel_new));
-    globals.insert("__channel_send".to_string(), Value::Builtin(builtin_channel_send));
-    globals.insert("__channel_recv".to_string(), Value::Builtin(builtin_channel_recv));
-    globals.insert("__channel_close".to_string(), Value::Builtin(builtin_channel_close));
-    globals.insert("__channel_len".to_string(), Value::Builtin(builtin_channel_len));
-    globals.insert("__channel_is_closed".to_string(), Value::Builtin(builtin_channel_is_closed));
+    globals.insert(
+        "__channel_new".to_string(),
+        Value::Builtin(builtin_channel_new),
+    );
+    globals.insert(
+        "__channel_send".to_string(),
+        Value::Builtin(builtin_channel_send),
+    );
+    globals.insert(
+        "__channel_recv".to_string(),
+        Value::Builtin(builtin_channel_recv),
+    );
+    globals.insert(
+        "__channel_close".to_string(),
+        Value::Builtin(builtin_channel_close),
+    );
+    globals.insert(
+        "__channel_len".to_string(),
+        Value::Builtin(builtin_channel_len),
+    );
+    globals.insert(
+        "__channel_is_closed".to_string(),
+        Value::Builtin(builtin_channel_is_closed),
+    );
 }
 
 /// The builtins that need the calling VM, and the function that gets it.

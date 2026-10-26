@@ -43,7 +43,8 @@ fn run_on(mut vm: VM, source: &str) -> Result<String, String> {
 
 /// Asserts every backend accepts `source`, and returns the agreed value.
 fn eval(source: &str) -> String {
-    let interp = run_on(VM::new_interpreter(), source).unwrap_or_else(|e| panic!("interpreter: {e}"));
+    let interp =
+        run_on(VM::new_interpreter(), source).unwrap_or_else(|e| panic!("interpreter: {e}"));
     let jit = run_on(VM::new_eager_jit(), source).unwrap_or_else(|e| panic!("jit: {e}"));
     assert_eq!(interp, jit, "backends disagree for:\n{source}");
     interp
@@ -99,7 +100,9 @@ fn the_shell_form_really_does_execute_it() {
 fn arguments_keep_their_spaces_and_quotes() {
     // printf brackets each argument, so argument boundaries are visible: a
     // space-splitting implementation would produce more brackets than inputs.
-    let out = eval("r := __exec_argv(\"printf\", [\"[%s]\", \"a b c\", '\"q\"', \"it's\"])\nr[\"stdout\"]");
+    let out = eval(
+        "r := __exec_argv(\"printf\", [\"[%s]\", \"a b c\", '\"q\"', \"it's\"])\nr[\"stdout\"]",
+    );
     assert_eq!(out, "[a b c][\"q\"][it's]");
 }
 
@@ -143,5 +146,8 @@ fn exec_no_longer_takes_a_variadic_tail() {
     // string, which is precisely the trap. Rejecting is loud; a program relying
     // on it gets an error naming the replacement rather than a quiet injection.
     let err = eval_err("__exec(\"echo\", \"a\")");
-    assert!(err.contains("__exec_argv"), "should point at the fix: {err}");
+    assert!(
+        err.contains("__exec_argv"),
+        "should point at the fix: {err}"
+    );
 }

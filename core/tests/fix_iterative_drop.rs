@@ -25,12 +25,19 @@ fn run_small_stack(source: String, make: fn() -> VM) -> Result<String, String> {
             let lexer = Lexer::new(&source);
             let mut parser = Parser::new(lexer, &source);
             let program = parser.parse_program();
-            assert!(parser.errors().is_empty(), "parser errors:\n{}", parser.format_errors());
+            assert!(
+                parser.errors().is_empty(),
+                "parser errors:\n{}",
+                parser.format_errors()
+            );
             let function = Compiler::new()
                 .compile(&program)
                 .unwrap_or_else(|e| panic!("compile errors: {e:?}"));
             let mut vm = make();
-            let out = vm.run(function).map(|v| format!("{v}")).map_err(|e| e.message);
+            let out = vm
+                .run(function)
+                .map(|v| format!("{v}"))
+                .map_err(|e| e.message);
             // Dropping the VM frees whatever the script still holds.
             drop(vm);
             out
@@ -53,12 +60,18 @@ fn assert_frees(source: &str, expected: &str) {
 
 #[test]
 fn nested_arrays_free_on_reassignment() {
-    assert_frees("x := []\neach i in range(DEPTH) { x = [x] }\nx = 0\n\"done\"", "done");
+    assert_frees(
+        "x := []\neach i in range(DEPTH) { x = [x] }\nx = 0\n\"done\"",
+        "done",
+    );
 }
 
 #[test]
 fn nested_tuples_free_on_reassignment() {
-    assert_frees("x := (0,)\neach i in range(DEPTH) { x = (x, i) }\nx = 0\n\"done\"", "done");
+    assert_frees(
+        "x := (0,)\neach i in range(DEPTH) { x = (x, i) }\nx = 0\n\"done\"",
+        "done",
+    );
 }
 
 #[test]
@@ -95,7 +108,10 @@ fn a_mixed_chain_frees() {
 
 #[test]
 fn a_deep_value_still_alive_when_the_vm_drops_is_freed() {
-    assert_frees("x := []\neach i in range(DEPTH) { x = [x] }\n\"done\"", "done");
+    assert_frees(
+        "x := []\neach i in range(DEPTH) { x = [x] }\n\"done\"",
+        "done",
+    );
 }
 
 #[test]

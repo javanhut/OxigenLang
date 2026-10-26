@@ -279,11 +279,7 @@ fn vm_enforces_parameter_types() {
 #[test]
 fn vm_accepts_correct_parameter_types() {
     let dir = temp_dir("vm-type-ok");
-    let script = write_script(
-        &dir,
-        "ok.oxi",
-        "fun f(x <int>) { x + 1 }\nprintln(f(41))\n",
-    );
+    let script = write_script(&dir, "ok.oxi", "fun f(x <int>) { x + 1 }\nprintln(f(41))\n");
     let output = run_oxigen(&script, &[]);
     assert!(output.status.success(), "stderr:\n{}", stderr(&output));
     assert_eq!(stdout(&output), "42\n");
@@ -324,7 +320,12 @@ fn run_args(args: &[&str]) -> Output {
 #[test]
 fn unknown_subcommand_is_an_error_not_a_repl() {
     let output = run_args(&["run", "app.oxi"]);
-    assert_eq!(output.status.code(), Some(EXIT_USAGE), "{}", stderr(&output));
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_USAGE),
+        "{}",
+        stderr(&output)
+    );
     let err = stderr(&output);
     assert!(err.contains("unknown subcommand `run`"), "{err}");
     // `oxigen run` was in the docs once; point at the real spelling.
@@ -334,7 +335,12 @@ fn unknown_subcommand_is_an_error_not_a_repl() {
 #[test]
 fn unknown_bare_word_is_an_error() {
     let output = run_args(&["nonsense"]);
-    assert_eq!(output.status.code(), Some(EXIT_USAGE), "{}", stderr(&output));
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_USAGE),
+        "{}",
+        stderr(&output)
+    );
     assert!(
         stderr(&output).contains("unknown subcommand `nonsense`"),
         "{}",
@@ -347,7 +353,12 @@ fn non_oxi_file_is_an_error_not_a_repl() {
     let dir = temp_dir("cli-ext");
     let path = write_script(&dir, "app.txt", "hello\n");
     let output = run_args(&[path.to_str().unwrap()]);
-    assert_eq!(output.status.code(), Some(EXIT_USAGE), "{}", stderr(&output));
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_USAGE),
+        "{}",
+        stderr(&output)
+    );
     assert!(
         stderr(&output).contains("not an Oxigen source file"),
         "{}",
@@ -358,8 +369,17 @@ fn non_oxi_file_is_an_error_not_a_repl() {
 #[test]
 fn missing_script_is_an_error() {
     let output = run_args(&["definitely-missing.oxi"]);
-    assert_eq!(output.status.code(), Some(EXIT_USAGE), "{}", stderr(&output));
-    assert!(stderr(&output).contains("no such file"), "{}", stderr(&output));
+    assert_eq!(
+        output.status.code(),
+        Some(EXIT_USAGE),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("no such file"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]
@@ -389,7 +409,11 @@ fn bare_invocation_still_starts_the_repl() {
         .unwrap();
     drop(child.stdin.take());
     let output = child.wait_with_output().unwrap();
-    assert!(stdout(&output).contains("Oxigen REPL"), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("Oxigen REPL"),
+        "{}",
+        stdout(&output)
+    );
 }
 
 #[test]
@@ -400,7 +424,11 @@ fn check_exits_nonzero_when_the_file_has_errors() {
     let output = run_args(&["check", broken.to_str().unwrap()]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     // The JSON still goes to stdout — the LSP parses it regardless of status.
-    assert!(stdout(&output).contains("\"severity\":\"error\""), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("\"severity\":\"error\""),
+        "{}",
+        stdout(&output)
+    );
 
     let good = write_script(&dir, "good.oxi", "main {\n  x := 1\n}\n");
     let output = run_args(&["check", good.to_str().unwrap()]);
@@ -419,7 +447,11 @@ fn jit_flags_before_the_path_are_consumed_by_oxigen() {
     for flag in ["--jit", "--no-jit"] {
         let output = run_args(&[flag, script.to_str().unwrap()]);
         assert!(output.status.success(), "{}", stderr(&output));
-        assert_eq!(stdout(&output).trim(), "0", "{flag} leaked into script args");
+        assert_eq!(
+            stdout(&output).trim(),
+            "0",
+            "{flag} leaked into script args"
+        );
     }
 }
 
@@ -454,7 +486,10 @@ fn check_reports_compile_errors_not_just_parse_errors() {
     assert!(out.contains("\"code\""), "diagnostic has no code:\n{out}");
     assert!(out.contains("skip"), "{out}");
     // A real location, not the `0:0` a line-only error would give.
-    assert!(!out.contains("\"line\":0"), "compile error has no location:\n{out}");
+    assert!(
+        !out.contains("\"line\":0"),
+        "compile error has no location:\n{out}"
+    );
 }
 
 #[test]
@@ -463,7 +498,13 @@ fn check_json_keeps_the_fields_the_lsp_reads() {
     let script = write_script(&dir, "s.oxi", "main {\n  y :=\n}\n");
     let output = run_args(&["check", script.to_str().unwrap()]);
     let out = stdout(&output);
-    for field in ["\"line\"", "\"column\"", "\"message\"", "\"severity\"", "\"suggestion\""] {
+    for field in [
+        "\"line\"",
+        "\"column\"",
+        "\"message\"",
+        "\"severity\"",
+        "\"suggestion\"",
+    ] {
         assert!(out.contains(field), "missing {field} in:\n{out}");
     }
 }
@@ -488,5 +529,8 @@ fn compile_errors_render_like_parse_errors() {
     let err = stderr(&output);
     assert!(err.contains("error[E"), "no code:\n{err}");
     assert!(err.contains("-->"), "no location line:\n{err}");
-    assert!(!err.contains("Compile error:"), "old format survived:\n{err}");
+    assert!(
+        !err.contains("Compile error:"),
+        "old format survived:\n{err}"
+    );
 }

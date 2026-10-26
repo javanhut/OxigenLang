@@ -142,5 +142,8 @@ fn shallow_mutual_recursion_still_correct() {
     let jit = run_vm_big_stack(MUTUAL_SHALLOW, Some(1)).expect("jit shallow should succeed");
     assert_eq!(interp, "0", "interp shallow mutual recursion wrong value");
     assert_eq!(jit, "0", "jit shallow mutual recursion wrong value");
-    assert_eq!(interp, jit, "VM interp != VM JIT (shallow mutual recursion)");
+    assert_eq!(
+        interp, jit,
+        "VM interp != VM JIT (shallow mutual recursion)"
+    );
 }

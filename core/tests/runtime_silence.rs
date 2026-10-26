@@ -53,7 +53,10 @@ fn too_few_arguments_are_reported_at_the_call() {
     // Was: padded with `None`, so the failure appeared inside the callee as
     // `type mismatch: INTEGER + NONE` — on a line the caller wrote correctly.
     let out = assert_rejected("fun add(a, b) { a + b }\nadd(1)", "E0032");
-    assert!(out.contains("takes 2 arguments but 1 was supplied"), "{out}");
+    assert!(
+        out.contains("takes 2 arguments but 1 was supplied"),
+        "{out}"
+    );
     assert!(out.contains("missing `b`"), "{out}");
     assert!(
         !out.contains("INTEGER + NONE"),
@@ -120,10 +123,7 @@ fn partial_named_construction_is_rejected_too() {
 fn a_field_that_admits_none_may_be_omitted() {
     // A linked-list tail is written `next <Node> || <None>` and left off on
     // purpose; only fields that cannot hold `None` must be supplied.
-    assert_eq!(
-        run("struct N { d <int>\n nx <N> || <None> }\nN(1).d"),
-        "1"
-    );
+    assert_eq!(run("struct N { d <int>\n nx <N> || <None> }\nN(1).d"), "1");
 }
 
 #[test]

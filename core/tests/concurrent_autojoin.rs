@@ -36,16 +36,14 @@ fn run(source: &str) -> String {
 // array consumes its task via a different operator, with no explicit `converge`.
 #[test]
 fn auto_join_resolves_task_at_every_operator_site() {
-    let out = run(
-        "fun w(x) { x * x }\n\
+    let out = run("fun w(x) { x * x }\n\
          a := diverge { w(6) }\n\
          b := diverge { w(5) }\n\
          c := diverge { w(4) }\n\
          d := diverge { w(3) }\n\
          e := diverge { w(2) }\n\
          i := diverge { w(1) }\n\
-         [a * 2, b - 5, c == 16, d > 8, -e, [10, 20, 30][i]]\n",
-    );
+         [a * 2, b - 5, c == 16, d > 8, -e, [10, 20, 30][i]]\n");
     // mul, sub, eq, cmp, negate, index-by-task — each auto-joins on use.
     assert_eq!(out, "[72, 20, True, True, -4, 20]");
 }

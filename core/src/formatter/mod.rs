@@ -220,7 +220,10 @@ impl Formatter {
             // `hide` lives on the Program, not the statement, so it has to be
             // replayed here — dropping it would silently publish a private
             // function on the next `oxigen fmt`.
-            if let Statement::Let { name, value: Expression::FunctionLiteral { .. } } = stmt
+            if let Statement::Let {
+                name,
+                value: Expression::FunctionLiteral { .. },
+            } = stmt
                 && program.hidden.iter().any(|h| h == &name.value)
             {
                 self.hide_next_fn = true;
@@ -387,15 +390,16 @@ impl Formatter {
                     parameters,
                     body,
                 } = value
-                    && token.token_type == TokenType::Function {
-                        self.push("fun ");
-                        self.push(&name.value);
-                        self.push("(");
-                        self.format_params(parameters);
-                        self.push(")");
-                        self.format_function_body(body);
-                        return;
-                    }
+                    && token.token_type == TokenType::Function
+                {
+                    self.push("fun ");
+                    self.push(&name.value);
+                    self.push("(");
+                    self.format_params(parameters);
+                    self.push(")");
+                    self.format_function_body(body);
+                    return;
+                }
                 self.push(&name.value);
                 self.push(" := ");
                 self.format_tail_expression(value);
@@ -579,12 +583,13 @@ impl Formatter {
                     }
                     self.push(" -> ");
                     if arm.body.len() == 1
-                        && let Statement::Expr(e) = &arm.body[0] {
-                            self.format_expression(e);
-                            self.after_item(span, saved);
-                            self.item_end();
-                            continue;
-                        }
+                        && let Statement::Expr(e) = &arm.body[0]
+                    {
+                        self.format_expression(e);
+                        self.after_item(span, saved);
+                        self.item_end();
+                        continue;
+                    }
                     self.block("", &arm.body);
                     self.after_item(span, saved);
                     self.item_end();
@@ -682,8 +687,7 @@ impl Formatter {
                         self.newline();
                     }
                     let span = Some(method_name.token.span);
-                    let saved =
-                        self.before_item(span, methods.get(i + 1).map(|m| m.0.token.span));
+                    let saved = self.before_item(span, methods.get(i + 1).map(|m| m.0.token.span));
                     self.push_indent();
                     self.push("fun ");
                     self.push(&method_name.value);
@@ -1412,12 +1416,8 @@ fn stmt_span(stmt: &Statement) -> Option<Span> {
         | Statement::Main { token, .. }
         | Statement::Test { token, .. } => Some(token.span),
         // The statement starts at the target, not the `=` the token points to.
-        Statement::DotAssign { token, object, .. } => {
-            expr_span(object).or(Some(token.span))
-        }
-        Statement::IndexAssign { token, object, .. } => {
-            expr_span(object).or(Some(token.span))
-        }
+        Statement::DotAssign { token, object, .. } => expr_span(object).or(Some(token.span)),
+        Statement::IndexAssign { token, object, .. } => expr_span(object).or(Some(token.span)),
     }
 }
 
@@ -1433,9 +1433,9 @@ fn expr_span(expr: &Expression) -> Option<Span> {
         | Expression::Index { left, token, .. }
         | Expression::DotAccess { left, token, .. }
         | Expression::Slice { left, token, .. } => expr_span(left).or(Some(token.span)),
-        Expression::Call { function, token, .. } => {
-            expr_span(function).or(Some(token.span))
-        }
+        Expression::Call {
+            function, token, ..
+        } => expr_span(function).or(Some(token.span)),
         Expression::Guard { value, token, .. } | Expression::TypeWrap { value, token, .. } => {
             expr_span(value).or(Some(token.span))
         }
@@ -1615,9 +1615,10 @@ fn strip_negation(expr: &Expression) -> Option<&Expression> {
     if let Expression::Prefix {
         operator, right, ..
     } = expr
-        && operator == "not" {
-            return Some(right.as_ref());
-        }
+        && operator == "not"
+    {
+        return Some(right.as_ref());
+    }
     None
 }
 

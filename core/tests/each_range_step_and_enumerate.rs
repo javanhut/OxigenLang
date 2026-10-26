@@ -145,7 +145,10 @@ fn one_name_over_a_map_still_binds_the_pair() {
 fn two_names_over_a_range_number_the_elements() {
     // Ranges fall back to the array path here, so the first name is a real
     // ordinal index rather than a copy of the counter.
-    assert_eq!(collect("each i, v in range(10, 0, -5)", "{i}:{v}"), "0:10,1:5,");
+    assert_eq!(
+        collect("each i, v in range(10, 0, -5)", "{i}:{v}"),
+        "0:10,1:5,"
+    );
 }
 
 #[test]
@@ -153,11 +156,15 @@ fn skip_and_stop_balance_both_loop_bindings() {
     // Both names are pushed per iteration, so `skip`/`stop` have to unwind two
     // locals; a mismatch corrupts the stack rather than failing loudly.
     assert_eq!(
-        run("acc <str> := \"\"\neach i, v in [\"a\", \"b\", \"c\", \"d\"] {\n  skip when i == 1\n  acc = acc + \"{i}{v},\"\n}\nacc"),
+        run(
+            "acc <str> := \"\"\neach i, v in [\"a\", \"b\", \"c\", \"d\"] {\n  skip when i == 1\n  acc = acc + \"{i}{v},\"\n}\nacc"
+        ),
         "0a,2c,3d,"
     );
     assert_eq!(
-        run("acc <str> := \"\"\neach i, v in [\"a\", \"b\", \"c\"] {\n  stop when i == 2\n  acc = acc + \"{i}{v},\"\n}\nacc"),
+        run(
+            "acc <str> := \"\"\neach i, v in [\"a\", \"b\", \"c\"] {\n  stop when i == 2\n  acc = acc + \"{i}{v},\"\n}\nacc"
+        ),
         "0a,1b,"
     );
 }
@@ -165,7 +172,9 @@ fn skip_and_stop_balance_both_loop_bindings() {
 #[test]
 fn closures_capture_each_iterations_own_pair() {
     assert_eq!(
-        run("fs := []\neach i, v in [\"p\", \"q\"] { fs = push(fs, fun() { \"{i}{v}\" }) }\nacc <str> := \"\"\neach f in fs { acc = acc + f() + \",\" }\nacc"),
+        run(
+            "fs := []\neach i, v in [\"p\", \"q\"] { fs = push(fs, fun() { \"{i}{v}\" }) }\nacc <str> := \"\"\neach f in fs { acc = acc + f() + \",\" }\nacc"
+        ),
         "0p,1q,"
     );
 }
@@ -173,7 +182,9 @@ fn closures_capture_each_iterations_own_pair() {
 #[test]
 fn two_name_loops_nest() {
     assert_eq!(
-        run("acc <str> := \"\"\neach i, row in [[1, 2], [3, 4]] {\n  each j, cell in row { acc = acc + \"{i},{j}={cell};\" }\n}\nacc"),
+        run(
+            "acc <str> := \"\"\neach i, row in [[1, 2], [3, 4]] {\n  each j, cell in row { acc = acc + \"{i},{j}={cell};\" }\n}\nacc"
+        ),
         "0,0=1;0,1=2;1,0=3;1,1=4;"
     );
 }
@@ -183,7 +194,9 @@ fn two_name_loop_in_a_function_is_reentrant() {
     // Repeated calls exercise the loop's per-iteration cleanup on a warm
     // (JIT-eligible) function.
     assert_eq!(
-        run("fun total(m) {\n  acc <int> := 0\n  each k, v in m { acc = acc + v }\n  acc\n}\nsum <int> := 0\neach n in range(3) { sum = sum + total({\"a\": 1, \"b\": 2}) }\nsum"),
+        run(
+            "fun total(m) {\n  acc <int> := 0\n  each k, v in m { acc = acc + v }\n  acc\n}\nsum <int> := 0\neach n in range(3) { sum = sum + total({\"a\": 1, \"b\": 2}) }\nsum"
+        ),
         "9"
     );
 }

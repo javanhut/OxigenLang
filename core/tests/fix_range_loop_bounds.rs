@@ -59,7 +59,9 @@ fn assert_all_ok(source: &str, expected: &str) {
 fn assert_all_err(source: &str, needle: &str) {
     for (name, make) in backends() {
         match run_on(make(), source) {
-            Ok(v) => panic!("{name}: expected an error containing {needle:?}, got Ok({v})\n{source}"),
+            Ok(v) => {
+                panic!("{name}: expected an error containing {needle:?}, got Ok({v})\n{source}")
+            }
             Err(e) => assert!(
                 e.contains(needle),
                 "{name}: error {e:?} does not mention {needle:?}\n{source}"
@@ -99,7 +101,10 @@ fn counting_down_stops_at_i64_min() {
 #[test]
 fn skip_and_stop_still_work_near_the_edge() {
     let src = "fun f() {\n  out := []\n  each i in range(9223372036854775797, 9223372036854775807, 3) {\n    skip when i == 9223372036854775800\n    out = push(out, i)\n    stop when len(out) == 20\n  }\n  out\n}\nf()";
-    assert_all_ok(src, "[9223372036854775797, 9223372036854775803, 9223372036854775806]");
+    assert_all_ok(
+        src,
+        "[9223372036854775797, 9223372036854775803, 9223372036854775806]",
+    );
     let src = "fun f() {\n  n := 0\n  each i in range(0, 9223372036854775807, 4611686018427387904) {\n    n = n + 1\n    stop when n == 20\n  }\n  n\n}\nf()";
     assert_all_ok(src, "2");
 }
@@ -121,7 +126,10 @@ fn every_bound_must_be_an_integer() {
     assert_all_err(&collected("3.5"), "range() requires integer arguments");
     assert_all_err(&collected("0, 2.5"), "range() requires integer arguments");
     assert_all_err(&collected("1.5, 4"), "range() requires integer arguments");
-    assert_all_err(&collected("\"a\", \"c\""), "range() requires integer arguments");
+    assert_all_err(
+        &collected("\"a\", \"c\""),
+        "range() requires integer arguments",
+    );
     assert_all_err(&collected("None"), "range() requires integer arguments");
 }
 
@@ -139,7 +147,11 @@ fn functions_with_range_loops_still_compile() {
     let got = vm.run(compile(src)).map(|v| format!("{v}")).unwrap();
     assert_eq!(got, "7500");
     assert!(vm.jit.compiled_ok_count() >= 1, "f was not compiled");
-    assert_eq!(vm.jit.compile_failed_count(), 0, "a range loop left the JIT");
+    assert_eq!(
+        vm.jit.compile_failed_count(),
+        0,
+        "a range loop left the JIT"
+    );
 }
 
 #[test]

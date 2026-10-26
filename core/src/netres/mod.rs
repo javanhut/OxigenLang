@@ -18,8 +18,8 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hasher};
 use std::fs::File;
+use std::hash::{BuildHasher, Hasher};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,7 +59,8 @@ const BODY_QUEUE_CHUNKS: usize = 8;
 const HTTP_MAX_LINE: usize = 8 * 1024 * 1024;
 
 // One lock so handles cross threads; I/O runs on a cloned fd outside it.
-static REGISTRY: LazyLock<Mutex<HashMap<u64, Resource>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static REGISTRY: LazyLock<Mutex<HashMap<u64, Resource>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static ID_KEY: LazyLock<RandomState> = LazyLock::new(RandomState::new);
 
@@ -180,7 +181,9 @@ pub fn tcp_set_read_timeout(id: u64, ms: i64) -> Result<(), String> {
         return Err("set_read_timeout: milliseconds must not be negative".to_string());
     }
     let timeout = (ms > 0).then(|| Duration::from_millis(ms as u64));
-    with_tcp(id, |s| s.set_read_timeout(timeout).map_err(|e| e.to_string()))
+    with_tcp(id, |s| {
+        s.set_read_timeout(timeout).map_err(|e| e.to_string())
+    })
 }
 
 pub fn tcp_send(id: u64, data: &str) -> Result<i64, String> {
@@ -303,7 +306,13 @@ pub fn close(id: u64) {
 pub const NO_HTTP: &str = "http is not available in this build of Oxigen (WebAssembly)";
 
 #[cfg(target_arch = "wasm32")]
-pub fn http_download(_: &str, _: &str, _: &str, _: &[(String, String)], _: Option<&str>) -> Result<i64, String> {
+pub fn http_download(
+    _: &str,
+    _: &str,
+    _: &str,
+    _: &[(String, String)],
+    _: Option<&str>,
+) -> Result<i64, String> {
     Err(NO_HTTP.into())
 }
 

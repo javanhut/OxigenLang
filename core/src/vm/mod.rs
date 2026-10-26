@@ -30,9 +30,30 @@ pub(crate) const STACK_GUARD_MARGIN: usize = 8192;
 /// Type names the runtime itself uses. A user struct or enum may not take
 /// one, or its instances would satisfy that built-in type's checks.
 pub(crate) const BUILTIN_TYPE_NAMES: &[&str] = &[
-    "INTEGER", "FLOAT", "CHAR", "STRING", "BOOLEAN", "ARRAY", "FUNCTION", "STRUCT_DEF",
-    "STRUCT", "BYTE", "UINT", "TUPLE", "MAP", "SET", "MODULE", "BUILTIN", "NONE", "ERROR",
-    "VALUE", "ENUM_DEF", "ENUM", "TASK", "HOST", "GENERIC",
+    "INTEGER",
+    "FLOAT",
+    "CHAR",
+    "STRING",
+    "BOOLEAN",
+    "ARRAY",
+    "FUNCTION",
+    "STRUCT_DEF",
+    "STRUCT",
+    "BYTE",
+    "UINT",
+    "TUPLE",
+    "MAP",
+    "SET",
+    "MODULE",
+    "BUILTIN",
+    "NONE",
+    "ERROR",
+    "VALUE",
+    "ENUM_DEF",
+    "ENUM",
+    "TASK",
+    "HOST",
+    "GENERIC",
 ];
 
 pub(crate) fn is_builtin_type_name(name: &str) -> bool {
@@ -49,7 +70,9 @@ pub(crate) fn type_matches(expected: &str, actual: &str) -> bool {
         return true;
     }
     if expected.contains(" || ") {
-        expected.split(" || ").any(|t| t == "GENERIC" || t == actual)
+        expected
+            .split(" || ")
+            .any(|t| t == "GENERIC" || t == actual)
     } else {
         expected == actual
     }
@@ -152,19 +175,20 @@ fn display_path_cwd(path: &Path) -> String {
 pub(crate) fn find_stdlib_path() -> PathBuf {
     // 1. Relative to executable (dev: target/debug/oxigen + stdlib/)
     if let Ok(exe) = std::env::current_exe()
-        && let Some(exe_dir) = exe.parent() {
-            let candidate = exe_dir.join("stdlib");
+        && let Some(exe_dir) = exe.parent()
+    {
+        let candidate = exe_dir.join("stdlib");
+        if candidate.is_dir() {
+            return candidate;
+        }
+        // 2. System install: <prefix>/bin/../lib/oxigen/stdlib
+        if let Some(prefix) = exe_dir.parent() {
+            let candidate = prefix.join("lib").join("oxigen").join("stdlib");
             if candidate.is_dir() {
                 return candidate;
             }
-            // 2. System install: <prefix>/bin/../lib/oxigen/stdlib
-            if let Some(prefix) = exe_dir.parent() {
-                let candidate = prefix.join("lib").join("oxigen").join("stdlib");
-                if candidate.is_dir() {
-                    return candidate;
-                }
-            }
         }
+    }
     // 3. Current working directory (preferred for local development)
     let candidate = PathBuf::from("stdlib");
     if candidate.is_dir() {
@@ -177,7 +201,10 @@ pub(crate) fn find_stdlib_path() -> PathBuf {
     }
     // 5. User install: ~/.oxigen/lib/stdlib
     if let Ok(home) = std::env::var("HOME") {
-        let candidate = PathBuf::from(home).join(".oxigen").join("lib").join("stdlib");
+        let candidate = PathBuf::from(home)
+            .join(".oxigen")
+            .join("lib")
+            .join("stdlib");
         if candidate.is_dir() {
             return candidate;
         }
@@ -609,8 +636,8 @@ impl VM {
             specialized_thunk: std::cell::Cell::new(None),
             specialized_arity: std::cell::Cell::new(0),
             specialized_kind: std::cell::Cell::new(0),
-                lean_thunk: std::cell::Cell::new(None),
-                lean_arity: std::cell::Cell::new(0),
+            lean_thunk: std::cell::Cell::new(None),
+            lean_arity: std::cell::Cell::new(0),
             upvalue_int_kinds: uv_kinds,
             upvalue_int_values: uv_values,
         });
@@ -830,13 +857,18 @@ impl VM {
     /// The globals of the module this VM loaded from `path`, if it has.
     pub fn loaded_module_globals(&self, path: &Path) -> Option<Rc<HashMap<String, Value>>> {
         let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        self.module_cache.get(&key).map(|module| Rc::clone(&module.globals))
+        self.module_cache
+            .get(&key)
+            .map(|module| Rc::clone(&module.globals))
     }
 
     /// The globals of the module at `path`, importing it into this VM first
     /// if it hasn't been. A worker uses it to run a spawned function from a
     /// module in that module's context.
-    pub fn module_globals_at(&mut self, path: &Path) -> Result<Rc<HashMap<String, Value>>, VMError> {
+    pub fn module_globals_at(
+        &mut self,
+        path: &Path,
+    ) -> Result<Rc<HashMap<String, Value>>, VMError> {
         if let Some(globals) = self.loaded_module_globals(path) {
             return Ok(globals);
         }
@@ -888,7 +920,11 @@ impl VM {
     /// Call a script function from native code that a script called (an ffi
     /// callback). A failed call is unwound here, so the script that made the
     /// native call carries on from a consistent VM.
-    pub(crate) fn call_reentrant(&mut self, callee: Value, args: Vec<Value>) -> Result<Value, VMError> {
+    pub(crate) fn call_reentrant(
+        &mut self,
+        callee: Value,
+        args: Vec<Value>,
+    ) -> Result<Value, VMError> {
         let (frames, jit_frames) = (self.frames.len(), self.jit_frame_view.len);
         let (stack, handlers) = (self.stack.len(), self.error_handlers.len());
         let result = self.call_with_args_inner(callee, args);
@@ -1143,9 +1179,9 @@ impl VM {
                     // Setting a hidden field from a literal is still setting it
                     // from outside; allowing it would make `hide` half a rule.
                     if layout.slots[idx].2
-                        && self
-                            .active_closure_method_of()
-                            .is_none_or(|owner| !self.struct_chain_contains(&struct_name_str, owner))
+                        && self.active_closure_method_of().is_none_or(|owner| {
+                            !self.struct_chain_contains(&struct_name_str, owner)
+                        })
                     {
                         return Err(self.runtime_error_hint(
                             &format!(
@@ -1183,7 +1219,11 @@ impl VM {
             }
         }
         if !missing.is_empty() {
-            let plural = if missing.len() == 1 { "field" } else { "fields" };
+            let plural = if missing.len() == 1 {
+                "field"
+            } else {
+                "fields"
+            };
             return Err(self.runtime_error_coded(
                 crate::diagnostics::registry::STRUCT_MISSING_FIELDS,
                 &format!(
@@ -1229,15 +1269,19 @@ impl VM {
         while let Some(d) = cur {
             cur = self.parent_struct_def(&d);
             if cur.is_none()
-                && let Some(p) = &d.parent {
-                    // Silently dropping an unresolvable parent yields an instance
-                    // missing every inherited field, which surfaces much later as a
-                    // baffling "field not found" — fail here instead.
-                    return Err(self.runtime_error_hint(
-                        &format!("parent struct '{p}' of '{}' is not defined in this scope", d.name),
-                        "import the parent struct, or check it is defined before the child",
-                    ));
-                }
+                && let Some(p) = &d.parent
+            {
+                // Silently dropping an unresolvable parent yields an instance
+                // missing every inherited field, which surfaces much later as a
+                // baffling "field not found" — fail here instead.
+                return Err(self.runtime_error_hint(
+                    &format!(
+                        "parent struct '{p}' of '{}' is not defined in this scope",
+                        d.name
+                    ),
+                    "import the parent struct, or check it is defined before the child",
+                ));
+            }
             chain.push(d);
         }
         // chain is [child, ..., root]; reverse for root-first order.
@@ -1296,13 +1340,16 @@ impl VM {
                     return Ok(inst.get_field(idx));
                 }
                 // Fall through: it might be a method on the struct def.
-                let method_val =
-                    if let Some(def) = self.globals.get(&inst.struct_name).and_then(|v| v.as_struct_def()) {
-                        let methods = def.methods.borrow();
-                        methods.get(fname.as_ref()).cloned()
-                    } else {
-                        None
-                    };
+                let method_val = if let Some(def) = self
+                    .globals
+                    .get(&inst.struct_name)
+                    .and_then(|v| v.as_struct_def())
+                {
+                    let methods = def.methods.borrow();
+                    methods.get(fname.as_ref()).cloned()
+                } else {
+                    None
+                };
                 if let Some(method) = method_val {
                     Ok(method)
                 } else {
@@ -1457,7 +1504,10 @@ impl VM {
     /// Deliberately chain-directional: a `Person` method may read a hidden
     /// field of an `American` (an American is-a Person), but a method of an
     /// unrelated struct may not, and neither may top-level code.
-    pub(crate) fn hidden_field_access_allowed(&self, inst: &crate::vm::value::ObjStructInstance) -> bool {
+    pub(crate) fn hidden_field_access_allowed(
+        &self,
+        inst: &crate::vm::value::ObjStructInstance,
+    ) -> bool {
         // `active_closure` is authoritative for both interpreted and JIT'd
         // frames; reading `frames.last()` would answer for the caller once a
         // hot method tiered up, and deny its own `self.field`.
@@ -1527,7 +1577,11 @@ impl VM {
         };
         match object.repr() {
             ValueRepr::Vector(vector) => Err(self.runtime_error_hint(
-                &format!("cannot assign to {}.{}: vectors are values", vector.constructor(), fname),
+                &format!(
+                    "cannot assign to {}.{}: vectors are values",
+                    vector.constructor(),
+                    fname
+                ),
                 "build a new vector instead, e.g. v = vec2(5, v.y)",
             )),
             ValueRepr::StructInstance(inst) => {
@@ -1574,7 +1628,11 @@ impl VM {
         let method_count = method_count as usize;
         let start = self.stack.len() - method_count * 2;
         let flat: Vec<Value> = self.stack_drain_from(start);
-        if let Some(def) = self.globals.get(name_str.as_ref()).and_then(|v| v.as_struct_def()) {
+        if let Some(def) = self
+            .globals
+            .get(name_str.as_ref())
+            .and_then(|v| v.as_struct_def())
+        {
             let mut methods = def.methods.borrow_mut();
             for pair in flat.chunks(2) {
                 if let Some(mname) = pair[1].as_string() {
@@ -1662,8 +1720,8 @@ impl VM {
             specialized_thunk: std::cell::Cell::new(None),
             specialized_arity: std::cell::Cell::new(0),
             specialized_kind: std::cell::Cell::new(0),
-                lean_thunk: std::cell::Cell::new(None),
-                lean_arity: std::cell::Cell::new(0),
+            lean_thunk: std::cell::Cell::new(None),
+            lean_arity: std::cell::Cell::new(0),
             upvalue_int_kinds: uv_kinds,
             upvalue_int_values: uv_values,
         });
@@ -1774,9 +1832,10 @@ impl VM {
     #[allow(dead_code)]
     pub(crate) fn current_slot_offset(&self) -> usize {
         if self.jit_executing.get()
-            && let Some(f) = self.jit_frame_top() {
-                return f.slot_offset;
-            }
+            && let Some(f) = self.jit_frame_top()
+        {
+            return f.slot_offset;
+        }
         self.frames.last().map(|f| f.slot_offset).unwrap_or(0)
     }
 
@@ -1785,10 +1844,11 @@ impl VM {
     pub(crate) fn current_constant(&self, idx: u16) -> Value {
         // fresh_clone so a typed zero-init heap default is unaliased per load, not shared.
         if self.jit_executing.get()
-            && let Some(frame) = self.jit_frame_top() {
-                let closure = unsafe { &*frame.closure_raw };
-                return closure.function.chunk.constants[idx as usize].fresh_clone();
-            }
+            && let Some(frame) = self.jit_frame_top()
+        {
+            let closure = unsafe { &*frame.closure_raw };
+            return closure.function.chunk.constants[idx as usize].fresh_clone();
+        }
         let frame = self.frames.last().unwrap();
         frame.closure.function.chunk.constants[idx as usize].fresh_clone()
     }
@@ -1961,9 +2021,10 @@ impl VM {
 
     fn current_line(&self) -> u32 {
         if self.jit_executing.get()
-            && let Some(frame) = self.jit_frame_top() {
-                return frame.line;
-            }
+            && let Some(frame) = self.jit_frame_top()
+        {
+            return frame.line;
+        }
         // No frame yet, so there is no line to report; diagnose, never panic.
         let Some(frame) = self.frames.last() else {
             return 0;
@@ -1984,9 +2045,10 @@ impl VM {
     /// in `format_error` falls back to no caret when col is 0.
     fn current_column(&self) -> u32 {
         if self.jit_executing.get()
-            && let Some(frame) = self.jit_frame_top() {
-                return frame.column;
-            }
+            && let Some(frame) = self.jit_frame_top()
+        {
+            return frame.column;
+        }
         let Some(frame) = self.frames.last() else {
             return 0;
         };
@@ -2004,9 +2066,10 @@ impl VM {
     #[inline(always)]
     pub(crate) fn active_closure(&self) -> &ObjClosure {
         if self.jit_executing.get()
-            && let Some(frame) = self.jit_frame_top() {
-                return unsafe { &*frame.closure_raw };
-            }
+            && let Some(frame) = self.jit_frame_top()
+        {
+            return unsafe { &*frame.closure_raw };
+        }
         &self.frames.last().unwrap().closure
     }
 
@@ -2024,10 +2087,10 @@ impl VM {
     #[inline(always)]
     fn active_module_globals(&self) -> Option<&HashMap<String, Value>> {
         if self.jit_executing.get()
-            && let Some(frame) = self.jit_frame_top() {
-                return (!frame.module_globals.is_null())
-                    .then(|| unsafe { &*frame.module_globals });
-            }
+            && let Some(frame) = self.jit_frame_top()
+        {
+            return (!frame.module_globals.is_null()).then(|| unsafe { &*frame.module_globals });
+        }
         self.frames.last().and_then(|f| f.module_globals.as_deref())
     }
 
@@ -2043,9 +2106,10 @@ impl VM {
     /// `increment_strong_count` is sound.
     fn active_module_globals_rc(&self) -> Option<Rc<HashMap<String, Value>>> {
         if self.jit_executing.get()
-            && let Some(frame) = self.jit_frame_top() {
-                return unsafe { mg_rc(frame.module_globals) };
-            }
+            && let Some(frame) = self.jit_frame_top()
+        {
+            return unsafe { mg_rc(frame.module_globals) };
+        }
         self.frames.last().and_then(|f| f.module_globals.clone())
     }
 
@@ -2057,9 +2121,10 @@ impl VM {
     #[inline(always)]
     pub(crate) fn has_active_module_globals(&self) -> bool {
         if self.jit_executing.get()
-            && let Some(frame) = self.jit_frame_top() {
-                return !frame.module_globals.is_null();
-            }
+            && let Some(frame) = self.jit_frame_top()
+        {
+            return !frame.module_globals.is_null();
+        }
         self.frames
             .last()
             .map(|f| f.module_globals.is_some())
@@ -2084,7 +2149,10 @@ impl VM {
             .as_ref()
             .map(|o| o.file.clone())
             .or_else(|| self.current_file.as_deref().map(display_path_cwd));
-        let source = origin.as_ref().map(|o| o.source.as_str()).unwrap_or(&self.source);
+        let source = origin
+            .as_ref()
+            .map(|o| o.source.as_str())
+            .unwrap_or(&self.source);
 
         let location = match (&file, col > 0) {
             (Some(f), true) => format!("{}:{}:{}", f, line_num, col),
@@ -2098,16 +2166,17 @@ impl VM {
         }
 
         if !source.is_empty()
-            && let Some(source_line) = source.lines().nth(line_num.saturating_sub(1)) {
-                let line_str = format!("{}", line_num);
-                let padding = " ".repeat(line_str.len());
-                out.push_str(&format!("{} |\n", padding));
-                out.push_str(&format!("{} | {}", line_str, source_line));
-                if col > 0 {
-                    let caret_padding = " ".repeat(col.saturating_sub(1));
-                    out.push_str(&format!("\n{} | {}^", padding, caret_padding));
-                }
+            && let Some(source_line) = source.lines().nth(line_num.saturating_sub(1))
+        {
+            let line_str = format!("{}", line_num);
+            let padding = " ".repeat(line_str.len());
+            out.push_str(&format!("{} |\n", padding));
+            out.push_str(&format!("{} | {}", line_str, source_line));
+            if col > 0 {
+                let caret_padding = " ".repeat(col.saturating_sub(1));
+                out.push_str(&format!("\n{} | {}^", padding, caret_padding));
             }
+        }
 
         if let Some(hint) = hint {
             out.push_str(&format!("\n  = hint: {}", hint));
@@ -2138,10 +2207,11 @@ impl VM {
     /// `None` means the entry script, whose source the VM holds directly.
     fn innermost_frame_origin(&self) -> Option<Rc<crate::vm::value::ModuleOrigin>> {
         if self.jit_executing.get()
-            && let Some(frame) = self.jit_frame_top() {
-                let closure = unsafe { &*frame.closure_raw };
-                return closure.function.origin.borrow().clone();
-            }
+            && let Some(frame) = self.jit_frame_top()
+        {
+            let closure = unsafe { &*frame.closure_raw };
+            return closure.function.origin.borrow().clone();
+        }
         self.frames
             .last()
             .and_then(|f| f.closure.function.origin.borrow().clone())
@@ -2153,10 +2223,11 @@ impl VM {
     /// in instead of just a line number.
     fn innermost_frame_name(&self) -> Option<String> {
         if self.jit_executing.get()
-            && let Some(frame) = self.jit_frame_top() {
-                let closure = unsafe { &*frame.closure_raw };
-                return closure.function.name.clone();
-            }
+            && let Some(frame) = self.jit_frame_top()
+        {
+            let closure = unsafe { &*frame.closure_raw };
+            return closure.function.name.clone();
+        }
         self.frames
             .last()
             .and_then(|f| f.closure.function.name.clone())
@@ -2176,11 +2247,13 @@ impl VM {
         };
         let jit_caller = self.jit_frame_top().map(|f| f.slot_offset);
         let interp_caller = self.frames.last().map(|f| f.slot_offset);
-        let prev = self.jit_executing.replace(match (jit_caller, interp_caller) {
-            (Some(j), Some(i)) => j > i,
-            (Some(_), None) => true,
-            _ => false,
-        });
+        let prev = self
+            .jit_executing
+            .replace(match (jit_caller, interp_caller) {
+                (Some(j), Some(i)) => j > i,
+                (Some(_), None) => true,
+                _ => false,
+            });
         let err = self.runtime_error_hint(message, hint);
         self.jit_executing.set(prev);
         let len = self.jit_frame_view.len;
@@ -2219,7 +2292,11 @@ impl VM {
             entries.push((
                 frame.slot_offset,
                 jit_on_top,
-                (closure.function.name.clone(), frame.line, frame_file(closure)),
+                (
+                    closure.function.name.clone(),
+                    frame.line,
+                    frame_file(closure),
+                ),
             ));
         }
         for frame in &self.frames {
@@ -2235,7 +2312,11 @@ impl VM {
             entries.push((
                 frame.slot_offset,
                 !jit_on_top,
-                (frame.closure.function.name.clone(), line, frame_file(&frame.closure)),
+                (
+                    frame.closure.function.name.clone(),
+                    line,
+                    frame_file(&frame.closure),
+                ),
             ));
         }
         // Innermost first; at an equal base the executing record wins.
@@ -2248,7 +2329,9 @@ impl VM {
     /// deliberate rather than a slip — a linked-list `next <Node> || <None>`
     /// is meant to be left off at the tail.
     fn field_is_optional(type_name: &str) -> bool {
-        type_name.split("||").any(|t| t.trim().eq_ignore_ascii_case("none"))
+        type_name
+            .split("||")
+            .any(|t| t.trim().eq_ignore_ascii_case("none"))
     }
 
     /// Check a value about to be stored in field `field` of `struct_name`,
@@ -2305,10 +2388,12 @@ impl VM {
         let owner = format!("{}.{}", enum_name, variant.name);
         args.into_iter()
             .enumerate()
-            .map(|(i, arg)| match (names.get(i), variant.field_types.get(i)) {
-                (Some(name), Some(ty)) => self.check_field_value(&owner, name, ty, arg),
-                _ => Ok(arg),
-            })
+            .map(
+                |(i, arg)| match (names.get(i), variant.field_types.get(i)) {
+                    (Some(name), Some(ty)) => self.check_field_value(&owner, name, ty, arg),
+                    _ => Ok(arg),
+                },
+            )
             .collect()
     }
 
@@ -2343,9 +2428,7 @@ impl VM {
             format!("{required} to {max} arguments")
         };
         let was = if got == 1 { "was" } else { "were" };
-        let message = format!(
-            "{name} takes {expectation} but {got} {was} supplied"
-        );
+        let message = format!("{name} takes {expectation} but {got} {was} supplied");
 
         let hint = if got < required {
             let missing: Vec<String> = function
@@ -2535,9 +2618,15 @@ impl VM {
                 }
 
                 // ── Arithmetic ──────────────────────────────────────
-                OpCode::Add => int_fast_binop!(l, r, true, Value::Integer(l.wrapping_add(r)), binary_add),
-                OpCode::Subtract => int_fast_binop!(l, r, true, Value::Integer(l.wrapping_sub(r)), binary_sub),
-                OpCode::Multiply => int_fast_binop!(l, r, true, Value::Integer(l.wrapping_mul(r)), binary_mul),
+                OpCode::Add => {
+                    int_fast_binop!(l, r, true, Value::Integer(l.wrapping_add(r)), binary_add)
+                }
+                OpCode::Subtract => {
+                    int_fast_binop!(l, r, true, Value::Integer(l.wrapping_sub(r)), binary_sub)
+                }
+                OpCode::Multiply => {
+                    int_fast_binop!(l, r, true, Value::Integer(l.wrapping_mul(r)), binary_mul)
+                }
                 // Excludes -1 as well as 0: Rust traps i64::MIN / -1 unconditionally and panic=abort kills the process.
                 OpCode::Divide => {
                     int_fast_binop!(l, r, r != 0 && r != -1, Value::Integer(l / r), binary_div)
@@ -2959,8 +3048,7 @@ impl VM {
                             let matches = if tag_idx == 0xFFFF {
                                 true // no filter → catch any error
                             } else {
-                                let filter =
-                                    self.frames[frame_idx].read_constant(tag_idx).clone();
+                                let filter = self.frames[frame_idx].read_constant(tag_idx).clone();
                                 match (filter.as_string(), data.tag.as_ref()) {
                                     (Some(f), Some(t)) => f.as_str() == t.as_str(),
                                     _ => false,
@@ -3250,9 +3338,8 @@ impl VM {
                     let name_idx = self.frames[frame_idx].read_u16();
                     let name = self.frames[frame_idx].read_constant(name_idx).clone();
                     if let Some(var_name) = name.as_string() {
-                        let has_constraint = self
-                            .global_type_constraints
-                            .contains_key(var_name.as_ref());
+                        let has_constraint =
+                            self.global_type_constraints.contains_key(var_name.as_ref());
                         self.push(Value::Boolean(!has_constraint));
                     } else {
                         self.push(Value::Boolean(true));
@@ -3339,7 +3426,8 @@ impl VM {
                                             args.len()
                                         )));
                                     }
-                                    let args = self.check_variant_args(&def.name, v, expected, args)?;
+                                    let args =
+                                        self.check_variant_args(&def.name, v, expected, args)?;
                                     self.push(Value::EnumInstance(Rc::new(
                                         crate::vm::value::ObjEnumInstance {
                                             enum_name: def.name.clone(),
@@ -3406,7 +3494,8 @@ impl VM {
                                         )));
                                     }
                                     for (fname, value) in fields.iter_mut() {
-                                        let Some(i) = expected.iter().position(|n| n == fname) else {
+                                        let Some(i) = expected.iter().position(|n| n == fname)
+                                        else {
                                             return Err(self.runtime_error(&format!(
                                                 "struct variant {}.{} has no field '{}'",
                                                 def.name, v.name, fname
@@ -3415,7 +3504,8 @@ impl VM {
                                         if let Some(ty) = v.field_types.get(i) {
                                             let owner = format!("{}.{}", def.name, v.name);
                                             let checked = std::mem::replace(value, Value::None);
-                                            *value = self.check_field_value(&owner, fname, ty, checked)?;
+                                            *value =
+                                                self.check_field_value(&owner, fname, ty, checked)?;
                                         }
                                     }
                                     self.push(Value::EnumInstance(Rc::new(
@@ -3504,7 +3594,10 @@ impl VM {
             ValueRepr::Float(f) => Ok(Value::Float(-f)),
             ValueRepr::Vector(vector) => Ok(vector.map(|c| -c).into_value()),
             _ => Err(self.runtime_error_hint(
-                &format!("negation is only supported for numbers, got {}", v.type_name()),
+                &format!(
+                    "negation is only supported for numbers, got {}",
+                    v.type_name()
+                ),
                 "only <int>, <float> and vector values can be negated",
             )),
         }
@@ -3523,7 +3616,9 @@ impl VM {
                 s.push_str(r);
                 Ok(Value::String(rc_str(s)))
             }
-            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer((*l as i64).wrapping_add(*r as i64))),
+            (Value::Byte(l), Value::Byte(r)) => {
+                Ok(Value::Integer((*l as i64).wrapping_add(*r as i64)))
+            }
             (Value::Byte(l), Value::Integer(r)) => Ok(Value::Integer((*l as i64).wrapping_add(*r))),
             (Value::Integer(l), Value::Byte(r)) => Ok(Value::Integer((*l).wrapping_add(*r as i64))),
             (Value::Uint(l), Value::Uint(r)) => Ok(Value::Uint(l.wrapping_add(*r))),
@@ -3575,7 +3670,9 @@ impl VM {
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l - r)),
             (Value::Integer(l), Value::Float(r)) => Ok(Value::Float(*l as f64 - r)),
             (Value::Float(l), Value::Integer(r)) => Ok(Value::Float(l - *r as f64)),
-            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer((*l as i64).wrapping_sub(*r as i64))),
+            (Value::Byte(l), Value::Byte(r)) => {
+                Ok(Value::Integer((*l as i64).wrapping_sub(*r as i64)))
+            }
             (Value::Byte(l), Value::Integer(r)) => Ok(Value::Integer((*l as i64).wrapping_sub(*r))),
             (Value::Integer(l), Value::Byte(r)) => Ok(Value::Integer((*l).wrapping_sub(*r as i64))),
             (Value::Uint(l), Value::Uint(r)) => {
@@ -3605,7 +3702,9 @@ impl VM {
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l * r)),
             (Value::Integer(l), Value::Float(r)) => Ok(Value::Float(*l as f64 * r)),
             (Value::Float(l), Value::Integer(r)) => Ok(Value::Float(l * *r as f64)),
-            (Value::Byte(l), Value::Byte(r)) => Ok(Value::Integer((*l as i64).wrapping_mul(*r as i64))),
+            (Value::Byte(l), Value::Byte(r)) => {
+                Ok(Value::Integer((*l as i64).wrapping_mul(*r as i64)))
+            }
             (Value::Uint(l), Value::Uint(r)) => Ok(Value::Uint(l.wrapping_mul(*r))),
             _ if let Some((a, b)) = promote_numeric(&a, &b) => self.binary_mul(a, b),
             _ => match vector::arithmetic(&a, &b, '*') {
@@ -3789,9 +3888,7 @@ impl VM {
     pub(crate) fn binary_shl(&self, a: Value, b: Value) -> Result<Value, VMError> {
         let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
-            (Value::Integer(l), Value::Integer(r)) => {
-                Ok(Value::Integer(l.wrapping_shl(*r as u32)))
-            }
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l.wrapping_shl(*r as u32))),
             _ => Err(self.runtime_error("<< requires integers")),
         }
     }
@@ -3799,9 +3896,7 @@ impl VM {
     pub(crate) fn binary_shr(&self, a: Value, b: Value) -> Result<Value, VMError> {
         let (a, b) = (self.force(a), self.force(b));
         match (&a, &b) {
-            (Value::Integer(l), Value::Integer(r)) => {
-                Ok(Value::Integer(l.wrapping_shr(*r as u32)))
-            }
+            (Value::Integer(l), Value::Integer(r)) => Ok(Value::Integer(l.wrapping_shr(*r as u32))),
             _ => Err(self.runtime_error(">> requires integers")),
         }
     }
@@ -3881,7 +3976,12 @@ impl VM {
         match order(&a, &b) {
             Some(ordering) => Ok(Value::Boolean(ordering.is_some_and(holds))),
             None => Err(self.runtime_error_hint(
-                &format!("cannot compare {} {} {}", a.type_name(), symbol, b.type_name()),
+                &format!(
+                    "cannot compare {} {} {}",
+                    a.type_name(),
+                    symbol,
+                    b.type_name()
+                ),
                 "comparison requires numbers, strings or chars on both sides",
             )),
         }
@@ -3978,8 +4078,8 @@ impl VM {
                     .active_closure_method_of()
                     .is_none_or(|owner| !self.struct_chain_contains(&def_name, owner));
                 for (i, slot) in layout.slots.iter().enumerate() {
-                    let supplied_here = i < args.len()
-                        || named_args.iter().any(|(n, _)| *n == slot.0);
+                    let supplied_here =
+                        i < args.len() || named_args.iter().any(|(n, _)| *n == slot.0);
                     if slot.2 && supplied_here && outside {
                         return Err(self.runtime_error_hint(
                             &format!(
@@ -3991,9 +4091,7 @@ impl VM {
                     }
                     let val = if i < args.len() {
                         self.check_field_value(&def_name, &slot.0, &slot.1, args[i].clone())?
-                    } else if let Some((_, v)) =
-                        named_args.iter().find(|(n, _)| *n == slot.0)
-                    {
+                    } else if let Some((_, v)) = named_args.iter().find(|(n, _)| *n == slot.0) {
                         self.check_field_value(&def_name, &slot.0, &slot.1, v.clone())?
                     } else {
                         if !Self::field_is_optional(&slot.1) {
@@ -4006,15 +4104,14 @@ impl VM {
                 // Supplying nothing is the documented zero-value form; supplying some is the mistake.
                 let supplied = args.len() + named_args.len();
                 if supplied > 0 && !missing.is_empty() {
-                    let plural = if missing.len() == 1 { "field" } else { "fields" };
+                    let plural = if missing.len() == 1 {
+                        "field"
+                    } else {
+                        "fields"
+                    };
                     return Err(self.runtime_error_coded(
                         crate::diagnostics::registry::STRUCT_MISSING_FIELDS,
-                        &format!(
-                            "{} is missing {} {}",
-                            def_name,
-                            plural,
-                            missing.join(", ")
-                        ),
+                        &format!("{} is missing {} {}", def_name, plural, missing.join(", ")),
                         Some(
                             "give every field a value, or none at all for zero-value \
                              initialization",
@@ -4035,7 +4132,10 @@ impl VM {
                 }
 
                 self.push(Value::StructInstance(Rc::new(ObjStructInstance::new(
-                    def_name, field_vec, layout, Rc::clone(def),
+                    def_name,
+                    field_vec,
+                    layout,
+                    Rc::clone(def),
                 ))));
                 Ok(())
             }
@@ -4117,10 +4217,7 @@ impl VM {
                     .find_method_on_def(&inst.def, method_name)
                     .ok_or_else(|| {
                         self.runtime_error_hint(
-                            &format!(
-                                "method '{}' not found on {}",
-                                method_name, inst.struct_name
-                            ),
+                            &format!("method '{}' not found on {}", method_name, inst.struct_name),
                             "check the struct definition and its parent for available methods",
                         )
                     })?;
@@ -4268,9 +4365,10 @@ impl VM {
         }
         // An imported function must construct structs defined in ITS module, which live in those globals.
         if let Some(mg) = self.active_module_globals()
-            && let Some(Value::StructDef(def)) = mg.get(name) {
-                return Some(Rc::clone(def));
-            }
+            && let Some(Value::StructDef(def)) = mg.get(name)
+        {
+            return Some(Rc::clone(def));
+        }
         None
     }
 
@@ -4284,9 +4382,10 @@ impl VM {
     ) -> Option<Rc<crate::vm::value::ObjStructDef>> {
         let parent = def.parent.as_ref()?;
         if let Some(mg) = def.module_globals.get()
-            && let Some(Value::StructDef(pd)) = mg.get(parent) {
-                return Some(Rc::clone(pd));
-            }
+            && let Some(Value::StructDef(pd)) = mg.get(parent)
+        {
+            return Some(Rc::clone(pd));
+        }
         self.get_struct_def(parent)
     }
 
@@ -4475,7 +4574,8 @@ impl VM {
 
         // Lean by design: skips the call_count bump, the named-args block and the arity re-check.
         // Never the parameter type check, which the slow path below would have made.
-        if state == 1 && named_args.is_empty() && arg_count == expected && module_globals.is_none() {
+        if state == 1 && named_args.is_empty() && arg_count == expected && module_globals.is_none()
+        {
             self.check_param_types(&closure.function)?;
             if let Some(result) = self.call_closure_fast_path(&closure) {
                 return result;
@@ -4494,7 +4594,10 @@ impl VM {
             // Validate everything before touching the stack: the frame is placed at
             // `len - expected`, so surplus positional args would sit below it and leak.
             let params = &closure.function.params;
-            let required = params.iter().filter(|p| !p.has_default && !p.optional).count();
+            let required = params
+                .iter()
+                .filter(|p| !p.has_default && !p.optional)
+                .count();
             if arg_count > expected {
                 return Err(self.arity_error(
                     &closure.function,
@@ -4601,8 +4704,7 @@ impl VM {
                     closure.jit_thunk.set(Some(thunk));
                     closure.jit_state.set(1);
                     Some(thunk)
-                } else if let Some(e) =
-                    self.jit.maybe_compile_entries_for(&closure.function, count)
+                } else if let Some(e) = self.jit.maybe_compile_entries_for(&closure.function, count)
                 {
                     closure.jit_thunk.set(Some(e.generic));
                     closure.specialized_thunk.set(e.specialized);
@@ -4717,9 +4819,10 @@ impl VM {
     pub(crate) fn capture_upvalue(&mut self, stack_slot: usize) -> Rc<RefCell<Upvalue>> {
         for uv in &self.open_upvalues {
             if let Upvalue::Open(slot) = &*uv.borrow()
-                && *slot == stack_slot {
-                    return Rc::clone(uv);
-                }
+                && *slot == stack_slot
+            {
+                return Rc::clone(uv);
+            }
         }
 
         let upvalue = Rc::new(RefCell::new(Upvalue::Open(stack_slot)));
@@ -4888,9 +4991,7 @@ impl VM {
                 "check the length before indexing",
             )),
             _ => Err(self.runtime_error_hint(
-                &format!(
-                    "index {index} out of range for {type_name} of length {len}",
-                    ),
+                &format!("index {index} out of range for {type_name} of length {len}",),
                 &format!(
                     "valid indices are 0 to {} (or -1 to -{len} counting from the end)",
                     len - 1
@@ -4953,7 +5054,12 @@ impl VM {
 
     /// Resolve one slice bound against `len`: negative counts from the end,
     /// and anything out of range clamps to the nearer end.
-    fn slice_bound(&self, bound: Option<Value>, default: usize, len: usize) -> Result<usize, VMError> {
+    fn slice_bound(
+        &self,
+        bound: Option<Value>,
+        default: usize,
+        len: usize,
+    ) -> Result<usize, VMError> {
         match bound {
             Some(Value::Integer(i)) if i < 0 => Ok(len.saturating_sub(i.unsigned_abs() as usize)),
             Some(Value::Integer(i)) => Ok((i as u64).min(len as u64) as usize),
@@ -4987,7 +5093,11 @@ impl VM {
                 let start_idx = self.slice_bound(start, 0, len)?;
                 let end_idx = self.slice_bound(end, len, len)?;
                 if start_idx < end_idx {
-                    let sliced: String = s.chars().skip(start_idx).take(end_idx - start_idx).collect();
+                    let sliced: String = s
+                        .chars()
+                        .skip(start_idx)
+                        .take(end_idx - start_idx)
+                        .collect();
                     Ok(Value::String(rc_str(sliced)))
                 } else {
                     Ok(Value::String(rc_str("")))
@@ -5010,7 +5120,10 @@ impl VM {
     // ── Module System ───────────────────────────────────────────────────
 
     fn import_module(&mut self, path_str: &str, selective_names: &[String]) -> Result<(), VMError> {
-        let supplied = self.module_source.as_ref().and_then(|source| source(path_str));
+        let supplied = self
+            .module_source
+            .as_ref()
+            .and_then(|source| source(path_str));
         // A supplied module has no file; its name in angle brackets keys the
         // cache and names it in errors, and cannot collide with a real path.
         let module_path = match supplied {
@@ -5169,15 +5282,16 @@ impl VM {
     fn resolve_module_path(&self, path_str: &str) -> Result<PathBuf, VMError> {
         // Relative import
         if (path_str.starts_with("./") || path_str.starts_with("../"))
-            && let Some(current) = &self.current_file {
-                let base = current.parent().unwrap_or(current);
-                let resolved = base.join(path_str).with_extension("oxi");
-                if resolved.exists() {
-                    return resolved
-                        .canonicalize()
-                        .map_err(|e| self.runtime_error(&format!("cannot resolve path: {}", e)));
-                }
+            && let Some(current) = &self.current_file
+        {
+            let base = current.parent().unwrap_or(current);
+            let resolved = base.join(path_str).with_extension("oxi");
+            if resolved.exists() {
+                return resolved
+                    .canonicalize()
+                    .map_err(|e| self.runtime_error(&format!("cannot resolve path: {}", e)));
             }
+        }
 
         // Stdlib import
         let stdlib = self.stdlib_path.join(path_str).with_extension("oxi");
@@ -5341,10 +5455,14 @@ impl VM {
                 // `as i64` saturated 1e30 to i64::MAX and turned NaN into 0.
                 ValueRepr::Float(f) => {
                     let t = f.trunc();
-                    if f.is_finite() && (-9223372036854775808.0..9223372036854775808.0).contains(&t) {
+                    if f.is_finite() && (-9223372036854775808.0..9223372036854775808.0).contains(&t)
+                    {
                         Ok(Value::Integer(t as i64))
                     } else {
-                        Err(self.runtime_error(&format!("cannot convert FLOAT {} to INTEGER: out of range", f)))
+                        Err(self.runtime_error(&format!(
+                            "cannot convert FLOAT {} to INTEGER: out of range",
+                            f
+                        )))
                     }
                 }
                 ValueRepr::String(s) => s.parse::<i64>().map(Value::Integer).map_err(|_| {
@@ -5439,13 +5557,18 @@ impl VM {
                         if f.is_finite() && (0.0..18446744073709551616.0).contains(&t) {
                             Ok(Value::Uint(t as u64))
                         } else {
-                            Err(self.runtime_error(&format!("cannot convert FLOAT {} to UINT (>= 0)", f)))
+                            Err(self.runtime_error(&format!(
+                                "cannot convert FLOAT {} to UINT (>= 0)",
+                                f
+                            )))
                         }
                     }
                     ValueRepr::Byte(b) => Ok(Value::Uint(b as u64)),
-                    ValueRepr::String(s) => s.trim().parse::<u64>().map(Value::Uint).map_err(|_| {
-                        self.runtime_error(&format!("cannot convert STRING \"{}\" to UINT", s))
-                    }),
+                    ValueRepr::String(s) => {
+                        s.trim().parse::<u64>().map(Value::Uint).map_err(|_| {
+                            self.runtime_error(&format!("cannot convert STRING \"{}\" to UINT", s))
+                        })
+                    }
                     ValueRepr::Boolean(b) => Ok(Value::Uint(u64::from(b))),
                     _ => Err(self
                         .runtime_error(&format!("cannot convert {} to UINT", value.type_name()))),
@@ -5544,9 +5667,15 @@ mod tests {
 
     #[test]
     fn execution_mode_constructors_are_explicit() {
-        assert_eq!(VM::new_interpreter().execution_mode(), ExecutionMode::Interpreter);
+        assert_eq!(
+            VM::new_interpreter().execution_mode(),
+            ExecutionMode::Interpreter
+        );
         assert_eq!(VM::new_tiered().execution_mode(), ExecutionMode::TieredJit);
-        assert_eq!(VM::new_eager_jit().execution_mode(), ExecutionMode::EagerJit);
+        assert_eq!(
+            VM::new_eager_jit().execution_mode(),
+            ExecutionMode::EagerJit
+        );
         assert_eq!(VM::new().execution_mode(), ExecutionMode::TieredJit);
     }
 

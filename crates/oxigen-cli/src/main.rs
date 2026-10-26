@@ -19,7 +19,6 @@ use oxigen_core::lexer::Lexer;
 use oxigen_core::parser::Parser;
 use oxigen_core::vm::VM;
 
-
 fn read_source(file_path: &str) -> String {
     match fs::read_to_string(file_path) {
         Ok(contents) => contents,
@@ -99,10 +98,8 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
                 Ok(f) => f,
                 Err(errors) => {
                     // Render through the shared renderer so a compile error looks like every other diagnostic.
-                    let source = SourceFile::named(
-                        file_path_buf.display().to_string(),
-                        contents.clone(),
-                    );
+                    let source =
+                        SourceFile::named(file_path_buf.display().to_string(), contents.clone());
                     for err in errors {
                         eprint!("{}", render::render_human(&err.into_diagnostic(), &source));
                     }
@@ -411,7 +408,12 @@ fn check_file(file_path: &str, json: bool) {
         for d in sink.diagnostics() {
             print!("{}", render::render_human(d, &source));
         }
-        let count = |sev| sink.diagnostics().iter().filter(|d| d.severity == sev).count();
+        let count = |sev| {
+            sink.diagnostics()
+                .iter()
+                .filter(|d| d.severity == sev)
+                .count()
+        };
         let (errors, warnings) = (count(Severity::Error), count(Severity::Warning));
         match (errors, warnings) {
             (0, 0) => println!("{file_path}: no problems found"),
@@ -511,7 +513,10 @@ fn fmt_files(args: &[String], check: bool) {
     }
 
     if failed > 0 {
-        eprintln!("\n{failed} of {} file(s) could not be formatted.", paths.len());
+        eprintln!(
+            "\n{failed} of {} file(s) could not be formatted.",
+            paths.len()
+        );
         std::process::exit(1);
     }
 
@@ -537,7 +542,10 @@ fn write_atomically(path: &str, contents: &str) -> std::io::Result<()> {
     let target = std::path::Path::new(path);
     let tmp = target.with_file_name(format!(
         ".{}.oxigen-fmt.tmp",
-        target.file_name().and_then(|n| n.to_str()).unwrap_or("file")
+        target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
     ));
     fs::write(&tmp, contents)?;
     let result = fs::metadata(target)
@@ -563,8 +571,12 @@ fn print_usage() {
     println!("Usage:");
     println!("  oxigen [options] <file.oxi> [script args...]   Run a script");
     println!("  oxigen [options]                               Start the REPL");
-    println!("  oxigen check [--json] <file.oxi>               Report errors and warnings without running");
-    println!("                                                 (JSON when --json or not a terminal)");
+    println!(
+        "  oxigen check [--json] <file.oxi>               Report errors and warnings without running"
+    );
+    println!(
+        "                                                 (JSON when --json or not a terminal)"
+    );
     println!("  oxigen fmt [--check] <file.oxi|dir>...         Format files in place");
     println!("                                                 --check: report and exit 1 instead");
     println!("  oxigen test [file.oxi|dir]                     Run *_test.oxi suites");
@@ -641,8 +653,8 @@ fn main() {
         cursor += 1;
     }
 
-    let eager_jit = !no_jit
-        && (want_eager || env::var("OXIGEN_JIT").map(|v| v != "0").unwrap_or(false));
+    let eager_jit =
+        !no_jit && (want_eager || env::var("OXIGEN_JIT").map(|v| v != "0").unwrap_or(false));
     let jit_mode = if no_jit {
         JitMode::Disabled
     } else if eager_jit {
@@ -666,7 +678,10 @@ fn main() {
                     let path = path.clone();
                     on_big_stack(move || check_file(&path, json));
                 }
-                None => usage_error("`check` needs a file", Some("oxigen check [--json] <file.oxi>")),
+                None => usage_error(
+                    "`check` needs a file",
+                    Some("oxigen check [--json] <file.oxi>"),
+                ),
             }
         }
         Some("fmt") => {
@@ -701,7 +716,10 @@ fn main() {
                     Some("run `oxigen explain --list` to see every code"),
                 ),
             },
-            None => usage_error("`explain` needs an error code", Some("oxigen explain E0003")),
+            None => usage_error(
+                "`explain` needs an error code",
+                Some("oxigen explain E0003"),
+            ),
         },
         Some(path) if path.ends_with(".oxi") => {
             let p = PathBuf::from(path);

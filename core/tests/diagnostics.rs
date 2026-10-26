@@ -14,7 +14,10 @@ use oxigen_core::parser::Parser;
 use oxigen_core::token::{Pos, Span};
 
 fn span(line: usize, col: usize, start: usize, end: usize) -> Span {
-    Span::range(Pos::new(line, col, start), Pos::new(line, col + (end - start), end))
+    Span::range(
+        Pos::new(line, col, start),
+        Pos::new(line, col + (end - start), end),
+    )
 }
 
 /// Parses and returns the rendered diagnostics.
@@ -78,7 +81,10 @@ fn a_point_span_still_renders_one_caret() {
     let d = Diagnostic::error(Code("E0003"), Span::new(1, 7), "here");
     let out = render::render_human(&d, &src);
     assert!(out.contains("^"), "{out}");
-    assert!(!out.contains("^^"), "point span should be one caret:\n{out}");
+    assert!(
+        !out.contains("^^"),
+        "point span should be one caret:\n{out}"
+    );
 }
 
 #[test]
@@ -109,7 +115,10 @@ fn secondary_labels_notes_and_helps_all_render() {
     assert!(out.contains("= help: rebind with `:=`"), "{out}");
     // The secondary is marked with dashes so it reads as context, not a second
     // error.
-    assert!(out.contains("---"), "secondary should underline with dashes:\n{out}");
+    assert!(
+        out.contains("---"),
+        "secondary should underline with dashes:\n{out}"
+    );
 }
 
 #[test]
@@ -135,7 +144,10 @@ fn an_unknown_location_does_not_invent_a_source_line() {
     let src = SourceFile::named("t.oxi", "first line\nsecond line\n");
     let d = Diagnostic::error(Code("E0021"), Span::new(0, 0), "no location");
     let out = render::render_human(&d, &src);
-    assert!(!out.contains("first line"), "invented a source line:\n{out}");
+    assert!(
+        !out.contains("first line"),
+        "invented a source line:\n{out}"
+    );
     assert!(!out.contains("0:0"), "{out}");
 }
 
@@ -171,7 +183,11 @@ fn json_keeps_the_legacy_fields_and_adds_the_new_ones() {
 fn the_sink_reports_whether_anything_is_fatal() {
     let mut sink = DiagnosticSink::new();
     assert!(!sink.has_errors());
-    sink.push(Diagnostic::warning(Code("W0001"), Span::new(1, 1), "unused"));
+    sink.push(Diagnostic::warning(
+        Code("W0001"),
+        Span::new(1, 1),
+        "unused",
+    ));
     assert!(!sink.has_errors(), "a warning alone is not fatal");
     sink.push(Diagnostic::error(Code("E0003"), Span::new(1, 1), "bad"));
     assert!(sink.has_errors());
@@ -184,10 +200,18 @@ fn deduplicate_drops_same_line_repeats_but_keeps_distinct_errors() {
     sink.push(Diagnostic::error(Code("E0003"), span(1, 1, 0, 10), "outer"));
     sink.push(Diagnostic::error(Code("E0003"), span(1, 3, 2, 4), "inner"));
     // A genuinely separate error further down must survive.
-    sink.push(Diagnostic::error(Code("E0003"), span(5, 1, 40, 44), "elsewhere"));
+    sink.push(Diagnostic::error(
+        Code("E0003"),
+        span(5, 1, 40, 44),
+        "elsewhere",
+    ));
     sink.deduplicate();
 
-    let messages: Vec<&str> = sink.diagnostics().iter().map(|d| d.message.as_str()).collect();
+    let messages: Vec<&str> = sink
+        .diagnostics()
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
     assert_eq!(messages, vec!["outer", "elsewhere"]);
 }
 
@@ -216,7 +240,10 @@ fn distinct_problems_get_distinct_codes() {
     };
     let a = extract(&type_err);
     let b = extract(&interp_err);
-    assert!(!a.is_empty() && !b.is_empty(), "{type_err}\n---\n{interp_err}");
+    assert!(
+        !a.is_empty() && !b.is_empty(),
+        "{type_err}\n---\n{interp_err}"
+    );
 }
 
 #[test]
@@ -250,7 +277,11 @@ fn first_code(src: &str) -> String {
 #[test]
 fn lexical_problems_get_lexical_codes_not_the_generic_one() {
     assert_eq!(first_code("x := 1;\n"), "E0002", "semicolon");
-    assert_eq!(first_code("name := \"ada\n"), "E0001", "unterminated string");
+    assert_eq!(
+        first_code("name := \"ada\n"),
+        "E0001",
+        "unterminated string"
+    );
     assert_eq!(first_code("c := ``\n"), "E0022", "empty char literal");
 }
 
@@ -298,7 +329,10 @@ fn compiler_errors_that_have_a_span_underline_it() {
         .compile(&program)
         .expect_err("`skip` outside a loop should fail to compile");
     let source = SourceFile::named("t.oxi", src);
-    let out = render::render_human(&errors.into_iter().next().unwrap().into_diagnostic(), &source);
+    let out = render::render_human(
+        &errors.into_iter().next().unwrap().into_diagnostic(),
+        &source,
+    );
     assert!(out.contains("^^^^"), "expected `skip` underlined:\n{out}");
     assert!(!out.contains(":0"), "column should not be 0:\n{out}");
 }
@@ -331,14 +365,26 @@ fn compile_code(src: &str) -> String {
 #[test]
 fn no_enclosing_loop_reports_the_same_code_whatever_the_position() {
     // Identical mistake; `skip` is last in one and not in the other.
-    assert_eq!(compile_code("fun f() { skip }\neach i in range(2) { f() }"), "E0016");
-    assert_eq!(compile_code("fun f() { skip\n 0 }\neach i in range(2) { f() }"), "E0016");
+    assert_eq!(
+        compile_code("fun f() { skip }\neach i in range(2) { f() }"),
+        "E0016"
+    );
+    assert_eq!(
+        compile_code("fun f() { skip\n 0 }\neach i in range(2) { f() }"),
+        "E0016"
+    );
 }
 
 #[test]
 fn a_closure_or_thread_body_is_not_inside_the_loop() {
-    assert_eq!(compile_code("each i in range(2) { g := fun() { skip }\n g() }"), "E0016");
-    assert_eq!(compile_code("each i in range(2) { diverge { skip } }"), "E0016");
+    assert_eq!(
+        compile_code("each i in range(2) { g := fun() { skip }\n g() }"),
+        "E0016"
+    );
+    assert_eq!(
+        compile_code("each i in range(2) { diverge { skip } }"),
+        "E0016"
+    );
 }
 
 #[test]
@@ -359,8 +405,14 @@ fn used_as_a_value_survives_where_it_is_the_real_reason() {
 
 #[test]
 fn legitimate_loop_control_still_compiles() {
-    assert_eq!(compile_code("each i in range(3) { skip when i == 1\n println(i) }"), "");
-    assert_eq!(compile_code("each i in range(3) { stop when i == 1\n println(i) }"), "");
+    assert_eq!(
+        compile_code("each i in range(3) { skip when i == 1\n println(i) }"),
+        ""
+    );
+    assert_eq!(
+        compile_code("each i in range(3) { stop when i == 1\n println(i) }"),
+        ""
+    );
     // Value discarded — this is ordinary loop control flow, not a value use.
     assert_eq!(
         compile_code("each i in range(3) { option { i == 1 -> skip, 0 }\n println(i) }"),
@@ -422,14 +474,19 @@ fn the_rule_applies_to_inline_patterns_too() {
 fn it_is_rejected_even_when_the_pattern_is_never_used() {
     // The declaration can never work, so waiting for a use site would let a
     // broken pattern sit in a file indefinitely.
-    assert_eq!(compile_code("pattern cmp(a, b) when a > b\nprintln(\"unused\")"), "E0024");
+    assert_eq!(
+        compile_code("pattern cmp(a, b) when a > b\nprintln(\"unused\")"),
+        "E0024"
+    );
 }
 
 #[test]
 fn single_parameter_patterns_still_compile() {
     assert_eq!(compile_code("pattern big(n) when n > 3\n1"), "");
     assert_eq!(
-        compile_code("pattern big(n) when n > 3\neach i in [1] { choose i { big -> 1, else -> 2 } }"),
+        compile_code(
+            "pattern big(n) when n > 3\neach i in [1] { choose i { big -> 1, else -> 2 } }"
+        ),
         ""
     );
     assert_eq!(
@@ -437,7 +494,10 @@ fn single_parameter_patterns_still_compile() {
         ""
     );
     // Comparing against a captured value is the supported alternative.
-    assert_eq!(compile_code("limit := 3\npattern big(n) when n > limit\n1"), "");
+    assert_eq!(
+        compile_code("limit := 3\npattern big(n) when n > limit\n1"),
+        ""
+    );
 }
 
 #[test]
@@ -488,7 +548,10 @@ fn a_loop_variable_is_not_told_to_use_walrus() {
         !out.contains("use := to override"),
         "still gives the misleading advice:\n{out}"
     );
-    assert!(out.contains("does not change which values are iterated"), "{out}");
+    assert!(
+        out.contains("does not change which values are iterated"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -496,14 +559,20 @@ fn the_loop_header_is_shown_as_a_secondary_label() {
     // Impossible while spans were points — this is the payoff of widening them.
     let out = compile_render("fun f() {\n  each i in range(3) { i = 1 }\n}\nf()");
     assert!(out.contains("rebound on each iteration"), "{out}");
-    assert!(out.contains("---"), "expected a secondary underline:\n{out}");
+    assert!(
+        out.contains("---"),
+        "expected a secondary underline:\n{out}"
+    );
 }
 
 #[test]
 fn the_increment_site_now_has_advice_too() {
     // `i++` is the more common mistake and previously carried no hint at all.
     let out = compile_render("fun f() {\n  each i in range(3) { i++ }\n}\nf()");
-    assert!(out.contains("cannot mutate loop variable `i` with `++`"), "{out}");
+    assert!(
+        out.contains("cannot mutate loop variable `i` with `++`"),
+        "{out}"
+    );
     assert!(out.contains("= help:"), "no advice:\n{out}");
 }
 
@@ -531,12 +600,18 @@ fn walrus_no_longer_bypasses_the_check_on_a_loop_variable() {
 #[test]
 fn walrus_still_overrides_a_constant() {
     // Documented behaviour: `:=` is how you override an immutable binding.
-    assert_eq!(compile_code("fun f() {\n  PI <float> = 3.14\n  PI := 3.0\n  PI\n}\nf()"), "");
+    assert_eq!(
+        compile_code("fun f() {\n  PI <float> = 3.14\n  PI := 3.0\n  PI\n}\nf()"),
+        ""
+    );
 }
 
 #[test]
 fn mutable_locals_are_unaffected() {
-    assert_eq!(compile_code("fun f() {\n  n := 1\n  n = 2\n  n++\n  n\n}\nf()"), "");
+    assert_eq!(
+        compile_code("fun f() {\n  n := 1\n  n = 2\n  n++\n  n\n}\nf()"),
+        ""
+    );
     assert_eq!(compile_code("fun f(p) {\n  p = 2\n  p\n}\nf(1)"), "");
 }
 
@@ -618,6 +693,9 @@ fn valid_programs_do_not_trip_the_net() {
         "struct P { n <int> }\np := P(1)\np.n\n",
     ] {
         let out = render_parse_errors(src);
-        assert!(out.is_empty(), "valid program produced diagnostics:\n{src}\n{out}");
+        assert!(
+            out.is_empty(),
+            "valid program produced diagnostics:\n{src}\n{out}"
+        );
     }
 }

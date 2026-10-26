@@ -131,8 +131,8 @@ println(rec(200000, 1, 2, 3, 4, 5, 6, 7))
         "JIT: expected a stack-overflow error, got: {jit:?}"
     );
     // VM (interpreter) path: same graceful Err via call_closure's STACK_MAX guard.
-    let vm =
-        run_result_big_stack(src, None).expect_err("deep many-local recursion must return Err on VM");
+    let vm = run_result_big_stack(src, None)
+        .expect_err("deep many-local recursion must return Err on VM");
     assert!(
         vm.to_lowercase().contains("stack overflow"),
         "VM: expected a stack-overflow error, got: {vm:?}"

@@ -1,5 +1,5 @@
-use crate::diagnostics::registry as codes;
 use crate::diagnostics::Diagnostic;
+use crate::diagnostics::registry as codes;
 use crate::token::{Pos, Span, Token, TokenType, token_map};
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -694,7 +694,11 @@ impl Lexer {
         // `1.5e3`, `2E-4`: without this `e3` lexed as a separate statement.
         if matches!(self.ch, 'e' | 'E') {
             let sign = matches!(self.peek_char(), '+' | '-');
-            let digit_at = if sign { self.position + 2 } else { self.position + 1 };
+            let digit_at = if sign {
+                self.position + 2
+            } else {
+                self.position + 1
+            };
             if self.input.get(digit_at).is_some_and(|c| c.is_ascii_digit()) {
                 is_float = true;
                 self.read_char();
@@ -954,9 +958,13 @@ impl Lexer {
     /// parser turns this `Illegal` token into a reported diagnostic.
     fn unterminated_string_token(&mut self, span: Span) -> Token {
         self.diagnostics.push(
-            Diagnostic::error(codes::UNTERMINATED_STRING, span, "unterminated string literal")
-                .label("this string is never closed")
-                .help("close it on the same line, or use a triple-quoted string to span lines"),
+            Diagnostic::error(
+                codes::UNTERMINATED_STRING,
+                span,
+                "unterminated string literal",
+            )
+            .label("this string is never closed")
+            .help("close it on the same line, or use a triple-quoted string to span lines"),
         );
         self.illegal("unterminated string literal", span)
     }
@@ -1193,7 +1201,11 @@ impl Lexer {
             }
             // Landing between two open levels used to be accepted, silently
             // attaching the line to the outer block.
-            if self.indent_stack.last().is_some_and(|&top| top != indent_level) {
+            if self
+                .indent_stack
+                .last()
+                .is_some_and(|&top| top != indent_level)
+            {
                 self.diagnostics.push(
                     Diagnostic::error(
                         codes::ILLEGAL_TOKEN,

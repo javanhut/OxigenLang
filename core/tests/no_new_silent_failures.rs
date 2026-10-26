@@ -123,7 +123,12 @@ fn count_shapes(source: &str) -> usize {
     source
         .lines()
         .map(|line| line.split("//").next().unwrap_or(""))
-        .map(|code| SHAPES.iter().map(|s| code.matches(s).count()).sum::<usize>())
+        .map(|code| {
+            SHAPES
+                .iter()
+                .map(|s| code.matches(s).count())
+                .sum::<usize>()
+        })
         .sum()
 }
 
@@ -196,11 +201,18 @@ fn no_new_narrowing_casts_at_the_language_boundary() {
         let found: usize = source
             .lines()
             .map(|line| line.split("//").next().unwrap_or(""))
-            .map(|code| NARROWING.iter().map(|c| code.matches(c).count()).sum::<usize>())
+            .map(|code| {
+                NARROWING
+                    .iter()
+                    .map(|c| code.matches(c).count())
+                    .sum::<usize>()
+            })
             .sum();
         if found != *allowed {
             let verb = if found > *allowed { "added" } else { "removed" };
-            drift.push(format!("  {rel}: baseline {allowed}, found {found} ({verb})"));
+            drift.push(format!(
+                "  {rel}: baseline {allowed}, found {found} ({verb})"
+            ));
         }
     }
 

@@ -21,7 +21,11 @@ fn run_vm(source: &str, jit_threshold: Option<u32>) -> Result<String, String> {
     let lexer = Lexer::new(source);
     let mut parser = Parser::new(lexer, source);
     let program = parser.parse_program();
-    assert!(parser.errors().is_empty(), "parser errors:\n{}", parser.format_errors());
+    assert!(
+        parser.errors().is_empty(),
+        "parser errors:\n{}",
+        parser.format_errors()
+    );
     let function = Compiler::new()
         .compile(&program)
         .map_err(|errs| format!("compile error: {errs:?}"))?;
@@ -29,7 +33,9 @@ fn run_vm(source: &str, jit_threshold: Option<u32>) -> Result<String, String> {
     if let Some(t) = jit_threshold {
         vm.jit.set_threshold(t);
     }
-    vm.run(function).map(|v| format!("{v}")).map_err(|e| e.message)
+    vm.run(function)
+        .map(|v| format!("{v}"))
+        .map_err(|e| e.message)
 }
 
 #[test]
@@ -43,8 +49,15 @@ fn nested_discarded_skip_compiles_and_runs() {
         "each i in range(2){ option { True -> (option { True -> { skip } }) } }\n\"ok\"\n",
     ] {
         // Its final value is the string "ok".
-        assert_eq!(run_vm(src, None).unwrap(), "ok", "VM interp should run nested-discarded skip:\n{src}");
-        assert!(run_vm(src, Some(1)).is_ok(), "VM JIT should run nested-discarded skip:\n{src}");
+        assert_eq!(
+            run_vm(src, None).unwrap(),
+            "ok",
+            "VM interp should run nested-discarded skip:\n{src}"
+        );
+        assert!(
+            run_vm(src, Some(1)).is_ok(),
+            "VM JIT should run nested-discarded skip:\n{src}"
+        );
     }
 }
 
@@ -65,7 +78,10 @@ fn skip_escaping_to_function_return_is_rejected_everywhere() {
         "VM should reject skip as a give value, got: {:?}",
         run_vm(give, None)
     );
-    assert!(run_vm(give, Some(1)).is_err(), "JIT should reject skip as a give value");
+    assert!(
+        run_vm(give, Some(1)).is_err(),
+        "JIT should reject skip as a give value"
+    );
 
     // Same via an implicit (tail) return.
     let implicit = "fun g(){ option { 1 >= 0 -> { stop } } }\nprintln(g())\n";
@@ -81,13 +97,22 @@ fn consumed_skip_still_errors_and_normal_loops_unaffected() {
     // A genuinely consumed skip is rejected statically by the VM/JIT compiler...
     // A loop IS present here, so "used as a value" (E0017) is the real reason.
     let consumed = "each i in [1] { x := 1 + option { i == 1 -> { skip }, 5 }\nprintln(x) }\n";
-    assert!(run_vm(consumed, None).unwrap_err().contains("E0017"),
-        "VM should reject a consumed skip, got: {:?}", run_vm(consumed, None));
+    assert!(
+        run_vm(consumed, None).unwrap_err().contains("E0017"),
+        "VM should reject a consumed skip, got: {:?}",
+        run_vm(consumed, None)
+    );
 
     // ...while ordinary in-loop skip/stop control flow is untouched.
     let normal = "each i in range(6){ skip when i % 2 == 0\ni }\n";
-    assert!(run_vm(normal, None).is_ok(), "normal skip-in-loop must still run");
-    assert!(run_vm(normal, Some(1)).is_ok(), "normal skip-in-loop must still run under JIT");
+    assert!(
+        run_vm(normal, None).is_ok(),
+        "normal skip-in-loop must still run"
+    );
+    assert!(
+        run_vm(normal, Some(1)).is_ok(),
+        "normal skip-in-loop must still run under JIT"
+    );
 }
 
 #[test]
@@ -101,11 +126,15 @@ fn dead_skip_arm_is_rejected_on_all_backends() {
         "VM must reject a dead consumed skip arm, got: {:?}",
         run_vm(src, None)
     );
-    assert!(run_vm(src, Some(1)).is_err(), "JIT must reject a dead consumed skip arm");
+    assert!(
+        run_vm(src, Some(1)).is_err(),
+        "JIT must reject a dead consumed skip arm"
+    );
 
     // A function whose option has a stop arm that IS structurally a value but is
     // never selected at the call — same static rejection.
-    let stop_src = "fun pick(n){ option { n < 0 -> -1, n == 0 -> 0, True -> { stop } } }\npick(0)\n";
+    let stop_src =
+        "fun pick(n){ option { n < 0 -> -1, n == 0 -> 0, True -> { stop } } }\npick(0)\n";
     assert!(
         run_vm(stop_src, None).unwrap_err().contains("E0016"),
         "VM must reject a dead consumed stop arm, got: {:?}",
@@ -129,7 +158,10 @@ fn skip_stop_outside_loop_in_uncalled_function_rejected_everywhere() {
             "VM must reject skip/stop outside a loop, got: {:?}\n{src}",
             run_vm(src, None)
         );
-        assert!(run_vm(src, Some(1)).is_err(), "JIT must reject skip/stop outside a loop:\n{src}");
+        assert!(
+            run_vm(src, Some(1)).is_err(),
+            "JIT must reject skip/stop outside a loop:\n{src}"
+        );
     }
 }
 
@@ -149,12 +181,21 @@ fn non_tail_skip_stop_in_consumed_block_rejected_everywhere() {
             "VM must reject non-tail consumed skip/stop, got: {:?}\n{src}",
             run_vm(src, None)
         );
-        assert!(run_vm(src, Some(1)).is_err(), "JIT must reject non-tail consumed skip/stop:\n{src}");
+        assert!(
+            run_vm(src, Some(1)).is_err(),
+            "JIT must reject non-tail consumed skip/stop:\n{src}"
+        );
     }
 
     // ...but a non-tail skip/stop in a DISCARDED block is still legitimate loop
     // control flow and runs on all three backends.
     let discarded = "each i in [1,2,3] {\n  option { i == 2 -> { skip\n99 } }\n}\n\"done\"\n";
-    assert!(run_vm(discarded, None).is_ok(), "discarded non-tail skip must still run");
-    assert!(run_vm(discarded, Some(1)).is_ok(), "discarded non-tail skip must still run under JIT");
+    assert!(
+        run_vm(discarded, None).is_ok(),
+        "discarded non-tail skip must still run"
+    );
+    assert!(
+        run_vm(discarded, Some(1)).is_ok(),
+        "discarded non-tail skip must still run under JIT"
+    );
 }

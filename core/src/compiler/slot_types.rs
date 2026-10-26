@@ -438,7 +438,9 @@ fn collect_local_inits(
     let mut start_of_end: HashMap<usize, usize> = HashMap::new();
     let mut ip = 0;
     while ip < code.len() {
-        let Ok(len) = chunk.instruction_len(ip) else { break };
+        let Ok(len) = chunk.instruction_len(ip) else {
+            break;
+        };
         start_of_end.insert(ip + len, ip);
         ip += len;
     }
@@ -474,8 +476,10 @@ fn collect_local_inits(
         };
         // A range loop's limit comes from `RangeLimit`, which yields an Integer or raises.
         let init_ip = producer.filter(|&p| {
-            matches!(OpCode::from_byte(code[p]), Some(OpCode::Constant | OpCode::RangeLimit))
-                && !forward_targets.contains(&decl_ip)
+            matches!(
+                OpCode::from_byte(code[p]),
+                Some(OpCode::Constant | OpCode::RangeLimit)
+            ) && !forward_targets.contains(&decl_ip)
                 && states
                     .get(&decl_ip)
                     .is_some_and(|st| st.stack.len() == slot as usize + 1)
@@ -913,10 +917,18 @@ fn compute_specialized_entry_eligibility(
         );
         let is_int_demand_mirror = int_mirror_param_slots.contains(&slot);
         if !(is_int_typed || is_int_demand_mirror) {
-            return (SpecEligibilityOutcome::RejectedParamNotInt, Vec::new(), false);
+            return (
+                SpecEligibilityOutcome::RejectedParamNotInt,
+                Vec::new(),
+                false,
+            );
         }
         if captured_slots.contains(&slot) {
-            return (SpecEligibilityOutcome::RejectedParamCaptured, Vec::new(), false);
+            return (
+                SpecEligibilityOutcome::RejectedParamCaptured,
+                Vec::new(),
+                false,
+            );
         }
     }
 
@@ -937,11 +949,19 @@ fn compute_specialized_entry_eligibility(
 
         match op {
             OpCode::Closure => {
-                return (SpecEligibilityOutcome::RejectedHasClosureOp, Vec::new(), false);
+                return (
+                    SpecEligibilityOutcome::RejectedHasClosureOp,
+                    Vec::new(),
+                    false,
+                );
             }
             // SetUpvalue needs write-through into the live Rc<RefCell<Upvalue>>; CloseUpvalue keeps the helper path.
             OpCode::SetUpvalue | OpCode::CloseUpvalue => {
-                return (SpecEligibilityOutcome::RejectedHasUpvalueOp, Vec::new(), false);
+                return (
+                    SpecEligibilityOutcome::RejectedHasUpvalueOp,
+                    Vec::new(),
+                    false,
+                );
             }
             OpCode::GetUpvalue => {
                 has_get_upvalue = true;
@@ -972,19 +992,31 @@ fn compute_specialized_entry_eligibility(
         let state = match states.get(&rip) {
             Some(s) => s,
             None => {
-                return (SpecEligibilityOutcome::RejectedReturnUnreachable, Vec::new(), false);
+                return (
+                    SpecEligibilityOutcome::RejectedReturnUnreachable,
+                    Vec::new(),
+                    false,
+                );
             }
         };
         let top_ty = state.stack.last().copied().unwrap_or(SlotType::Bottom);
         // Bottom means unreachable → still reject (can't trust).
         if matches!(top_ty, SlotType::Bottom) {
-            return (SpecEligibilityOutcome::RejectedReturnUnreachable, Vec::new(), false);
+            return (
+                SpecEligibilityOutcome::RejectedReturnUnreachable,
+                Vec::new(),
+                false,
+            );
         }
         // Value and Int64 are both fine: the trampoline's runtime tag check handles correctness.
     }
 
     let param_slots: Vec<u16> = (1..=arity).collect();
-    (SpecEligibilityOutcome::Eligible, param_slots, has_get_upvalue)
+    (
+        SpecEligibilityOutcome::Eligible,
+        param_slots,
+        has_get_upvalue,
+    )
 }
 
 /// Walk the bytecode and pick out param slots that qualify for an
@@ -1270,7 +1302,12 @@ fn transfer(
         // Push a constant — type depends on the constant's variant.
         OpCode::Constant => {
             let idx = read_u16(code, ip + 1) as usize;
-            let ty = if chunk.constants.get(idx).and_then(|v| v.as_integer()).is_some() {
+            let ty = if chunk
+                .constants
+                .get(idx)
+                .and_then(|v| v.as_integer())
+                .is_some()
+            {
                 SlotType::Int64
             } else {
                 SlotType::Value
@@ -2782,8 +2819,7 @@ mod tests {
             .local_decls
             .iter()
             .filter(|&&(ip, _)| {
-                ip >= 3
-                    && OpCode::from_byte(f.chunk.code[ip - 2]) == Some(OpCode::Call)
+                ip >= 3 && OpCode::from_byte(f.chunk.code[ip - 2]) == Some(OpCode::Call)
             })
             .map(|&(_, s)| s)
             .next()
@@ -2927,12 +2963,21 @@ mod tests {
         let mut f = make_fn("closure", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
-            OpCode::GetLocal as u8, 0, 1,    // push self (for synthetic call)
-            OpCode::Constant as u8, 0, 0,
-            OpCode::Call as u8, 1,
+            OpCode::GetLocal as u8,
+            0,
+            1, // push self (for synthetic call)
+            OpCode::Constant as u8,
+            0,
+            0,
+            OpCode::Call as u8,
+            1,
             OpCode::Pop as u8,
-            OpCode::GetUpvalue as u8, 0, 0,  // push upvalue 0 (x)
-            OpCode::GetLocal as u8, 0, 1,    // push y (param)
+            OpCode::GetUpvalue as u8,
+            0,
+            0, // push upvalue 0 (x)
+            OpCode::GetLocal as u8,
+            0,
+            1, // push y (param)
             OpCode::Add as u8,
             OpCode::Return as u8,
         ];
@@ -2949,14 +2994,25 @@ mod tests {
         let mut f = make_fn("mut_closure", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
-            OpCode::GetLocal as u8, 0, 1,
-            OpCode::Constant as u8, 0, 0,
-            OpCode::Call as u8, 1,
+            OpCode::GetLocal as u8,
+            0,
+            1,
+            OpCode::Constant as u8,
+            0,
+            0,
+            OpCode::Call as u8,
+            1,
             OpCode::Pop as u8,
-            OpCode::GetLocal as u8, 0, 1,
-            OpCode::SetUpvalue as u8, 0, 0,  // mutate upvalue 0
+            OpCode::GetLocal as u8,
+            0,
+            1,
+            OpCode::SetUpvalue as u8,
+            0,
+            0, // mutate upvalue 0
             OpCode::Pop as u8,
-            OpCode::GetLocal as u8, 0, 1,
+            OpCode::GetLocal as u8,
+            0,
+            1,
             OpCode::Return as u8,
         ];
         f.chunk.constants = vec![Value::Integer(0)];
@@ -2975,14 +3031,23 @@ mod tests {
         let mut f = make_fn("closing", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
-            OpCode::GetLocal as u8, 0, 1,
-            OpCode::Constant as u8, 0, 0,
-            OpCode::Call as u8, 1,
+            OpCode::GetLocal as u8,
+            0,
+            1,
+            OpCode::Constant as u8,
+            0,
+            0,
+            OpCode::Call as u8,
+            1,
             OpCode::Pop as u8,
             // A real CloseUpvalue has the captured local on top and pops it; keep this bytecode stack-valid.
-            OpCode::Constant as u8, 0, 0,
+            OpCode::Constant as u8,
+            0,
+            0,
             OpCode::CloseUpvalue as u8,
-            OpCode::GetLocal as u8, 0, 1,
+            OpCode::GetLocal as u8,
+            0,
+            1,
             OpCode::Return as u8,
         ];
         f.chunk.constants = vec![Value::Integer(0)];
@@ -3025,8 +3090,12 @@ mod tests {
         let mut f = make_fn("inner_closure", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
-            OpCode::GetUpvalue as u8, 0, 0,  // push upvalue 0 (x)
-            OpCode::GetLocal as u8, 0, 1,    // push y (param)
+            OpCode::GetUpvalue as u8,
+            0,
+            0, // push upvalue 0 (x)
+            OpCode::GetLocal as u8,
+            0,
+            1, // push y (param)
             OpCode::Add as u8,
             OpCode::Return as u8,
         ];
@@ -3042,10 +3111,7 @@ mod tests {
         // No Call and no GetUpvalue means no path reaches a specialized entry, so reject as RejectedNoCall.
         let mut f = make_fn("identity", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
-        f.chunk.code = vec![
-            OpCode::GetLocal as u8, 0, 1,
-            OpCode::Return as u8,
-        ];
+        f.chunk.code = vec![OpCode::GetLocal as u8, 0, 1, OpCode::Return as u8];
         f.chunk.constants = vec![];
         let r = analyze(&f);
         assert!(!r.specialized_entry_eligible);
@@ -3114,8 +3180,11 @@ mk(1)",
 
     #[test]
     fn lean_entry_rejects_zero_arity() {
-        let f = compile_for_analysis("fun c() { 1 + 2 }
-c()", Some("c"));
+        let f = compile_for_analysis(
+            "fun c() { 1 + 2 }
+c()",
+            Some("c"),
+        );
         let r = analyze(&f);
         assert!(!r.lean_entry_eligible);
     }

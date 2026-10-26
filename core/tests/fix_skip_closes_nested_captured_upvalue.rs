@@ -85,7 +85,10 @@ fn option_arm_value_with_single_local() {
 
 #[test]
 fn option_arm_value_with_two_locals() {
-    assert_parity("r := option { True -> {\n y := 5\n z := 7\n y + z\n } }\nr", "12");
+    assert_parity(
+        "r := option { True -> {\n y := 5\n z := 7\n y + z\n } }\nr",
+        "12",
+    );
 }
 
 #[test]

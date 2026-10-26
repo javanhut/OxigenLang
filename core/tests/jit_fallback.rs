@@ -173,7 +173,10 @@ fn jit_index_assign_matches_and_compiles() {
     assert_eq!(run_disabled(src).0, expected, "interp baseline");
     let (out, ok, failed) = run(src, Some(1));
     assert_eq!(out, expected, "jit output must match interpreter");
-    assert!(ok >= 1, "expected the array-mutating fn to JIT-compile (ok={ok})");
+    assert!(
+        ok >= 1,
+        "expected the array-mutating fn to JIT-compile (ok={ok})"
+    );
     assert_eq!(failed, 0, "no compile failures expected (failed={failed})");
 }
 
@@ -195,7 +198,10 @@ fn jit_map_index_assign_matches_and_compiles() {
     // `mutate` compiles (its `m[k]=v` is now supported); `go` does NOT —
     // its `{"k": 0}` map literal is a `BuildMap`, still outside the
     // allow-list — so we assert a compile happened, not that none failed.
-    assert!(ok >= 1, "expected the map-mutating fn to JIT-compile (ok={ok})");
+    assert!(
+        ok >= 1,
+        "expected the map-mutating fn to JIT-compile (ok={ok})"
+    );
 }
 
 /// Assigning to an index of a non-indexable value must error identically
@@ -207,7 +213,10 @@ fn jit_index_assign_error_matches_interpreter() {
     let interp = run_result(src, None);
     let jit = run_result(src, Some(1));
     assert!(interp.is_err(), "interp should error: {interp:?}");
-    assert_eq!(interp, jit, "JIT and interpreter must report the same error");
+    assert_eq!(
+        interp, jit,
+        "JIT and interpreter must report the same error"
+    );
 }
 
 #[test]
@@ -828,7 +837,10 @@ fn jit_array_index_out_of_range_matches_interpreter() {
         let baseline = run_result(&source, None).expect_err("interpreter should error");
         let jitted = run_result(&source, Some(1)).expect_err("jit should error");
         assert!(baseline.contains("out of range"), "{baseline}");
-        assert_eq!(baseline, jitted, "jit and interpreter must agree for [{index}]");
+        assert_eq!(
+            baseline, jitted,
+            "jit and interpreter must agree for [{index}]"
+        );
     }
 }
 
@@ -1670,7 +1682,10 @@ go()
     let (baseline, _, _) = run(src, None);
     let (jitted, j_ok, _) = run(src, Some(1));
     assert_eq!(baseline, "5");
-    assert_eq!(jitted, baseline, "builtin call in JIT loop must match interpreter");
+    assert_eq!(
+        jitted, baseline,
+        "builtin call in JIT loop must match interpreter"
+    );
     assert!(j_ok >= 1, "go should JIT-compile");
 }
 
@@ -1682,8 +1697,8 @@ go()
 fn jit_enforces_local_type_lock_on_reassignment() {
     for src in [
         "fun f(){ x <int> := 1\nx = \"hi\"\nx }\nf()", // string into int-locked
-        "fun f(){ x <int> := 1\nx = 2.5\nx }\nf()",     // float into int-locked
-        "fun f(){ x <float> := 1.0\nx = 2\nx }\nf()",   // int into float-locked
+        "fun f(){ x <int> := 1\nx = 2.5\nx }\nf()",    // float into int-locked
+        "fun f(){ x <float> := 1.0\nx = 2\nx }\nf()",  // int into float-locked
     ] {
         assert!(
             run_result(src, None).is_err(),
@@ -1772,21 +1787,39 @@ fn loop_var_capture_is_per_iteration() {
 #[test]
 fn error_model_recovery() {
     let cases: &[(&str, &str)] = &[
-        ("fun rn(){ <fail>(\"no\") }\nrn() <guard>(\"Guest\")", "Guest"),
+        (
+            "fun rn(){ <fail>(\"no\") }\nrn() <guard>(\"Guest\")",
+            "Guest",
+        ),
         ("fun bad(){ 1/0 }\nbad() <guard>(\"safe\")", "safe"),
         ("fun ok(){ 42 }\nok() <guard>(\"x\")", "42"),
         ("fun n(){ None }\nn() <guard>(\"fb\")", "None"), // guard does NOT catch None
         ("fail \"boom\" guard err -> err.msg", "boom"),
-        ("fun risky(){ <fail>(\"boom\") }\noption { risky() -> \"ok\", <Error> -> \"fb\" }", "fb"),
+        (
+            "fun risky(){ <fail>(\"boom\") }\noption { risky() -> \"ok\", <Error> -> \"fb\" }",
+            "fb",
+        ),
         ("option { True -> \"ok\", <Error> -> \"fb\" }", "ok"), // <Error> only on error
         ("option { False -> \"x\" }", "None"),                  // no-match => None
         ("<Value>(\"ok\").value", "ok"),
         ("(<type<Error || Value>>(\"x\")).value", "x"),
-        ("r := <type<Error || Value>>(<fail>(\"boom\"))\nr.msg", "boom"),
-        ("fun rn(){ <fail>(<Error<retry>>(\"lost\")) }\nrn() <guard<Error<retry>>>(\"Guest\")", "Guest"),
+        (
+            "r := <type<Error || Value>>(<fail>(\"boom\"))\nr.msg",
+            "boom",
+        ),
+        (
+            "fun rn(){ <fail>(<Error<retry>>(\"lost\")) }\nrn() <guard<Error<retry>>>(\"Guest\")",
+            "Guest",
+        ),
         // tag mismatch re-propagates to an outer (untagged) guard
-        ("fun rn(){ <fail>(<Error<retry>>(\"lost\")) }\nrn() <guard<Error<x>>>(\"inner\") <guard>(\"outer\")", "outer"),
-        ("fun a(){ <fail>(\"e1\") }\nfun b(){ <fail>(\"e2\") }\na() <guard>(b() <guard>(\"both\"))", "both"),
+        (
+            "fun rn(){ <fail>(<Error<retry>>(\"lost\")) }\nrn() <guard<Error<x>>>(\"inner\") <guard>(\"outer\")",
+            "outer",
+        ),
+        (
+            "fun a(){ <fail>(\"e1\") }\nfun b(){ <fail>(\"e2\") }\na() <guard>(b() <guard>(\"both\"))",
+            "both",
+        ),
     ];
     for (src, expected) in cases {
         assert_eq!(run_result(src, None).unwrap(), *expected, "interp: {src}");
@@ -1840,11 +1873,26 @@ fn global_walrus_reassign_in_nested_block() {
 #[test]
 fn jit_specialized_recursion_non_int_return() {
     let cases: &[(&str, &str)] = &[
-        ("fun f(n) { option { n <= 0 -> 3.5, f(n - 1) } }\nf(3)", "3.5"),
-        ("fun f(n) { option { n <= 0 -> \"done\", f(n - 1) } }\nf(3)", "done"),
-        ("fun f(n) { option { n <= 0 -> None, f(n - 1) } }\nf(3)", "None"),
-        ("fun f(n) { option { n <= 0 -> 2, n == 1 -> 3.5, f(n - 1) } }\nf(3)", "3.5"),
-        ("fun fib(n) { give n when n < 2\nfib(n-1) + fib(n-2) }\nfib(15)", "610"),
+        (
+            "fun f(n) { option { n <= 0 -> 3.5, f(n - 1) } }\nf(3)",
+            "3.5",
+        ),
+        (
+            "fun f(n) { option { n <= 0 -> \"done\", f(n - 1) } }\nf(3)",
+            "done",
+        ),
+        (
+            "fun f(n) { option { n <= 0 -> None, f(n - 1) } }\nf(3)",
+            "None",
+        ),
+        (
+            "fun f(n) { option { n <= 0 -> 2, n == 1 -> 3.5, f(n - 1) } }\nf(3)",
+            "3.5",
+        ),
+        (
+            "fun fib(n) { give n when n < 2\nfib(n-1) + fib(n-2) }\nfib(15)",
+            "610",
+        ),
         // Call-with-arith fusion: the caller emits the arithmetic twice, once for
         // each place the callee can leave its result. `g(1)` returns an Integer
         // (status 0, result handed over in a register — the fast side); `g(0)`
@@ -1881,7 +1929,11 @@ fn jit_specialized_recursion_non_int_return() {
     ];
     for (src, expected) in cases {
         assert_eq!(run_result(src, None).unwrap(), *expected, "interp: {src}");
-        assert_eq!(run_result(src, Some(1)).unwrap(), *expected, "eager-jit: {src}");
+        assert_eq!(
+            run_result(src, Some(1)).unwrap(),
+            *expected,
+            "eager-jit: {src}"
+        );
     }
 }
 
@@ -1903,22 +1955,40 @@ fn guard_in_loop_no_leak() {
 fn jit_each_over_collections_matches_and_compiles() {
     let cases: &[(&str, &str)] = &[
         // array
-        ("fun f(a){ t := 0\neach x in a { t = t + x }\nt }\nf([10,20,30])", "60"),
+        (
+            "fun f(a){ t := 0\neach x in a { t = t + x }\nt }\nf([10,20,30])",
+            "60",
+        ),
         // string
-        ("fun f(s){ n := 0\neach c in s { n = n + 1 }\nn }\nf(\"abcde\")", "5"),
+        (
+            "fun f(s){ n := 0\neach c in s { n = n + 1 }\nn }\nf(\"abcde\")",
+            "5",
+        ),
         // tuple
-        ("fun f(p){ t := 0\neach x in p { t = t + x }\nt }\nf((1,2,3,4))", "10"),
+        (
+            "fun f(p){ t := 0\neach x in p { t = t + x }\nt }\nf((1,2,3,4))",
+            "10",
+        ),
         // stop must fire at the right element (regression: array was built
         // [1,3,2,4], so `stop when x==3` fired early). Expect 1+2 = 3.
-        ("fun f(a){ s := 0\neach x in a { stop when x == 3\ns = s + x }\ns }\nf([1,2,3,4])", "3"),
+        (
+            "fun f(a){ s := 0\neach x in a { stop when x == 3\ns = s + x }\ns }\nf([1,2,3,4])",
+            "3",
+        ),
         // skip over array
-        ("fun f(a){ s := 0\neach x in a { skip when x == 2\ns = s + x }\ns }\nf([1,2,3,4])", "8"),
+        (
+            "fun f(a){ s := 0\neach x in a { skip when x == 2\ns = s + x }\ns }\nf([1,2,3,4])",
+            "8",
+        ),
     ];
     for (src, expected) in cases {
         assert_eq!(run_disabled(src).0, *expected, "interp: {src}");
         let (out, ok, failed) = run_with_thresholds(src, None, Some(1));
         assert_eq!(out, *expected, "jit: {src}");
-        assert!(ok >= 1, "expected each-loop to JIT-compile: {src} (ok={ok})");
+        assert!(
+            ok >= 1,
+            "expected each-loop to JIT-compile: {src} (ok={ok})"
+        );
         assert_eq!(failed, 0, "compile failure for: {src} (failed={failed})");
     }
 }
@@ -1930,14 +2000,23 @@ fn jit_each_over_collections_matches_and_compiles() {
 #[test]
 fn jit_each_in_range_counting_loop_matches_and_compiles() {
     let cases: &[(&str, &str)] = &[
-        ("fun f(n){ t := 0\neach i in range(n) { t = t + i }\nt }\nf(100)", "4950"),
-        ("fun f(){ t := 0\neach i in range(2, 7) { t = t + i }\nt }\nf()", "20"),
+        (
+            "fun f(n){ t := 0\neach i in range(n) { t = t + i }\nt }\nf(100)",
+            "4950",
+        ),
+        (
+            "fun f(){ t := 0\neach i in range(2, 7) { t = t + i }\nt }\nf()",
+            "20",
+        ),
     ];
     for (src, expected) in cases {
         assert_eq!(run_disabled(src).0, *expected, "interp: {src}");
         let (out, ok, failed) = run_with_thresholds(src, None, Some(1));
         assert_eq!(out, *expected, "jit: {src}");
-        assert!(ok >= 1, "expected counting-loop to JIT-compile: {src} (ok={ok})");
+        assert!(
+            ok >= 1,
+            "expected counting-loop to JIT-compile: {src} (ok={ok})"
+        );
         assert_eq!(failed, 0, "compile failure for: {src} (failed={failed})");
     }
 

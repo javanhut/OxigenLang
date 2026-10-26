@@ -13,9 +13,29 @@ macro_rules! pages {
 }
 
 const MODULES: &[(&str, &str)] = pages!(
-    "ansi", "api", "array", "channel", "datetime", "encoding", "env", "ffi", "hash", "io", "json",
-    "math", "net", "os", "parse_args", "path", "random", "regex", "result", "strings", "test",
-    "time", "toml",
+    "ansi",
+    "api",
+    "array",
+    "channel",
+    "datetime",
+    "encoding",
+    "env",
+    "ffi",
+    "hash",
+    "io",
+    "json",
+    "math",
+    "net",
+    "os",
+    "parse_args",
+    "path",
+    "random",
+    "regex",
+    "result",
+    "strings",
+    "test",
+    "time",
+    "toml",
 );
 
 const BUILTINS: &str = include_str!("../../../docs/builtins.md");
@@ -42,11 +62,13 @@ fn documents(line: &str, name: &str) -> bool {
 }
 
 /// Each section of `page` whose heading documents `name`, with its body.
-fn sections<'a>(page: &'a str, name: &str) -> Vec<String> {
+fn sections(page: &str, name: &str) -> Vec<String> {
     let lines: Vec<&str> = page.lines().collect();
     let mut found = Vec::new();
     for (i, line) in lines.iter().enumerate() {
-        let Some(level) = heading_level(line) else { continue };
+        let Some(level) = heading_level(line) else {
+            continue;
+        };
         if level < 2 || !documents(line, name) {
             continue;
         }
@@ -64,7 +86,11 @@ fn index() -> String {
     let width = MODULES.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
     for (name, page) in MODULES {
         let first = summary(page);
-        let short = first.split(". ").next().unwrap_or(&first).trim_end_matches('.');
+        let short = first
+            .split(". ")
+            .next()
+            .unwrap_or(&first)
+            .trim_end_matches('.');
         out.push_str(&format!("  {name:width$}  {short}\n"));
     }
     out.push_str("\nBuilt-in functions, available without an import: `oxigen doc builtins`\n");
@@ -85,11 +111,15 @@ pub fn lookup(topic: Option<&str>) -> Result<String, String> {
     }
     if let Some((module, name)) = topic.split_once('.') {
         let Some((_, page)) = MODULES.iter().find(|(n, _)| *n == module) else {
-            return Err(format!("no module named `{module}`; run `oxigen doc` for the list"));
+            return Err(format!(
+                "no module named `{module}`; run `oxigen doc` for the list"
+            ));
         };
         let found = sections(page, name);
         if found.is_empty() {
-            return Err(format!("`{module}` has no `{name}`; run `oxigen doc {module}` for its functions"));
+            return Err(format!(
+                "`{module}` has no `{name}`; run `oxigen doc {module}` for its functions"
+            ));
         }
         return Ok(found.join("\n\n"));
     }
@@ -99,10 +129,16 @@ pub fn lookup(topic: Option<&str>) -> Result<String, String> {
         .map(|s| format!("[builtin]\n{s}"))
         .collect();
     for (module, page) in MODULES {
-        found.extend(sections(page, topic).into_iter().map(|s| format!("[{module}]\n{s}")));
+        found.extend(
+            sections(page, topic)
+                .into_iter()
+                .map(|s| format!("[{module}]\n{s}")),
+        );
     }
     if found.is_empty() {
-        return Err(format!("nothing named `{topic}`; run `oxigen doc` for the modules"));
+        return Err(format!(
+            "nothing named `{topic}`; run `oxigen doc` for the modules"
+        ));
     }
     Ok(found.join("\n\n"))
 }
@@ -113,7 +149,11 @@ mod tests {
 
     #[test]
     fn finds_functions_by_module_and_by_name() {
-        assert!(lookup(Some("io.append_file")).unwrap().contains("append_file(path, content)"));
+        assert!(
+            lookup(Some("io.append_file"))
+                .unwrap()
+                .contains("append_file(path, content)")
+        );
         assert!(lookup(Some("exec_argv")).unwrap().starts_with("[os]"));
         assert!(lookup(Some("push")).unwrap().starts_with("[builtin]"));
         assert!(lookup(Some("io")).unwrap().starts_with("# io"));

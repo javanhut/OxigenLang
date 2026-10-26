@@ -79,12 +79,21 @@ fn non_utf8_argument_is_a_usage_error() {
 #[test]
 fn test_discovery_does_not_follow_directory_symlinks() {
     let dir = temp_dir("test-symlink");
-    write(&dir, "x_test.oxi", "<test>(\"one\") {\n    expect(1).eq(1)\n}\n");
+    write(
+        &dir,
+        "x_test.oxi",
+        "<test>(\"one\") {\n    expect(1).eq(1)\n}\n",
+    );
     fs::create_dir_all(dir.join("sub")).unwrap();
     std::os::unix::fs::symlink("..", dir.join("sub").join("up")).unwrap();
     // The test runner finds the stdlib (`expect`) relative to the workspace.
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let out = oxigen().current_dir(root).arg("test").arg(&dir).output().unwrap();
+    let out = oxigen()
+        .current_dir(root)
+        .arg("test")
+        .arg(&dir)
+        .output()
+        .unwrap();
     assert!(
         stdout(&out).contains("1 passed"),
         "ran tests through a symlink loop:\n{}",
@@ -113,9 +122,15 @@ fn fmt_does_not_follow_directory_symlinks() {
 
 #[test]
 fn missing_paths_are_usage_errors() {
-    let out = oxigen().args(["test", "definitely-missing.oxi"]).output().unwrap();
+    let out = oxigen()
+        .args(["test", "definitely-missing.oxi"])
+        .output()
+        .unwrap();
     assert_eq!(code(&out), 2, "test: {}", stderr(&out));
-    let out = oxigen().args(["check", "definitely-missing.oxi"]).output().unwrap();
+    let out = oxigen()
+        .args(["check", "definitely-missing.oxi"])
+        .output()
+        .unwrap();
     assert_eq!(code(&out), 2, "check: {}", stderr(&out));
 }
 
@@ -147,11 +162,17 @@ fn unknown_option_is_reported_as_an_option() {
 #[test]
 fn fmt_keeps_a_location_directive_with_trailing_space() {
     let dir = temp_dir("fmt-location");
-    let file = write(&dir, "a.oxi", "#[location=/usr/bin/env oxigen] \nprintln(1)\n");
+    let file = write(
+        &dir,
+        "a.oxi",
+        "#[location=/usr/bin/env oxigen] \nprintln(1)\n",
+    );
     let out = oxigen().arg("fmt").arg(&file).output().unwrap();
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     assert!(
-        fs::read_to_string(&file).unwrap().contains("#[location=/usr/bin/env oxigen]"),
+        fs::read_to_string(&file)
+            .unwrap()
+            .contains("#[location=/usr/bin/env oxigen]"),
         "location directive dropped:\n{}",
         fs::read_to_string(&file).unwrap()
     );
@@ -168,8 +189,14 @@ fn fmt_keeps_indent_mode_after_a_blank_line_or_trailing_space() {
         let out = oxigen().arg("fmt").arg(&file).output().unwrap();
         assert_eq!(code(&out), 0, "{}", stderr(&out));
         let formatted = fs::read_to_string(&file).unwrap();
-        assert!(formatted.contains("#[indent]"), "directive dropped:\n{formatted}");
-        assert!(formatted.contains("fun f(a):"), "converted to brace style:\n{formatted}");
+        assert!(
+            formatted.contains("#[indent]"),
+            "directive dropped:\n{formatted}"
+        );
+        assert!(
+            formatted.contains("fun f(a):"),
+            "converted to brace style:\n{formatted}"
+        );
         let run = oxigen().arg(&file).output().unwrap();
         assert_eq!(stdout(&run), "1\n", "{}", stderr(&run));
     }
@@ -192,9 +219,18 @@ fn fmt_reports_a_broken_file_and_still_formats_the_rest() {
 fn fmt_check_flag_works_after_the_paths() {
     let dir = temp_dir("fmt-check-late");
     let file = write(&dir, "a.oxi", "y:=1\n");
-    let out = oxigen().arg("fmt").arg(&file).arg("--check").output().unwrap();
+    let out = oxigen()
+        .arg("fmt")
+        .arg(&file)
+        .arg("--check")
+        .output()
+        .unwrap();
     assert_eq!(code(&out), 1, "{}", stderr(&out));
-    assert_eq!(fs::read_to_string(&file).unwrap(), "y:=1\n", "--check wrote the file");
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "y:=1\n",
+        "--check wrote the file"
+    );
 }
 
 #[test]
@@ -203,7 +239,11 @@ fn fmt_never_truncates_a_file_at_a_nul_byte() {
     let source = "println(\"a\")\n\0\nprintln(\"b\")\n";
     let file = write(&dir, "a.oxi", source);
     oxigen().arg("fmt").arg(&file).output().unwrap();
-    assert_eq!(fs::read_to_string(&file).unwrap(), source, "fmt deleted code after a NUL");
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        source,
+        "fmt deleted code after a NUL"
+    );
 }
 
 // ── M4: check on deep input ──
@@ -212,7 +252,11 @@ fn fmt_never_truncates_a_file_at_a_nul_byte() {
 fn check_reports_deep_nesting_instead_of_aborting() {
     let dir = temp_dir("check-deep");
     let n = 20_000;
-    let file = write(&dir, "deep.oxi", &format!("x := {}1{}\n", "(".repeat(n), ")".repeat(n)));
+    let file = write(
+        &dir,
+        "deep.oxi",
+        &format!("x := {}1{}\n", "(".repeat(n), ")".repeat(n)),
+    );
     let out = oxigen().arg("check").arg(&file).output().unwrap();
     assert_eq!(code(&out), 1, "stderr: {}", stderr(&out));
     assert!(stdout(&out).contains("nest"), "{}", stdout(&out));

@@ -70,12 +70,16 @@ fn choose_subject_is_reentrant_under_recursion() {
 
 #[test]
 fn guard_binding_does_not_clobber_a_global() {
-    assert_all_ok("err <int> = 5\ny := fail \"x\" guard err -> 0\n[err, y]", "[5, 0]");
+    assert_all_ok(
+        "err <int> = 5\ny := fail \"x\" guard err -> 0\n[err, y]",
+        "[5, 0]",
+    );
 }
 
 #[test]
 fn guard_binding_shadows_a_local_of_the_same_name() {
-    let src = "fun t() {\n  e := \"local\"\n  y := fail \"bang\" guard e -> e.msg\n  [y, e]\n}\nt()";
+    let src =
+        "fun t() {\n  e := \"local\"\n  y := fail \"bang\" guard e -> e.msg\n  [y, e]\n}\nt()";
     assert_all_ok(src, "[bang, local]");
 }
 
@@ -87,5 +91,8 @@ fn guard_binding_inside_call_arguments() {
 
 #[test]
 fn guard_without_error_keeps_the_value() {
-    assert_all_ok("fun t() {\n  e := 3\n  y := 10 guard e -> 0\n  [y, e]\n}\nt()", "[10, 3]");
+    assert_all_ok(
+        "fun t() {\n  e := 3\n  y := 10 guard e -> 0\n  [y, e]\n}\nt()",
+        "[10, 3]",
+    );
 }

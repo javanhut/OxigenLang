@@ -9,7 +9,11 @@ use oxigen_core::parser::Parser;
 fn check(src: &str) -> Vec<Diagnostic> {
     let mut parser = Parser::new(Lexer::new(src), src);
     let program = parser.parse_program();
-    assert!(parser.errors().is_empty(), "parse errors: {:?}", parser.errors());
+    assert!(
+        parser.errors().is_empty(),
+        "parse errors: {:?}",
+        parser.errors()
+    );
     let mut builtins = std::collections::HashMap::new();
     oxigen_core::vm::builtins::register_builtins(&mut builtins);
     Compiler::new().check(&program, &|n: &str| builtins.contains_key(n))
@@ -58,12 +62,18 @@ fn a_literal_after_a_comparison_is_a_warning() {
 
 #[test]
 fn a_literal_on_the_left_of_or_is_a_warning() {
-    assert_eq!(codes("t := (\"quit\" or \"exit\")\nprintln(t)\n"), vec![("E0039", Severity::Warning)]);
+    assert_eq!(
+        codes("t := (\"quit\" or \"exit\")\nprintln(t)\n"),
+        vec![("E0039", Severity::Warning)]
+    );
 }
 
 #[test]
 fn not_equal_to_a_distributed_or_is_a_warning() {
-    assert_eq!(codes("c := 1\nprintln(c != (1 or 2))\n"), vec![("E0039", Severity::Warning)]);
+    assert_eq!(
+        codes("c := 1\nprintln(c != (1 or 2))\n"),
+        vec![("E0039", Severity::Warning)]
+    );
 }
 
 #[test]
@@ -78,7 +88,11 @@ fn return_explains_give() {
     let mut parser = Parser::new(Lexer::new(src), src);
     parser.parse_program();
     let first = &parser.errors()[0];
-    assert!(first.message.contains("`return` is not an Oxigen keyword"), "{}", first.message);
+    assert!(
+        first.message.contains("`return` is not an Oxigen keyword"),
+        "{}",
+        first.message
+    );
     let text = parser.format_errors();
     assert!(text.contains("give value"), "{text}");
 }

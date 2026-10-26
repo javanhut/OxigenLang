@@ -31,7 +31,11 @@ fn run_vm(source: &str, jit_threshold: Option<u32>) -> String {
     let lexer = Lexer::new(source);
     let mut parser = Parser::new(lexer, source);
     let program = parser.parse_program();
-    assert!(parser.errors().is_empty(), "parser errors:\n{}", parser.format_errors());
+    assert!(
+        parser.errors().is_empty(),
+        "parser errors:\n{}",
+        parser.format_errors()
+    );
     let function = Compiler::new().compile(&program).expect("compile");
     let mut vm = VM::new();
     if let Some(t) = jit_threshold {
@@ -74,9 +78,15 @@ fn struct_field_add_in_loop_with_inheritance() {
 fn walrus_local_returned_from_conditional_option_arm() {
     // The minimal repro: a non-constant-init local returned from a *conditional*
     // option arm. Was 0 under the JIT.
-    assert_parity("fun f(n) { val := n + 100\n option { n <= 0 -> val, 999 } }\n f(0)", "100");
+    assert_parity(
+        "fun f(n) { val := n + 100\n option { n <= 0 -> val, 999 } }\n f(0)",
+        "100",
+    );
     // local in the ELSE arm, and two locals.
-    assert_parity("fun f(n) { val := n + 100\n option { n > 0 -> 999, val } }\n f(0)", "100");
+    assert_parity(
+        "fun f(n) { val := n + 100\n option { n > 0 -> 999, val } }\n f(0)",
+        "100",
+    );
     assert_parity(
         "fun f(n) { a := n + 1\n b := n + 100\n option { n <= 0 -> b, 999 } }\n f(0)",
         "100",
@@ -110,5 +120,8 @@ fn non_loop_field_add_and_unconditional_arm_still_correct() {
          s <S> := S(0)\n s.run()",
         "3",
     );
-    assert_parity("fun f(n) { val := n + 100\n option { True -> val } }\n f(7)", "107");
+    assert_parity(
+        "fun f(n) { val := n + 100\n option { True -> val } }\n f(7)",
+        "107",
+    );
 }

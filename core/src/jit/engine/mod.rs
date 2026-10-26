@@ -20,6 +20,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 
 use crate::compiler::opcode::{Chunk, OpCode};
+use crate::vm::JitFrame;
 use crate::vm::VM;
 use crate::vm::VMError;
 use crate::vm::value::{
@@ -27,7 +28,6 @@ use crate::vm::value::{
     VALUE_INT_PAYLOAD_OFFSET, VALUE_SIZE, VALUE_TAG_CLOSURE, VALUE_TAG_FLOAT, VALUE_TAG_INTEGER,
     VALUE_TAG_NONE, VALUE_TAG_STRUCT_INSTANCE,
 };
-use crate::vm::JitFrame;
 
 use super::scan;
 use super::virt_stack::{VirtConst, VirtSlot, VirtStack};
@@ -35,9 +35,9 @@ use super::{CompiledEntries, CompiledThunk, SpecializedThunkRaw};
 
 mod cache;
 mod counters;
-mod lean;
 mod defs;
 mod helpers;
+mod lean;
 pub(crate) use cache::ClosureInlineKind;
 pub(crate) use cache::{
     CallCacheEntry, FieldCacheEntry, FieldCacheKind, GlobalCacheEntry, MethodCacheEntry,
@@ -48,8 +48,7 @@ use counters::{counter_offsets, emit_counter_bump};
 use defs::{
     Entry, obj_closure_module_globals_offset, vm_jit_frame_view_len_offset,
     vm_jit_frame_view_ptr_offset, vm_limits_armed_offset, vm_loop_countdown_offset,
-    vm_stack_view_len_offset,
-    vm_stack_view_ptr_offset,
+    vm_stack_view_len_offset, vm_stack_view_ptr_offset,
 };
 pub(crate) use defs::{EntryKind, InvokeOutcome, SpecializedEntryKind};
 use helpers::{HelperIds, HelperRefs, declare_helper_refs, declare_helpers, register_helpers};
@@ -109,7 +108,6 @@ pub(super) struct JitInner {
     /// Address of the VM's armed byte, or 0 to load it through the VM.
     limits_armed: usize,
 }
-
 
 impl JitInner {
     pub fn new(limits_armed: usize) -> Self {
@@ -611,7 +609,6 @@ impl JitInner {
                 // Pops whose virtual compare+branch never materialized a Boolean have nothing to pop.
                 let mut virt_branch_elided_pops: HashSet<usize> = HashSet::new();
 
-
                 // Cranelift 0.131+ owns Variable ids; declare_var returns a fresh one.
                 {
                     let mut needs_var: Vec<u16> = Vec::new();
@@ -671,8 +668,7 @@ impl JitInner {
                         let arity = func.arity as usize;
 
                         // Closure-aware layout is [vm, closure_ptr, args..]; otherwise [vm, args..].
-                        let arg_block_param_offset =
-                            if spec_wants_closure_arg { 2 } else { 1 };
+                        let arg_block_param_offset = if spec_wants_closure_arg { 2 } else { 1 };
                         if let Some(var) = closure_arg_var {
                             let closure_ptr_val = builder.block_params(entry_block)[1];
                             builder.def_var(var, closure_ptr_val);
@@ -803,20 +799,21 @@ impl JitInner {
 
                 while ip < code.len() {
                     if let Some(&block) = blocks.get(&ip)
-                        && block != current_block {
-                            if !terminated {
-                                // Fall-through is a control-flow edge: staged values must live in memory at the merge.
-                                virt_stack.flush_to_memory(&mut builder, vm_val);
-                                builder.ins().jump(block, &[]);
-                            }
-                            builder.switch_to_block(block);
-                            current_block = block;
-                            terminated = false;
-                            // A merge block starts with an empty abstract operand stack.
-                            virt_stack = VirtStack::new();
-                            // A predecessor could have written any line, so the first opcode must re-emit.
-                            last_emitted_loc = None;
+                        && block != current_block
+                    {
+                        if !terminated {
+                            // Fall-through is a control-flow edge: staged values must live in memory at the merge.
+                            virt_stack.flush_to_memory(&mut builder, vm_val);
+                            builder.ins().jump(block, &[]);
                         }
+                        builder.switch_to_block(block);
+                        current_block = block;
+                        terminated = false;
+                        // A merge block starts with an empty abstract operand stack.
+                        virt_stack = VirtStack::new();
+                        // A predecessor could have written any line, so the first opcode must re-emit.
+                        last_emitted_loc = None;
+                    }
 
                     // Cranelift forbids emitting into a filled block; byte-step to the next real block start.
                     if terminated {
@@ -1053,13 +1050,13 @@ impl JitInner {
                                     virt_stack.flush_to_memory(&mut builder, vm_val);
                                 }
                                 let idx_val = builder.ins().iconst(types::I32, idx as i64);
-                                let call =
-                                    builder.ins().call(refs.range_limit, &[vm_val, idx_val]);
+                                let call = builder.ins().call(refs.range_limit, &[vm_val, idx_val]);
                                 let status = builder.inst_results(call)[0];
                                 emit_early_exit_on_err(&mut builder, exit_block, status);
                                 // On success the helper left an Integer on top: harvest it into the register.
                                 if let Some((slot, var)) = init_var {
-                                    let limit = emit_load_stack_top_integer_payload(&mut builder, vm_val);
+                                    let limit =
+                                        emit_load_stack_top_integer_payload(&mut builder, vm_val);
                                     builder.def_var(var, limit);
                                     live_int_slots.insert(slot);
                                 }
@@ -1212,12 +1209,13 @@ impl JitInner {
                                 // Peephole guards above ensure no other path writes a virtualized slot without def_var.
                                 let slot = read_u16(code, ip + 1);
                                 if let Some(&var) = int_locals.get(&slot)
-                                    && live_int_slots.contains(&slot) {
-                                        let val = builder.use_var(var);
-                                        virt_stack.push_int_ssa(val);
-                                        ip += 3;
-                                        continue;
-                                    }
+                                    && live_int_slots.contains(&slot)
+                                {
+                                    let val = builder.use_var(var);
+                                    virt_stack.push_int_ssa(val);
+                                    ip += 3;
+                                    continue;
+                                }
                                 // Read-only Value params that passed the tag guard live in a Variable for the invocation.
                                 if let Some(&var) = param_mirrors.get(&slot) {
                                     let val = builder.use_var(var);
@@ -1337,8 +1335,7 @@ impl JitInner {
                                         col,
                                         &mut last_emitted_loc,
                                     );
-                                    let slot_arg =
-                                        builder.ins().iconst(types::I32, slot as i64);
+                                    let slot_arg = builder.ins().iconst(types::I32, slot as i64);
                                     let call = builder
                                         .ins()
                                         .call(refs.set_local_checked, &[vm_val, slot_arg]);
@@ -1489,11 +1486,12 @@ impl JitInner {
                                     &mut blocks,
                                     &slot_types,
                                     counters_ptr_opt,
-                                ) {
-                                    terminated = true;
-                                    ip = next_ip;
-                                    continue;
-                                }
+                                )
+                            {
+                                terminated = true;
+                                ip = next_ip;
+                                continue;
+                            }
 
                             // Bias-and-shift instead of Cranelift's ~20-cycle idiv; required at opt_level=none.
 
@@ -1504,18 +1502,18 @@ impl JitInner {
                                 if !is_mod
                                     && let Some(q) =
                                         try_emit_sdiv_pow2_peephole(&mut builder, lhs, rhs)
-                                    {
-                                        if let Some(cp) = counters_ptr_opt {
-                                            emit_counter_bump(
-                                                &mut builder,
-                                                cp,
-                                                counter_offsets::VIRT_DIV_POW2_LOWERED,
-                                            );
-                                        }
-                                        virt_stack.push_int_ssa(q);
-                                        ip += 1;
-                                        continue;
+                                {
+                                    if let Some(cp) = counters_ptr_opt {
+                                        emit_counter_bump(
+                                            &mut builder,
+                                            cp,
+                                            counter_offsets::VIRT_DIV_POW2_LOWERED,
+                                        );
                                     }
+                                    virt_stack.push_int_ssa(q);
+                                    ip += 1;
+                                    continue;
+                                }
                                 // Both paths can raise (zero divisor, INT_MIN/-1), so stamp the line.
                                 maybe_emit_current_line(
                                     &mut builder,
@@ -1619,13 +1617,14 @@ impl JitInner {
 
                                 if virt_eligible {
                                     if matches!(op, OpCode::Equal | OpCode::NotEqual)
-                                        && let Some(cp) = counters_ptr_opt {
-                                            emit_counter_bump(
-                                                &mut builder,
-                                                cp,
-                                                counter_offsets::VIRT_BRANCH_EQ_HIT,
-                                            );
-                                        }
+                                        && let Some(cp) = counters_ptr_opt
+                                    {
+                                        emit_counter_bump(
+                                            &mut builder,
+                                            cp,
+                                            counter_offsets::VIRT_BRANCH_EQ_HIT,
+                                        );
+                                    }
                                     let rhs = virt_stack.pop_int_ssa().unwrap();
                                     let lhs = virt_stack.pop_int_ssa().unwrap();
                                     let pred = builder.ins().icmp(cc, lhs, rhs);
@@ -1655,7 +1654,7 @@ impl JitInner {
                                         own_frame_ptr,
                                         line,
                                         col,
-                                    &mut last_emitted_loc,
+                                        &mut last_emitted_loc,
                                     );
                                     if !virt_stack.is_empty() {
                                         virt_stack.flush_to_memory(&mut builder, vm_val);
@@ -1741,7 +1740,7 @@ impl JitInner {
                                 own_frame_ptr,
                                 line,
                                 col,
-                                    &mut last_emitted_loc,
+                                &mut last_emitted_loc,
                             );
                             if !virt_stack.is_empty() {
                                 virt_stack.flush_to_memory(&mut builder, vm_val);
@@ -2080,7 +2079,6 @@ impl JitInner {
                             // Emitted inside the IC's hit block to share its tag and RC checks; separate emission ran bench_arith 254% slower.
                             let mut shared_post_call_block: Option<Block> = None;
 
-
                             // Direct self-recursion: guard on callee_rc == our own closure_raw, else fall through to the IC.
                             //
                             // Excludes the closure-aware shape: that signature leads with a
@@ -2112,9 +2110,9 @@ impl JitInner {
                                 && !blocks.contains_key(&(ip + 2))
                             {
                                 match OpCode::from_byte(code[ip + 2]) {
-                                    Some(o @ (OpCode::Add | OpCode::Subtract | OpCode::Multiply)) => {
-                                        Some(o)
-                                    }
+                                    Some(
+                                        o @ (OpCode::Add | OpCode::Subtract | OpCode::Multiply),
+                                    ) => Some(o),
                                     _ => None,
                                 }
                             } else {
@@ -2186,8 +2184,9 @@ impl JitInner {
                                     VALUE_INT_PAYLOAD_OFFSET as i32,
                                 );
                                 // curr_rc_raw is NonNull<RcBox<ObjClosure>>; JitFrame.closure_raw is adjusted by RC_VALUE_OFFSET.
-                                let closure_ptr =
-                                    builder.ins().iadd_imm_s(curr_rc_raw, RC_VALUE_OFFSET as i64);
+                                let closure_ptr = builder
+                                    .ins()
+                                    .iadd_imm_s(curr_rc_raw, RC_VALUE_OFFSET as i64);
                                 let caller_frame_ptr = own_frame_ptr;
                                 let current_closure_raw = builder.ins().load(
                                     ptr_ty,
@@ -2217,7 +2216,6 @@ impl JitInner {
                                         counter_offsets::SELF_RECURSION_DIRECT_CALL,
                                     );
                                 }
-
 
                                 // Replicate the VM's FRAMES_MAX guard: without it deep recursion overruns jit_frames and SIGSEGVs.
                                 emit_inline_recursion_guard(
@@ -2325,9 +2323,13 @@ impl JitInner {
                                     three_a3,
                                 );
                                 let dispatch_a3 = builder.create_block();
-                                builder
-                                    .ins()
-                                    .brif(is_boxed_a3, post_call_block, &[], dispatch_a3, &[]);
+                                builder.ins().brif(
+                                    is_boxed_a3,
+                                    post_call_block,
+                                    &[],
+                                    dispatch_a3,
+                                    &[],
+                                );
                                 builder.switch_to_block(dispatch_a3);
 
                                 // Error / bailout propagate.
@@ -2390,9 +2392,8 @@ impl JitInner {
                             let stack_len = emit_load_stack_len(&mut builder, vm_val);
 
                             let value_size = builder.ins().iconst(types::I64, VALUE_SIZE as i64);
-                            let offset_from_top = builder
-                                .ins()
-                                .iconst(types::I64, arg_count as i64 + 1);
+                            let offset_from_top =
+                                builder.ins().iconst(types::I64, arg_count as i64 + 1);
                             let callee_slot = builder.ins().isub(stack_len, offset_from_top);
                             let callee_off = builder.ins().imul(callee_slot, value_size);
                             let callee_ptr = builder.ins().iadd(stack_ptr, callee_off);
@@ -2490,7 +2491,9 @@ impl JitInner {
                             //
                             // Any guard failure falls through to the existing paths with
                             // nothing mutated, so this can only ever be a speed change.
-                            if arg_count == 1 && matches!(kind, EntryKind::Generic | EntryKind::IntSpecialized) {
+                            if arg_count == 1
+                                && matches!(kind, EntryKind::Generic | EntryKind::IntSpecialized)
+                            {
                                 use cranelift_codegen::ir::MemFlagsData;
                                 use cranelift_codegen::ir::condcodes::IntCC;
                                 let f = MemFlagsData::trusted();
@@ -2636,11 +2639,10 @@ impl JitInner {
                                     VALUE_INT_PAYLOAD_OFFSET as i32,
                                 );
                                 let strong_i = builder.ins().load(types::I64, f, cm_rc_i, 0);
-                                let strong_gt1_i = builder.ins().icmp(
-                                    IntCC::UnsignedGreaterThan,
-                                    strong_i,
-                                    one_i,
-                                );
+                                let strong_gt1_i =
+                                    builder
+                                        .ins()
+                                        .icmp(IntCC::UnsignedGreaterThan, strong_i, one_i);
                                 let commit_block = builder.create_block();
                                 builder.ins().brif(
                                     strong_gt1_i,
@@ -2703,9 +2705,8 @@ impl JitInner {
                             // Fires inside the IC hit block after tag+RC match; non-CA cost is 1 kind load + 1 brif.
                             let post_ca_dispatch_block = if arg_count == 1 {
                                 // Compute closure_obj_ptr once.
-                                let closure_obj_ptr = builder
-                                    .ins()
-                                    .iadd_imm_s(curr_rc, RC_VALUE_OFFSET as i64);
+                                let closure_obj_ptr =
+                                    builder.ins().iadd_imm_s(curr_rc, RC_VALUE_OFFSET as i64);
 
                                 // Locate the arg slot up front so it can be tag-checked alongside kind/arity.
                                 let stack_ptr_ca = emit_load_stack_ptr(&mut builder, vm_val);
@@ -2735,7 +2736,8 @@ impl JitInner {
                                 let is_ca_kind = builder.ins().icmp_imm_s(
                                     IntCC::Equal,
                                     kind_byte,
-                                    crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE as i64,
+                                    crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE
+                                        as i64,
                                 );
                                 let arity_match = builder.ins().icmp_imm_s(
                                     IntCC::Equal,
@@ -2800,10 +2802,9 @@ impl JitInner {
                                     vm_val,
                                     vm_jit_frame_view_len_offset(),
                                 );
-                                let frame_size_ca = builder.ins().iconst(
-                                    types::I64,
-                                    std::mem::size_of::<JitFrame>() as i64,
-                                );
+                                let frame_size_ca = builder
+                                    .ins()
+                                    .iconst(types::I64, std::mem::size_of::<JitFrame>() as i64);
                                 let frame_off_ca =
                                     builder.ins().imul(jit_frames_len_ca, frame_size_ca);
                                 let new_frame_ptr_ca =
@@ -2814,8 +2815,7 @@ impl JitInner {
                                     closure_obj_ptr,
                                     obj_closure_module_globals_offset(),
                                 );
-                                let line_val_ca =
-                                    builder.ins().iconst(types::I32, line as i64);
+                                let line_val_ca = builder.ins().iconst(types::I32, line as i64);
                                 builder.ins().store(
                                     flags,
                                     closure_obj_ptr,
@@ -2843,8 +2843,7 @@ impl JitInner {
                                     JitFrame::OFFSET_LINE,
                                 );
                                 let one_inc_ca = builder.ins().iconst(types::I64, 1);
-                                let new_fl_ca =
-                                    builder.ins().iadd(jit_frames_len_ca, one_inc_ca);
+                                let new_fl_ca = builder.ins().iadd(jit_frames_len_ca, one_inc_ca);
                                 builder.ins().store(
                                     flags,
                                     new_fl_ca,
@@ -2893,7 +2892,9 @@ impl JitInner {
                                     three_ca,
                                 );
                                 let ca_dispatch = builder.create_block();
-                                builder.ins().brif(is_boxed_ca, ca_pcb, &[], ca_dispatch, &[]);
+                                builder
+                                    .ins()
+                                    .brif(is_boxed_ca, ca_pcb, &[], ca_dispatch, &[]);
                                 builder.switch_to_block(ca_dispatch);
 
                                 let ca_ok_block = builder.create_block();
@@ -2917,10 +2918,9 @@ impl JitInner {
                                     vm_jit_frame_view_len_offset(),
                                 );
                                 let zero64_ca = builder.ins().iconst(types::I64, 0);
-                                builder.ins().jump(
-                                    exit_block,
-                                    &[ca_err_status.into(), zero64_ca.into()],
-                                );
+                                builder
+                                    .ins()
+                                    .jump(exit_block, &[ca_err_status.into(), zero64_ca.into()]);
 
                                 // ── ca_ok_block: push int payload, jump pcb ──
                                 builder.switch_to_block(ca_ok_block);
@@ -2949,12 +2949,7 @@ impl JitInner {
                             let _ = post_ca_dispatch_block;
 
                             // FRAMES_MAX guard before the push; the 256 MB driver stack means this fires before the native stack dies.
-                            emit_inline_recursion_guard(
-                                &mut builder,
-                                exit_block,
-                                &refs,
-                                vm_val,
-                            );
+                            emit_inline_recursion_guard(&mut builder, exit_block, &refs, vm_val);
 
                             let jit_frames_ptr = builder.ins().load(
                                 ptr_ty,
@@ -3028,13 +3023,9 @@ impl JitInner {
                             builder.append_block_param(restore_err_block, types::I32);
                             // Status 2 is the callee's entry-guard bailout, not an error: propagating it re-ran the caller mid-loop.
                             let hit_nonzero_block = builder.create_block();
-                            builder.ins().brif(
-                                hit_status,
-                                hit_nonzero_block,
-                                &[],
-                                ok_block,
-                                &[],
-                            );
+                            builder
+                                .ins()
+                                .brif(hit_status, hit_nonzero_block, &[], ok_block, &[]);
 
                             builder.switch_to_block(hit_nonzero_block);
                             let bail_block = builder.create_block();
@@ -3274,9 +3265,8 @@ impl JitInner {
                                 let stack_len = emit_load_stack_len(&mut builder, vm_val);
                                 let value_size =
                                     builder.ins().iconst(types::I64, VALUE_SIZE as i64);
-                                let offset_from_top = builder
-                                    .ins()
-                                    .iconst(types::I64, arg_count as i64 + 1);
+                                let offset_from_top =
+                                    builder.ins().iconst(types::I64, arg_count as i64 + 1);
                                 let receiver_slot = builder.ins().isub(stack_len, offset_from_top);
                                 let receiver_off = builder.ins().imul(receiver_slot, value_size);
                                 let receiver_ptr = builder.ins().iadd(stack_ptr, receiver_off);
@@ -3309,8 +3299,9 @@ impl JitInner {
                                     receiver_ptr,
                                     VALUE_INT_PAYLOAD_OFFSET as i32,
                                 );
-                                let inst_ptr =
-                                    builder.ins().iadd_imm_s(receiver_raw, RC_VALUE_OFFSET as i64);
+                                let inst_ptr = builder
+                                    .ins()
+                                    .iadd_imm_s(receiver_raw, RC_VALUE_OFFSET as i64);
                                 let inst_def_raw = builder.ins().load(
                                     ptr_ty,
                                     flags,
@@ -3575,15 +3566,20 @@ impl JitInner {
                                     closure_raw_t,
                                     obj_closure_module_globals_offset(),
                                 );
-                                let def_t = builder.ins().iadd_imm_s(inst_def_raw, RC_VALUE_OFFSET as i64);
+                                let def_t = builder
+                                    .ins()
+                                    .iadd_imm_s(inst_def_raw, RC_VALUE_OFFSET as i64);
                                 let def_mg = builder.ins().load(
                                     ptr_ty,
                                     flags,
                                     def_t,
-                                    std::mem::offset_of!(crate::vm::value::ObjStructDef, module_globals)
-                                        as i32,
+                                    std::mem::offset_of!(
+                                        crate::vm::value::ObjStructDef,
+                                        module_globals
+                                    ) as i32,
                                 );
-                                let module_globals = builder.ins().select(def_mg, def_mg, closure_mg);
+                                let module_globals =
+                                    builder.ins().select(def_mg, def_mg, closure_mg);
                                 // JitFrame stores the T pointer, not the RcBox pointer.
                                 builder.ins().store(
                                     flags,
@@ -3727,9 +3723,8 @@ impl JitInner {
                                         ($slow_result:expr) => {{
                                             let stack_ptr_td =
                                                 emit_load_stack_ptr(&mut builder, vm_val);
-                                            let vsize_td = builder
-                                                .ins()
-                                                .iconst(types::I64, VALUE_SIZE as i64);
+                                            let vsize_td =
+                                                builder.ins().iconst(types::I64, VALUE_SIZE as i64);
                                             let cm_off_td =
                                                 builder.ins().imul(slot_offset_val, vsize_td);
                                             let cm_addr_td =
@@ -3742,8 +3737,7 @@ impl JitInner {
                                             );
                                             let strong_td =
                                                 builder.ins().load(types::I64, flags, cm_rc_td, 0);
-                                            let one_td =
-                                                builder.ins().iconst(types::I64, 1);
+                                            let one_td = builder.ins().iconst(types::I64, 1);
                                             let gt1_td = builder.ins().icmp(
                                                 IntCC::UnsignedGreaterThan,
                                                 strong_td,
@@ -3751,9 +3745,7 @@ impl JitInner {
                                             );
                                             let fast_td = builder.create_block();
                                             let slow_td = builder.create_block();
-                                            builder
-                                                .ins()
-                                                .brif(gt1_td, fast_td, &[], slow_td, &[]);
+                                            builder.ins().brif(gt1_td, fast_td, &[], slow_td, &[]);
 
                                             // strong == 1 means this is the last reference and a
                                             // real recursive Drop is required, which IR cannot
@@ -3766,9 +3758,10 @@ impl JitInner {
                                             builder.ins().call(refs.op_return, &[vm_val]);
                                             let three_td = builder.ins().iconst(types::I32, 3);
                                             let zero64_td = builder.ins().iconst(types::I64, 0);
-                                            builder
-                                                .ins()
-                                                .jump(exit_block, &[three_td.into(), zero64_td.into()]);
+                                            builder.ins().jump(
+                                                exit_block,
+                                                &[three_td.into(), zero64_td.into()],
+                                            );
 
                                             builder.switch_to_block(fast_td);
                                             builder.seal_block(fast_td);
@@ -3844,13 +3837,16 @@ impl JitInner {
                                         let int_tag = builder
                                             .ins()
                                             .iconst(types::I8, VALUE_TAG_INTEGER as i64);
-                                        let is_int =
-                                            builder.ins().icmp(IntCC::Equal, tag, int_tag);
+                                        let is_int = builder.ins().icmp(IntCC::Equal, tag, int_tag);
                                         let int_block = builder.create_block();
                                         let boxed_block = builder.create_block();
-                                        builder
-                                            .ins()
-                                            .brif(is_int, int_block, &[], boxed_block, &[]);
+                                        builder.ins().brif(
+                                            is_int,
+                                            int_block,
+                                            &[],
+                                            boxed_block,
+                                            &[],
+                                        );
 
                                         // Integer → fast i64 return.
                                         builder.switch_to_block(int_block);
@@ -3936,14 +3932,15 @@ impl JitInner {
 
             if want_disasm
                 && let Some(code) = self.ctx.compiled_code()
-                    && let Some(vcode) = code.vcode.as_ref() {
-                        eprintln!(
-                            "=== disasm fn={} kind={:?} ===\n{}",
-                            func.name.as_deref().unwrap_or("<anon>"),
-                            kind,
-                            vcode
-                        );
-                    }
+                && let Some(vcode) = code.vcode.as_ref()
+            {
+                eprintln!(
+                    "=== disasm fn={} kind={:?} ===\n{}",
+                    func.name.as_deref().unwrap_or("<anon>"),
+                    kind,
+                    vcode
+                );
+            }
 
             self.module.clear_context(&mut self.ctx);
         }
@@ -4103,7 +4100,9 @@ fn emit_param_type_guard(
         let byte_off = builder.ins().imul(abs_slot, value_size);
         let slot_ptr = builder.ins().iadd(stack_ptr, byte_off);
         let tag = builder.ins().load(types::I8, flags, slot_ptr, 0);
-        let is_int = builder.ins().icmp_imm_s(IntCC::Equal, tag, VALUE_TAG_INTEGER as i64);
+        let is_int = builder
+            .ins()
+            .icmp_imm_s(IntCC::Equal, tag, VALUE_TAG_INTEGER as i64);
         let next = builder.create_block();
         builder.ins().brif(is_int, next, &[], slow_block, &[]);
         builder.switch_to_block(next);
@@ -4173,9 +4172,10 @@ fn emit_inline_recursion_guard(
     let frame_max = builder
         .ins()
         .iconst(types::I64, crate::vm::FRAMES_MAX as i64);
-    let stack_lim = builder
-        .ins()
-        .iconst(types::I64, (crate::vm::STACK_MAX - crate::vm::STACK_GUARD_MARGIN) as i64);
+    let stack_lim = builder.ins().iconst(
+        types::I64,
+        (crate::vm::STACK_MAX - crate::vm::STACK_GUARD_MARGIN) as i64,
+    );
     let frame_of = builder
         .ins()
         .icmp(IntCC::UnsignedGreaterThanOrEqual, jfl, frame_max);
@@ -4237,7 +4237,9 @@ fn emit_loop_poll(
     let interrupt = builder
         .ins()
         .band_imm_s(armed, i64::from(crate::vm::limits::INTERRUPT));
-    builder.ins().brif(interrupt, stop_block, &[], budget_block, &[]);
+    builder
+        .ins()
+        .brif(interrupt, stop_block, &[], budget_block, &[]);
 
     builder.switch_to_block(budget_block);
     let offset = vm_loop_countdown_offset();
@@ -4328,9 +4330,11 @@ enum StructFieldAddShape {
 /// parameters are untyped or `<int>` (which the inline guards' Integer tag
 /// checks already enforce) can be inlined.
 fn params_admit_any_int(func: &Function) -> bool {
-    func.params
-        .iter()
-        .all(|p| p.type_ann.as_deref().is_none_or(|t| matches!(t, "int" | "INTEGER")))
+    func.params.iter().all(|p| {
+        p.type_ann
+            .as_deref()
+            .is_none_or(|t| matches!(t, "int" | "INTEGER"))
+    })
 }
 
 /// Detects whether `func` is exactly `fun(y) { x + y }` over one immutable
@@ -5082,9 +5086,7 @@ fn emit_mixed_mode_int_arith(
     let fast_block = builder.create_block();
     let slow_block = builder.create_block();
     let cont_block = builder.create_block();
-    builder
-        .ins()
-        .brif(is_int, fast_block, &[], slow_block, &[]);
+    builder.ins().brif(is_int, fast_block, &[], slow_block, &[]);
 
     // Tag byte is already Integer, so only the payload needs overwriting.
     builder.switch_to_block(fast_block);
@@ -6206,7 +6208,9 @@ fn emit_slow_set_local_checked(
     vm_val: cranelift_codegen::ir::Value,
     slot_val: cranelift_codegen::ir::Value,
 ) {
-    let call = builder.ins().call(refs.set_local_checked, &[vm_val, slot_val]);
+    let call = builder
+        .ins()
+        .call(refs.set_local_checked, &[vm_val, slot_val]);
     let status = builder.inst_results(call)[0];
     emit_early_exit_on_err(builder, exit_block, status);
 }

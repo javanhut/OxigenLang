@@ -6,7 +6,7 @@
 //! address or, for an array or map argument, a temporary buffer copied back
 //! after the call (out parameters). See `docs/stdlib/ffi.md`.
 
-use crate::vm::value::{rc_str, NativeFunction, Value};
+use crate::vm::value::{NativeFunction, Value, rc_str};
 use std::cell::Cell;
 use std::collections::HashMap;
 
@@ -27,9 +27,9 @@ mod imp {
     use super::*;
     use crate::vm::collections::OxMap;
     use crate::vm::value::{ObjModule, ValueRepr};
-    use libffi::middle::{ffi_abi_FFI_DEFAULT_ABI, Arg, Cif, Closure, CodePtr, Ret, Type};
+    use libffi::middle::{Arg, Cif, Closure, CodePtr, Ret, Type, ffi_abi_FFI_DEFAULT_ABI};
     use std::cell::RefCell;
-    use std::ffi::{c_char, c_void, CStr, CString};
+    use std::ffi::{CStr, CString, c_char, c_void};
     use std::rc::Rc;
 
     pub(super) const BUILTINS: &[(&str, crate::vm::value::BuiltinFn)] = &[
@@ -370,7 +370,7 @@ mod imp {
                             "expected a map for struct {}, got {}",
                             def.name,
                             v.type_name()
-                        ))
+                        ));
                     }
                 },
                 CType::Str | CType::Ptr(_) => {
@@ -513,7 +513,7 @@ mod imp {
                 return Err(format!(
                     "cannot pass {} as a variadic argument",
                     v.type_name()
-                ))
+                ));
             }
         })
     }
@@ -674,7 +674,7 @@ mod imp {
 
     #[cfg(unix)]
     mod os {
-        use std::ffi::{c_void, CStr};
+        use std::ffi::{CStr, c_void};
         pub const PROCESS: &str = "";
 
         fn last_error() -> String {
@@ -732,7 +732,7 @@ mod imp {
     // ponytail: untested on Windows (no Windows machine in CI here).
     #[cfg(windows)]
     mod os {
-        use std::ffi::{c_char, c_void, CStr};
+        use std::ffi::{CStr, c_char, c_void};
         /// No single module exports the C runtime the way the main program
         /// does on Unix; `None` means the universal CRT.
         pub const PROCESS: &str = "ucrtbase.dll";
@@ -848,7 +848,7 @@ mod imp {
                         }
                     }
                     Some(_) => {
-                        return Err("declarations must be a map of name to C signature".into())
+                        return Err("declarations must be a map of name to C signature".into());
                     }
                 }
                 Ok(Value::Module(Rc::new(ObjModule {

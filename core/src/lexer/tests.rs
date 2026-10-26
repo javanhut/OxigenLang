@@ -260,11 +260,13 @@ fn test_unterminated_string_anchored_at_opening_quote() {
         .find(|t| t.token_type == TokenType::Illegal)
         .expect("unterminated string should emit an Illegal token");
     assert_eq!(
-        illegal.span.line(), 1,
+        illegal.span.line(),
+        1,
         "error should be anchored at the opening quote's line"
     );
     assert_eq!(
-        illegal.span.column(), 6,
+        illegal.span.column(),
+        6,
         "error should be anchored at the opening quote's column"
     );
 }
@@ -289,8 +291,9 @@ fn test_unterminated_string_does_not_swallow_following_line() {
 fn test_unterminated_single_quote_string_is_illegal() {
     let tokens = collect_tokens("x := 'oops\n");
     assert!(
-        tokens.iter().any(|t| t.token_type == TokenType::Illegal
-            && t.literal.contains("unterminated")),
+        tokens
+            .iter()
+            .any(|t| t.token_type == TokenType::Illegal && t.literal.contains("unterminated")),
         "unterminated single-quoted string should also be reported"
     );
 }
@@ -427,11 +430,13 @@ fn test_unterminated_triple_quoted_string_is_illegal() {
         .expect("unterminated triple-quoted string should emit an Illegal token");
     assert!(illegal.literal.contains("unterminated"));
     assert_eq!(
-        illegal.span.line(), 1,
+        illegal.span.line(),
+        1,
         "error should be anchored at the opening fence's line"
     );
     assert_eq!(
-        illegal.span.column(), 6,
+        illegal.span.column(),
+        6,
         "error should be anchored at the opening fence's column"
     );
     assert!(

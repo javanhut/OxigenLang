@@ -36,17 +36,17 @@ pub enum TokenType {
     Lte,        // <=
     Arrow,      // ->
     // Delimiters
-    Comma,     // ,
-    Colon,     // :
-    LBrace,    // {
-    RBrace,    // }
-    LBracket,  // [
-    RBracket,  // ]
-    LParen,    // (
-    RParen,    // )
-    FullStop,  // .
-    FSlash,    // /
-    BSlash,    // \
+    Comma,    // ,
+    Colon,    // :
+    LBrace,   // {
+    RBrace,   // }
+    LBracket, // [
+    RBracket, // ]
+    LParen,   // (
+    RParen,   // )
+    FullStop, // .
+    FSlash,   // /
+    BSlash,   // \
 
     // Bitwise Operators
     LShift,     // <<

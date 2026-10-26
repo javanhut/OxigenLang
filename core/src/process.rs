@@ -68,16 +68,23 @@ fn builtin_spawn_process(args: &[Value]) -> Value {
         None | Some(ValueRepr::None) => Vec::new(),
         _ => return err("os.spawn: argv must be an array"),
     };
-    let capture = matches!(args.get(2).map(|v| v.repr()), Some(ValueRepr::Boolean(true)));
+    let capture = matches!(
+        args.get(2).map(|v| v.repr()),
+        Some(ValueRepr::Boolean(true))
+    );
     // Before the child starts: a child that could not be stopped at exit
     // would outlive the script, which is what spawn promises it won't.
     if let Err(e) = signals::watch_for_exit() {
-        return err(format!("os.spawn: cannot arrange to stop children at exit: {e}"));
+        return err(format!(
+            "os.spawn: cannot arrange to stop children at exit: {e}"
+        ));
     }
     let mut cmd = Command::new(&prog);
-    cmd.args(&argv)
-        .stdin(Stdio::piped())
-        .stdout(if capture { Stdio::piped() } else { Stdio::inherit() });
+    cmd.args(&argv).stdin(Stdio::piped()).stdout(if capture {
+        Stdio::piped()
+    } else {
+        Stdio::inherit()
+    });
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return err(format!("os.spawn({prog}): {e}")),
@@ -123,7 +130,11 @@ fn builtin_process_close_stdin(args: &[Value]) -> Value {
     }
 }
 
-fn with_stdout(args: &[Value], what: &str, f: impl FnOnce(&mut BufReader<ChildStdout>) -> Value) -> Value {
+fn with_stdout(
+    args: &[Value],
+    what: &str,
+    f: impl FnOnce(&mut BufReader<ChildStdout>) -> Value,
+) -> Value {
     let p = match proc_of(args.first(), what) {
         Ok(p) => p,
         Err(e) => return e,
@@ -131,7 +142,9 @@ fn with_stdout(args: &[Value], what: &str, f: impl FnOnce(&mut BufReader<ChildSt
     let mut stdout = lock(&p.stdout);
     match stdout.as_mut() {
         Some(out) => f(out),
-        None => err(format!("os.{what}: output is not captured; spawn with capture=True")),
+        None => err(format!(
+            "os.{what}: output is not captured; spawn with capture=True"
+        )),
     }
 }
 
@@ -248,7 +261,11 @@ fn builtin_signals(args: &[Value]) -> Value {
             let names: Option<Vec<String>> = a.borrow().iter().map(|v| str_of(Some(v))).collect();
             match names {
                 Some(n) if !n.is_empty() => n,
-                _ => return err("os.signals takes an array of signal names, like [\"INT\", \"TERM\"]"),
+                _ => {
+                    return err(
+                        "os.signals takes an array of signal names, like [\"INT\", \"TERM\"]",
+                    );
+                }
             }
         }
         Some(ValueRepr::String(s)) => vec![s.to_string()],
@@ -263,11 +280,17 @@ fn builtin_signals(args: &[Value]) -> Value {
 /// Stop every child still running: SIGTERM, a moment to exit, then SIGKILL.
 fn stop_children() {
     // Never block an exiting process on a registry another thread holds.
-    let Some(all) = PROCS.get().and_then(|m| m.try_lock().ok()).map(|m| m.values().cloned().collect::<Vec<_>>())
+    let Some(all) = PROCS
+        .get()
+        .and_then(|m| m.try_lock().ok())
+        .map(|m| m.values().cloned().collect::<Vec<_>>())
     else {
         return;
     };
-    let running: Vec<_> = all.into_iter().filter(|p| matches!(try_exit_code(p), Ok(None))).collect();
+    let running: Vec<_> = all
+        .into_iter()
+        .filter(|p| matches!(try_exit_code(p), Ok(None)))
+        .collect();
     for p in &running {
         // A child that has just exited refuses the signal; the SIGKILL pass
         // below covers any other failure, and the process is ending anyway.
@@ -314,11 +337,19 @@ mod signals {
             .iter()
             .find(|(n, _)| *n == bare)
             .map(|(_, s)| *s)
-            .ok_or_else(|| format!("unknown signal '{name}' (known: {})", NAMES.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")))
+            .ok_or_else(|| {
+                format!(
+                    "unknown signal '{name}' (known: {})",
+                    NAMES.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+                )
+            })
     }
 
     fn name(sig: libc::c_int) -> &'static str {
-        NAMES.iter().find(|(_, s)| *s == sig).map_or("?", |(n, _)| n)
+        NAMES
+            .iter()
+            .find(|(_, s)| *s == sig)
+            .map_or("?", |(n, _)| n)
     }
 
     pub(super) fn send(p: &Proc, name: &str) -> Result<(), String> {
@@ -354,12 +385,17 @@ mod signals {
                     return Err(format!("signal pipe: {}", std::io::Error::last_os_error()));
                 }
                 let read_fd = fds[0];
-                let watcher = std::thread::Builder::new().name("oxigen-signals".into()).spawn(move || {
-                    let mut byte = 0u8;
-                    while unsafe { libc::read(read_fd, &mut byte as *mut u8 as *mut libc::c_void, 1) } == 1 {
-                        deliver(libc::c_int::from(byte));
-                    }
-                });
+                let watcher = std::thread::Builder::new()
+                    .name("oxigen-signals".into())
+                    .spawn(move || {
+                        let mut byte = 0u8;
+                        while unsafe {
+                            libc::read(read_fd, &mut byte as *mut u8 as *mut libc::c_void, 1)
+                        } == 1
+                        {
+                            deliver(libc::c_int::from(byte));
+                        }
+                    });
                 if let Err(e) = watcher {
                     unsafe {
                         libc::close(fds[0]);
@@ -374,7 +410,11 @@ mod signals {
     }
 
     fn deliver(sig: libc::c_int) {
-        let subs: Vec<u64> = lock(&SUBSCRIBERS).iter().filter(|(s, _)| *s == sig).map(|(_, ch)| *ch).collect();
+        let subs: Vec<u64> = lock(&SUBSCRIBERS)
+            .iter()
+            .filter(|(s, _)| *s == sig)
+            .map(|(_, ch)| *ch)
+            .collect();
         if !subs.is_empty() {
             for ch in subs {
                 crate::concurrent::push_str(ch, name(sig));
@@ -410,8 +450,14 @@ mod signals {
     }
 
     pub(super) fn subscribe(names: &[String]) -> Result<u64, String> {
-        let sigs = names.iter().map(|n| number(n)).collect::<Result<Vec<_>, _>>()?;
-        if let Some(&bad) = sigs.iter().find(|&&s| s == libc::SIGKILL || s == libc::SIGSTOP) {
+        let sigs = names
+            .iter()
+            .map(|n| number(n))
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(&bad) = sigs
+            .iter()
+            .find(|&&s| s == libc::SIGKILL || s == libc::SIGSTOP)
+        {
             return Err(format!("{} cannot be caught", name(bad)));
         }
         let ch = crate::concurrent::new_channel();
@@ -490,11 +536,18 @@ pub(crate) fn register(globals: &mut HashMap<String, Value>) {
 /// Run `cmd` to completion, feeding it `stdin` when given. The input is
 /// written from another thread, so a child that fills its output pipe before
 /// reading all its input cannot deadlock against us.
-pub(crate) fn output_with_stdin(mut cmd: Command, stdin: Option<String>) -> std::io::Result<std::process::Output> {
+pub(crate) fn output_with_stdin(
+    mut cmd: Command,
+    stdin: Option<String>,
+) -> std::io::Result<std::process::Output> {
     let Some(input) = stdin else {
         return cmd.output();
     };
-    let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
     let mut pipe = child.stdin.take().expect("stdin is piped");
     let writer = std::thread::spawn(move || {
         // A child may exit without reading all its input (`head`), which

@@ -466,54 +466,129 @@ impl OpCode {
         use OpCode::*;
         match self {
             Constant | None | True | False | GetLocal | GetGlobal | GetUpvalue | IsMut
-            | IsTypeMut => StackEffect::Fixed { pops: 0, pushes: 1, peeks: 0 },
-            Pop | CloseUpvalue | Return | Fail => {
-                StackEffect::Fixed { pops: 1, pushes: 0, peeks: 0 }
-            }
-            Dup => StackEffect::Fixed { pops: 0, pushes: 1, peeks: 1 },
+            | IsTypeMut => StackEffect::Fixed {
+                pops: 0,
+                pushes: 1,
+                peeks: 0,
+            },
+            Pop | CloseUpvalue | Return | Fail => StackEffect::Fixed {
+                pops: 1,
+                pushes: 0,
+                peeks: 0,
+            },
+            Dup => StackEffect::Fixed {
+                pops: 0,
+                pushes: 1,
+                peeks: 1,
+            },
             Add | Subtract | Multiply | Divide | Modulo | Equal | NotEqual | Greater
             | GreaterEqual | Less | LessEqual | BitAnd | BitOr | BitXor | ShiftLeft
-            | ShiftRight | Index | IterGet | RangeLimit => {
-                StackEffect::Fixed { pops: 2, pushes: 1, peeks: 0 }
-            }
+            | ShiftRight | Index | IterGet | RangeLimit => StackEffect::Fixed {
+                pops: 2,
+                pushes: 1,
+                peeks: 0,
+            },
             Not | BitNot | Negate | TypeWrap | IsType | GetField | GetModuleField
-            | ValueConstruct => StackEffect::Fixed { pops: 1, pushes: 1, peeks: 0 },
-            SetLocal | SetGlobal | SetUpvalue | SetLocalLocked | CheckType => {
-                StackEffect::Fixed { pops: 0, pushes: 0, peeks: 1 }
-            }
+            | ValueConstruct => StackEffect::Fixed {
+                pops: 1,
+                pushes: 1,
+                peeks: 0,
+            },
+            SetLocal | SetGlobal | SetUpvalue | SetLocalLocked | CheckType => StackEffect::Fixed {
+                pops: 0,
+                pushes: 0,
+                peeks: 1,
+            },
             CloseUpvalueAt | Increment | Decrement | Jump | Loop | Main | PopHandler => {
-                StackEffect::Fixed { pops: 0, pushes: 0, peeks: 0 }
+                StackEffect::Fixed {
+                    pops: 0,
+                    pushes: 0,
+                    peeks: 0,
+                }
             }
-            JumpIfFalse | JumpIfTrue | Unless => {
-                StackEffect::Fixed { pops: 0, pushes: 0, peeks: 1 }
-            }
-            PopJumpIfFalse => StackEffect::Fixed { pops: 1, pushes: 0, peeks: 0 },
-            Closure => StackEffect::Fixed { pops: 0, pushes: 1, peeks: 0 },
-            IterLen => StackEffect::Fixed { pops: 1, pushes: 1, peeks: 0 },
-            IterEntry => StackEffect::Fixed { pops: 2, pushes: 2, peeks: 0 },
-            IndexAssign => StackEffect::Fixed { pops: 3, pushes: 0, peeks: 0 },
-            SetField => StackEffect::Fixed { pops: 2, pushes: 0, peeks: 0 },
-            PushHandler => StackEffect::Fixed { pops: 0, pushes: 0, peeks: 0 },
-            StructDef | EnumDef | DefinePattern => {
-                StackEffect::Fixed { pops: 0, pushes: 0, peeks: 0 }
-            }
-            DefineGlobal | DefineGlobalTyped => {
-                StackEffect::Fixed { pops: 1, pushes: 0, peeks: 0 }
-            }
-            Call | CallNamed | BuildArray | BuildTuple | BuildMap | BuildSet | Slice
-            | StructLiteral | DefineMethod | MakeEnumVariantUnit | MakeEnumVariantTuple
-            | MakeEnumVariantStruct | TestPattern | ErrorConstruct | Guard | Import
-            | StringInterp | Log | Unpack | MethodCall | MethodCallNamed => {
-                StackEffect::OperandDependent
-            }
+            JumpIfFalse | JumpIfTrue | Unless => StackEffect::Fixed {
+                pops: 0,
+                pushes: 0,
+                peeks: 1,
+            },
+            PopJumpIfFalse => StackEffect::Fixed {
+                pops: 1,
+                pushes: 0,
+                peeks: 0,
+            },
+            Closure => StackEffect::Fixed {
+                pops: 0,
+                pushes: 1,
+                peeks: 0,
+            },
+            IterLen => StackEffect::Fixed {
+                pops: 1,
+                pushes: 1,
+                peeks: 0,
+            },
+            IterEntry => StackEffect::Fixed {
+                pops: 2,
+                pushes: 2,
+                peeks: 0,
+            },
+            IndexAssign => StackEffect::Fixed {
+                pops: 3,
+                pushes: 0,
+                peeks: 0,
+            },
+            SetField => StackEffect::Fixed {
+                pops: 2,
+                pushes: 0,
+                peeks: 0,
+            },
+            PushHandler => StackEffect::Fixed {
+                pops: 0,
+                pushes: 0,
+                peeks: 0,
+            },
+            StructDef | EnumDef | DefinePattern => StackEffect::Fixed {
+                pops: 0,
+                pushes: 0,
+                peeks: 0,
+            },
+            DefineGlobal | DefineGlobalTyped => StackEffect::Fixed {
+                pops: 1,
+                pushes: 0,
+                peeks: 0,
+            },
+            Call
+            | CallNamed
+            | BuildArray
+            | BuildTuple
+            | BuildMap
+            | BuildSet
+            | Slice
+            | StructLiteral
+            | DefineMethod
+            | MakeEnumVariantUnit
+            | MakeEnumVariantTuple
+            | MakeEnumVariantStruct
+            | TestPattern
+            | ErrorConstruct
+            | Guard
+            | Import
+            | StringInterp
+            | Log
+            | Unpack
+            | MethodCall
+            | MethodCallNamed => StackEffect::OperandDependent,
         }
     }
 
     const fn control_flow(self) -> ControlFlow {
         match self {
             OpCode::Jump | OpCode::Main => ControlFlow::ForwardJump,
-            OpCode::JumpIfFalse | OpCode::JumpIfTrue | OpCode::PopJumpIfFalse
-            | OpCode::Unless | OpCode::TestPattern | OpCode::Guard => ControlFlow::ConditionalJump,
+            OpCode::JumpIfFalse
+            | OpCode::JumpIfTrue
+            | OpCode::PopJumpIfFalse
+            | OpCode::Unless
+            | OpCode::TestPattern
+            | OpCode::Guard => ControlFlow::ConditionalJump,
             OpCode::Loop => ControlFlow::BackwardJump,
             OpCode::Return => ControlFlow::Return,
             OpCode::PushHandler | OpCode::PopHandler => ControlFlow::ErrorHandler,
@@ -525,25 +600,81 @@ impl OpCode {
         use OpCode::*;
         let touches_heap = matches!(
             self,
-            Closure | StructDef | StructLiteral | DefineMethod | EnumDef | MakeEnumVariantUnit
-                | MakeEnumVariantTuple | MakeEnumVariantStruct | BuildArray | BuildTuple
-                | BuildMap | BuildSet | StringInterp | Index | IndexAssign | Slice | GetField
-                | SetField | MethodCall | MethodCallNamed | TypeWrap | Import | GetModuleField
-                | GetUpvalue | SetUpvalue | CloseUpvalue | GetGlobal | SetGlobal | Call
-                | CallNamed | ErrorConstruct | ValueConstruct | Guard | Fail | IterLen | IterGet
-                | IterEntry | Unpack | Log
+            Closure
+                | StructDef
+                | StructLiteral
+                | DefineMethod
+                | EnumDef
+                | MakeEnumVariantUnit
+                | MakeEnumVariantTuple
+                | MakeEnumVariantStruct
+                | BuildArray
+                | BuildTuple
+                | BuildMap
+                | BuildSet
+                | StringInterp
+                | Index
+                | IndexAssign
+                | Slice
+                | GetField
+                | SetField
+                | MethodCall
+                | MethodCallNamed
+                | TypeWrap
+                | Import
+                | GetModuleField
+                | GetUpvalue
+                | SetUpvalue
+                | CloseUpvalue
+                | GetGlobal
+                | SetGlobal
+                | Call
+                | CallNamed
+                | ErrorConstruct
+                | ValueConstruct
+                | Guard
+                | Fail
+                | IterLen
+                | IterGet
+                | IterEntry
+                | Unpack
+                | Log
         );
         let may_allocate = matches!(
             self,
-            Closure | StructLiteral | MakeEnumVariantUnit | MakeEnumVariantTuple
-                | MakeEnumVariantStruct | BuildArray | BuildTuple | BuildMap | BuildSet
-                | StringInterp | ErrorConstruct | ValueConstruct
+            Closure
+                | StructLiteral
+                | MakeEnumVariantUnit
+                | MakeEnumVariantTuple
+                | MakeEnumVariantStruct
+                | BuildArray
+                | BuildTuple
+                | BuildMap
+                | BuildSet
+                | StringInterp
+                | ErrorConstruct
+                | ValueConstruct
         );
         let may_throw = matches!(
             self,
-            Divide | Modulo | Call | CallNamed | MethodCall | MethodCallNamed | Index
-                | IndexAssign | Slice | GetField | SetField | TypeWrap | Import | Fail | Log
-                | CheckType | SetLocalLocked | RangeLimit
+            Divide
+                | Modulo
+                | Call
+                | CallNamed
+                | MethodCall
+                | MethodCallNamed
+                | Index
+                | IndexAssign
+                | Slice
+                | GetField
+                | SetField
+                | TypeWrap
+                | Import
+                | Fail
+                | Log
+                | CheckType
+                | SetLocalLocked
+                | RangeLimit
         );
         OpProperties {
             may_allocate,
@@ -557,15 +688,62 @@ impl OpCode {
         use OpCode::*;
         if matches!(
             self,
-            Constant | None | True | False | Pop | Dup | BuildArray | Index | IndexAssign
-                | IterLen | IterGet | IterEntry | TypeWrap | Add | Subtract | Multiply | Divide
+            Constant
+                | None
+                | True
+                | False
+                | Pop
+                | Dup
+                | BuildArray
+                | Index
+                | IndexAssign
+                | IterLen
+                | IterGet
+                | IterEntry
+                | TypeWrap
+                | Add
+                | Subtract
+                | Multiply
+                | Divide
                 | Modulo
-                | Equal | NotEqual | Less | LessEqual | Greater | GreaterEqual | Not | Negate
-                | BitAnd | BitOr | BitXor | BitNot | ShiftLeft | ShiftRight | Log | GetLocal
-                | SetLocal | GetGlobal | SetGlobal | DefineGlobal | DefineGlobalTyped
-                | GetUpvalue | SetUpvalue | Closure | Jump | JumpIfFalse | JumpIfTrue | Loop
-                | PopJumpIfFalse | Call | Return | StructDef | StructLiteral | GetField
-                | SetField | DefineMethod | MethodCall | RangeLimit
+                | Equal
+                | NotEqual
+                | Less
+                | LessEqual
+                | Greater
+                | GreaterEqual
+                | Not
+                | Negate
+                | BitAnd
+                | BitOr
+                | BitXor
+                | BitNot
+                | ShiftLeft
+                | ShiftRight
+                | Log
+                | GetLocal
+                | SetLocal
+                | GetGlobal
+                | SetGlobal
+                | DefineGlobal
+                | DefineGlobalTyped
+                | GetUpvalue
+                | SetUpvalue
+                | Closure
+                | Jump
+                | JumpIfFalse
+                | JumpIfTrue
+                | Loop
+                | PopJumpIfFalse
+                | Call
+                | Return
+                | StructDef
+                | StructLiteral
+                | GetField
+                | SetField
+                | DefineMethod
+                | MethodCall
+                | RangeLimit
         ) {
             JitSupport::Native
         } else {
@@ -628,7 +806,10 @@ impl Chunk {
 
     /// The type a `SetLocalLocked` at `offset` enforces.
     pub fn local_lock_at(&self, offset: usize) -> Option<&crate::vm::value::Value> {
-        let i = self.local_locks.binary_search_by_key(&offset, |&(o, _)| o).ok()?;
+        let i = self
+            .local_locks
+            .binary_search_by_key(&offset, |&(o, _)| o)
+            .ok()?;
         self.constants.get(self.local_locks[i].1 as usize)
     }
 

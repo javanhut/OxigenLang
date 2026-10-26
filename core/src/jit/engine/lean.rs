@@ -79,9 +79,7 @@ pub(crate) fn compile_lean_entry(
     // caller treats `None` as "no lean entry", and the function then keeps
     // whichever entry it already had. Refusing to compile is always a
     // performance outcome, never a correctness one.
-    let func_id = module
-        .declare_function(&name, Linkage::Local, &sig)
-        .ok()?;
+    let func_id = module.declare_function(&name, Linkage::Local, &sig).ok()?;
 
     ctx.func.signature = sig;
     let ok = {
@@ -177,7 +175,9 @@ fn translate_lean_body(
         match op {
             OpCode::Jump | OpCode::JumpIfFalse | OpCode::JumpIfTrue => {
                 let off = read_u16(code, ip + 1) as usize;
-                blocks.entry(ip + 3 + off).or_insert_with(|| b.create_block());
+                blocks
+                    .entry(ip + 3 + off)
+                    .or_insert_with(|| b.create_block());
             }
             OpCode::Loop => {
                 let off = read_u16(code, ip + 1) as usize;
@@ -185,7 +185,9 @@ fn translate_lean_body(
                 if off > after {
                     return false;
                 }
-                blocks.entry(after - off).or_insert_with(|| b.create_block());
+                blocks
+                    .entry(after - off)
+                    .or_insert_with(|| b.create_block());
             }
             _ => {}
         }
@@ -513,9 +515,7 @@ work(1)
             (a.wrapping_add(b.wrapping_mul(3)).wrapping_sub(n as u64)) as i64
         }
         for n in [1i64, 2, 3, 7, 10, 20] {
-            let v = unsafe {
-                crate::jit::runtime::invoke_lean(code as *const (), &[n], 1_000_000)
-            };
+            let v = unsafe { crate::jit::runtime::invoke_lean(code as *const (), &[n], 1_000_000) };
             assert_eq!(v, Ok(reference(n)), "work({n})");
         }
         // Cross-check the reference itself against the value the interpreter
