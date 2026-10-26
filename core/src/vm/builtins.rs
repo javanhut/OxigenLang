@@ -28,6 +28,7 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("error".to_string(), Value::Builtin(builtin_error));
     globals.insert("is_value".to_string(), Value::Builtin(builtin_is_value));
     globals.insert("is_error".to_string(), Value::Builtin(builtin_is_error));
+    crate::vm::ffi::register(globals);
     globals.insert("keys".to_string(), Value::Builtin(builtin_keys));
     globals.insert("values".to_string(), Value::Builtin(builtin_values));
     globals.insert("insert".to_string(), Value::Builtin(builtin_insert));

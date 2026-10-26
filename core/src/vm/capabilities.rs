@@ -23,17 +23,21 @@ pub enum Capability {
     Threads,
     /// Sleep, which blocks the thread running the script.
     Sleep,
+    /// Load shared libraries and call C functions (`ffi`). C code can do
+    /// anything the process can, so this implies every other capability.
+    Ffi,
 }
 
 impl Capability {
     /// Every capability, which is what a new VM has.
-    pub const ALL: [Capability; 6] = [
+    pub const ALL: [Capability; 7] = [
         Capability::FileSystem,
         Capability::Network,
         Capability::Process,
         Capability::Stdin,
         Capability::Threads,
         Capability::Sleep,
+        Capability::Ffi,
     ];
 
     /// The name used in error messages.
@@ -45,6 +49,7 @@ impl Capability {
             Capability::Stdin => "stdin",
             Capability::Threads => "threads",
             Capability::Sleep => "sleep",
+            Capability::Ffi => "ffi",
         }
     }
 }
@@ -98,6 +103,18 @@ pub(crate) const GATED_BUILTINS: &[(&str, Capability)] = &[
     ("__join_task", Capability::Threads),
     ("cancel", Capability::Threads),
     ("__time_sleep", Capability::Sleep),
+    ("__ffi_open", Capability::Ffi),
+    ("__ffi_fn", Capability::Ffi),
+    ("__ffi_struct", Capability::Ffi),
+    ("__ffi_callback", Capability::Ffi),
+    ("__ffi_sym", Capability::Ffi),
+    ("__ffi_alloc", Capability::Ffi),
+    ("__ffi_free", Capability::Ffi),
+    ("__ffi_sizeof", Capability::Ffi),
+    ("__ffi_read", Capability::Ffi),
+    ("__ffi_write", Capability::Ffi),
+    ("__ffi_string", Capability::Ffi),
+    ("__ffi_cstring", Capability::Ffi),
     // These take a local path as well as a URL or socket: a script allowed
     // only the network could otherwise read and write any file through them.
     // A builtin listed twice needs both capabilities.

@@ -97,6 +97,13 @@ vm.restrict(&[Capability::FileSystem]);   // files, but nothing else
 | `Stdin` | Reading from standard input, which blocks until the user types |
 | `Threads` | `diverge`/`converge` |
 | `Sleep` | `time.sleep`, which blocks the thread running the script |
+| `Ffi` | Loading C libraries and calling them (`ffi`). C code can do anything the process can, so never grant it to a script you would not run natively |
+
+A script with `Ffi` can call any C function in the process, including
+everything the other capabilities guard, so allowing it amounts to allowing
+everything. A host that wants scripts to reach a particular C library safely
+should wrap that library in `register_native` functions instead, and leave
+`Ffi` out. See [FFI architecture](FFI_ARCHITECTURE.md#safety-and-sandboxing).
 
 The language, the pure built-ins and the stdlib modules built on them keep
 working. A call that needs a missing capability fails with an error naming

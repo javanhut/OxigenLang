@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Added: calling C (`ffi`)
+
+A new standard library module, `ffi`, calls C libraries from scripts. Declare
+functions with their C signatures and call them like Oxigen functions:
+
+```oxi
+introduce ffi
+libm := ffi.open("m", {"pow": "double(double x, double y)"})
+libm.pow(2.0, 10.0)   // 1024
+```
+
+- Libraries by bare name (`"m"`, `"sqlite3"`), file name, path, or `None` for
+  the C runtime.
+- C type spellings in signatures (`const char *`, `size_t`, `unsigned long`,
+  `enum X`, `T *`), plus short names (`i32`, `f64`, `ptr`).
+- Variadic functions (`printf`, `snprintf`), structs by value
+  (`ffi.cstruct`), arrays and maps passed to `T *` and copied back
+  (out-parameters), and callbacks (`ffi.callback`) that can re-enter the VM.
+- Memory helpers: `alloc`, `new`, `free`, `read`, `write`, `sizeof`, `string`
+  and `cstring`.
+- A new capability, `Capability::Ffi`. A host that calls `vm.restrict` must
+  list it for scripts to use `ffi`.
+
+Building from source now needs a C compiler and `make`, for the bundled
+libffi. The prebuilt Linux binaries are statically linked against musl and
+cannot load shared libraries, so `ffi.open` fails there; build from source to
+use it on Linux. See [docs/stdlib/ffi.md](docs/stdlib/ffi.md) and
+[docs/FFI_ARCHITECTURE.md](docs/FFI_ARCHITECTURE.md).
+
 ## 0.2.0
 
 A correctness release. An adversarial review of the whole toolchain (front

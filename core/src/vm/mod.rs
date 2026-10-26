@@ -1,6 +1,7 @@
 pub mod builtins;
 pub mod capabilities;
 pub mod collections;
+pub mod ffi;
 pub mod intern;
 pub mod limits;
 pub mod nanvalue;
@@ -882,6 +883,23 @@ impl VM {
             self.execute_until(depth)?;
         }
         Ok(self.pop())
+    }
+
+    /// Call a script function from native code that a script called (an ffi
+    /// callback). A failed call is unwound here, so the script that made the
+    /// native call carries on from a consistent VM.
+    pub(crate) fn call_reentrant(&mut self, callee: Value, args: Vec<Value>) -> Result<Value, VMError> {
+        let (frames, jit_frames) = (self.frames.len(), self.jit_frame_view.len);
+        let (stack, handlers) = (self.stack.len(), self.error_handlers.len());
+        let result = self.call_with_args_inner(callee, args);
+        if result.is_err() {
+            self.frames.truncate(frames);
+            self.jit_frame_view.len = jit_frames;
+            self.error_handlers.truncate(handlers);
+            self.close_upvalues(stack);
+            self.stack_truncate(stack);
+        }
+        result
     }
 
     /// No script is running: the host, not a script, is calling in.
@@ -3891,7 +3909,10 @@ impl VM {
                     ));
                 }
                 let start = self.stack.len() - arg_count;
+                // An ffi callback fired during this call re-enters through here.
+                let outer = ffi::CURRENT_VM.replace(self as *mut VM);
                 let result = (native.func)(&self.stack[start..]);
+                ffi::CURRENT_VM.set(outer);
                 // Drop the args AND the native itself (at start - 1).
                 self.stack_truncate(start - 1);
                 match result {

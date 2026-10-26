@@ -55,6 +55,12 @@ examples:
 | [net](net.md) | HTTP client, streaming HTTP, TCP and UDP sockets |
 | [api](api.md) | HTTP server: routing, JSON and HTML responses, static files, the accept loop |
 
+## C interop
+
+| Module | What it covers |
+|--------|----------------|
+| [ffi](ffi.md) | call C libraries by signature: structs, pointers, variadics, callbacks |
+
 ## Language support
 
 | Module | What it covers |
