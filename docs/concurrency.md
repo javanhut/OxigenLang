@@ -100,6 +100,42 @@ results := converge [user, orders]   // [userResult, ordersResult]
 
 For fanning out the *same* work over a collection, use `diverge each`.
 
+## Passing messages with channels
+
+A task's result comes back once, when it finishes. To pass values while it
+runs, such as jobs for a worker to process in order, use a
+[channel](stdlib/channel.md): a queue that any task can `send` to and
+`recv` from.
+
+```oxi
+introduce channel
+
+sentences := channel.new()
+
+speaker := diverge {
+    spoken := 0
+    repeat when True {
+        s := channel.recv(sentences)     // waits for the next one
+        stop when s == None              // the channel was closed
+        println("speaking: " + s)
+        spoken = spoken + 1
+    }
+    spoken
+}
+
+each s in ["Hello.", "How are you?", "Goodbye."] {
+    channel.send(sentences, s)
+}
+channel.close(sentences)
+println(converge speaker)   // 3
+```
+
+Values are delivered in the order they were sent, and each is copied, like
+task arguments. A channel is an `int` handle, so it can be captured by a task
+or passed to one. `channel.recv(ch, timeout_ms)` stops waiting after a timeout,
+and `channel.try_recv(ch)` never waits. Signals reach a program the same way,
+on a channel from [`os.signals`](stdlib/os.md#signalsnames).
+
 ## What can cross threads
 
 When a value is passed into a task or returned from one, it is **copied** across the thread boundary (the original side keeps its own copy). These types can cross:
@@ -109,6 +145,7 @@ When a value is passed into a task or returned from one, it is **copied** across
 - Arrays, tuples, maps, sets (including nested)
 - Structs and enums
 - Open TCP/UDP sockets (so a server can `diverge` each connection to a handler)
+- Channels, and processes started with [`os.spawn`](stdlib/os.md#background-processes): like sockets, these are handles, so every task that has one uses the same channel or process
 
 ### Functions do not cross
 
@@ -184,3 +221,4 @@ The model is built for parallel compute and I/O fan-out into the hundreds. A few
 | `converge [T1, T2, …]` | wait for a list of tasks, return their values in order |
 | `converge T within ms` | wait up to `ms`; error value on timeout (test with `is_error`) |
 | `cancel(T)` | ask task `T` to stop (cooperative) |
+| `channel.send(C, V)` / `channel.recv(C)` | pass `V` to whichever task receives from channel `C` |

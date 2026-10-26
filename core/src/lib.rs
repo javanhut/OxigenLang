@@ -11,6 +11,7 @@ pub mod lexer;
 pub mod netres;
 pub mod output;
 pub mod parser;
+pub mod process;
 pub mod test_runner;
 pub mod token;
 pub mod vm;

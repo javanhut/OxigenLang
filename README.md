@@ -9,7 +9,7 @@ OxigenLang is a modern, lightweight programming language implemented in Rust. It
 ## Features
 
 - **Module System**: Import standard library modules or local files with `introduce`/`intro`. Namespace imports, selective imports, and module caching.
-- **Standard Library**: 22 modules — math, strings, array, io, os, path, time, datetime, random, json, toml, encoding, hash, regex, net (HTTP/HTTPS client with streaming download/upload, plus TCP and UDP sockets), api (HTTP servers — routing, JSON/HTML/static-file responses, and a threaded server in one module), ansi (terminal colors), parse_args (CLI flag parsing), env (.env files), ffi (calling C libraries), test (the `expect` matchers), and result (Error/Value helpers).
+- **Standard Library**: 23 modules — math, strings, array, io, os (including background processes and signals), path, time, datetime, random, json, toml, encoding, hash, regex, net (HTTP/HTTPS client with streaming download/upload, plus TCP and UDP sockets), api (HTTP servers — routing, JSON/HTML/static-file responses, and a threaded server in one module), ansi (terminal colors), parse_args (CLI flag parsing), env (.env files), channel (message passing between tasks), ffi (calling C libraries), test (the `expect` matchers), and result (Error/Value helpers).
 - **Flexible Block Styles**: Choose between traditional brace-based blocks or Python-style indentation blocks with the `#[indent]` directive.
 - **Conditional Expressions**: Multi-arm `option` blocks, ternary shorthand, `unless` inverse conditionals, `unless ... then ...` fallback expressions, `when`/`unless` postfix guards, and short-circuit `and`/`or` logical operators.
 - **Pattern Matching**: Define reusable patterns with the `pattern` keyword and match against them with `choose`.
@@ -23,6 +23,7 @@ OxigenLang is a modern, lightweight programming language implemented in Rust. It
 - **Built-in Functions**: Built-in functions for I/O, collection manipulation, type conversion, and introspection.
 - **Two-Tier Error Model**: Propagating errors that halt execution alongside error *values* you can pass around — construct them with `<Error>`/`<Error<tag>>`, wrap success with `<Value>`, normalize fallible calls with `<type<Error || Value>>`, and inspect them with the `is_error`/`is_value` built-ins and the `result` module.
 - **C Interop**: Call any C library from a script by pasting its signatures: `ffi.open("m", {"cos": "double(double)"})`, then `libm.cos(0.0)`. Variadic functions, structs by value, out-parameters and callbacks are supported.
+- **Tooling**: `oxigen check` finds undefined names and suspicious logic without running anything, and `oxigen doc` shows the reference docs for any module or function in the terminal.
 - **Testing**: A built-in test runner — write `<test>("name") { ... }` blocks with `expect(...)` matchers and run them with `oxigen test`. Exits non-zero on failure for CI.
 - **REPL**: Interactive shell for quick experimentation with persistent state across lines.
 

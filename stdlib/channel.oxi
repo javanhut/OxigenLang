@@ -1,0 +1,26 @@
+// Pass messages between tasks, in order. A channel is a handle (an int), so it
+// crosses into `diverge` tasks like any other value; messages are copied, the
+// same as task arguments and results.
+
+// A new, empty channel.
+fun new() { __channel_new() }
+
+// Queue a value. Fails if the channel is closed.
+fun send(ch <int>, value) { __channel_send(ch, value) }
+
+// The next value, waiting for one. With timeout_ms, give up after that long.
+// Returns None when the wait times out, or once the channel is closed and empty.
+fun recv(ch <int>, timeout_ms = None) { __channel_recv(ch, timeout_ms) }
+
+// The next value if one is waiting, or None at once.
+fun try_recv(ch <int>) { __channel_recv(ch, 0) }
+
+// Stop the channel taking values. Waiting receivers wake up; values already
+// queued can still be received.
+fun close(ch <int>) { __channel_close(ch) }
+
+// How many values are queued.
+fun len(ch <int>) { __channel_len(ch) }
+
+// Whether close has been called.
+fun is_closed(ch <int>) { __channel_is_closed(ch) }

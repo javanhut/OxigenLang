@@ -6,7 +6,6 @@
 //
 // A library is a bare name ("m", "sqlite3"), a file name, a path, or None for
 // the C runtime. A wrong signature is undefined behaviour, as in C.
-
 // Load a library and bind every function in decls, a map of name to C
 // signature. The result is called like a module: lib.name(args).
 fun open(lib, decls = None) { __ffi_open(lib, decls) }

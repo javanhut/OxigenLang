@@ -303,7 +303,7 @@ pub fn close(id: u64) {
 pub const NO_HTTP: &str = "http is not available in this build of Oxigen (WebAssembly)";
 
 #[cfg(target_arch = "wasm32")]
-pub fn http_download(_: &str, _: &str) -> Result<i64, String> {
+pub fn http_download(_: &str, _: &str, _: &str, _: &[(String, String)], _: Option<&str>) -> Result<i64, String> {
     Err(NO_HTTP.into())
 }
 
@@ -322,13 +322,18 @@ pub fn http_upload(
     Err(NO_HTTP.into())
 }
 
-/// Streams a GET response body to `path` without buffering it in memory.
-/// Returns the HTTP status code.
+/// Streams a response body to `path` without buffering it in memory, so a
+/// binary body (audio, an image) reaches the file byte for byte. `method` and
+/// `body` work as in `http_open`. Returns the HTTP status code.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn http_download(url: &str, path: &str) -> Result<i64, String> {
-    let resp = ureq::get(url)
-        .call()
-        .map_err(|e| format!("http error: {}", e))?;
+pub fn http_download(
+    url: &str,
+    path: &str,
+    method: &str,
+    headers: &[(String, String)],
+    body: Option<&str>,
+) -> Result<i64, String> {
+    let resp = send_request(method, url, headers, body, "download")?;
     let status = resp.status().as_u16();
     let (_, body) = resp.into_parts();
     let mut reader = body.into_reader();
@@ -351,7 +356,22 @@ pub fn http_open(
     headers: &[(String, String)],
     body: Option<&str>,
 ) -> Result<u64, String> {
-    let resp = match method.to_uppercase().as_str() {
+    let resp = send_request(method, url, headers, body, "open_stream")?;
+    let (_, resp_body) = resp.into_parts();
+    Ok(spawn_body_reader(Box::new(resp_body.into_reader())))
+}
+
+/// Sends one request: GET, or POST/PUT/PATCH with `body`. `what` names the
+/// caller in the unsupported-method error.
+#[cfg(not(target_arch = "wasm32"))]
+fn send_request(
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: Option<&str>,
+    what: &str,
+) -> Result<ureq::http::Response<ureq::Body>, String> {
+    match method.to_uppercase().as_str() {
         "GET" => {
             let mut req = ureq::get(url);
             for (k, v) in headers {
@@ -373,12 +393,9 @@ pub fn http_open(
                 None => req.send_empty(),
             }
         }
-        m => return Err(format!("open_stream: unsupported method '{}'", m)),
+        m => return Err(format!("{what}: unsupported method '{m}'")),
     }
-    .map_err(|e| format!("http error: {}", e))?;
-
-    let (_, resp_body) = resp.into_parts();
-    Ok(spawn_body_reader(Box::new(resp_body.into_reader())))
+    .map_err(|e| format!("http error: {}", e))
 }
 
 /// Drains a response body on a background thread into a channel so reads can be

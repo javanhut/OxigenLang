@@ -1181,3 +1181,171 @@ pub fn join_with_vm(vm: &VM, args: &[Value]) -> Value {
         _ => Value::Error(Rc::new("join() requires a task handle".to_string())),
     }
 }
+
+// ── Channels ────────────────────────────────────────────────────────────
+//
+// A channel is a queue of `Sendable` messages in a process-wide registry, and
+// a script holds its integer id, so it crosses into tasks like a socket does.
+// Values are copied in on `send` and rebuilt on `recv`, exactly as task
+// arguments and results are.
+
+struct Chan {
+    state: Mutex<ChanState>,
+    ready: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct ChanState {
+    items: std::collections::VecDeque<Sendable>,
+    closed: bool,
+}
+
+// ponytail: channels are never freed; drop closed, drained ones from the
+// registry if a script makes channels by the thousand.
+static CHANNELS: OnceLock<Mutex<HashMap<u64, Arc<Chan>>>> = OnceLock::new();
+static NEXT_CHANNEL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn channels() -> std::sync::MutexGuard<'static, HashMap<u64, Arc<Chan>>> {
+    CHANNELS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+fn channel_of(v: Option<&Value>, what: &str) -> Result<Arc<Chan>, Value> {
+    let id = v.and_then(|v| v.as_integer());
+    id.and_then(|id| channels().get(&(id as u64)).cloned())
+        .ok_or_else(|| Value::Error(Rc::new(format!("channel.{what}: not a channel"))))
+}
+
+pub(crate) fn new_channel() -> u64 {
+    let id = NEXT_CHANNEL.fetch_add(1, Ordering::Relaxed);
+    channels().insert(id, Arc::new(Chan { state: Mutex::default(), ready: Default::default() }));
+    id
+}
+
+/// Queue a message without a VM, for messages Rust produces (signals).
+pub(crate) fn push_str(id: u64, msg: &str) {
+    if let Some(ch) = channels().get(&id).cloned() {
+        let mut st = ch.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !st.closed {
+            st.items.push_back(Sendable::Str(msg.to_string()));
+            ch.ready.notify_one();
+        }
+    }
+}
+
+fn builtin_channel_new(_args: &[Value]) -> Value {
+    Value::Integer(new_channel() as i64)
+}
+
+pub fn builtin_channel_send(_args: &[Value]) -> Value {
+    Value::Error(Rc::new("channel.send: internal dispatch error".to_string()))
+}
+
+pub fn builtin_channel_recv(_args: &[Value]) -> Value {
+    Value::Error(Rc::new("channel.recv: internal dispatch error".to_string()))
+}
+
+/// `__channel_send(ch, value)`
+fn channel_send(vm: &VM, args: &[Value]) -> Value {
+    let ch = match channel_of(args.first(), "send") {
+        Ok(ch) => ch,
+        Err(e) => return e,
+    };
+    let msg = match args.get(1).map(|v| detach(v, Some(vm))) {
+        Some(Ok(m)) => m,
+        Some(Err(e)) => return Value::Error(Rc::new(format!("channel.send: {e}"))),
+        None => return Value::Error(Rc::new("channel.send takes (channel, value)".to_string())),
+    };
+    let mut st = ch.state.lock().unwrap_or_else(|e| e.into_inner());
+    if st.closed {
+        return Value::Error(Rc::new("channel.send: the channel is closed".to_string()));
+    }
+    st.items.push_back(msg);
+    ch.ready.notify_one();
+    Value::None
+}
+
+/// `__channel_recv(ch, timeout_ms)`: the next message, waiting for one.
+/// `None` once the channel is closed and empty, when `timeout_ms` passes,
+/// or at once for a timeout of 0.
+fn channel_recv(vm: &VM, args: &[Value]) -> Value {
+    let ch = match channel_of(args.first(), "recv") {
+        Ok(ch) => ch,
+        Err(e) => return e,
+    };
+    let deadline = args
+        .get(1)
+        .and_then(|v| v.as_integer())
+        .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms.max(0) as u64));
+    let mut st = ch.state.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        if let Some(msg) = st.items.pop_front() {
+            drop(st);
+            return attach(msg, vm).unwrap_or_else(|e| Value::Error(Rc::new(format!("channel.recv: {e}"))));
+        }
+        if st.closed {
+            return Value::None;
+        }
+        st = match deadline {
+            None => ch.ready.wait(st).unwrap_or_else(|e| e.into_inner()),
+            Some(end) => {
+                let left = end.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    return Value::None;
+                }
+                ch.ready.wait_timeout(st, left).unwrap_or_else(|e| e.into_inner()).0
+            }
+        };
+    }
+}
+
+fn builtin_channel_close(args: &[Value]) -> Value {
+    match channel_of(args.first(), "close") {
+        Ok(ch) => {
+            ch.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+            ch.ready.notify_all();
+            Value::None
+        }
+        Err(e) => e,
+    }
+}
+
+fn builtin_channel_len(args: &[Value]) -> Value {
+    match channel_of(args.first(), "len") {
+        Ok(ch) => Value::Integer(ch.state.lock().unwrap_or_else(|e| e.into_inner()).items.len() as i64),
+        Err(e) => e,
+    }
+}
+
+fn builtin_channel_is_closed(args: &[Value]) -> Value {
+    match channel_of(args.first(), "is_closed") {
+        Ok(ch) => Value::Boolean(ch.state.lock().unwrap_or_else(|e| e.into_inner()).closed),
+        Err(e) => e,
+    }
+}
+
+pub(crate) fn register_channel_builtins(globals: &mut HashMap<String, Value>) {
+    globals.insert("__channel_new".to_string(), Value::Builtin(builtin_channel_new));
+    globals.insert("__channel_send".to_string(), Value::Builtin(builtin_channel_send));
+    globals.insert("__channel_recv".to_string(), Value::Builtin(builtin_channel_recv));
+    globals.insert("__channel_close".to_string(), Value::Builtin(builtin_channel_close));
+    globals.insert("__channel_len".to_string(), Value::Builtin(builtin_channel_len));
+    globals.insert("__channel_is_closed".to_string(), Value::Builtin(builtin_channel_is_closed));
+}
+
+/// The builtins that need the calling VM, and the function that gets it.
+/// `VM::call_value` routes these here; every other builtin is a plain `fn`.
+pub(crate) fn with_vm(func: crate::vm::value::BuiltinFn) -> Option<fn(&VM, &[Value]) -> Value> {
+    let is = |f: crate::vm::value::BuiltinFn| std::ptr::fn_addr_eq(func, f);
+    if is(builtin_join) {
+        Some(join_with_vm)
+    } else if is(builtin_channel_send) {
+        Some(channel_send)
+    } else if is(builtin_channel_recv) {
+        Some(channel_recv)
+    } else {
+        None
+    }
+}

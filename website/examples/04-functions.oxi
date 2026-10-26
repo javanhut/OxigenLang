@@ -10,18 +10,14 @@ fun make_counter(start <int> = 0) {
     }
 }
 
-fun greet(name <str>, greeting <str> = "Hello", punct? <str>) {
-    "{greeting}, {name}{punct unless punct == None then "!"}"
-}
+fun greet(name <str>, greeting <str> = "Hello", punct? <str>) { "{greeting}, {name}{punct unless punct == None then "!"}" }
 
 main {
     next := make_counter(10)
     next()
     println("counter:", next())
-
     println(greet("Ada"))
     println(greet("Linus", greeting="Welcome", punct="."))
-
     nums := range(1, 11)
     evens := array.filter(nums, fun(n) { n % 2 == 0 })
     squares := array.map(evens, fun(n) { n * n })

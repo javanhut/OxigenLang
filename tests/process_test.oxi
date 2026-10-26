@@ -1,0 +1,50 @@
+introduce os
+introduce channel
+
+<test>("a spawned program reads what is written to it") {
+    p := os.spawn("cat", [], True)
+    os.write_stdin(p, "hello\nworld\n")
+    expect(os.read_output_line(p)).eq("hello")
+    expect(os.read_output_line(p)).eq("world")
+    expect(os.is_running(p)).truthy()
+    expect(os.wait(p)).eq(0)
+    expect(os.is_running(p)).eq(False)
+    expect(os.read_output_line(p)).eq(None)
+}
+
+<test>("read_output collects everything the program prints") {
+    p := os.spawn("echo", ["a", "b"], True)
+    expect(os.read_output(p)).eq("a b\n")
+    expect(os.wait(p)).eq(0)
+}
+
+<test>("wait times out, and kill ends the program") {
+    p := os.spawn("sleep", ["30"])
+    expect(os.process_pid(p)).gt(0)
+    expect(os.wait(p, 20)).eq(None)
+    os.kill(p)
+    expect(os.wait(p)).eq(-1)
+}
+
+<test>("output is not readable unless captured") {
+    p := os.spawn("true", [])
+    expect(<type<Error> || <Value>>(os.read_output_line(p))).is_error()
+    os.wait(p)
+}
+
+<test>("exec_argv sends stdin without a shell") {
+    payload := "\{\"text\": \"it's; $(rm -rf /) | x\"\}"
+    r := os.exec_argv("cat", [], payload)
+    expect(r["stdout"]).eq(payload)
+}
+
+<test>("subscribed signals arrive on a channel") {
+    sigs := os.signals(["USR1"])
+    os.exec_argv("kill", ["-USR1", str(os.pid())])
+    expect(channel.recv(sigs, 2000)).eq("USR1")
+}
+
+<test>("unknown and uncatchable signals are refused") {
+    expect(<type<Error> || <Value>>(os.signals(["NOPE"]))).is_error()
+    expect(<type<Error> || <Value>>(os.signals(["KILL"]))).is_error()
+}

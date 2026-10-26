@@ -51,6 +51,7 @@ const BASELINE: &[(&str, usize)] = &[
     ("core/src/jit/mod.rs", 5),
     ("core/src/keyinput.rs", 1),
     ("core/src/output.rs", 2),
+    ("core/src/process.rs", 5),
     ("core/src/vm/builtins.rs", 3),
     ("core/src/vm/mod.rs", 5),
     ("core/src/vm/nanvalue.rs", 2),

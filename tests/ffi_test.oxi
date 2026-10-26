@@ -1,17 +1,7 @@
 introduce ffi
-
 ffi.cstruct("div_t", "int quot; int rem")
 ffi.cstruct("Vec2", ["double x", "double y"])
-
-libc := ffi.open(None, {
-    "labs": "long(long)",
-    "strlen": "size_t(const char *s)",
-    "snprintf": "int(char *buf, size_t n, const char *fmt, ...)",
-    "frexp": "double(double x, int *exp)",
-    "qsort": "void(int *base, size_t n, size_t size, void *cmp)",
-    "div": "div_t(int, int)",
-    "getenv": "char *(const char *name)",
-})
+libc := ffi.open(None, {"labs": "long(long)", "strlen": "size_t(const char *s)", "snprintf": "int(char *buf, size_t n, const char *fmt, ...)", "frexp": "double(double x, int *exp)", "qsort": "void(int *base, size_t n, size_t size, void *cmp)", "div": "div_t(int, int)", "getenv": "char *(const char *name)"})
 
 <test>("calls C like an Oxigen function") {
     expect(libc.labs(-42)).eq(42)
@@ -55,9 +45,7 @@ libc := ffi.open(None, {
 }
 
 <test>("callbacks") {
-    cmp := ffi.callback("int(const void *a, const void *b)", fun(a, b) {
-        ffi.read(a, "int") - ffi.read(b, "int")
-    })
+    cmp := ffi.callback("int(const void *a, const void *b)", fun(a, b) { ffi.read(a, "int") - ffi.read(b, "int") })
     xs := [5, 1, 4, 2, 3]
     libc.qsort(xs, len(xs), ffi.sizeof("int"), cmp)
     expect(xs).eq([1, 2, 3, 4, 5])
@@ -69,7 +57,7 @@ libc := ffi.open(None, {
 }
 
 <test>("structs pasted from a header") {
-    expect(ffi.cstruct("typedef struct \{ int a; char *name; \} Item;")).eq("Item")
+    expect(ffi.cstruct("typedef struct \{ int a; char *name; } Item;")).eq("Item")
     p := ffi.new("Item", {"a": 7})
     expect(ffi.read(p, "Item")).eq({"a": 7, "name": None})
     ffi.free(p)

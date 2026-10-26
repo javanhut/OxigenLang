@@ -1,8 +1,6 @@
 introduce strings
 
-fun slug(title <str>) {
-    strings.replace(strings.lower(strings.trim(title)), " ", "-")
-}
+fun slug(title <str>) { strings.replace(strings.lower(strings.trim(title)), " ", "-") }
 
 <test>("slug lower-cases and hyphenates") {
     expect(slug("  Hello Oxigen ")).eq("hello-oxigen")

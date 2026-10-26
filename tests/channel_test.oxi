@@ -1,0 +1,45 @@
+introduce channel
+
+<test>("values arrive in the order they were sent") {
+    ch := channel.new()
+    channel.send(ch, 1)
+    channel.send(ch, "two")
+    channel.send(ch, [3])
+    expect(channel.len(ch)).eq(3)
+    expect(channel.recv(ch)).eq(1)
+    expect(channel.recv(ch)).eq("two")
+    expect(channel.recv(ch)).eq([3])
+}
+
+<test>("a task can feed a channel the main program reads") {
+    ch := channel.new()
+    worker := diverge {
+        each i in range(4) { channel.send(ch, {"n": i}) }
+        channel.close(ch)
+        "done"
+    }
+    got := []
+    repeat when True {
+        m := channel.recv(ch)
+        stop when m == None
+        push(got, m["n"])
+    }
+    expect(got).eq([0, 1, 2, 3])
+    expect(converge worker).eq("done")
+}
+
+<test>("recv and try_recv return None when nothing comes") {
+    ch := channel.new()
+    expect(channel.try_recv(ch)).eq(None)
+    expect(channel.recv(ch, 20)).eq(None)
+}
+
+<test>("a closed channel still hands out what was queued, then None") {
+    ch := channel.new()
+    channel.send(ch, "last")
+    channel.close(ch)
+    expect(channel.is_closed(ch)).truthy()
+    expect(channel.recv(ch)).eq("last")
+    expect(channel.recv(ch)).eq(None)
+    expect(<type<Error> || <Value>>(channel.send(ch, 1))).is_error()
+}

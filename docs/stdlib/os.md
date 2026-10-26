@@ -1,6 +1,7 @@
 # os
 
-Processes, environment variables, directories, and facts about the machine.
+Running programs (to completion, or in the background), signals, environment
+variables, directories, and facts about the machine.
 
 ```oxi
 introduce os
@@ -9,7 +10,17 @@ introduce os
 | Function | Signature | Returns |
 |----------|-----------|---------|
 | [`exec`](#execcmd) | `exec(cmd)` | `map` — `stdout`, `stderr`, `code` |
-| [`exec_argv`](#exec_argvprog-argv) | `exec_argv(prog, argv)` | same map |
+| [`exec_argv`](#exec_argvprog-argv-stdin) | `exec_argv(prog, argv, stdin?)` | same map |
+| [`spawn`](#spawnprog-argv-capture) | `spawn(prog, argv?, capture?)` | a process handle |
+| [`write_stdin`](#write_stdinproc-text) | `write_stdin(proc, text)` | `None` |
+| [`close_stdin`](#close_stdinproc) | `close_stdin(proc)` | `None` |
+| [`read_output_line`](#read_output_lineproc) | `read_output_line(proc)` | `str` or `None` |
+| [`read_output`](#read_outputproc) | `read_output(proc)` | `str` |
+| [`wait`](#waitproc-timeout_ms) | `wait(proc, timeout_ms?)` | exit code, or `None` |
+| [`kill`](#killproc-signal) | `kill(proc, signal?)` | `None` |
+| [`is_running`](#is_runningproc) | `is_running(proc)` | `bool` |
+| [`process_pid`](#process_pidproc) | `process_pid(proc)` | `int` |
+| [`signals`](#signalsnames) | `signals(names)` | a [channel](channel.md) |
 | [`name`](#name) | `name()` | `str` |
 | [`arch`](#arch) | `arch()` | `str` |
 | [`args`](#args) | `args()` | `array` |
@@ -60,12 +71,13 @@ shell metacharacter in the string is live: `;`, `|`, `&`, `$(...)`, backticks,
 println(os.exec("ls *.oxi | wc -l").stdout)
 ```
 
-`exec` takes exactly **one** argument. The older variadic form
+`exec` takes exactly **one** argument. To send a command input, use
+[`exec_argv`](#exec_argvprog-argv-stdin), which takes `stdin`. The older variadic form
 (`os.exec("cat", user_file)`) space-joined extras into the shell string — which
 looked like an argument vector while being shell concatenation — and is now an
 error pointing here.
 
-### `exec_argv(prog, argv)`
+### `exec_argv(prog, argv, stdin?)`
 
 Run a program **directly**, with no shell. Each element of `argv` arrives as
 exactly one literal argument.
@@ -102,6 +114,146 @@ program is something you want to handle:
 r := <type<Error> || <Value>>(os.exec_argv("no_such_prog", []))
 println(r.msg) when is_error(r)
 ```
+
+**Sending input.** Pass a string as `stdin` and the program reads it as its
+standard input. Data never goes through a shell or a temporary file, so it
+cannot inject commands, whatever it contains:
+
+```oxi
+introduce os
+introduce json
+
+body := json.stringify({"model": "llama3", "prompt": "hi; $(rm -rf /)"})
+r := os.exec_argv("curl", ["-s", "-d", "@-", "http://localhost:11434/api/generate"], body)
+```
+
+Without `stdin`, the program shares the script's own standard input.
+
+---
+
+## Background processes
+
+`exec` and `exec_argv` wait for the program to finish. `spawn` starts one and
+returns at once with a handle, so the script can keep talking to it:
+
+```oxi
+introduce os
+
+speaker := os.spawn("say", [])          // or "espeak", "piper", ...
+os.write_stdin(speaker, "Hello there.\n")
+os.write_stdin(speaker, "Second sentence.\n")
+os.close_stdin(speaker)                 // no more input
+os.wait(speaker)
+```
+
+A handle is an `int`, so it can be passed into a
+[`diverge`](../concurrency.md) task, and any task can write to, wait for or
+kill the program.
+
+**Programs still running when the script ends are stopped.** At a normal exit,
+at `os.exit`, and on Ctrl-C, SIGTERM or SIGHUP, each child gets SIGTERM, then
+SIGKILL if it is still running 200 ms later. A script no longer needs to watch
+its own process ID to clean up. (On Windows, children are not yet stopped at
+exit.)
+
+### `spawn(prog, argv?, capture?)`
+
+Start `prog` with the arguments in `argv` (no shell, as with `exec_argv`).
+Its standard input is a pipe for `write_stdin`. Its output goes to the
+terminal, unless `capture` is `True`: then it goes to a pipe that
+`read_output_line` and `read_output` read. stderr always goes to the terminal.
+
+A missing program is an error, like `exec_argv`.
+
+Only capture output you will read. A program writing to a captured pipe nobody
+reads stops once the pipe is full.
+
+### `write_stdin(proc, text)`
+
+Send `text` to the program's standard input and flush it, so the program sees
+it at once. No newline is added. Writing after `close_stdin`, or to a program
+that has exited, is an error.
+
+### `close_stdin(proc)`
+
+Close the program's standard input. Programs that read until end of input
+(`cat`, `wc`, many text-to-speech tools) finish their work then.
+
+### `read_output_line(proc)`
+
+The next line the program printed, without its newline, waiting for it. Returns
+`None` once the program has closed its output (usually because it exited).
+Needs `capture=True`:
+
+```oxi
+introduce os
+
+p := os.spawn("cat", [], True)
+os.write_stdin(p, "ping\n")
+println(os.read_output_line(p))   // ping
+os.close_stdin(p)
+```
+
+### `read_output(proc)`
+
+Everything the program prints from now until it closes its output. Needs
+`capture=True`.
+
+### `wait(proc, timeout_ms?)`
+
+Wait for the program to exit and return its exit code. A program ended by a
+signal returns `-1`. With `timeout_ms`, it returns `None` if the program is
+still running after that long. Waiting closes the program's stdin first,
+since a program waiting for more input would never exit.
+
+### `kill(proc, signal?)`
+
+Send the program a signal: `"TERM"` by default (asks it to exit), or `"KILL"`
+(cannot be ignored), `"INT"`, `"HUP"`, `"USR1"` and so on. Killing a program
+that has already exited does nothing. Follow with `wait` to collect it.
+
+### `is_running(proc)`
+
+Whether the program is still running.
+
+### `process_pid(proc)`
+
+The operating system's process ID for the program, for logging or for other
+tools. `pid()` is the script's own ID.
+
+---
+
+## Signals
+
+### `signals(names)`
+
+A [channel](channel.md) that receives each of the named signals, as a string
+such as `"INT"`, whenever one arrives. The names are `"INT"` (Ctrl-C),
+`"TERM"`, `"HUP"`, `"QUIT"`, `"USR1"`, `"USR2"` and `"WINCH"`, with or without
+the `SIG` prefix.
+
+Once a signal is subscribed, it no longer ends the program. The script decides
+what to do, usually to clean up and exit:
+
+```oxi
+introduce os
+introduce channel
+
+stop := os.signals(["INT", "TERM"])
+speaker := os.spawn("say", [])
+
+repeat when channel.try_recv(stop) == None {
+    line := next_sentence()          // your own function
+    os.write_stdin(speaker, line + "\n")
+}
+
+println("shutting down")
+os.kill(speaker)
+```
+
+To wait for a signal and do nothing else, use `channel.recv(stop)`. `"KILL"`
+and `"STOP"` cannot be caught, so `signals` refuses them. Signals are not
+supported on Windows yet; `signals` fails there.
 
 ---
 

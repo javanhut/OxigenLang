@@ -3,7 +3,7 @@ pub mod slot_types;
 
 use crate::diagnostics::registry as codes;
 use crate::diagnostics::{Code, Diagnostic};
-use crate::token::Span;
+use crate::token::{Span, Token};
 use crate::ast::*;
 use crate::vm::value::{
     Function, LocalInfo, ObjEnumDef, ParamInfo, Value, VmEnumVariantDef, VmEnumVariantKind, rc_str,
@@ -353,6 +353,42 @@ pub struct Compiler {
     /// the same unit (`Compiler::for_unit`) assigns identical ids (closure
     /// transfer across threads relies on this to identify a function's code).
     fn_counter: u64,
+    /// What `Compiler::check` collects on top of compiling; `None` for an
+    /// ordinary compile, which records nothing.
+    lint: Option<Box<Lint>>,
+}
+
+/// Names a program reads and defines as globals, and warnings about code that
+/// compiles but is very likely wrong. See `Compiler::check`.
+#[derive(Default)]
+struct Lint {
+    reads: Vec<(String, Span)>,
+    defs: std::collections::HashSet<String>,
+    warnings: Vec<Diagnostic>,
+}
+
+/// A literal whose truth value never changes, as `or`/`and` see it.
+/// A literal as it is written in source, quotes and all.
+fn written(expr: &Expression, token: &Token) -> String {
+    match unwrap_grouped(expr) {
+        Expression::Str { value, .. } => format!("{value:?}"),
+        _ => token.literal.clone(),
+    }
+}
+
+fn constant_operand(expr: &Expression) -> Option<&Token> {
+    match unwrap_grouped(expr) {
+        Expression::Str { token, .. }
+        | Expression::Int { token, .. }
+        | Expression::Float { token, .. }
+        | Expression::Char { token, .. } => Some(token),
+        _ => None,
+    }
+}
+
+fn is_comparison(expr: &Expression) -> bool {
+    matches!(unwrap_grouped(expr),
+        Expression::Infix { operator, .. } if matches!(operator.as_str(), "==" | "!=" | "<" | ">" | "<=" | ">="))
 }
 
 /// The next unused compilation unit number.
@@ -386,13 +422,59 @@ impl Compiler {
             declared_globals: std::collections::HashSet::new(),
             typed_globals: std::collections::HashSet::new(),
             fn_counter: (unit as u64) << 32,
+            lint: None,
         };
         compiler.frames.push(CompilerFrame::new(None, 0));
         compiler
     }
 
+    /// Compile `program` for `oxigen check`: its compile errors, plus a name
+    /// the program reads that nothing defines (an error, since it fails when
+    /// it runs), plus warnings for logic that compiles but is almost
+    /// certainly a mistake. `known` says which names exist without being
+    /// defined in the program: builtins, and whatever the host adds.
+    pub fn check(mut self, program: &Program, known: &dyn Fn(&str) -> bool) -> Vec<Diagnostic> {
+        self.lint = Some(Box::default());
+        let mut lint = None;
+        let mut out = Vec::new();
+        if let Err(errors) = self.compile_collecting(program, &mut lint) {
+            out.extend(errors.into_iter().map(CompileError::into_diagnostic));
+        }
+        let Some(lint) = lint else {
+            return out;
+        };
+        let mut reported = std::collections::HashSet::new();
+        for (name, span) in lint.reads {
+            if lint.defs.contains(&name) || known(&name) || !reported.insert(name.clone()) {
+                continue;
+            }
+            out.push(
+                Diagnostic::error(codes::UNDEFINED_NAME, span, format!("undefined name `{name}`"))
+                    .label("nothing in this program defines it")
+                    .help("define it with `name := value`, import it with `introduce`, or check the spelling"),
+            );
+        }
+        out.extend(lint.warnings);
+        out
+    }
+
     /// Compile a program and return the top-level function.
-    pub fn compile(mut self, program: &Program) -> Result<Function, Vec<CompileError>> {
+    pub fn compile(self, program: &Program) -> Result<Function, Vec<CompileError>> {
+        self.compile_collecting(program, &mut None)
+    }
+
+    /// `compile`, handing back what the lint collected (if it was on).
+    fn compile_collecting(
+        mut self,
+        program: &Program,
+        lint: &mut Option<Box<Lint>>,
+    ) -> Result<Function, Vec<CompileError>> {
+        let result = self.compile_program(program);
+        *lint = self.lint.take();
+        result
+    }
+
+    fn compile_program(&mut self, program: &Program) -> Result<Function, Vec<CompileError>> {
         // The last expression statement's value is the program's return value.
         if program.statements.is_empty() {
             self.emit_op(OpCode::None, 0);
@@ -437,7 +519,7 @@ impl Compiler {
         }
 
         if !self.errors.is_empty() {
-            return Err(self.errors);
+            return Err(std::mem::take(&mut self.errors));
         }
 
         self.finalize_local_locks();
@@ -450,6 +532,40 @@ impl Compiler {
     }
 
     // ── Helpers ────────────────────────────────────────────────────────
+
+    fn lint_warn(&mut self, span: Span, message: String, help: &str) {
+        if let Some(lint) = &mut self.lint {
+            lint.warnings.push(Diagnostic::warning(codes::SUSPICIOUS_LOGIC, span, message).help(help));
+        }
+    }
+
+    /// `x == "a" or "b"` and `("a" or "b")` compile, and are almost never
+    /// what was meant. A literal on the right of a plain value is fine:
+    /// `name or "anonymous"` is a fallback.
+    fn lint_logical(&mut self, op: &str, left: &Expression, right: &Expression) {
+        if self.lint.is_none() {
+            return;
+        }
+        if let Some(lit) = constant_operand(left) {
+            let text = written(left, lit);
+            let message = match op {
+                "or" => format!("`{text} or ...` is always {text}: a literal is never false"),
+                _ => format!("`{text} and ...` is always the right-hand side: a literal is never false"),
+            };
+            self.lint_warn(
+                lit.span,
+                message,
+                "to compare against several values, write `x == (a or b)`, or `x == a or x == b`",
+            );
+        } else if let Some(lit) = constant_operand(right).filter(|_| is_comparison(left)) {
+            let text = written(right, lit);
+            self.lint_warn(
+                lit.span,
+                format!("{text} here is a value on its own, not part of the comparison, so this is always true"),
+                "`x == a or b` means `(x == a) or b`; write `x == (a or b)`, or `x == a or x == b`",
+            );
+        }
+    }
 
     /// Give every write to a typed local its binding's lock back where the
     /// slot's own lock could not hold it (another binding of a different type
@@ -507,6 +623,14 @@ impl Compiler {
     }
 
     fn emit_op_u16(&mut self, op: OpCode, operand: u16, line: u32) {
+        // Every way a program defines a global comes through here.
+        if self.lint.is_some()
+            && matches!(op, OpCode::DefineGlobal | OpCode::DefineGlobalTyped | OpCode::SetGlobal)
+            && let Some(Value::String(name)) = self.current_chunk().constants.get(operand as usize).cloned()
+            && let Some(lint) = &mut self.lint
+        {
+            lint.defs.insert(name.to_string());
+        }
         if op == OpCode::SetLocal {
             let offset = self.current_chunk().len();
             let frame = self.current_frame_mut();
@@ -2289,6 +2413,14 @@ impl Compiler {
 
                 let path_const = self.make_constant(Value::String(rc_str(path_str.as_str())), line);
 
+                if let Some(lint) = &mut self.lint {
+                    match selective {
+                        Some(names) => lint.defs.extend(names.iter().map(|n| n.value.clone())),
+                        // A namespace import binds the path's last segment.
+                        None => lint.defs.extend(path.segments.last().cloned()),
+                    }
+                }
+
                 if let Some(names) = selective {
                     // Selective import: push the names
                     for name in names {
@@ -2402,6 +2534,9 @@ impl Compiler {
                 right,
                 ..
             } => {
+                if operator == "and" || operator == "or" {
+                    self.lint_logical(operator, left, right);
+                }
                 // Short-circuit logical operators
                 if operator == "and" {
                     self.compile_expression(left);
@@ -2435,6 +2570,19 @@ impl Compiler {
                             operator, left_inner, right, true, line,
                         );
                         return;
+                    }
+                    if self.lint.is_some() && operator == "!=" {
+                        let group = if left_is_logical { left_inner } else { right_inner };
+                        if let Expression::Infix { operator: op, token, .. } = group
+                            && op == "or"
+                            && (left_is_logical != right_is_logical)
+                        {
+                            self.lint_warn(
+                                token.span,
+                                "`x != (a or b)` is true unless a and b are equal, since x can only equal one of them".into(),
+                                "to check that x is neither, write `x != a and x != b`",
+                            );
+                        }
                     }
                     if right_is_logical && !left_is_logical {
                         self.compile_distributed_comparison(
@@ -3366,6 +3514,9 @@ impl Compiler {
         if let Some(uv_idx) = self.resolve_upvalue(frame_idx, &ident.value) {
             self.emit_op_u16(OpCode::GetUpvalue, uv_idx, line);
             return;
+        }
+        if let Some(lint) = &mut self.lint {
+            lint.reads.push((ident.value.clone(), ident.token.span));
         }
         let name_const = self.make_constant(Value::String(rc_str(ident.value.as_str())), line);
         self.emit_op_u16(OpCode::GetGlobal, name_const, line);

@@ -19,7 +19,8 @@ pub enum Capability {
     Process,
     /// Read from standard input, which blocks until the user types.
     Stdin,
-    /// Run code on other threads (`diverge`/`converge`).
+    /// Run code on other threads (`diverge`/`converge`) and pass messages
+    /// between them (`channel`).
     Threads,
     /// Sleep, which blocks the thread running the script.
     Sleep,
@@ -61,6 +62,8 @@ pub(crate) const GATED_BUILTINS: &[(&str, Capability)] = &[
     ("__read_file", Capability::FileSystem),
     ("__write_file", Capability::FileSystem),
     ("__append_file", Capability::FileSystem),
+    ("__read_bytes", Capability::FileSystem),
+    ("__write_bytes", Capability::FileSystem),
     ("__file_exists", Capability::FileSystem),
     ("__list_dir", Capability::FileSystem),
     ("__walk_dir", Capability::FileSystem),
@@ -96,6 +99,16 @@ pub(crate) const GATED_BUILTINS: &[(&str, Capability)] = &[
     ("__chdir", Capability::Process),
     ("__exit", Capability::Process),
     ("__pid", Capability::Process),
+    ("__spawn_process", Capability::Process),
+    ("__process_write", Capability::Process),
+    ("__process_close_stdin", Capability::Process),
+    ("__process_read_line", Capability::Process),
+    ("__process_read_all", Capability::Process),
+    ("__process_wait", Capability::Process),
+    ("__process_is_running", Capability::Process),
+    ("__process_pid", Capability::Process),
+    ("__process_kill", Capability::Process),
+    ("__signals", Capability::Process),
     ("__input", Capability::Stdin),
     ("__read_line", Capability::Stdin),
     ("__read_key", Capability::Stdin),
@@ -103,6 +116,12 @@ pub(crate) const GATED_BUILTINS: &[(&str, Capability)] = &[
     ("__join_task", Capability::Threads),
     ("cancel", Capability::Threads),
     ("__time_sleep", Capability::Sleep),
+    ("__channel_new", Capability::Threads),
+    ("__channel_send", Capability::Threads),
+    ("__channel_recv", Capability::Threads),
+    ("__channel_close", Capability::Threads),
+    ("__channel_len", Capability::Threads),
+    ("__channel_is_closed", Capability::Threads),
     ("__ffi_open", Capability::Ffi),
     ("__ffi_fn", Capability::Ffi),
     ("__ffi_struct", Capability::Ffi),

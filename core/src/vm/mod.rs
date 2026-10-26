@@ -3939,14 +3939,11 @@ impl VM {
                 if is_spawn {
                     self.snapshot_spawn_closure(start);
                 }
-                // join rebuilds struct/enum results; spawn snapshots the main thread's globals.
+                // join and channels rebuild struct/enum values; spawn snapshots the main thread's globals.
                 let result = if is_spawn {
                     crate::concurrent::spawn_with_vm(self, &self.stack[start..])
-                } else if std::ptr::fn_addr_eq(
-                    func,
-                    crate::concurrent::builtin_join as fn(&[Value]) -> Value,
-                ) {
-                    crate::concurrent::join_with_vm(self, &self.stack[start..])
+                } else if let Some(with_vm) = crate::concurrent::with_vm(func) {
+                    with_vm(self, &self.stack[start..])
                 } else {
                     func(&self.stack[start..])
                 };

@@ -7,17 +7,13 @@ main {
     inventory["apples"] = 12
     inventory["pears"] = 4
     inventory["plums"] = 9
-
     each name in keys(inventory) {
         println("{name}: {inventory[name]}")
     }
-
     tags := set("fast", "simple", "fast")
     println("unique tags:", len(tags))
-
     first, second := ["x", "y"]
     println(first, second)
-
     text := json.stringify({"lang": "Oxigen", "jit": True, "modules": 19})
     println(text)
     data := json.parse(text)

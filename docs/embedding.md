@@ -93,11 +93,16 @@ vm.restrict(&[Capability::FileSystem]);   // files, but nothing else
 |---|---|
 | `FileSystem` | Reading and writing files and directories (`io`, most of `os`) |
 | `Network` | Sockets and HTTP (`net`, `api`); `net.download`, `net.upload` and `net.send_file` touch local files, so they need `FileSystem` too |
-| `Process` | Running programs, environment variables, the working directory, exiting |
+| `Process` | Running programs (`os.exec`, `os.spawn`), signals (`os.signals`), environment variables, the working directory, exiting |
 | `Stdin` | Reading from standard input, which blocks until the user types |
-| `Threads` | `diverge`/`converge` |
+| `Threads` | `diverge`/`converge`, and `channel` |
 | `Sleep` | `time.sleep`, which blocks the thread running the script |
 | `Ffi` | Loading C libraries and calling them (`ffi`). C code can do anything the process can, so never grant it to a script you would not run natively |
+
+A script that calls `os.spawn` or `os.signals` installs signal handlers for
+SIGINT, SIGTERM and SIGHUP (and any signal it subscribes to) in the host
+process, plus an `atexit` hook that stops the children it started. A host
+that handles those signals itself should leave `Process` out.
 
 A script with `Ffi` can call any C function in the process, including
 everything the other capabilities guard, so allowing it amounts to allowing

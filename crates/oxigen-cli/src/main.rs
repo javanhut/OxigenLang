@@ -3,6 +3,7 @@ use std::fs;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+mod doc;
 mod repl;
 
 /// Single source of truth for the version banner — `--version`, `--help` and
@@ -12,7 +13,7 @@ pub fn print_version() {
 }
 
 use oxigen_core::compiler::Compiler;
-use oxigen_core::diagnostics::{DiagnosticSink, SourceFile, render};
+use oxigen_core::diagnostics::{DiagnosticSink, Severity, SourceFile, render};
 use oxigen_core::formatter::Formatter;
 use oxigen_core::lexer::Lexer;
 use oxigen_core::parser::Parser;
@@ -374,7 +375,7 @@ fn run_tests_command(paths: &[String]) {
     }
 }
 
-fn check_file(file_path: &str) {
+fn check_file(file_path: &str, json: bool) {
     if !PathBuf::from(file_path).is_file() {
         usage_error(&format!("no such file: `{file_path}`"), None);
     }
@@ -389,19 +390,34 @@ fn check_file(file_path: &str) {
     sink.extend(parser.errors().iter().cloned());
 
     // check used to parse and stop, so a compile error never reached an editor.
-    if !sink.has_errors()
-        && let Err(errors) = Compiler::new().compile(&program)
-    {
-        sink.extend(errors.into_iter().map(|e| e.into_diagnostic()));
+    // Past that, it also finds names nothing defines, and suspicious logic.
+    if !sink.has_errors() {
+        let mut builtins = std::collections::HashMap::new();
+        oxigen_core::vm::builtins::register_builtins(&mut builtins);
+        // `__args` is set for every script; `expect` is imported into tests.
+        let known = |name: &str| builtins.contains_key(name) || matches!(name, "__args" | "expect");
+        sink.extend(Compiler::new().check(&program, &known));
     }
 
     sink.deduplicate();
-    let payload: Vec<serde_json::Value> = sink
-        .diagnostics()
-        .iter()
-        .map(|d| render::render_json(d, &source))
-        .collect();
-    println!("{}", serde_json::to_string(&payload).unwrap());
+    if json {
+        let payload: Vec<serde_json::Value> = sink
+            .diagnostics()
+            .iter()
+            .map(|d| render::render_json(d, &source))
+            .collect();
+        println!("{}", serde_json::to_string(&payload).unwrap());
+    } else {
+        for d in sink.diagnostics() {
+            print!("{}", render::render_human(d, &source));
+        }
+        let count = |sev| sink.diagnostics().iter().filter(|d| d.severity == sev).count();
+        let (errors, warnings) = (count(Severity::Error), count(Severity::Warning));
+        match (errors, warnings) {
+            (0, 0) => println!("{file_path}: no problems found"),
+            _ => println!("{file_path}: {errors} error(s), {warnings} warning(s)"),
+        }
+    }
 
     // Non-zero only on real failure, so check works as a CI gate; warnings still exit 0.
     if sink.has_errors() {
@@ -539,7 +555,7 @@ fn write_atomically(path: &str, contents: &str) -> std::io::Result<()> {
 /// the tool ran and the *code* was bad) so scripts can tell the two apart.
 const EXIT_USAGE: i32 = 2;
 
-const SUBCOMMANDS: [&str; 4] = ["check", "fmt", "test", "explain"];
+const SUBCOMMANDS: [&str; 5] = ["check", "fmt", "test", "explain", "doc"];
 
 fn print_usage() {
     print_version();
@@ -547,11 +563,13 @@ fn print_usage() {
     println!("Usage:");
     println!("  oxigen [options] <file.oxi> [script args...]   Run a script");
     println!("  oxigen [options]                               Start the REPL");
-    println!("  oxigen check <file.oxi>                        Report syntax errors as JSON");
+    println!("  oxigen check [--json] <file.oxi>               Report errors and warnings without running");
+    println!("                                                 (JSON when --json or not a terminal)");
     println!("  oxigen fmt [--check] <file.oxi|dir>...         Format files in place");
     println!("                                                 --check: report and exit 1 instead");
     println!("  oxigen test [file.oxi|dir]                     Run *_test.oxi suites");
     println!("  oxigen explain <CODE>                          Explain an error code");
+    println!("  oxigen doc [module|module.fn|fn|builtins]      Show the reference docs");
     println!();
     println!("Options (must come BEFORE the file; anything after it goes to the script):");
     println!("  --jit          Compile eagerly instead of tiering up");
@@ -640,13 +658,17 @@ fn main() {
         None => repl::run_repl(),
         Some("--version" | "-v") => print_version(),
         Some("--help" | "-h") => print_usage(),
-        Some("check") => match rest.get(1) {
-            Some(path) => {
-                let path = path.clone();
-                on_big_stack(move || check_file(&path));
+        Some("check") => {
+            // JSON for editors and other tools; text for a person at a terminal.
+            let json = tail.iter().any(|a| a == "--json") || !std::io::stdout().is_terminal();
+            match tail.iter().find(|a| *a != "--json") {
+                Some(path) => {
+                    let path = path.clone();
+                    on_big_stack(move || check_file(&path, json));
+                }
+                None => usage_error("`check` needs a file", Some("oxigen check [--json] <file.oxi>")),
             }
-            None => usage_error("`check` needs a file", Some("oxigen check <file.oxi>")),
-        },
+        }
         Some("fmt") => {
             // Accepted anywhere after `fmt`, not only straight after it.
             let check = tail.iter().any(|a| a == "--check");
@@ -664,6 +686,13 @@ fn main() {
             let paths = tail.to_vec();
             on_big_stack(move || run_tests_command(&paths));
         }
+        Some("doc") => match doc::lookup(rest.get(1).map(String::as_str)) {
+            Ok(text) => println!("{text}"),
+            Err(message) => {
+                eprintln!("error: {message}");
+                std::process::exit(1);
+            }
+        },
         Some("explain") => match rest.get(1) {
             Some(code) => match render::explain(code) {
                 Some(text) => println!("{text}"),

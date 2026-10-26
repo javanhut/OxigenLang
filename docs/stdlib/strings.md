@@ -25,7 +25,7 @@ Strings are immutable — every function here returns a **new** string.
 | [`ends_with`](#ends_withs-suffix) | `ends_with(s, suffix)` | `bool` |
 | [`contains_str`](#contains_strs-sub--containss-sub) | `contains_str(s, sub)` | `bool` |
 | [`contains`](#contains_strs-sub--containss-sub) | `contains(s, sub)` | `bool` |
-| [`index_of`](#index_ofs-sub) | `index_of(s, sub)` | `int` (`-1` if absent) |
+| [`index_of`](#index_ofs-sub-start) | `index_of(s, sub, start?)` | `int` (`-1` if absent) |
 | [`count`](#counts-sub) | `count(s, sub)` | `int` |
 | [`slice`](#slices-start-end) | `slice(s, start, end)` | `str` |
 | [`char_at`](#char_ats-i) | `char_at(s, i)` | `str` |
@@ -180,15 +180,27 @@ println(strings.contains_str("hello", "ell"))   // True
 println(strings.contains("hello", "z"))         // False
 ```
 
-### `index_of(s, sub)`
+### `index_of(s, sub, start?)`
 
-Index of the first occurrence of `sub`, or `-1` if it never appears. The
-index counts characters, like `s[i]`, not bytes.
+Index of the first occurrence of `sub` at or after index `start` (default 0),
+or `-1` if there is none. Indexes count characters, like `s[i]`, not bytes.
 
 ```oxi
 println(strings.index_of("hello", "ll"))   // 2
 println(strings.index_of("hello", "z"))    // -1
 println(strings.index_of("héllo", "l"))    // 2
+println(strings.index_of("a-b-c", "-", 2)) // 3
+```
+
+To find every occurrence, start each search just past the last one:
+
+```oxi
+s := "a-b-c"
+i := strings.index_of(s, "-")
+repeat when i != -1 {
+    println(i)                             // 1, then 3
+    i = strings.index_of(s, "-", i + 1)
+}
 ```
 
 ### `count(s, sub)`

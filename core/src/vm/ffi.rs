@@ -6,7 +6,7 @@
 //! address or, for an array or map argument, a temporary buffer copied back
 //! after the call (out parameters). See `docs/stdlib/ffi.md`.
 
-use crate::vm::value::{NativeFunction, Value, rc_str};
+use crate::vm::value::{rc_str, NativeFunction, Value};
 use std::cell::Cell;
 use std::collections::HashMap;
 
@@ -27,9 +27,9 @@ mod imp {
     use super::*;
     use crate::vm::collections::OxMap;
     use crate::vm::value::{ObjModule, ValueRepr};
-    use libffi::middle::{Arg, Cif, Closure, CodePtr, Ret, Type, ffi_abi_FFI_DEFAULT_ABI};
+    use libffi::middle::{ffi_abi_FFI_DEFAULT_ABI, Arg, Cif, Closure, CodePtr, Ret, Type};
     use std::cell::RefCell;
-    use std::ffi::{CStr, CString, c_char, c_void};
+    use std::ffi::{c_char, c_void, CStr, CString};
     use std::rc::Rc;
 
     pub(super) const BUILTINS: &[(&str, crate::vm::value::BuiltinFn)] = &[
@@ -117,7 +117,10 @@ mod imp {
         }
 
         fn is_int(&self) -> bool {
-            !matches!(self, CType::Void | CType::F32 | CType::F64 | CType::Struct(_))
+            !matches!(
+                self,
+                CType::Void | CType::F32 | CType::F64 | CType::Struct(_)
+            )
         }
     }
 
@@ -168,9 +171,13 @@ mod imp {
             "unsigned" | "unsigned int" | "u32" | "uint32_t" => CType::U32,
             "long" | "long int" | "signed long" => c_long(false),
             "unsigned long" | "unsigned long int" => c_long(true),
-            "long long" | "long long int" | "signed long long" | "i64" | "int64_t"
-            | "ssize_t" | "intptr_t" | "ptrdiff_t" | "off_t" => CType::I64,
-            "unsigned long long" | "unsigned long long int" | "u64" | "uint64_t" | "size_t"
+            "long long" | "long long int" | "signed long long" | "i64" | "int64_t" | "ssize_t"
+            | "intptr_t" | "ptrdiff_t" | "off_t" => CType::I64,
+            "unsigned long long"
+            | "unsigned long long int"
+            | "u64"
+            | "uint64_t"
+            | "size_t"
             | "uintptr_t" => CType::U64,
             "float" | "f32" => CType::F32,
             "double" | "f64" => CType::F64,
@@ -183,12 +190,20 @@ mod imp {
                     return Err(format!(
                         "unknown C type '{}'{}",
                         src.trim(),
-                        if stars > 0 { "" } else { " (declare structs with ffi.cstruct first)" }
+                        if stars > 0 {
+                            ""
+                        } else {
+                            " (declare structs with ffi.cstruct first)"
+                        }
                     ));
                 }
             },
         };
-        let base = if t.starts_with("enum ") { CType::I32 } else { base };
+        let base = if t.starts_with("enum ") {
+            CType::I32
+        } else {
+            base
+        };
         Ok(match stars {
             0 => base,
             _ => {
@@ -248,9 +263,16 @@ mod imp {
             }
         }
         if args.iter().any(|a| matches!(a, CType::Void)) {
-            return Err(format!("bad C signature '{src}': a parameter cannot be void"));
+            return Err(format!(
+                "bad C signature '{src}': a parameter cannot be void"
+            ));
         }
-        Ok(Sig { name, ret, args, variadic })
+        Ok(Sig {
+            name,
+            ret,
+            args,
+            variadic,
+        })
     }
 
     fn sig_label(sig: &Sig) -> &str {
@@ -298,7 +320,9 @@ mod imp {
 
     fn cstring(s: String, temps: &mut Option<&mut Temps>) -> Result<i64, String> {
         let Some(temps) = temps else {
-            return Err("a string here needs memory that outlives the call; use ffi.cstring".into());
+            return Err(
+                "a string here needs memory that outlives the call; use ffi.cstring".into(),
+            );
         };
         let c = CString::new(s).map_err(|_| "string contains a NUL byte")?;
         let p = c.as_ptr() as i64;
@@ -307,7 +331,12 @@ mod imp {
     }
 
     /// Write `v` as a `ty` at `dst`, which is zeroed and `ty.size()` long.
-    unsafe fn write_value(ty: &CType, v: &Value, dst: *mut u8, temps: &mut Option<&mut Temps>) -> Result<(), String> {
+    unsafe fn write_value(
+        ty: &CType,
+        v: &Value,
+        dst: *mut u8,
+        temps: &mut Option<&mut Temps>,
+    ) -> Result<(), String> {
         let expected = || format!("expected a value for {}", type_name(ty));
         unsafe {
             match ty {
@@ -336,7 +365,13 @@ mod imp {
                     }
                     ValueRepr::Array(a) => write_fields(def, &a.borrow(), dst, temps)?,
                     ValueRepr::Tuple(t) => write_fields(def, t, dst, temps)?,
-                    _ => return Err(format!("expected a map for struct {}, got {}", def.name, v.type_name())),
+                    _ => {
+                        return Err(format!(
+                            "expected a map for struct {}, got {}",
+                            def.name,
+                            v.type_name()
+                        ))
+                    }
                 },
                 CType::Str | CType::Ptr(_) => {
                     let p = match (ty, v.repr()) {
@@ -344,7 +379,9 @@ mod imp {
                         // An array or map for `T*`: point at a copy, copied back after the call.
                         (CType::Ptr(Some(elem)), ValueRepr::Array(_) | ValueRepr::Map(_)) => {
                             let Some(temps) = temps.as_deref_mut() else {
-                                return Err("an array or map here needs a pointer from ffi.alloc".into());
+                                return Err(
+                                    "an array or map here needs a pointer from ffi.alloc".into()
+                                );
                             };
                             let items: Vec<Value> = match v.repr() {
                                 ValueRepr::Array(a) => a.borrow().iter().cloned().collect(),
@@ -358,18 +395,26 @@ mod imp {
                                     .map_err(|e| format!("element {i}: {e}"))?;
                             }
                             let p = base as i64;
-                            temps.back.push(WriteBack { target: v.clone(), elem: (**elem).clone(), buf });
+                            temps.back.push(WriteBack {
+                                target: v.clone(),
+                                elem: (**elem).clone(),
+                                buf,
+                            });
                             p
                         }
                         (CType::Ptr(None), ValueRepr::Array(_)) => {
-                            return Err("to pass an array, declare the element type (int *, not void *)".into());
+                            return Err(
+                                "to pass an array, declare the element type (int *, not void *)"
+                                    .into(),
+                            );
                         }
                         _ => int_of(v).ok_or_else(expected)?,
                     };
                     (dst as *mut usize).write_unaligned(p as usize)
                 }
                 _ => {
-                    let n = int_of(v).ok_or_else(|| format!("expected an int, got {}", v.type_name()))?;
+                    let n = int_of(v)
+                        .ok_or_else(|| format!("expected an int, got {}", v.type_name()))?;
                     match ty.size() {
                         1 => dst.write(n as u8),
                         2 => (dst as *mut u16).write_unaligned(n as u16),
@@ -382,12 +427,23 @@ mod imp {
         Ok(())
     }
 
-    unsafe fn write_fields(def: &StructDef, vals: &[Value], dst: *mut u8, temps: &mut Option<&mut Temps>) -> Result<(), String> {
+    unsafe fn write_fields(
+        def: &StructDef,
+        vals: &[Value],
+        dst: *mut u8,
+        temps: &mut Option<&mut Temps>,
+    ) -> Result<(), String> {
         if vals.len() > def.fields.len() {
-            return Err(format!("struct {} has {} fields, got {}", def.name, def.fields.len(), vals.len()));
+            return Err(format!(
+                "struct {} has {} fields, got {}",
+                def.name,
+                def.fields.len(),
+                vals.len()
+            ));
         }
         for ((name, fty, off), v) in def.fields.iter().zip(vals) {
-            unsafe { write_value(fty, v, dst.add(*off), temps) }.map_err(|e| format!("{}.{name}: {e}", def.name))?;
+            unsafe { write_value(fty, v, dst.add(*off), temps) }
+                .map_err(|e| format!("{}.{name}: {e}", def.name))?;
         }
         Ok(())
     }
@@ -416,7 +472,12 @@ mod imp {
                     let pairs = def
                         .fields
                         .iter()
-                        .map(|(name, fty, off)| (Value::String(rc_str(name.as_str())), read_value(fty, src.add(*off))))
+                        .map(|(name, fty, off)| {
+                            (
+                                Value::String(rc_str(name.as_str())),
+                                read_value(fty, src.add(*off)),
+                            )
+                        })
                         .collect();
                     Value::Map(Rc::new(RefCell::new(OxMap::from_pairs(pairs))))
                 }
@@ -448,7 +509,12 @@ mod imp {
             ValueRepr::String(_) => CType::Str,
             ValueRepr::Uint(_) => CType::U64,
             _ if int_of(v).is_some() => CType::I64,
-            _ => return Err(format!("cannot pass {} as a variadic argument", v.type_name())),
+            _ => {
+                return Err(format!(
+                    "cannot pass {} as a variadic argument",
+                    v.type_name()
+                ))
+            }
         })
     }
 
@@ -553,17 +619,22 @@ mod imp {
     ) {
         let out = result as *mut u64 as *mut u8;
         let sig = &data.sig;
-        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
-            let vals = (0..sig.args.len())
-                .map(|i| unsafe { read_value(&sig.args[i], *args.add(i) as *const u8) })
-                .collect();
-            let vm = CURRENT_VM.get();
-            if vm.is_null() {
-                return Err("ffi callback called outside a call from Oxigen (another thread?)".into());
-            }
-            let v = unsafe { (*vm).call_reentrant(data.func.clone(), vals) }.map_err(|e| e.message)?;
-            write_return(&sig.ret, &v, out).map_err(|e| format!("ffi callback returned a bad value: {e}"))
-        }));
+        let ran =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), String> {
+                let vals = (0..sig.args.len())
+                    .map(|i| unsafe { read_value(&sig.args[i], *args.add(i) as *const u8) })
+                    .collect();
+                let vm = CURRENT_VM.get();
+                if vm.is_null() {
+                    return Err(
+                        "ffi callback called outside a call from Oxigen (another thread?)".into(),
+                    );
+                }
+                let v = unsafe { (*vm).call_reentrant(data.func.clone(), vals) }
+                    .map_err(|e| e.message)?;
+                write_return(&sig.ret, &v, out)
+                    .map_err(|e| format!("ffi callback returned a bad value: {e}"))
+            }));
         let failed = match ran {
             Ok(Ok(())) => return,
             Ok(Err(e)) => e,
@@ -580,7 +651,9 @@ mod imp {
     fn write_return(ty: &CType, v: &Value, out: *mut u8) -> Result<(), String> {
         match ty {
             CType::Void => Ok(()),
-            CType::Str => Err("callbacks cannot return char*; return a pointer from ffi.cstring as void*".into()),
+            CType::Str => Err(
+                "callbacks cannot return char*; return a pointer from ffi.cstring as void*".into(),
+            ),
             t if t.is_int() => {
                 let mut tmp = [0u64; 1];
                 unsafe { write_value(t, v, tmp.as_mut_ptr() as *mut u8, &mut None)? };
@@ -601,23 +674,40 @@ mod imp {
 
     #[cfg(unix)]
     mod os {
-        use std::ffi::{CStr, c_void};
+        use std::ffi::{c_void, CStr};
         pub const PROCESS: &str = "";
 
         fn last_error() -> String {
             let e = unsafe { libc::dlerror() };
-            if e.is_null() { "unknown error".into() } else { unsafe { CStr::from_ptr(e) }.to_string_lossy().into_owned() }
+            if e.is_null() {
+                "unknown error".into()
+            } else {
+                unsafe { CStr::from_ptr(e) }.to_string_lossy().into_owned()
+            }
         }
 
         pub fn open(path: Option<&CStr>) -> Result<*mut c_void, String> {
-            let h = unsafe { libc::dlopen(path.map_or(std::ptr::null(), |p| p.as_ptr()), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-            if h.is_null() { Err(last_error()) } else { Ok(h) }
+            let h = unsafe {
+                libc::dlopen(
+                    path.map_or(std::ptr::null(), |p| p.as_ptr()),
+                    libc::RTLD_NOW | libc::RTLD_LOCAL,
+                )
+            };
+            if h.is_null() {
+                Err(last_error())
+            } else {
+                Ok(h)
+            }
         }
 
         pub fn sym(lib: *mut c_void, name: &CStr) -> Result<*mut c_void, String> {
             unsafe { libc::dlerror() };
             let p = unsafe { libc::dlsym(lib, name.as_ptr()) };
-            if p.is_null() { Err(last_error()) } else { Ok(p) }
+            if p.is_null() {
+                Err(last_error())
+            } else {
+                Ok(p)
+            }
         }
 
         pub fn candidates(name: &str) -> Vec<String> {
@@ -631,7 +721,10 @@ mod imp {
             } else {
                 // `libm.so` is often a linker script dlopen cannot load; the
                 // versioned names are the real files.
-                ["", ".6", ".1", ".0", ".2", ".3", ".4", ".5"].iter().map(|v| format!("lib{name}.so{v}")).collect()
+                ["", ".6", ".1", ".0", ".2", ".3", ".4", ".5"]
+                    .iter()
+                    .map(|v| format!("lib{name}.so{v}"))
+                    .collect()
             }
         }
     }
@@ -639,7 +732,7 @@ mod imp {
     // ponytail: untested on Windows (no Windows machine in CI here).
     #[cfg(windows)]
     mod os {
-        use std::ffi::{CStr, c_char, c_void};
+        use std::ffi::{c_char, c_void, CStr};
         /// No single module exports the C runtime the way the main program
         /// does on Unix; `None` means the universal CRT.
         pub const PROCESS: &str = "ucrtbase.dll";
@@ -653,12 +746,22 @@ mod imp {
         pub fn open(path: Option<&CStr>) -> Result<*mut c_void, String> {
             let path = path.unwrap_or(c"ucrtbase.dll");
             let h = unsafe { LoadLibraryA(path.as_ptr()) };
-            if h.is_null() { Err(format!("LoadLibrary failed (error {})", unsafe { GetLastError() })) } else { Ok(h) }
+            if h.is_null() {
+                Err(format!("LoadLibrary failed (error {})", unsafe {
+                    GetLastError()
+                }))
+            } else {
+                Ok(h)
+            }
         }
 
         pub fn sym(lib: *mut c_void, name: &CStr) -> Result<*mut c_void, String> {
             let p = unsafe { GetProcAddress(lib, name.as_ptr()) };
-            if p.is_null() { Err(format!("symbol {} not found", name.to_string_lossy())) } else { Ok(p) }
+            if p.is_null() {
+                Err(format!("symbol {} not found", name.to_string_lossy()))
+            } else {
+                Ok(p)
+            }
         }
 
         pub fn candidates(name: &str) -> Vec<String> {
@@ -682,7 +785,11 @@ mod imp {
             && !name.contains(".so")
             && !name.ends_with(".dylib")
             && !name.ends_with(".dll");
-        let tries = if plain { os::candidates(&name) } else { vec![name.clone()] };
+        let tries = if plain {
+            os::candidates(&name)
+        } else {
+            vec![name.clone()]
+        };
         let mut first_err = None;
         for t in &tries {
             let c = CString::new(t.as_str()).map_err(|_| "library name contains a NUL byte")?;
@@ -731,7 +838,8 @@ mod imp {
                     Some(ValueRepr::Map(m)) => {
                         for (k, v) in m.borrow().iter() {
                             let key = str_of(k).ok_or("function names must be strings")?;
-                            let sig = str_of(v).ok_or_else(|| format!("{key}: expected a C signature string"))?;
+                            let sig = str_of(v)
+                                .ok_or_else(|| format!("{key}: expected a C signature string"))?;
                             let mut sig = parse_sig(&sig).map_err(|e| format!("{key}: {e}"))?;
                             let sym = sig.name.clone().unwrap_or_else(|| key.clone());
                             let addr = symbol(lib, &sym).map_err(|e| format!("{key}: {e}"))?;
@@ -739,7 +847,9 @@ mod imp {
                             globals.insert(key, native(addr, sig));
                         }
                     }
-                    Some(_) => return Err("declarations must be a map of name to C signature".into()),
+                    Some(_) => {
+                        return Err("declarations must be a map of name to C signature".into())
+                    }
                 }
                 Ok(Value::Module(Rc::new(ObjModule {
                     name: label,
@@ -759,7 +869,10 @@ mod imp {
                 let addr = match args.first().map(|v| v.repr()) {
                     Some(ValueRepr::Integer(p)) if p != 0 => p as usize,
                     _ => {
-                        let name = sig.name.clone().ok_or("the signature needs a function name, like \"int abs(int)\"")?;
+                        let name = sig
+                            .name
+                            .clone()
+                            .ok_or("the signature needs a function name, like \"int abs(int)\"")?;
                         symbol(library(args.first())?, &name)?
                     }
                 };
@@ -775,32 +888,47 @@ mod imp {
     fn builtin_struct(args: &[Value]) -> Value {
         wrap(
             (|| {
-                let first = args.first().and_then(str_of).ok_or("expected (name, fields)")?;
+                let first = args
+                    .first()
+                    .and_then(str_of)
+                    .ok_or("expected (name, fields)")?;
                 let (name, body) = match args.get(1).map(|v| v.repr()) {
                     Some(ValueRepr::String(f)) => (first.trim().to_string(), f.to_string()),
                     Some(ValueRepr::Array(a)) => {
                         let fields: Option<Vec<String>> = a.borrow().iter().map(str_of).collect();
-                        (first.trim().to_string(), fields.ok_or("fields must be strings")?.join(";"))
+                        (
+                            first.trim().to_string(),
+                            fields.ok_or("fields must be strings")?.join(";"),
+                        )
                     }
                     Some(ValueRepr::None) | None => {
-                        let bad = || format!("expected (name, \"double x; double y\"), got '{first}'");
-                        let (open, close) = (first.find('{').ok_or_else(bad)?, first.rfind('}').ok_or_else(bad)?);
+                        let bad =
+                            || format!("expected (name, \"double x; double y\"), got '{first}'");
+                        let (open, close) = (
+                            first.find('{').ok_or_else(bad)?,
+                            first.rfind('}').ok_or_else(bad)?,
+                        );
                         let ident = |s: &str| {
                             s.split_whitespace()
-                                .filter(|w| !matches!(*w, "typedef" | "struct"))
-                                .last()
+                                .rfind(|w| !matches!(*w, "typedef" | "struct"))
                                 .map(|w| w.trim_end_matches(';').to_string())
                                 .filter(|w| !w.is_empty())
                         };
                         // `struct Name { ... }` or `typedef struct { ... } Name;`
-                        let name = ident(&first[..open]).or_else(|| ident(&first[close + 1..])).ok_or_else(bad)?;
+                        let name = ident(&first[..open])
+                            .or_else(|| ident(&first[close + 1..]))
+                            .ok_or_else(bad)?;
                         (name, first[open + 1..close].to_string())
                     }
                     Some(_) => return Err("fields must be a string or an array of strings".into()),
                 };
                 let src = &body;
                 let mut fields = Vec::new();
-                for f in src.split([';', ',']).map(str::trim).filter(|f| !f.is_empty()) {
+                for f in src
+                    .split([';', ','])
+                    .map(str::trim)
+                    .filter(|f| !f.is_empty())
+                {
                     let (ty, fname) = parse_decl(f)?;
                     let fname = fname.ok_or_else(|| format!("field '{f}' needs a name"))?;
                     if matches!(ty, CType::Void) {
@@ -812,12 +940,19 @@ mod imp {
                 if fields.is_empty() {
                     return Err(format!("struct {name} has no fields"));
                 }
-                let mut ffi = Type::structure(fields.iter().map(|(_, t)| t.ffi()).collect::<Vec<_>>());
-                let offsets = ffi.struct_offsets(ffi_abi_FFI_DEFAULT_ABI).map_err(|e| format!("{e:?}"))?;
+                let mut ffi =
+                    Type::structure(fields.iter().map(|(_, t)| t.ffi()).collect::<Vec<_>>());
+                let offsets = ffi
+                    .struct_offsets(ffi_abi_FFI_DEFAULT_ABI)
+                    .map_err(|e| format!("{e:?}"))?;
                 let raw = unsafe { &*ffi.as_raw_ptr() };
                 let def = StructDef {
                     name: name.clone(),
-                    fields: fields.into_iter().zip(offsets).map(|((n, t), o)| (n, t, o)).collect(),
+                    fields: fields
+                        .into_iter()
+                        .zip(offsets)
+                        .map(|((n, t), o)| (n, t, o))
+                        .collect(),
                     size: raw.size,
                     align: raw.alignment as usize,
                     ffi,
@@ -838,7 +973,9 @@ mod imp {
                     return Err("a callback cannot be variadic".into());
                 }
                 let func = match args.get(1).map(|v| v.repr()) {
-                    Some(ValueRepr::Closure(_) | ValueRepr::Native(_) | ValueRepr::Builtin(_)) => args[1].clone(),
+                    Some(ValueRepr::Closure(_) | ValueRepr::Native(_) | ValueRepr::Builtin(_)) => {
+                        args[1].clone()
+                    }
                     _ => return Err("expected a function to call".into()),
                 };
                 let cif = cif(&sig.args, sig.args.len(), false, &sig.ret);
@@ -892,12 +1029,19 @@ mod imp {
     }
 
     fn builtin_sizeof(args: &[Value]) -> Value {
-        wrap(type_arg(args.first()).map(|t| Value::Integer(t.size() as i64)), "sizeof")
+        wrap(
+            type_arg(args.first()).map(|t| Value::Integer(t.size() as i64)),
+            "sizeof",
+        )
     }
 
     /// The address of element `index` of a `ty` array at `ptr`.
     fn element(args: &[Value], index_at: usize) -> Result<(*mut u8, CType), String> {
-        let p = args.first().and_then(int_of).filter(|&p| p != 0).ok_or("expected a non-null pointer")?;
+        let p = args
+            .first()
+            .and_then(int_of)
+            .filter(|&p| p != 0)
+            .ok_or("expected a non-null pointer")?;
         let ty = type_arg(args.get(1))?;
         let i = match args.get(index_at) {
             None => 0,
@@ -909,7 +1053,10 @@ mod imp {
 
     /// `__ffi_read(ptr, type, index?)`
     fn builtin_read(args: &[Value]) -> Value {
-        wrap(element(args, 2).map(|(p, ty)| unsafe { read_value(&ty, p) }), "read")
+        wrap(
+            element(args, 2).map(|(p, ty)| unsafe { read_value(&ty, p) }),
+            "read",
+        )
     }
 
     /// `__ffi_write(ptr, type, value, index?)`
@@ -978,10 +1125,17 @@ mod imp {
             assert!(matches!(s.ret, CType::U64) && s.args.is_empty());
 
             let s = parse_sig("void qsort(void*, size_t, size_t, void*)").unwrap();
-            assert!(matches!(s.args[..], [CType::Ptr(None), CType::U64, CType::U64, CType::Ptr(None)]));
+            assert!(matches!(
+                s.args[..],
+                [CType::Ptr(None), CType::U64, CType::U64, CType::Ptr(None)]
+            ));
 
-            assert!(matches!(parse_type("int *").unwrap(), CType::Ptr(Some(t)) if matches!(*t, CType::I32)));
-            assert!(matches!(parse_type("char **").unwrap(), CType::Ptr(Some(t)) if matches!(*t, CType::Str)));
+            assert!(
+                matches!(parse_type("int *").unwrap(), CType::Ptr(Some(t)) if matches!(*t, CType::I32))
+            );
+            assert!(
+                matches!(parse_type("char **").unwrap(), CType::Ptr(Some(t)) if matches!(*t, CType::Str))
+            );
             assert!(parse_sig("int f(int, ..., int)").is_err());
             assert!(parse_type("Nope").is_err());
         }

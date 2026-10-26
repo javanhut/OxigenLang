@@ -36,6 +36,16 @@ fun tmp_dir(leaf <str>) {
     os.rmdir(dir)
 }
 
+<test>("bytes round-trip exactly") {
+    dir := tmp_dir("oxi_io_bytes")
+    os.mkdir(dir)
+    f := path.join([dir, "b.bin"])
+    io.write_bytes(f, [0, 255, byte(10), 128])
+    expect(io.read_bytes(f)).eq([byte(0), byte(255), byte(10), byte(128)])
+    expect(io.file_size(f)).eq(4)
+    expect(<type<Error> || <Value>>(io.write_bytes(f, [256]))).is_error()
+}
+
 <test>("append adds to the end") {
     dir := tmp_dir("oxi_io_append")
     os.mkdir(dir)

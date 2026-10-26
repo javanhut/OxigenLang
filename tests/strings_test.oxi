@@ -22,6 +22,11 @@ introduce strings
 <test>("searching") {
     expect(strings.index_of("hello world", "world")).eq(6)
     expect(strings.index_of("hello", "z")).eq(-1)
+    expect(strings.index_of("a-b-c", "-", 2)).eq(3)
+    expect(strings.index_of("a-b-c", "-", 4)).eq(-1)
+    expect(strings.index_of("héllo wörld", "ö", 3)).eq(7)
+    expect(strings.index_of("ab", "", 2)).eq(2)
+    expect(strings.index_of("ab", "x", 99)).eq(-1)
     expect(strings.count("banana", "a")).eq(3)
     expect(strings.count("aaaa", "aa")).eq(2)
 }

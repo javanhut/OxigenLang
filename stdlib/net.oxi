@@ -28,9 +28,14 @@ fun head(url <str>) { __http_request("HEAD", url) }
 fun request(method <HttpMethod>, url <str>, headers <generic>, body <generic>) { __http_request(method.value, url, headers, body) }
 
 // ── Streaming HTTP ────────────────────────────────────────────────────────
-// Stream a GET response body to a file without buffering it in memory.
+// Stream a response body to a file without buffering it in memory. The bytes
+// are written as received, so binary bodies (audio, images) arrive intact.
+// GET by default; pass method "POST", "PUT" or "PATCH" with a body to send one.
 // Returns the HTTP status code.
-fun download(url <str>, path <str>) { __net_download(url, path) }
+fun download(url <str>, path <str>, method <str> = "GET", headers <map> = {}, body = None) { __net_download(url, path, method, headers, body) }
+
+// POST body and stream the response to a file: download(url, path, "POST", ...).
+fun post_to_file(url <str>, body <str>, path <str>, headers <map> = {"Content-Type": "application/json"}) { __net_download(url, path, "POST", headers, body) }
 
 // Stream a file as the request body without buffering it in memory.
 // Returns a map with "status" and "body".

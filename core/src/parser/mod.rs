@@ -568,6 +568,23 @@ impl Parser {
         if ok || self.too_deep || self.curr_token.token_type == TokenType::RBrace {
             return;
         }
+        // `return x` parses as a statement `return` followed by `x`; say what
+        // the other language's keyword is called here instead.
+        if self.curr_token.token_type == TokenType::Ident
+            && let Some(instead) = foreign_keyword(&self.curr_token.literal)
+        {
+            let word = self.curr_token.literal.clone();
+            self.errors.push(
+                diag(
+                    codes::UNEXPECTED_TOKEN,
+                    self.curr_token.span,
+                    format!("`{word}` is not an Oxigen keyword"),
+                )
+                .label("read as a variable name, so the next word starts a second statement")
+                .help(instead),
+            );
+            return;
+        }
         self.errors.push(
             diag(
                 codes::UNEXPECTED_TOKEN,
@@ -3546,3 +3563,24 @@ impl Parser {
 
 #[cfg(test)]
 mod tests;
+
+/// What Oxigen calls a keyword from another language, for a word that is not
+/// one here and so parses as a plain name.
+fn foreign_keyword(word: &str) -> Option<&'static str> {
+    Some(match word {
+        "return" => {
+            "Oxigen has no `return`: a function returns its last expression. \
+             To return early, use `give value` (or `give value when condition`)"
+        }
+        "break" => "to leave a loop, use `stop`",
+        "continue" => "to go to the next loop iteration, use `skip`",
+        "let" | "var" | "const" => "declare a variable with `name := value`",
+        "def" | "func" | "function" | "fn" => "define a function with `fun name(params) { ... }`",
+        "import" | "require" | "use" | "include" => "import a module with `introduce name`",
+        "if" | "elif" | "switch" => "branch with `option { condition -> { ... } }` (see control flow docs)",
+        "while" => "loop with `repeat when condition { ... }`",
+        "for" | "foreach" => "loop with `each item in collection { ... }`",
+        "throw" | "raise" => "raise an error with `fail \"message\"`",
+        _ => return None,
+    })
+}

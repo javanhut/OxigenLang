@@ -29,6 +29,8 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("is_value".to_string(), Value::Builtin(builtin_is_value));
     globals.insert("is_error".to_string(), Value::Builtin(builtin_is_error));
     crate::vm::ffi::register(globals);
+    crate::concurrent::register_channel_builtins(globals);
+    crate::process::register(globals);
     globals.insert("keys".to_string(), Value::Builtin(builtin_keys));
     globals.insert("values".to_string(), Value::Builtin(builtin_values));
     globals.insert("insert".to_string(), Value::Builtin(builtin_insert));
@@ -136,6 +138,8 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
         "__append_file".to_string(),
         Value::Builtin(builtin_append_file),
     );
+    globals.insert("__read_bytes".to_string(), Value::Builtin(builtin_read_bytes));
+    globals.insert("__write_bytes".to_string(), Value::Builtin(builtin_write_bytes));
     globals.insert(
         "__file_exists".to_string(),
         Value::Builtin(builtin_file_exists),
@@ -829,13 +833,21 @@ fn builtin_contains_str(args: &[Value]) -> Value {
 }
 
 /// Index of the first `sub` in `s`, counted in characters like `s[i]`, or -1.
+/// The character index of `sub` in `s` at or after character `start`, or -1.
 fn builtin_str_index_of(args: &[Value]) -> Value {
-    match args {
-        [Value::String(s), Value::String(sub)] => match s.find(sub.as_str()) {
-            Some(byte) => Value::Integer(s[..byte].chars().count() as i64),
-            None => Value::Integer(-1),
-        },
-        _ => Value::Error(rc_str("__str_index_of() requires (string, string)")),
+    let (s, sub, start) = match args {
+        [Value::String(s), Value::String(sub)] => (s, sub, 0),
+        [Value::String(s), Value::String(sub), Value::Integer(n)] => (s, sub, (*n).max(0) as usize),
+        [Value::String(s), Value::String(sub), Value::None] => (s, sub, 0),
+        _ => return Value::Error(rc_str("__str_index_of() requires (string, string, start?)")),
+    };
+    // Past the end there is nothing to find, not even an empty string.
+    let Some(from) = s.char_indices().map(|(b, _)| b).chain([s.len()]).nth(start) else {
+        return Value::Integer(-1);
+    };
+    match s[from..].find(sub.as_str()) {
+        Some(byte) => Value::Integer((start + s[from..from + byte].chars().count()) as i64),
+        None => Value::Integer(-1),
     }
 }
 
@@ -1418,6 +1430,55 @@ fn builtin_write_file(args: &[Value]) -> Value {
     }
 }
 
+fn io_error(e: std::io::Error) -> Value {
+    Value::ErrorValue(Rc::new(ErrorValueData {
+        msg: rc_str(format!("{}", e)),
+        tag: Some(rc_str("IO")),
+    }))
+}
+
+/// A file's raw contents as an array of bytes, for binary files `__read_file`
+/// would reject or mangle as text.
+fn builtin_read_bytes(args: &[Value]) -> Value {
+    match args {
+        [path] => match path.repr() {
+            ValueRepr::String(path) => match std::fs::read(path.as_ref()) {
+                Ok(bytes) => Value::array(bytes.into_iter().map(Value::Byte).collect()),
+                Err(e) => io_error(e),
+            },
+            _ => Value::Error(rc_str("__read_bytes() requires a string path")),
+        },
+        _ => Value::Error(rc_str("__read_bytes() takes 1 argument")),
+    }
+}
+
+/// Write an array of bytes (or ints 0-255) to a file exactly as given.
+fn builtin_write_bytes(args: &[Value]) -> Value {
+    let [path, data] = args else {
+        return Value::Error(rc_str("__write_bytes() takes 2 arguments (path, bytes)"));
+    };
+    let (ValueRepr::String(path), ValueRepr::Array(data)) = (path.repr(), data.repr()) else {
+        return Value::Error(rc_str("__write_bytes() requires (string, array of bytes)"));
+    };
+    let mut bytes = Vec::with_capacity(data.borrow().len());
+    for (i, v) in data.borrow().iter().enumerate() {
+        match v.repr() {
+            ValueRepr::Byte(b) => bytes.push(b),
+            ValueRepr::Integer(n) if let Ok(b) = u8::try_from(n) => bytes.push(b),
+            _ => {
+                return Value::Error(rc_str(format!(
+                    "__write_bytes(): element {i} is {}, not a byte (0-255)",
+                    v.type_name()
+                )));
+            }
+        }
+    }
+    match std::fs::write(path.as_ref(), bytes) {
+        Ok(()) => Value::None,
+        Err(e) => io_error(e),
+    }
+}
+
 fn builtin_append_file(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("__append_file() takes 2 arguments"));
@@ -1482,12 +1543,22 @@ fn process_output_map(output: std::process::Output) -> Value {
     )))
 }
 
+/// The optional text to feed a command's stdin; `None` leaves stdin inherited.
+fn stdin_arg(v: Option<&Value>, name: &str) -> Result<Option<String>, Value> {
+    match v.map(|v| v.repr()) {
+        None | Some(ValueRepr::None) => Ok(None),
+        Some(ValueRepr::String(s)) => Ok(Some(s.to_string())),
+        Some(_) => Err(Value::Error(rc_str(format!("{name}() stdin must be a string")))),
+    }
+}
+
 // Runs through a shell, so every metacharacter is live; use __exec_argv with untrusted input.
 fn builtin_exec(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str(
             "__exec() takes 1 argument (a shell command string); \
-             to pass arguments safely use __exec_argv(program, [args])",
+             to pass arguments safely use __exec_argv(program, [args]), \
+             which also takes the text for stdin: __exec_argv(program, [args], stdin)",
         ));
     }
     let full_cmd = match args[0].repr() {
@@ -1518,8 +1589,8 @@ fn builtin_exec(args: &[Value]) -> Value {
 
 // Shell-free: each argv element is one verbatim argument, so "x; rm -rf /" is a filename.
 fn builtin_exec_argv(args: &[Value]) -> Value {
-    if args.len() != 2 {
-        return Value::Error(rc_str("__exec_argv() takes 2 arguments (program, array)"));
+    if !(2..=3).contains(&args.len()) {
+        return Value::Error(rc_str("__exec_argv() takes (program, array) and optional stdin"));
     }
     let program = match args[0].repr() {
         ValueRepr::String(s) => s.to_string(),
@@ -1530,7 +1601,13 @@ fn builtin_exec_argv(args: &[Value]) -> Value {
         _ => return Value::Error(rc_str("__exec_argv() requires an array of arguments")),
     };
 
-    match std::process::Command::new(&program).args(&argv).output() {
+    let stdin = match stdin_arg(args.get(2), "__exec_argv") {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let mut cmd = std::process::Command::new(&program);
+    cmd.args(&argv);
+    match crate::process::output_with_stdin(cmd, stdin) {
         Ok(output) => process_output_map(output),
         // A missing program fails here; the shell form reports that as exit code 127 instead.
         Err(e) => Value::Error(rc_str(format!("__exec_argv({}): {}", program, e))),
@@ -2783,12 +2860,21 @@ macro_rules! net_try {
 }
 
 fn builtin_net_download(args: &[Value]) -> Value {
-    if args.len() != 2 {
-        return Value::Error(rc_str("download: expected (url, path)"));
+    if !(2..=5).contains(&args.len()) {
+        return Value::Error(rc_str("download: expected (url, path, method?, headers?, body?)"));
     }
     let url = net_try!(net_str(&args[0], "download url"));
     let path = net_try!(net_str(&args[1], "download path"));
-    match crate::netres::http_download(&url, &path) {
+    let method = match args.get(2).map(|v| v.repr()) {
+        None | Some(ValueRepr::None) => "GET".to_string(),
+        Some(_) => net_try!(net_str(&args[2], "download method")),
+    };
+    let headers = net_headers(args.get(3));
+    let body = match args.get(4).map(|v| v.repr()) {
+        None | Some(ValueRepr::None) => None,
+        Some(_) => Some(net_try!(net_str(&args[4], "download body"))),
+    };
+    match crate::netres::http_download(&url, &path, &method, &headers, body.as_deref()) {
         Ok(status) => Value::Integer(status),
         Err(e) => Value::Error(rc_str(e)),
     }
