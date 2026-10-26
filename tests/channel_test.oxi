@@ -14,7 +14,9 @@ introduce channel
 <test>("a task can feed a channel the main program reads") {
     ch := channel.new()
     worker := diverge {
-        each i in range(4) { channel.send(ch, {"n": i}) }
+        each i in range(4) {
+            channel.send(ch, {"n": i})
+        }
         channel.close(ch)
         "done"
     }

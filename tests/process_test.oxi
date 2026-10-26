@@ -33,7 +33,7 @@ introduce channel
 }
 
 <test>("exec_argv sends stdin without a shell") {
-    payload := "\{\"text\": \"it's; $(rm -rf /) | x\"\}"
+    payload := "\{\"text\": \"it's; $(rm -rf /) | x\"}"
     r := os.exec_argv("cat", [], payload)
     expect(r["stdout"]).eq(payload)
 }

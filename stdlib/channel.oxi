@@ -1,7 +1,6 @@
 // Pass messages between tasks, in order. A channel is a handle (an int), so it
 // crosses into `diverge` tasks like any other value; messages are copied, the
 // same as task arguments and results.
-
 // A new, empty channel.
 fun new() { __channel_new() }
 
