@@ -199,9 +199,10 @@ does in brace style.
 | Category     | Functions                                          |
 |--------------|----------------------------------------------------|
 | I/O          | `print`, `println`                                 |
-| Collections  | `len`, `push`, `first`, `last`, `rest`, `has`      |
+| Collections  | `len`, `first`, `last`, `rest`, `has`, `copy`      |
+| Add / remove | `push`, `insert`, `remove`, `pop`, `extend`, `clear` |
 | Iteration    | `range`                                            |
 | Conversion   | `ord`, `chr`, `str`, `chars`                       |
 | Constructors | `byte`, `uint`, `set`, `tuple`                     |
-| Map          | `keys`, `values`, `insert`, `remove`               |
+| Map          | `keys`, `values`                                   |
 | Introspection| `type`, `is_mut`, `is_type_mut`                    |
