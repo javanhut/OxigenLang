@@ -1,0 +1,61 @@
+// Set algebra. Every function returns a new set and leaves its arguments
+// alone; push, insert, remove, pop, extend and clear change a set in place.
+// ── Combining ──
+fun union(a <set>, b <set>) { extend(copy(a), b) }
+
+fun intersection(a <set>, b <set>) {
+    result <set>
+    each x in a {
+        push(result, x) when has(b, x)
+    }
+    result
+}
+
+fun difference(a <set>, b <set>) {
+    result <set>
+    each x in a {
+        push(result, x) unless has(b, x)
+    }
+    result
+}
+
+fun symmetric_difference(a <set>, b <set>) { union(difference(a, b), difference(b, a)) }
+
+// ── Comparing ──
+fun is_subset(a <set>, b <set>) {
+    each x in a {
+        give False unless has(b, x)
+    }
+    True
+}
+
+fun is_superset(a <set>, b <set>) { is_subset(b, a) }
+
+fun is_disjoint(a <set>, b <set>) {
+    each x in a {
+        give False when has(b, x)
+    }
+    True
+}
+
+// ── Transforms ──
+fun to_array(s <set>) {
+    result <array>
+    extend(result, s)
+}
+
+fun filter(s <set>, pred <generic>) {
+    result <set>
+    each x in s {
+        push(result, x) when pred(x)
+    }
+    result
+}
+
+fun map(s <set>, f <generic>) {
+    result <set>
+    each x in s {
+        push(result, f(x))
+    }
+    result
+}

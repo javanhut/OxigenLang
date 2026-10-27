@@ -45,6 +45,10 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("insert".to_string(), Value::Builtin(builtin_insert));
     globals.insert("remove".to_string(), Value::Builtin(builtin_remove));
     globals.insert("has".to_string(), Value::Builtin(builtin_has));
+    globals.insert("pop".to_string(), Value::Builtin(builtin_pop));
+    globals.insert("clear".to_string(), Value::Builtin(builtin_clear));
+    globals.insert("copy".to_string(), Value::Builtin(builtin_copy));
+    globals.insert("extend".to_string(), Value::Builtin(builtin_extend));
     globals.insert("tuple".to_string(), Value::Builtin(builtin_tuple));
     globals.insert("set".to_string(), Value::Builtin(builtin_set));
     globals.insert("byte".to_string(), Value::Builtin(builtin_byte));
@@ -412,8 +416,183 @@ fn builtin_push(args: &[Value]) -> Value {
             arr.borrow_mut().push(args[1].clone());
             args[0].clone() // return the array (same behavior as tree-walker)
         }
-        _ => Value::Error(rc_str("push() requires an array as first argument")),
+        ValueRepr::Set(s) => {
+            if let Some(e) = non_hashable_key_error(&args[1], "set element") {
+                return e;
+            }
+            s.borrow_mut().insert(args[1].clone());
+            args[0].clone()
+        }
+        _ => Value::Error(rc_str("push() requires an array or set as first argument")),
     }
+}
+
+/// Resolve a possibly negative `index` against `len`, where `upper` is the
+/// largest valid result (`len` for an insertion point, `len - 1` for an
+/// element).
+fn resolve_index(index: &Value, len: usize, upper: usize, func: &str) -> Result<usize, Value> {
+    let ValueRepr::Integer(i) = index.repr() else {
+        return Err(Value::Error(rc_str(format!(
+            "{func}() index must be an int, got {}",
+            index.type_name()
+        ))));
+    };
+    let resolved = if i < 0 { i + len as i64 } else { i };
+    if resolved < 0 || resolved as u64 > upper as u64 {
+        return Err(Value::Error(rc_str(format!(
+            "{func}() index {i} out of range for ARRAY of length {len}"
+        ))));
+    }
+    Ok(resolved as usize)
+}
+
+/// Every element of an array, tuple or set, for the bulk operations.
+fn elements_of(v: &Value, func: &str) -> Result<Vec<Value>, Value> {
+    match v.repr() {
+        ValueRepr::Array(a) => Ok(a.borrow().to_vec()),
+        ValueRepr::Tuple(t) => Ok(t.to_vec()),
+        ValueRepr::Set(s) => Ok(s.borrow().items().to_vec()),
+        _ => Err(Value::Error(rc_str(format!(
+            "{func}() needs an array, tuple or set of items, got {}",
+            v.type_name()
+        )))),
+    }
+}
+
+/// `pop(array)`, `pop(array, index)`, `pop(map, key)`, `pop(set)`: remove one
+/// entry and return it.
+fn builtin_pop(args: &[Value]) -> Value {
+    let Some(target) = args.first() else {
+        return Value::Error(rc_str("pop() takes 1 or 2 arguments"));
+    };
+    match (target.repr(), args.len()) {
+        (ValueRepr::Array(arr), 1 | 2) => {
+            let len = arr.borrow().len();
+            if len == 0 {
+                return Value::Error(rc_str("pop() from an empty array"));
+            }
+            let idx = match args.get(1) {
+                Some(i) => match resolve_index(i, len, len - 1, "pop") {
+                    Ok(idx) => idx,
+                    Err(e) => return e,
+                },
+                None => len - 1,
+            };
+            arr.borrow_mut().remove(idx)
+        }
+        // A missing key gives None, as `m[key]` does.
+        (ValueRepr::Map(m), 2) => {
+            let removed = m.borrow_mut().remove(&args[1]);
+            removed.unwrap_or(Value::None)
+        }
+        (ValueRepr::Set(s), 1) => {
+            let removed = s.borrow_mut().pop();
+            removed.unwrap_or_else(|| Value::Error(rc_str("pop() from an empty set")))
+        }
+        (ValueRepr::Map(_), _) => Value::Error(rc_str("pop(map, key) takes 2 arguments")),
+        (ValueRepr::Set(_), _) => Value::Error(rc_str(
+            "pop(set) takes 1 argument; use remove(set, value) to remove a given value",
+        )),
+        (ValueRepr::Array(_), _) => {
+            Value::Error(rc_str("pop(array, index?) takes 1 or 2 arguments"))
+        }
+        _ => Value::Error(rc_str(format!(
+            "pop() requires an array, map or set, got {}",
+            target.type_name()
+        ))),
+    }
+}
+
+/// `clear(collection)`: remove every entry, in place.
+fn builtin_clear(args: &[Value]) -> Value {
+    if args.len() != 1 {
+        return Value::Error(rc_str("clear() takes exactly 1 argument"));
+    }
+    // Take the contents out first so they drop after the borrow ends.
+    match args[0].repr() {
+        ValueRepr::Array(arr) => drop(std::mem::take(&mut *arr.borrow_mut())),
+        ValueRepr::Map(m) => drop(std::mem::take(&mut *m.borrow_mut())),
+        ValueRepr::Set(s) => drop(std::mem::take(&mut *s.borrow_mut())),
+        _ => {
+            return Value::Error(rc_str(format!(
+                "clear() requires an array, map or set, got {}",
+                args[0].type_name()
+            )));
+        }
+    }
+    args[0].clone()
+}
+
+/// `copy(collection)`: a new collection holding the same elements. Shallow:
+/// nested arrays, maps and sets are shared with the original.
+fn builtin_copy(args: &[Value]) -> Value {
+    if args.len() != 1 {
+        return Value::Error(rc_str("copy() takes exactly 1 argument"));
+    }
+    match args[0].repr() {
+        ValueRepr::Array(arr) => Value::Array(Rc::new(RefCell::new(arr.borrow().clone()))),
+        ValueRepr::Map(m) => Value::Map(Rc::new(RefCell::new(m.borrow().clone()))),
+        ValueRepr::Set(s) => Value::Set(Rc::new(RefCell::new(s.borrow().clone()))),
+        // Immutable, so the value itself is as good as a copy.
+        ValueRepr::Tuple(_) | ValueRepr::String(_) => args[0].clone(),
+        _ => Value::Error(rc_str(format!(
+            "copy() requires an array, map, set, tuple or str, got {}",
+            args[0].type_name()
+        ))),
+    }
+}
+
+/// `extend(array|set, items)` adds every item; `extend(map, other)` copies
+/// every entry of `other` in, replacing existing keys.
+fn builtin_extend(args: &[Value]) -> Value {
+    if args.len() != 2 {
+        return Value::Error(rc_str("extend() takes exactly 2 arguments"));
+    }
+    match args[0].repr() {
+        ValueRepr::Array(arr) => {
+            let items = match elements_of(&args[1], "extend") {
+                Ok(items) => items,
+                Err(e) => return e,
+            };
+            arr.borrow_mut().extend(items);
+        }
+        ValueRepr::Set(s) => {
+            let items = match elements_of(&args[1], "extend") {
+                Ok(items) => items,
+                Err(e) => return e,
+            };
+            if let Some(e) = items
+                .iter()
+                .find_map(|v| non_hashable_key_error(v, "set element"))
+            {
+                return e;
+            }
+            let mut s = s.borrow_mut();
+            for v in items {
+                s.insert(v);
+            }
+        }
+        ValueRepr::Map(m) => {
+            let ValueRepr::Map(other) = args[1].repr() else {
+                return Value::Error(rc_str(format!(
+                    "extend(map, other) needs a map to copy from, got {}",
+                    args[1].type_name()
+                )));
+            };
+            let entries = other.borrow().entries().to_vec();
+            let mut m = m.borrow_mut();
+            for (k, v) in entries {
+                m.insert(k, v);
+            }
+        }
+        _ => {
+            return Value::Error(rc_str(format!(
+                "extend() requires an array, map or set, got {}",
+                args[0].type_name()
+            )));
+        }
+    }
+    args[0].clone()
 }
 
 fn builtin_first(args: &[Value]) -> Value {
@@ -647,27 +826,49 @@ fn builtin_values(args: &[Value]) -> Value {
     }
 }
 
+/// `insert(map, key, value)`, `insert(set, value)`, `insert(array, index,
+/// value)`.
 fn builtin_insert(args: &[Value]) -> Value {
-    if args.len() != 3 {
-        return Value::Error(rc_str("insert() takes exactly 3 arguments"));
-    }
-    match args[0].repr() {
-        ValueRepr::Map(m) => {
+    let Some(target) = args.first() else {
+        return Value::Error(rc_str("insert() takes 2 or 3 arguments"));
+    };
+    match (target.repr(), args.len()) {
+        (ValueRepr::Map(m), 3) => {
             if let Some(e) = non_hashable_key_error(&args[1], "map key") {
                 return e;
             }
             m.borrow_mut().insert(args[1].clone(), args[2].clone());
-            args[0].clone()
         }
-        ValueRepr::Set(s) => {
+        (ValueRepr::Set(s), 2) => {
             if let Some(e) = non_hashable_key_error(&args[1], "set element") {
                 return e;
             }
             s.borrow_mut().insert(args[1].clone());
-            args[0].clone()
         }
-        _ => Value::Error(rc_str("insert() requires a map or set")),
+        (ValueRepr::Array(arr), 3) => {
+            let len = arr.borrow().len();
+            match resolve_index(&args[1], len, len, "insert") {
+                Ok(idx) => arr.borrow_mut().insert(idx, args[2].clone()),
+                Err(e) => return e,
+            }
+        }
+        (ValueRepr::Map(_), _) => {
+            return Value::Error(rc_str("insert(map, key, value) takes 3 arguments"));
+        }
+        (ValueRepr::Set(_), _) => {
+            return Value::Error(rc_str("insert(set, value) takes 2 arguments"));
+        }
+        (ValueRepr::Array(_), _) => {
+            return Value::Error(rc_str("insert(array, index, value) takes 3 arguments"));
+        }
+        _ => {
+            return Value::Error(rc_str(format!(
+                "insert() requires an array, map or set, got {}",
+                target.type_name()
+            )));
+        }
     }
+    target.clone()
 }
 
 /// `Some(error)` when `v` cannot be a map key or set element. Mirrors
@@ -696,7 +897,19 @@ fn builtin_remove(args: &[Value]) -> Value {
             s.borrow_mut().remove(&args[1]);
             args[0].clone()
         }
-        _ => Value::Error(rc_str("remove() requires a map or set")),
+        // The first element equal to the value, as `has` finds it.
+        ValueRepr::Array(arr) => {
+            let pos = arr.borrow().iter().position(|e| e == &args[1]);
+            if let Some(p) = pos {
+                let removed = arr.borrow_mut().remove(p);
+                drop(removed);
+            }
+            args[0].clone()
+        }
+        _ => Value::Error(rc_str(format!(
+            "remove() requires an array, map or set, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
@@ -709,7 +922,18 @@ fn builtin_has(args: &[Value]) -> Value {
         ValueRepr::Set(s) => Value::Boolean(s.borrow().contains(&args[1])),
         ValueRepr::Array(a) => Value::Boolean(a.borrow().iter().any(|e| e == &args[1])),
         ValueRepr::Tuple(t) => Value::Boolean(t.iter().any(|e| e == &args[1])),
-        _ => Value::Error(rc_str("has() requires a collection")),
+        ValueRepr::String(s) => match args[1].repr() {
+            ValueRepr::String(sub) => Value::Boolean(s.contains(sub.as_str())),
+            ValueRepr::Char(c) => Value::Boolean(s.contains(c)),
+            _ => Value::Error(rc_str(format!(
+                "has(str, x) needs a str or char to look for, got {}",
+                args[1].type_name()
+            ))),
+        },
+        _ => Value::Error(rc_str(format!(
+            "has() requires a collection or str, got {}",
+            args[0].type_name()
+        ))),
     }
 }
 
@@ -718,6 +942,13 @@ fn builtin_tuple(args: &[Value]) -> Value {
 }
 
 fn builtin_set(args: &[Value]) -> Value {
+    // An array can't be a set element, so `set(arr)` means its elements.
+    if let [only] = args
+        && let ValueRepr::Array(arr) = only.repr()
+    {
+        let items = arr.borrow().to_vec();
+        return builtin_set(&items);
+    }
     for a in args {
         if let Some(e) = non_hashable_key_error(a, "set element") {
             return e;

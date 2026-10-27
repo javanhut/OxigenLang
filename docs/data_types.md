@@ -312,12 +312,29 @@ Type keyword: `array`. Zero value: `[]`.
 
   Start and end can be any expression. Out-of-bounds values are clamped silently.
 
-- **Push**: Append an element (returns a new array):
+- **Add**: `push` appends, `insert` puts an element at an index, and `extend`
+  appends many. All three change the array in place:
 
   ```oxi
   arr := [1, 2]
-  arr := push(arr, 3)
+  push(arr, 3)            // [1, 2, 3]
+  insert(arr, 0, 0)       // [0, 1, 2, 3]
+  extend(arr, [4, 5])     // [0, 1, 2, 3, 4, 5]
   ```
+
+- **Remove**: `pop` removes by position and returns the element; `remove`
+  removes the first element equal to a value; `clear` empties the array:
+
+  ```oxi
+  arr := [10, 20, 30, 20]
+  pop(arr)                // 20 (the last); arr is [10, 20, 30]
+  pop(arr, 0)             // 10; arr is [20, 30]
+  remove(arr, 30)         // arr is [20]
+  clear(arr)              // arr is []
+  ```
+
+- **Copy**: arrays are shared references, so `b := a` gives two names for one
+  array. `copy(a)` makes a separate one.
 
 - **First / Last / Rest**:
 
@@ -329,7 +346,9 @@ Type keyword: `array`. Zero value: `[]`.
 
 - **Length**: `len([1, 2, 3])` returns `3`.
 
-- **Membership**: `has([1, 2, 3], 2)` returns `True`.
+- **Membership**: `has([1, 2, 3], 2)` returns `True`. The
+  [`array`](stdlib/array.md) module searches with a predicate: `find`,
+  `find_index`, `index_of`, `filter`.
 
 ### Tuple
 
@@ -427,18 +446,22 @@ Note: An empty map `{}` and an empty block `{}` use the same syntax. The parser 
   y.author = "ada"    // inserts, no error
   ```
 
-- **Insert**: Returns a new map with the key-value pair added or updated:
+- **Insert**: Adds the key-value pair, or updates it, in place. `extend`
+  copies in every entry of another map:
 
   ```oxi
   m := {"a": 1}
-  m := insert(m, "b", 2)
+  insert(m, "b", 2)            // {a: 1, b: 2}
+  extend(m, {"c": 3})          // {a: 1, b: 2, c: 3}
   ```
 
-- **Remove**: Returns a new map without the given key:
+- **Remove**: `remove` deletes a key in place; `pop` deletes it and returns
+  its value (`None` if it wasn't there); `clear` empties the map:
 
   ```oxi
   m := {"a": 1, "b": 2}
-  m := remove(m, "a")
+  remove(m, "a")               // {b: 2}
+  pop(m, "b")                  // 2; m is {}
   ```
 
 - **Keys / Values**:
@@ -450,29 +473,58 @@ Note: An empty map `{}` and an empty block `{}` use the same syntax. The parser 
 
 - **Length**: `len({"a": 1})` returns `1`.
 - **Membership**: `has({"a": 1}, "a")` returns `True` (checks keys).
+- **Copy**: `copy(m)` makes a separate map; `n := m` shares one.
 
 ### Set
 
-An unordered collection of unique values. Created with the `set()` built-in:
+A collection of unique values. Created with the `set()` built-in, from values
+or from an array:
 
 ```oxi
 s := set(1, 2, 3)
 duped := set(1, 1, 2, 2)
+from_array := set([1, 2, 2, 3])
 empty := set()
 ```
 
 Type keyword: `set`. Zero value: `set()`.
 
-Duplicates are automatically removed on creation.
+Duplicates are automatically removed on creation. A set remembers the order
+values were added in, which is the order `each` and `println` show them.
+Two sets are equal when they hold the same values, in any order.
 
 Set elements must be hashable, by the same rule and for the same reason as map
 keys — see [Map](#map) above.
 
 #### Set Operations
 
+- **Add**: `push(s, x)` or `insert(s, x)` adds a value; adding one the set
+  already holds does nothing. `extend(s, items)` adds every element of an
+  array, tuple or set.
+- **Remove**: `remove(s, x)` deletes a value; `pop(s)` deletes and returns the
+  most recently added one; `clear(s)` empties the set.
 - **Membership**: `has(set(1, 2, 3), 2)` returns `True`.
-- **Remove**: `remove(set(1, 2, 3), 2)` returns `set(1, 3)`.
 - **Length**: `len(set(1, 2, 3))` returns `3`.
+- **Copy**: `copy(s)` makes a separate set.
+
+All of these change the set in place:
+
+```oxi
+s := set(1, 2)
+push(s, 3)             // set(1, 2, 3)
+remove(s, 1)           // set(2, 3)
+extend(s, [3, 4])      // set(2, 3, 4)
+```
+
+Union, intersection, difference and subset tests are in the
+[`sets`](stdlib/sets.md) module:
+
+```oxi
+introduce sets
+
+sets.union(set(1, 2), set(2, 3))          // set(1, 2, 3)
+sets.intersection(set(1, 2), set(2, 3))   // set(2)
+```
 
 ### Byte
 

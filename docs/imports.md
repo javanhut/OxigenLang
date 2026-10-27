@@ -147,6 +147,7 @@ OxigenLang ships with the following standard library modules:
 | [`math`](stdlib/math.md) | Math functions (abs, sqrt, pow, floor, ceil, etc.)   |
 | [`strings`](stdlib/strings.md) | String manipulation (split, join, trim, upper, etc.) |
 | [`array`](stdlib/array.md) | Array operations (map, filter, reduce, sort, etc.)   |
+| [`sets`](stdlib/sets.md)   | Set algebra (union, intersection, difference, etc.)  |
 | [`io`](stdlib/io.md) | File I/O (read_file, write_file, etc.)               |
 | [`os`](stdlib/os.md) | OS interaction (exec, env vars, directories, etc.)   |
 | [`path`](stdlib/path.md) | File path manipulation and containment checks        |

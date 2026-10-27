@@ -154,6 +154,7 @@ syn match oxigenStructRef /\<\w\+\>\ze\s\+includes\>/
 syn keyword oxigenBuiltin print println len push first last rest
 syn keyword oxigenBuiltin type ord chr str int float range chars
 syn keyword oxigenBuiltin byte uint set keys values insert remove has
+syn keyword oxigenBuiltin pop extend clear copy
 syn keyword oxigenBuiltin tuple error is_value is_error cancel
 
 " Angle form directives: <log>, <log<tag>>, <fail>, <guard>, <guard<...>>

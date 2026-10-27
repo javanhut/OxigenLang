@@ -236,7 +236,7 @@ func builtinHover(word string) string {
 	case "len":
 		return "**len**(collection) -> int\n\nReturn the length of a string, array, map, tuple, or set."
 	case "push":
-		return "**push**(array, value) -> array\n\nAppend a value to the end of an array, **mutating it in place** (and returning it)."
+		return "**push**(collection, value) -> collection\n\nAppend a value to an array, or add it to a set, **mutating it in place** (and returning it)."
 	case "first":
 		return "**first**(array) -> value\n\nReturn the first element of an array."
 	case "last":
@@ -264,17 +264,25 @@ func builtinHover(word string) string {
 	case "uint":
 		return "**uint**(value) -> uint\n\nConvert a value to an unsigned integer."
 	case "set":
-		return "**set**(array) -> set\n\nCreate a set from an array, removing duplicates."
+		return "**set**(...values) or **set**(array) -> set\n\nCreate a set from the values, or from an array's elements, removing duplicates."
 	case "keys":
 		return "**keys**(map) -> array\n\nReturn the keys of a map as an array."
 	case "values":
 		return "**values**(map) -> array\n\nReturn the values of a map as an array."
 	case "insert":
-		return "**insert**(map, key, value) -> map\n\nInsert a key-value pair into a map (or an element into a set), **mutating it in place** (and returning it)."
+		return "**insert**(map, key, value) / **insert**(set, value) / **insert**(array, index, value) -> collection\n\nAdd an entry, **mutating the collection in place** (and returning it). For an array, `index` may be `len(arr)` to append, or negative to count from the end."
 	case "remove":
-		return "**remove**(collection, item) -> collection\n\nRemove an item from a collection."
+		return "**remove**(collection, item) -> collection\n\nRemove a map key, a set value, or the first array element equal to `item`, **in place**. Does nothing if it isn't there."
+	case "pop":
+		return "**pop**(array, index?) / **pop**(map, key) / **pop**(set) -> value\n\nRemove one entry and return it: an array's last element (or the one at `index`), a map key's value (`None` if absent), or a set's most recently added value."
+	case "extend":
+		return "**extend**(collection, items) -> collection\n\nAdd every element of an array, tuple or set to an array or set, or every entry of a map to a map, **in place**."
+	case "clear":
+		return "**clear**(collection) -> collection\n\nRemove every entry from an array, map or set, **in place**."
+	case "copy":
+		return "**copy**(collection) -> collection\n\nA new array, map or set with the same entries (shallow)."
 	case "has":
-		return "**has**(collection, item) -> bool\n\nCheck if a collection contains an item."
+		return "**has**(collection, item) -> bool\n\nCheck if a collection contains an item (a map checks its keys), or a string contains a substring."
 	case "tuple":
 		return "**tuple**(...values) -> tuple\n\nCreate a tuple from the given values."
 	case "error":
