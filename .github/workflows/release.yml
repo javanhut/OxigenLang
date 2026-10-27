@@ -111,7 +111,15 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # aarch64 gcc defaults to -moutline-atomics, so libffi's C calls
+      # __aarch64_swp4_sync etc., and its closures call __clear_cache; both
+      # live in libgcc, which rust's -nodefaultlibs musl link leaves out.
+      # Inline the atomics and link libgcc for __clear_cache. The variables
+      # are target-scoped, so the other matrix entries ignore them.
       - name: Build release binary
+        env:
+          CFLAGS_aarch64_unknown_linux_musl: -mno-outline-atomics
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C link-arg=-lgcc
         run: cargo build --release -p oxigen --target ${{ matrix.target }}
 
       - name: Verify binary runs
