@@ -59,7 +59,9 @@ fn assert_all_ok(source: &str, expected: &str) {
 fn assert_all_err(source: &str, needle: &str) {
     for (name, make) in backends() {
         match run_on(make(), source) {
-            Ok(v) => panic!("{name}: expected an error containing {needle:?}, got Ok({v})\n{source}"),
+            Ok(v) => {
+                panic!("{name}: expected an error containing {needle:?}, got Ok({v})\n{source}")
+            }
             Err(e) => assert!(
                 e.contains(needle),
                 "{name}: error {e:?} does not mention {needle:?}\n{source}"
@@ -93,7 +95,10 @@ fn lowered_range_loop_does_not_wrap_past_the_end() {
 #[test]
 fn lowered_range_loop_rejects_what_the_builtin_rejects() {
     assert_all_err("n := 0\neach i in range(0.5, 3) { n = n + 1 }\nn", "range");
-    assert_all_err("n := 0\neach i in range(\"a\", \"c\") { n = n + 1 }\nn", "range");
+    assert_all_err(
+        "n := 0\neach i in range(\"a\", \"c\") { n = n + 1 }\nn",
+        "range",
+    );
 }
 
 #[test]
@@ -121,9 +126,20 @@ fn bare_field_name_in_a_lambda_inside_a_method_is_the_field() {
 #[test]
 fn enum_payload_annotations_are_checked() {
     let e = "enum Shape {\n  Circle(radius <float>)\n  Rect { w <int>, h <int> }\n}\n";
-    assert_all_err(&format!("{e}Shape.Circle(\"not a float\")"), "type mismatch");
-    assert_all_err(&format!("{e}Shape.Rect {{ w: \"x\", h: 2 }}"), "type mismatch");
-    assert_all_ok(&format!("{e}c := Shape.Circle(1.5)\nr := Shape.Rect {{ w: 3, h: 4 }}\n[c.radius, r.w * r.h]"), "[1.5, 12]");
+    assert_all_err(
+        &format!("{e}Shape.Circle(\"not a float\")"),
+        "type mismatch",
+    );
+    assert_all_err(
+        &format!("{e}Shape.Rect {{ w: \"x\", h: 2 }}"),
+        "type mismatch",
+    );
+    assert_all_ok(
+        &format!(
+            "{e}c := Shape.Circle(1.5)\nr := Shape.Rect {{ w: 3, h: 4 }}\n[c.radius, r.w * r.h]"
+        ),
+        "[1.5, 12]",
+    );
 }
 
 #[test]

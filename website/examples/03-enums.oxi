@@ -10,13 +10,20 @@ enum Shape {
 
 fun area(shape <Shape>) {
     option {
-        shape.name == "Circle" -> math.round(math.PI * shape.radius * shape.radius),
-        shape.name == "Rect" -> shape.w * shape.h,
-        0.0
+        shape.name == "Circle" -> {
+            math.round(math.PI * shape.radius * shape.radius)
+        }
+        shape.name == "Rect" -> {
+            shape.w * shape.h
+        }
+        {
+            0.0
+        }
     }
 }
 
 pattern is_large(a) when a > 50
+
 pattern is_empty(a) when a == 0
 
 main {
@@ -24,8 +31,8 @@ main {
     each s in shapes {
         a := area(s)
         choose a {
-            is_large -> println("{s.name}: large, area {a}"),
-            is_empty -> println("{s.name}: no area"),
+            is_large -> println("{s.name}: large, area {a}")
+            is_empty -> println("{s.name}: no area")
             else -> println("{s.name}: small, area {a}")
         }
     }

@@ -18,8 +18,8 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hasher};
 use std::fs::File;
+use std::hash::{BuildHasher, Hasher};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,7 +59,8 @@ const BODY_QUEUE_CHUNKS: usize = 8;
 const HTTP_MAX_LINE: usize = 8 * 1024 * 1024;
 
 // One lock so handles cross threads; I/O runs on a cloned fd outside it.
-static REGISTRY: LazyLock<Mutex<HashMap<u64, Resource>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static REGISTRY: LazyLock<Mutex<HashMap<u64, Resource>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static ID_KEY: LazyLock<RandomState> = LazyLock::new(RandomState::new);
 
@@ -180,7 +181,9 @@ pub fn tcp_set_read_timeout(id: u64, ms: i64) -> Result<(), String> {
         return Err("set_read_timeout: milliseconds must not be negative".to_string());
     }
     let timeout = (ms > 0).then(|| Duration::from_millis(ms as u64));
-    with_tcp(id, |s| s.set_read_timeout(timeout).map_err(|e| e.to_string()))
+    with_tcp(id, |s| {
+        s.set_read_timeout(timeout).map_err(|e| e.to_string())
+    })
 }
 
 pub fn tcp_send(id: u64, data: &str) -> Result<i64, String> {
@@ -303,7 +306,13 @@ pub fn close(id: u64) {
 pub const NO_HTTP: &str = "http is not available in this build of Oxigen (WebAssembly)";
 
 #[cfg(target_arch = "wasm32")]
-pub fn http_download(_: &str, _: &str) -> Result<i64, String> {
+pub fn http_download(
+    _: &str,
+    _: &str,
+    _: &str,
+    _: &[(String, String)],
+    _: Option<&str>,
+) -> Result<i64, String> {
     Err(NO_HTTP.into())
 }
 
@@ -322,13 +331,18 @@ pub fn http_upload(
     Err(NO_HTTP.into())
 }
 
-/// Streams a GET response body to `path` without buffering it in memory.
-/// Returns the HTTP status code.
+/// Streams a response body to `path` without buffering it in memory, so a
+/// binary body (audio, an image) reaches the file byte for byte. `method` and
+/// `body` work as in `http_open`. Returns the HTTP status code.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn http_download(url: &str, path: &str) -> Result<i64, String> {
-    let resp = ureq::get(url)
-        .call()
-        .map_err(|e| format!("http error: {}", e))?;
+pub fn http_download(
+    url: &str,
+    path: &str,
+    method: &str,
+    headers: &[(String, String)],
+    body: Option<&str>,
+) -> Result<i64, String> {
+    let resp = send_request(method, url, headers, body, "download")?;
     let status = resp.status().as_u16();
     let (_, body) = resp.into_parts();
     let mut reader = body.into_reader();
@@ -351,7 +365,22 @@ pub fn http_open(
     headers: &[(String, String)],
     body: Option<&str>,
 ) -> Result<u64, String> {
-    let resp = match method.to_uppercase().as_str() {
+    let resp = send_request(method, url, headers, body, "open_stream")?;
+    let (_, resp_body) = resp.into_parts();
+    Ok(spawn_body_reader(Box::new(resp_body.into_reader())))
+}
+
+/// Sends one request: GET, or POST/PUT/PATCH with `body`. `what` names the
+/// caller in the unsupported-method error.
+#[cfg(not(target_arch = "wasm32"))]
+fn send_request(
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: Option<&str>,
+    what: &str,
+) -> Result<ureq::http::Response<ureq::Body>, String> {
+    match method.to_uppercase().as_str() {
         "GET" => {
             let mut req = ureq::get(url);
             for (k, v) in headers {
@@ -373,12 +402,9 @@ pub fn http_open(
                 None => req.send_empty(),
             }
         }
-        m => return Err(format!("open_stream: unsupported method '{}'", m)),
+        m => return Err(format!("{what}: unsupported method '{m}'")),
     }
-    .map_err(|e| format!("http error: {}", e))?;
-
-    let (_, resp_body) = resp.into_parts();
-    Ok(spawn_body_reader(Box::new(resp_body.into_reader())))
+    .map_err(|e| format!("http error: {}", e))
 }
 
 /// Drains a response body on a background thread into a channel so reads can be

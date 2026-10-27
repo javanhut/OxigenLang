@@ -9,7 +9,7 @@ OxigenLang is a modern, lightweight programming language implemented in Rust. It
 ## Features
 
 - **Module System**: Import standard library modules or local files with `introduce`/`intro`. Namespace imports, selective imports, and module caching.
-- **Standard Library**: 21 modules — math, strings, array, io, os, path, time, datetime, random, json, toml, encoding, hash, regex, net (HTTP/HTTPS client with streaming download/upload, plus TCP and UDP sockets), api (HTTP servers — routing, JSON/HTML/static-file responses, and a threaded server in one module), ansi (terminal colors), parse_args (CLI flag parsing), env (.env files), test (the `expect` matchers), and result (Error/Value helpers).
+- **Standard Library**: 23 modules — math, strings, array, io, os (including background processes and signals), path, time, datetime, random, json, toml, encoding, hash, regex, net (HTTP/HTTPS client with streaming download/upload, plus TCP and UDP sockets), api (HTTP servers — routing, JSON/HTML/static-file responses, and a threaded server in one module), ansi (terminal colors), parse_args (CLI flag parsing), env (.env files), channel (message passing between tasks), ffi (calling C libraries), test (the `expect` matchers), and result (Error/Value helpers).
 - **Flexible Block Styles**: Choose between traditional brace-based blocks or Python-style indentation blocks with the `#[indent]` directive.
 - **Conditional Expressions**: Multi-arm `option` blocks, ternary shorthand, `unless` inverse conditionals, `unless ... then ...` fallback expressions, `when`/`unless` postfix guards, and short-circuit `and`/`or` logical operators.
 - **Pattern Matching**: Define reusable patterns with the `pattern` keyword and match against them with `choose`.
@@ -22,6 +22,8 @@ OxigenLang is a modern, lightweight programming language implemented in Rust. It
 - **Index Assignment**: Set map keys and array elements directly with `m[key] = value` and `arr[i] = value`.
 - **Built-in Functions**: Built-in functions for I/O, collection manipulation, type conversion, and introspection.
 - **Two-Tier Error Model**: Propagating errors that halt execution alongside error *values* you can pass around — construct them with `<Error>`/`<Error<tag>>`, wrap success with `<Value>`, normalize fallible calls with `<type<Error || Value>>`, and inspect them with the `is_error`/`is_value` built-ins and the `result` module.
+- **C Interop**: Call any C library from a script by pasting its signatures: `ffi.open("m", {"cos": "double(double)"})`, then `libm.cos(0.0)`. Variadic functions, structs by value, out-parameters and callbacks are supported.
+- **Tooling**: `oxigen check` finds undefined names and suspicious logic without running anything, and `oxigen doc` shows the reference docs for any module or function in the terminal.
 - **Testing**: A built-in test runner — write `<test>("name") { ... }` blocks with `expect(...)` matchers and run them with `oxigen test`. Exits non-zero on failure for CI.
 - **REPL**: Interactive shell for quick experimentation with persistent state across lines.
 
@@ -37,7 +39,9 @@ Detects your system, downloads the matching release build, verifies its SHA-256 
 
 ### From source
 
-Requires [Rust](https://www.rust-lang.org/).
+Requires [Rust](https://www.rust-lang.org/), a C compiler and `make` (the build
+compiles the bundled libffi for the `ffi` module). On macOS the Xcode command
+line tools provide both; on Debian or Ubuntu, `build-essential`.
 
 ```bash
 git clone https://github.com/javanhut/OxigenLang.git
@@ -323,6 +327,27 @@ A test passes when its body runs without error and fails at the first failing
 matcher. `oxigen test` exits non-zero if any test fails, so it works in CI. See
 [docs/testing.md](docs/testing.md) for the full matcher list.
 
+## Calling C
+
+The `ffi` module calls C libraries directly. Declare the functions you need
+with their C signatures and call them like Oxigen functions:
+
+```oxi
+introduce ffi
+
+libm := ffi.open("m", {"pow": "double(double x, double y)"})
+println(libm.pow(2.0, 10.0))   // 1024
+
+ffi.cstruct("div_t", "int quot; int rem")
+libc := ffi.open(None, {"div": "div_t(int, int)"})
+println(libc.div(7, 2))        // {quot: 3, rem: 1}
+```
+
+See [docs/stdlib/ffi.md](docs/stdlib/ffi.md) for types, pointers, structs and
+callbacks, and [docs/FFI_ARCHITECTURE.md](docs/FFI_ARCHITECTURE.md) for how it
+works inside the VM. The prebuilt Linux binaries are static and cannot load
+shared libraries; build from source to use `ffi` on Linux.
+
 ## Documentation
 
 For detailed information, see the [docs](docs/) directory:
@@ -347,6 +372,7 @@ For detailed information, see the [docs](docs/) directory:
 | [Standard Library](docs/stdlib/README.md) | One page per stdlib module, every function documented |
 | [Testing](docs/testing.md) | The built-in test runner, `expect` matchers, `oxigen test` |
 | [Embedding](docs/embedding.md) | Running Oxigen inside a Rust program: native functions, host values, sandboxing, limits, hot reload |
+| [FFI Architecture](docs/FFI_ARCHITECTURE.md) | How the C FFI works: signatures, marshalling, structs, callbacks re-entering the VM, sandboxing |
 | [JIT Architecture](docs/JIT_ARCHITECTURE.md) | **Experimental** — baseline Cranelift JIT: runtime flags, build options, supported opcodes, safety invariants, benchmark status vs CPython |
 
 ## License

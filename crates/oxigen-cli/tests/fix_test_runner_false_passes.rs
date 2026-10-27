@@ -83,7 +83,10 @@ fn os_exit_in_a_test_fails_that_test_and_the_run_continues() {
     let text = stdout(&out);
     assert!(text.contains("[fail] fails"), "stdout:\n{text}");
     assert!(text.contains("[fail] exits"), "stdout:\n{text}");
-    assert!(text.contains("[ok]") && text.contains("after"), "stdout:\n{text}");
+    assert!(
+        text.contains("[ok]") && text.contains("after"),
+        "stdout:\n{text}"
+    );
 }
 
 #[test]
@@ -92,11 +95,18 @@ fn os_exit_at_a_test_files_top_level_does_not_end_the_run() {
         "test-exit-top",
         &[
             ("a_test.oxi", "<test>(\"a fails\") { expect(1).eq(2) }\n"),
-            ("b_test.oxi", "introduce os\nos.exit(0)\n<test>(\"b\") { expect(1).eq(1) }\n"),
+            (
+                "b_test.oxi",
+                "introduce os\nos.exit(0)\n<test>(\"b\") { expect(1).eq(1) }\n",
+            ),
         ],
     );
     assert_failed(&out);
-    assert!(stdout(&out).contains("[fail] a fails"), "stdout:\n{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("[fail] a fails"),
+        "stdout:\n{}",
+        stdout(&out)
+    );
 }
 
 #[test]
@@ -122,7 +132,12 @@ fn a_test_file_with_no_tests_and_a_failing_top_level_fails() {
 #[test]
 fn a_test_file_with_no_tests_and_a_clean_top_level_still_passes() {
     let out = run_tests("test-top-clean", &[("t_test.oxi", "fun helper() { 1 }\n")]);
-    assert!(out.status.success(), "stdout:\n{}\nstderr:\n{}", stdout(&out), stderr(&out));
+    assert!(
+        out.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&out),
+        stderr(&out)
+    );
 }
 
 #[test]
@@ -134,6 +149,15 @@ fn diverge_works_inside_a_test() {
             "fun sq(n) { n * n }\n<test>(\"plain block\") {\n    expect(converge diverge { 42 }).eq(42)\n}\n<test>(\"named function\") {\n    t := diverge { sq(4) }\n    expect(converge t).eq(16)\n}\n<test>(\"each\") {\n    expect(converge diverge each n in [1, 2, 3] { sq(n) }).eq([1, 4, 9])\n}\n",
         )],
     );
-    assert!(out.status.success(), "stdout:\n{}\nstderr:\n{}", stdout(&out), stderr(&out));
-    assert!(stdout(&out).contains("3 passed"), "stdout:\n{}", stdout(&out));
+    assert!(
+        out.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(
+        stdout(&out).contains("3 passed"),
+        "stdout:\n{}",
+        stdout(&out)
+    );
 }

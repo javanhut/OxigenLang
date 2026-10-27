@@ -208,7 +208,10 @@ fn construction_from_outside_cannot_supply_a_hidden_field() {
 #[test]
 fn a_factory_inside_the_struct_may_still_build_one() {
     // Otherwise a struct with a hidden field could never be built with a value.
-    assert_eq!(eval(&format!("{ACCOUNT}\nmake().clone_with(7).total()")), "7");
+    assert_eq!(
+        eval(&format!("{ACCOUNT}\nmake().clone_with(7).total()")),
+        "7"
+    );
 }
 
 #[test]

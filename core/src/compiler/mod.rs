@@ -1,10 +1,10 @@
 pub mod opcode;
 pub mod slot_types;
 
+use crate::ast::*;
 use crate::diagnostics::registry as codes;
 use crate::diagnostics::{Code, Diagnostic};
-use crate::token::Span;
-use crate::ast::*;
+use crate::token::{Span, Token};
 use crate::vm::value::{
     Function, LocalInfo, ObjEnumDef, ParamInfo, Value, VmEnumVariantDef, VmEnumVariantKind, rc_str,
 };
@@ -167,11 +167,17 @@ impl std::fmt::Display for CompileError {
 enum BindingKind {
     Mutable,
     /// `x <int> = 5` — declared immutable.
-    ImmutableConstant { decl: Span },
+    ImmutableConstant {
+        decl: Span,
+    },
     /// The variable of an `each` loop; rebound every iteration.
-    ImmutableLoopVar { header: Span },
+    ImmutableLoopVar {
+        header: Span,
+    },
     /// A block-scoped `struct`/`enum` name.
-    ImmutableTypeName { decl: Span },
+    ImmutableTypeName {
+        decl: Span,
+    },
 }
 
 impl BindingKind {
@@ -266,7 +272,9 @@ impl CompilerFrame {
             name: String::new(),
             depth: scope_depth,
             is_captured: false,
-            kind: BindingKind::ImmutableConstant { decl: Span::default() },
+            kind: BindingKind::ImmutableConstant {
+                decl: Span::default(),
+            },
             type_constraint: None,
         }];
         CompilerFrame {
@@ -353,6 +361,42 @@ pub struct Compiler {
     /// the same unit (`Compiler::for_unit`) assigns identical ids (closure
     /// transfer across threads relies on this to identify a function's code).
     fn_counter: u64,
+    /// What `Compiler::check` collects on top of compiling; `None` for an
+    /// ordinary compile, which records nothing.
+    lint: Option<Box<Lint>>,
+}
+
+/// Names a program reads and defines as globals, and warnings about code that
+/// compiles but is very likely wrong. See `Compiler::check`.
+#[derive(Default)]
+struct Lint {
+    reads: Vec<(String, Span)>,
+    defs: std::collections::HashSet<String>,
+    warnings: Vec<Diagnostic>,
+}
+
+/// A literal whose truth value never changes, as `or`/`and` see it.
+/// A literal as it is written in source, quotes and all.
+fn written(expr: &Expression, token: &Token) -> String {
+    match unwrap_grouped(expr) {
+        Expression::Str { value, .. } => format!("{value:?}"),
+        _ => token.literal.clone(),
+    }
+}
+
+fn constant_operand(expr: &Expression) -> Option<&Token> {
+    match unwrap_grouped(expr) {
+        Expression::Str { token, .. }
+        | Expression::Int { token, .. }
+        | Expression::Float { token, .. }
+        | Expression::Char { token, .. } => Some(token),
+        _ => None,
+    }
+}
+
+fn is_comparison(expr: &Expression) -> bool {
+    matches!(unwrap_grouped(expr),
+        Expression::Infix { operator, .. } if matches!(operator.as_str(), "==" | "!=" | "<" | ">" | "<=" | ">="))
 }
 
 /// The next unused compilation unit number.
@@ -386,13 +430,59 @@ impl Compiler {
             declared_globals: std::collections::HashSet::new(),
             typed_globals: std::collections::HashSet::new(),
             fn_counter: (unit as u64) << 32,
+            lint: None,
         };
         compiler.frames.push(CompilerFrame::new(None, 0));
         compiler
     }
 
+    /// Compile `program` for `oxigen check`: its compile errors, plus a name
+    /// the program reads that nothing defines (an error, since it fails when
+    /// it runs), plus warnings for logic that compiles but is almost
+    /// certainly a mistake. `known` says which names exist without being
+    /// defined in the program: builtins, and whatever the host adds.
+    pub fn check(mut self, program: &Program, known: &dyn Fn(&str) -> bool) -> Vec<Diagnostic> {
+        self.lint = Some(Box::default());
+        let mut lint = None;
+        let mut out = Vec::new();
+        if let Err(errors) = self.compile_collecting(program, &mut lint) {
+            out.extend(errors.into_iter().map(CompileError::into_diagnostic));
+        }
+        let Some(lint) = lint else {
+            return out;
+        };
+        let mut reported = std::collections::HashSet::new();
+        for (name, span) in lint.reads {
+            if lint.defs.contains(&name) || known(&name) || !reported.insert(name.clone()) {
+                continue;
+            }
+            out.push(
+                Diagnostic::error(codes::UNDEFINED_NAME, span, format!("undefined name `{name}`"))
+                    .label("nothing in this program defines it")
+                    .help("define it with `name := value`, import it with `introduce`, or check the spelling"),
+            );
+        }
+        out.extend(lint.warnings);
+        out
+    }
+
     /// Compile a program and return the top-level function.
-    pub fn compile(mut self, program: &Program) -> Result<Function, Vec<CompileError>> {
+    pub fn compile(self, program: &Program) -> Result<Function, Vec<CompileError>> {
+        self.compile_collecting(program, &mut None)
+    }
+
+    /// `compile`, handing back what the lint collected (if it was on).
+    fn compile_collecting(
+        mut self,
+        program: &Program,
+        lint: &mut Option<Box<Lint>>,
+    ) -> Result<Function, Vec<CompileError>> {
+        let result = self.compile_program(program);
+        *lint = self.lint.take();
+        result
+    }
+
+    fn compile_program(&mut self, program: &Program) -> Result<Function, Vec<CompileError>> {
         // The last expression statement's value is the program's return value.
         if program.statements.is_empty() {
             self.emit_op(OpCode::None, 0);
@@ -437,7 +527,7 @@ impl Compiler {
         }
 
         if !self.errors.is_empty() {
-            return Err(self.errors);
+            return Err(std::mem::take(&mut self.errors));
         }
 
         self.finalize_local_locks();
@@ -450,6 +540,43 @@ impl Compiler {
     }
 
     // ── Helpers ────────────────────────────────────────────────────────
+
+    fn lint_warn(&mut self, span: Span, message: String, help: &str) {
+        if let Some(lint) = &mut self.lint {
+            lint.warnings
+                .push(Diagnostic::warning(codes::SUSPICIOUS_LOGIC, span, message).help(help));
+        }
+    }
+
+    /// `x == "a" or "b"` and `("a" or "b")` compile, and are almost never
+    /// what was meant. A literal on the right of a plain value is fine:
+    /// `name or "anonymous"` is a fallback.
+    fn lint_logical(&mut self, op: &str, left: &Expression, right: &Expression) {
+        if self.lint.is_none() {
+            return;
+        }
+        if let Some(lit) = constant_operand(left) {
+            let text = written(left, lit);
+            let message = match op {
+                "or" => format!("`{text} or ...` is always {text}: a literal is never false"),
+                _ => format!(
+                    "`{text} and ...` is always the right-hand side: a literal is never false"
+                ),
+            };
+            self.lint_warn(
+                lit.span,
+                message,
+                "to compare against several values, write `x == (a or b)`, or `x == a or x == b`",
+            );
+        } else if let Some(lit) = constant_operand(right).filter(|_| is_comparison(left)) {
+            let text = written(right, lit);
+            self.lint_warn(
+                lit.span,
+                format!("{text} here is a value on its own, not part of the comparison, so this is always true"),
+                "`x == a or b` means `(x == a) or b`; write `x == (a or b)`, or `x == a or x == b`",
+            );
+        }
+    }
 
     /// Give every write to a typed local its binding's lock back where the
     /// slot's own lock could not hold it (another binding of a different type
@@ -470,13 +597,22 @@ impl Compiler {
             if slot_lock == Some(lock.as_str()) {
                 continue;
             }
-            let line = self.current_frame().function.chunk.lines.get(offset).copied().unwrap_or(0);
+            let line = self
+                .current_frame()
+                .function
+                .chunk
+                .lines
+                .get(offset)
+                .copied()
+                .unwrap_or(0);
             let tc = self.make_constant(Value::String(rc_str(lock.as_str())), line);
             let chunk = self.current_chunk();
             chunk.code[offset] = OpCode::SetLocalLocked as u8;
             chunk.local_locks.push((offset, tc));
         }
-        self.current_chunk().local_locks.sort_unstable_by_key(|&(o, _)| o);
+        self.current_chunk()
+            .local_locks
+            .sort_unstable_by_key(|&(o, _)| o);
     }
 
     fn current_frame(&self) -> &CompilerFrame {
@@ -507,6 +643,21 @@ impl Compiler {
     }
 
     fn emit_op_u16(&mut self, op: OpCode, operand: u16, line: u32) {
+        // Every way a program defines a global comes through here.
+        if self.lint.is_some()
+            && matches!(
+                op,
+                OpCode::DefineGlobal | OpCode::DefineGlobalTyped | OpCode::SetGlobal
+            )
+            && let Some(Value::String(name)) = self
+                .current_chunk()
+                .constants
+                .get(operand as usize)
+                .cloned()
+            && let Some(lint) = &mut self.lint
+        {
+            lint.defs.insert(name.to_string());
+        }
         if op == OpCode::SetLocal {
             let offset = self.current_chunk().len();
             let frame = self.current_frame_mut();
@@ -534,7 +685,7 @@ impl Compiler {
         };
         let idx = self.current_chunk().add_constant(value);
         if idx > u16::MAX as usize {
-            self.error_coded(codes::CHUNK_LIMIT,"Too many constants in one chunk", line);
+            self.error_coded(codes::CHUNK_LIMIT, "Too many constants in one chunk", line);
         }
         idx as u16
     }
@@ -590,7 +741,7 @@ impl Compiler {
         let current = self.current_chunk().len();
         let jump = current - offset - 2; // subtract the 2 bytes of the operand itself
         if jump > u16::MAX as usize {
-            self.error_coded(codes::CHUNK_LIMIT,"Jump too large", 0);
+            self.error_coded(codes::CHUNK_LIMIT, "Jump too large", 0);
             return;
         }
         self.current_chunk().patch_u16(offset, jump as u16);
@@ -601,7 +752,7 @@ impl Compiler {
         self.emit_op(OpCode::Loop, line);
         let offset = self.current_chunk().len() + 2 - loop_start;
         if offset > u16::MAX as usize {
-            self.error_coded(codes::CHUNK_LIMIT,"Loop body too large", line);
+            self.error_coded(codes::CHUNK_LIMIT, "Loop body too large", line);
         }
         self.current_chunk().write_u16(offset as u16, line);
     }
@@ -664,10 +815,14 @@ impl Compiler {
                 .note("`=` binds immutably; `:=` binds mutably");
                 // A synthetic declaration span has nothing useful to point at.
                 if decl == Span::default() {
-                    d.help(format!("declare it with `{name} := ...` to allow reassignment"))
+                    d.help(format!(
+                        "declare it with `{name} := ...` to allow reassignment"
+                    ))
                 } else {
                     d.secondary(decl, "declared immutable here with `=`")
-                        .help(format!("declare it with `{name} := ...` to allow reassignment"))
+                        .help(format!(
+                            "declare it with `{name} := ...` to allow reassignment"
+                        ))
                 }
             }
 
@@ -745,7 +900,9 @@ impl Compiler {
                  first parameter is supplied; the extra parameter{plural} bound \
                  to `None`"
             ))
-            .help("remove the extra parameters, or compare against a value from the enclosing scope"),
+            .help(
+                "remove the extra parameters, or compare against a value from the enclosing scope",
+            ),
         );
     }
 
@@ -807,7 +964,11 @@ impl Compiler {
     /// resolving only a local `self` sent the closure's field reads and writes
     /// to globals instead.
     fn implicit_self_for(&mut self, name: &str) -> Option<(OpCode, u16)> {
-        if !self.method_field_stack.last().is_some_and(|f| f.contains(name)) {
+        if !self
+            .method_field_stack
+            .last()
+            .is_some_and(|f| f.contains(name))
+        {
             return None;
         }
         if let Some(slot) = self.resolve_local("self") {
@@ -817,7 +978,8 @@ impl Compiler {
             return None;
         }
         let frame_idx = self.frames.len() - 1;
-        self.resolve_upvalue(frame_idx, "self").map(|uv| (OpCode::GetUpvalue, uv))
+        self.resolve_upvalue(frame_idx, "self")
+            .map(|uv| (OpCode::GetUpvalue, uv))
     }
 
     /// Push the value of the variable `name`: local, then upvalue, then global.
@@ -973,7 +1135,11 @@ impl Compiler {
         // Locals above the floor, innermost first (top of stack first).
         for &cap in captured.iter().skip(1).rev() {
             self.emit_op(
-                if cap { OpCode::CloseUpvalue } else { OpCode::Pop },
+                if cap {
+                    OpCode::CloseUpvalue
+                } else {
+                    OpCode::Pop
+                },
                 line,
             );
         }
@@ -1297,10 +1463,16 @@ impl Compiler {
                                 Diagnostic::error(
                                     codes::LOOP_VAR_REBIND,
                                     name.token.span,
-                                    format!("`:=` on loop variable `{}` lasts one iteration", name.value),
+                                    format!(
+                                        "`:=` on loop variable `{}` lasts one iteration",
+                                        name.value
+                                    ),
                                 )
                                 .label("discarded at the end of this iteration")
-                                .secondary(header, format!("`{}` is rebound from the sequence here", name.value))
+                                .secondary(
+                                    header,
+                                    format!("`{}` is rebound from the sequence here", name.value),
+                                )
                                 .note(
                                     "the rebinding applies to the rest of this iteration only; \
                                      it does not change which values are iterated",
@@ -1316,7 +1488,10 @@ impl Compiler {
                                     format!("cannot rebind type name `{}`", name.value),
                                 )
                                 .label("cannot rebind")
-                                .secondary(decl, format!("`{}` is declared here as a type", name.value))
+                                .secondary(
+                                    decl,
+                                    format!("`{}` is declared here as a type", name.value),
+                                )
                                 .help("choose a different name for the value"),
                             );
                         }
@@ -1328,17 +1503,16 @@ impl Compiler {
                 let mut predeclared_named_fn = false;
                 if let Expression::FunctionLiteral { .. } = value
                     && self.current_frame().scope_depth > 0
-                        && self.resolve_local(&name.value).is_none()
-                    {
-                        let frame_idx = self.frames.len() - 1;
-                        let is_upvalue = self.resolve_upvalue(frame_idx, &name.value).is_some();
-                        let is_global_reassign =
-                            self.declared_globals.contains(&name.value);
-                        if !is_upvalue && !is_global_reassign {
-                            self.add_local(&name.value, BindingKind::Mutable, None);
-                            predeclared_named_fn = true;
-                        }
+                    && self.resolve_local(&name.value).is_none()
+                {
+                    let frame_idx = self.frames.len() - 1;
+                    let is_upvalue = self.resolve_upvalue(frame_idx, &name.value).is_some();
+                    let is_global_reassign = self.declared_globals.contains(&name.value);
+                    if !is_upvalue && !is_global_reassign {
+                        self.add_local(&name.value, BindingKind::Mutable, None);
+                        predeclared_named_fn = true;
                     }
+                }
                 // Pass the name so a function literal's closure carries it instead of showing as anonymous.
                 if let Expression::FunctionLiteral {
                     parameters, body, ..
@@ -1365,7 +1539,14 @@ impl Compiler {
                 } else {
                     let frame_idx = self.frames.len() - 1;
                     if let Some(uv_idx) = self.resolve_upvalue(frame_idx, &name.value) {
-                        self.check_upvalue_write(&name.value, name.token.span, "rebind", "", true, line);
+                        self.check_upvalue_write(
+                            &name.value,
+                            name.token.span,
+                            "rebind",
+                            "",
+                            true,
+                            line,
+                        );
                         self.emit_op_u16(OpCode::SetUpvalue, uv_idx, line);
                         self.emit_op(OpCode::Pop, line);
                     } else if self.current_frame().scope_depth > 0
@@ -1396,7 +1577,8 @@ impl Compiler {
             } => {
                 // <generic> with = is not allowed — generic implies type mutability
                 if !walrus && matches!(type_ann, TypeAnnotation::Generic) {
-                    self.error_coded(codes::GENERIC_WITH_EQUALS,
+                    self.error_coded(
+                        codes::GENERIC_WITH_EQUALS,
                         &format!(
                             "<generic> cannot be used with '=' (immutable). use ':=' for '{}'",
                             name.value
@@ -1516,7 +1698,13 @@ impl Compiler {
                     && !self.current_frame().locals[slot as usize].kind.is_mutable()
                 {
                     let kind = self.current_frame().locals[slot as usize].kind;
-                    self.report_immutable_write(&name.value, kind, name.token.span, "assign to", "");
+                    self.report_immutable_write(
+                        &name.value,
+                        kind,
+                        name.token.span,
+                        "assign to",
+                        "",
+                    );
                 }
                 // A bare name that is not a local but is a field of the enclosing struct resolves to self.field.
                 if self.resolve_local(&name.value).is_none()
@@ -1538,7 +1726,14 @@ impl Compiler {
                 } else {
                     let frame_idx = self.frames.len() - 1;
                     if let Some(uv_idx) = self.resolve_upvalue(frame_idx, &name.value) {
-                        self.check_upvalue_write(&name.value, name.token.span, "assign to", "", false, line);
+                        self.check_upvalue_write(
+                            &name.value,
+                            name.token.span,
+                            "assign to",
+                            "",
+                            false,
+                            line,
+                        );
                         self.emit_op_u16(OpCode::SetUpvalue, uv_idx, line);
                     } else {
                         let name_const =
@@ -1593,7 +1788,9 @@ impl Compiler {
                     .loop_continue_floors
                     .push(continue_floor);
                 // `repeat` has no loop variable, so `stop` exits to the same height `skip` continues to.
-                self.current_frame_mut().loop_exit_floors.push(continue_floor);
+                self.current_frame_mut()
+                    .loop_exit_floors
+                    .push(continue_floor);
                 let handler_floor = self.current_frame().handler_depth;
                 self.current_frame_mut()
                     .loop_handler_depths
@@ -1666,39 +1863,62 @@ impl Compiler {
 
                 // iter_slot is the array path only; index_slot is the counter, end_slot the exclusive bound,
                 // limit_slot the last counter value that may still be advanced (see `RangeLimit`).
-                let (index_slot, iter_slot, end_slot, limit_slot) = if let Some((args, _)) = range_args {
-                    // counter = start (0 for 1-arg form), evaluated once
-                    if args.len() == 1 {
-                        self.emit_constant(Value::Integer(0), line);
+                let (index_slot, iter_slot, end_slot, limit_slot) =
+                    if let Some((args, _)) = range_args {
+                        // counter = start (0 for 1-arg form), evaluated once
+                        if args.len() == 1 {
+                            self.emit_constant(Value::Integer(0), line);
+                        } else {
+                            self.compile_expression(&args[0]);
+                        }
+                        self.add_local(LOOP_INDEX, BindingKind::Mutable, None);
+                        // range(n) puts the bound first; every other form puts it second, since a third argument is the step.
+                        self.compile_expression(if args.len() == 1 { &args[0] } else { &args[1] });
+                        self.add_local(
+                            LOOP_RANGE_END,
+                            BindingKind::ImmutableConstant {
+                                decl: Span::default(),
+                            },
+                            None,
+                        );
+                        let i = self.resolve_local(LOOP_INDEX).unwrap();
+                        let e = self.resolve_local(LOOP_RANGE_END).unwrap();
+                        // Checks both bounds are ints, as the builtin does, and bounds the counter so it never wraps.
+                        self.emit_op_u16(OpCode::GetLocal, i, line);
+                        self.emit_op_u16(OpCode::GetLocal, e, line);
+                        let step_idx = self.make_constant(Value::Integer(range_step), line);
+                        self.emit_op_u16(OpCode::RangeLimit, step_idx, line);
+                        self.add_local(
+                            LOOP_RANGE_LIMIT,
+                            BindingKind::ImmutableConstant {
+                                decl: Span::default(),
+                            },
+                            None,
+                        );
+                        let l = self.resolve_local(LOOP_RANGE_LIMIT).unwrap();
+                        (i, 0, e, l)
                     } else {
-                        self.compile_expression(&args[0]);
-                    }
-                    self.add_local(LOOP_INDEX, BindingKind::Mutable, None);
-                    // range(n) puts the bound first; every other form puts it second, since a third argument is the step.
-                    self.compile_expression(if args.len() == 1 { &args[0] } else { &args[1] });
-                    self.add_local(LOOP_RANGE_END, BindingKind::ImmutableConstant { decl: Span::default() }, None);
-                    let i = self.resolve_local(LOOP_INDEX).unwrap();
-                    let e = self.resolve_local(LOOP_RANGE_END).unwrap();
-                    // Checks both bounds are ints, as the builtin does, and bounds the counter so it never wraps.
-                    self.emit_op_u16(OpCode::GetLocal, i, line);
-                    self.emit_op_u16(OpCode::GetLocal, e, line);
-                    let step_idx = self.make_constant(Value::Integer(range_step), line);
-                    self.emit_op_u16(OpCode::RangeLimit, step_idx, line);
-                    self.add_local(LOOP_RANGE_LIMIT, BindingKind::ImmutableConstant { decl: Span::default() }, None);
-                    let l = self.resolve_local(LOOP_RANGE_LIMIT).unwrap();
-                    (i, 0, e, l)
-                } else {
-                    self.compile_expression(iterable);
-                    self.add_local(LOOP_ITERABLE, BindingKind::ImmutableConstant { decl: Span::default() }, None);
-                    self.emit_constant(Value::Integer(0), line);
-                    self.add_local(LOOP_INDEX, BindingKind::Mutable, None);
-                    let it = self.resolve_local(LOOP_ITERABLE).unwrap();
-                    let i = self.resolve_local(LOOP_INDEX).unwrap();
-                    (i, it, 0, 0)
-                };
+                        self.compile_expression(iterable);
+                        self.add_local(
+                            LOOP_ITERABLE,
+                            BindingKind::ImmutableConstant {
+                                decl: Span::default(),
+                            },
+                            None,
+                        );
+                        self.emit_constant(Value::Integer(0), line);
+                        self.add_local(LOOP_INDEX, BindingKind::Mutable, None);
+                        let it = self.resolve_local(LOOP_ITERABLE).unwrap();
+                        let i = self.resolve_local(LOOP_INDEX).unwrap();
+                        (i, it, 0, 0)
+                    };
                 let is_range = range_args.is_some();
                 // Counting up runs while index < bound, down while index > bound: the bound stays exclusive either way.
-                let range_cmp = if range_step > 0 { OpCode::Less } else { OpCode::Greater };
+                let range_cmp = if range_step > 0 {
+                    OpCode::Less
+                } else {
+                    OpCode::Greater
+                };
 
                 // A range loop tests `index < end` once here and then `index < limit` before each advance.
                 let entry_exit = if is_range {
@@ -1752,11 +1972,7 @@ impl Compiler {
                 // IterEntry pushes key then value, so the key takes the lower slot.
                 let header = token.span;
                 if let Some(index) = index_variable {
-                    self.add_local(
-                        &index.value,
-                        BindingKind::ImmutableLoopVar { header },
-                        None,
-                    );
+                    self.add_local(&index.value, BindingKind::ImmutableLoopVar { header }, None);
                 }
                 self.add_local(
                     &variable.value,
@@ -2053,7 +2269,9 @@ impl Compiler {
                 if self.current_frame().scope_depth > 0 {
                     self.add_local(
                         &name.value,
-                        BindingKind::ImmutableTypeName { decl: name.token.span },
+                        BindingKind::ImmutableTypeName {
+                            decl: name.token.span,
+                        },
                         None,
                     );
                 } else {
@@ -2122,7 +2340,9 @@ impl Compiler {
                 if self.current_frame().scope_depth > 0 {
                     self.add_local(
                         &name.value,
-                        BindingKind::ImmutableTypeName { decl: name.token.span },
+                        BindingKind::ImmutableTypeName {
+                            decl: name.token.span,
+                        },
                         None,
                     );
                 } else {
@@ -2218,7 +2438,11 @@ impl Compiler {
                             params.iter().map(|p| p.value.clone()).collect();
                         self.compile_pattern_function(&param_names, condition, line);
                         let slot = self.current_frame().locals.len() as u16;
-                        self.add_local(&format!("__pattern_{}", arm.pattern_name), BindingKind::Mutable, None);
+                        self.add_local(
+                            &format!("__pattern_{}", arm.pattern_name),
+                            BindingKind::Mutable,
+                            None,
+                        );
                         Some(slot)
                     } else {
                         None
@@ -2238,7 +2462,9 @@ impl Compiler {
 
                     match inline_slots[i] {
                         Some(slot) => self.emit_op_u16(OpCode::GetLocal, slot, line),
-                        None => self.emit_get_variable(&format!("__pattern_{}", arm.pattern_name), line),
+                        None => {
+                            self.emit_get_variable(&format!("__pattern_{}", arm.pattern_name), line)
+                        }
                     }
                     self.emit_op_u16(OpCode::GetLocal, subject_slot, line);
                     self.emit_op_u8(OpCode::Call, 1, line);
@@ -2289,6 +2515,14 @@ impl Compiler {
 
                 let path_const = self.make_constant(Value::String(rc_str(path_str.as_str())), line);
 
+                if let Some(lint) = &mut self.lint {
+                    match selective {
+                        Some(names) => lint.defs.extend(names.iter().map(|n| n.value.clone())),
+                        // A namespace import binds the path's last segment.
+                        None => lint.defs.extend(path.segments.last().cloned()),
+                    }
+                }
+
                 if let Some(names) = selective {
                     // Selective import: push the names
                     for name in names {
@@ -2324,10 +2558,11 @@ impl Compiler {
 
         // Fold pure-literal compound nodes; leaves keep their True/False/None fast-path opcodes.
         if matches!(expr, Expression::Prefix { .. } | Expression::Infix { .. })
-            && let Some(folded) = fold_constant_expression(expr) {
-                self.emit_constant(folded, line);
-                return;
-            }
+            && let Some(folded) = fold_constant_expression(expr)
+        {
+            self.emit_constant(folded, line);
+            return;
+        }
 
         match expr {
             Expression::Int { value, .. } => {
@@ -2392,7 +2627,11 @@ impl Compiler {
                     "-" => self.emit_op(OpCode::Negate, line),
                     "!" | "not" => self.emit_op(OpCode::Not, line),
                     "~" => self.emit_op(OpCode::BitNot, line),
-                    _ => self.error_coded(codes::UNKNOWN_OPERATOR,&format!("unknown prefix operator: {}", operator), line),
+                    _ => self.error_coded(
+                        codes::UNKNOWN_OPERATOR,
+                        &format!("unknown prefix operator: {}", operator),
+                        line,
+                    ),
                 }
             }
 
@@ -2402,6 +2641,9 @@ impl Compiler {
                 right,
                 ..
             } => {
+                if operator == "and" || operator == "or" {
+                    self.lint_logical(operator, left, right);
+                }
                 // Short-circuit logical operators
                 if operator == "and" {
                     self.compile_expression(left);
@@ -2436,6 +2678,27 @@ impl Compiler {
                         );
                         return;
                     }
+                    if self.lint.is_some() && operator == "!=" {
+                        let group = if left_is_logical {
+                            left_inner
+                        } else {
+                            right_inner
+                        };
+                        if let Expression::Infix {
+                            operator: op,
+                            token,
+                            ..
+                        } = group
+                            && op == "or"
+                            && (left_is_logical != right_is_logical)
+                        {
+                            self.lint_warn(
+                                token.span,
+                                "`x != (a or b)` is true unless a and b are equal, since x can only equal one of them".into(),
+                                "to check that x is neither, write `x != a and x != b`",
+                            );
+                        }
+                    }
                     if right_is_logical && !left_is_logical {
                         self.compile_distributed_comparison(
                             operator,
@@ -2469,7 +2732,11 @@ impl Compiler {
                     "^" => self.emit_op(OpCode::BitXor, line),
                     "<<" => self.emit_op(OpCode::ShiftLeft, line),
                     ">>" => self.emit_op(OpCode::ShiftRight, line),
-                    _ => self.error_coded(codes::UNKNOWN_OPERATOR,&format!("unknown infix operator: {}", operator), line),
+                    _ => self.error_coded(
+                        codes::UNKNOWN_OPERATOR,
+                        &format!("unknown infix operator: {}", operator),
+                        line,
+                    ),
                 }
             }
 
@@ -2496,7 +2763,11 @@ impl Compiler {
                     match operator.as_str() {
                         "++" => self.emit_op(OpCode::Add, line),
                         "--" => self.emit_op(OpCode::Subtract, line),
-                        _ => self.error_coded(codes::UNKNOWN_OPERATOR,&format!("unknown postfix operator: {}", operator), line),
+                        _ => self.error_coded(
+                            codes::UNKNOWN_OPERATOR,
+                            &format!("unknown postfix operator: {}", operator),
+                            line,
+                        ),
                     }
                     if let Some(slot) = self.resolve_local(&ident.value) {
                         self.emit_op_u16(OpCode::SetLocal, slot, line);
@@ -2520,7 +2791,11 @@ impl Compiler {
                     }
                     self.emit_op(OpCode::Pop, line); // pop the stored (new) value, leaving pre-inc
                 } else {
-                    self.error_coded(codes::UNKNOWN_OPERATOR,"postfix operator requires identifier", line);
+                    self.error_coded(
+                        codes::UNKNOWN_OPERATOR,
+                        "postfix operator requires identifier",
+                        line,
+                    );
                 }
             }
 
@@ -2916,8 +3191,7 @@ impl Compiler {
                 // Catch target is the TypeWrap, which turns the in-band error into the Error side of the union.
                 let is_error_union = type_str.contains(" || ") && {
                     let parts: Vec<&str> = type_str.split(" || ").collect();
-                    parts.contains(&"VALUE")
-                        && parts.iter().any(|p| p.starts_with("ERROR"))
+                    parts.contains(&"VALUE") && parts.iter().any(|p| p.starts_with("ERROR"))
                 };
                 let handler = if is_error_union {
                     Some(self.emit_push_handler(line))
@@ -3024,8 +3298,7 @@ impl Compiler {
         } else if name.value == "_" {
             self.emit_op(OpCode::Pop, line);
         } else {
-            let name_const =
-                self.make_constant(Value::String(rc_str(name.value.as_str())), line);
+            let name_const = self.make_constant(Value::String(rc_str(name.value.as_str())), line);
             self.emit_op_u16(OpCode::DefineGlobal, name_const, line);
         }
     }
@@ -3042,7 +3315,9 @@ impl Compiler {
             let forbidden = match kind {
                 BindingKind::Mutable => false,
                 BindingKind::ImmutableConstant { .. } => !walrus,
-                BindingKind::ImmutableLoopVar { .. } | BindingKind::ImmutableTypeName { .. } => true,
+                BindingKind::ImmutableLoopVar { .. } | BindingKind::ImmutableTypeName { .. } => {
+                    true
+                }
             };
             if forbidden {
                 self.report_immutable_write(&name.value, kind, name.token.span, "assign to", "");
@@ -3051,7 +3326,14 @@ impl Compiler {
         } else {
             let frame_idx = self.frames.len() - 1;
             if let Some(uv_idx) = self.resolve_upvalue(frame_idx, &name.value) {
-                self.check_upvalue_write(&name.value, name.token.span, "assign to", "", walrus, line);
+                self.check_upvalue_write(
+                    &name.value,
+                    name.token.span,
+                    "assign to",
+                    "",
+                    walrus,
+                    line,
+                );
                 self.emit_op_u16(OpCode::SetUpvalue, uv_idx, line);
             } else {
                 let name_const =
@@ -3229,7 +3511,11 @@ impl Compiler {
             "<=" => self.emit_op(OpCode::LessEqual, line),
             ">" => self.emit_op(OpCode::Greater, line),
             ">=" => self.emit_op(OpCode::GreaterEqual, line),
-            _ => self.error_coded(codes::UNKNOWN_OPERATOR,&format!("unknown comparison operator: {}", op), line),
+            _ => self.error_coded(
+                codes::UNKNOWN_OPERATOR,
+                &format!("unknown comparison operator: {}", op),
+                line,
+            ),
         }
     }
 
@@ -3237,7 +3523,11 @@ impl Compiler {
     fn compile_is_mut(&mut self, args: &[Expression], span: Span) {
         let line = span.line() as u32;
         if args.len() != 1 {
-            self.error_at(codes::INTRINSIC_MISUSE, span, "is_mut() takes exactly 1 argument");
+            self.error_at(
+                codes::INTRINSIC_MISUSE,
+                span,
+                "is_mut() takes exactly 1 argument",
+            );
             self.emit_op(OpCode::False, line);
             return;
         }
@@ -3256,7 +3546,11 @@ impl Compiler {
             // Struct fields are always mutable
             self.emit_op(OpCode::True, line);
         } else {
-            self.error_at(codes::INTRINSIC_MISUSE, span, "argument to is_mut must be a variable name");
+            self.error_at(
+                codes::INTRINSIC_MISUSE,
+                span,
+                "argument to is_mut must be a variable name",
+            );
             self.emit_op(OpCode::False, line);
         }
     }
@@ -3265,7 +3559,11 @@ impl Compiler {
     fn compile_is_type(&mut self, args: &[Expression], span: Span) {
         let line = span.line() as u32;
         if args.len() != 2 {
-            self.error_at(codes::INTRINSIC_MISUSE, span, "is_type() takes exactly 2 arguments");
+            self.error_at(
+                codes::INTRINSIC_MISUSE,
+                span,
+                "is_type() takes exactly 2 arguments",
+            );
             self.emit_op(OpCode::False, line);
             return;
         }
@@ -3276,7 +3574,11 @@ impl Compiler {
                 self.make_constant(Value::String(rc_str(type_ident.value.as_str())), line);
             self.emit_op_u16(OpCode::IsType, type_const, line);
         } else {
-            self.error_at(codes::INTRINSIC_MISUSE, span, "second argument to is_type must be a type name");
+            self.error_at(
+                codes::INTRINSIC_MISUSE,
+                span,
+                "second argument to is_type must be a type name",
+            );
             self.emit_op(OpCode::Pop, line);
             self.emit_op(OpCode::False, line);
         }
@@ -3286,7 +3588,11 @@ impl Compiler {
     fn compile_is_type_mut(&mut self, args: &[Expression], span: Span) {
         let line = span.line() as u32;
         if args.len() != 1 {
-            self.error_at(codes::INTRINSIC_MISUSE, span, "is_type_mut() takes exactly 1 argument");
+            self.error_at(
+                codes::INTRINSIC_MISUSE,
+                span,
+                "is_type_mut() takes exactly 1 argument",
+            );
             self.emit_op(OpCode::False, line);
             return;
         }
@@ -3314,7 +3620,11 @@ impl Compiler {
             // Struct fields have locked types
             self.emit_op(OpCode::False, line);
         } else {
-            self.error_at(codes::INTRINSIC_MISUSE, span, "argument to is_type_mut must be a variable name");
+            self.error_at(
+                codes::INTRINSIC_MISUSE,
+                span,
+                "argument to is_type_mut must be a variable name",
+            );
             self.emit_op(OpCode::False, line);
         }
     }
@@ -3325,7 +3635,6 @@ impl Compiler {
         self.loc_column_stack.push(col);
         self.compile_identifier_inner(ident, line);
         self.loc_column_stack.pop();
-        
     }
 
     /// Collect the field names visible to a method on `struct_name`, walking
@@ -3357,8 +3666,7 @@ impl Compiler {
         }
         if let Some((load_self, self_idx)) = self.implicit_self_for(&ident.value) {
             self.emit_op_u16(load_self, self_idx, line);
-            let field_const =
-                self.make_constant(Value::String(rc_str(ident.value.as_str())), line);
+            let field_const = self.make_constant(Value::String(rc_str(ident.value.as_str())), line);
             self.emit_op_u16(OpCode::GetField, field_const, line);
             return;
         }
@@ -3366,6 +3674,9 @@ impl Compiler {
         if let Some(uv_idx) = self.resolve_upvalue(frame_idx, &ident.value) {
             self.emit_op_u16(OpCode::GetUpvalue, uv_idx, line);
             return;
+        }
+        if let Some(lint) = &mut self.lint {
+            lint.reads.push((ident.value.clone(), ident.token.span));
         }
         let name_const = self.make_constant(Value::String(rc_str(ident.value.as_str())), line);
         self.emit_op_u16(OpCode::GetGlobal, name_const, line);

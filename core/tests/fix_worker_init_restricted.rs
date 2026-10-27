@@ -46,10 +46,16 @@ fn a_module_top_level_runs_restricted_on_workers_too() {
     vm.set_source(&source);
     vm.set_file(main);
     vm.restrict(&[Capability::Threads]);
-    let result = vm.run(function).map(|v| format!("{v}")).map_err(|e| e.message);
+    let result = vm
+        .run(function)
+        .map(|v| format!("{v}"))
+        .map_err(|e| e.message);
 
     let wrote = escaped.exists();
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(result, Ok("2".to_string()));
-    assert!(!wrote, "a worker ran the module's top level without the restriction");
+    assert!(
+        !wrote,
+        "a worker ran the module's top level without the restriction"
+    );
 }

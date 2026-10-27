@@ -179,6 +179,10 @@ greet(unknown="Bob")
 
 ## Return Values
 
+Oxigen has no `return` keyword. A function returns the value of its last
+expression, and `give` returns early. Writing `return x` is a syntax error
+that points here.
+
 ### Implicit Return
 
 The last expression in a function body is automatically returned:

@@ -43,7 +43,11 @@ fn compile(source: &str) -> oxigen_core::vm::value::Function {
     let lexer = Lexer::new(source);
     let mut parser = Parser::new(lexer, source);
     let program = parser.parse_program();
-    assert!(parser.errors().is_empty(), "parser errors:\n{}", parser.format_errors());
+    assert!(
+        parser.errors().is_empty(),
+        "parser errors:\n{}",
+        parser.format_errors()
+    );
     Compiler::new().compile(&program).expect("compile")
 }
 
@@ -77,14 +81,23 @@ fn assert_all(source: &str, expected: &str) {
 fn assert_all_fail(source: &str, needle: &str) {
     let all = outcomes(source, None);
     let interp = &all[0].1;
-    assert!(interp.starts_with("error: ") && interp.contains(needle), "interpreter: {interp}");
+    assert!(
+        interp.starts_with("error: ") && interp.contains(needle),
+        "interpreter: {interp}"
+    );
     for (name, got) in &all[1..] {
-        assert_eq!(got, interp, "{name} differs from the interpreter for:\n{source}");
+        assert_eq!(
+            got, interp,
+            "{name} differs from the interpreter for:\n{source}"
+        );
     }
 }
 
 fn temp_dir(label: &str) -> PathBuf {
-    let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let dir = std::env::temp_dir().join(format!("oxigen-jitparity-{label}-{unique}"));
     fs::create_dir_all(&dir).unwrap();
     dir

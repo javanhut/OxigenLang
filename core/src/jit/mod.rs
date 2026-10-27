@@ -28,8 +28,7 @@ pub mod scan;
 /// `upvalue_int_values[0]`, and both the JIT's inline reads and the helpers
 /// treat it as empty once the epoch has moved. Process-wide and relaxed:
 /// a write on another thread only costs a spurious miss.
-pub static UPVALUE_WRITE_EPOCH: std::sync::atomic::AtomicI64 =
-    std::sync::atomic::AtomicI64::new(0);
+pub static UPVALUE_WRITE_EPOCH: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 /// Invalidate every closure's upvalue int cache. Called on each write to a
 /// closed upvalue cell.
@@ -151,7 +150,8 @@ impl JitEngine {
     #[cfg(feature = "jit")]
     fn inner(&mut self) -> &mut engine::JitInner {
         let armed = self.limits_armed;
-        self.inner.get_or_insert_with(|| engine::JitInner::new(armed))
+        self.inner
+            .get_or_insert_with(|| engine::JitInner::new(armed))
     }
 
     /// Raw pointer to the JIT counters block, if the inner engine has
@@ -211,8 +211,7 @@ impl JitEngine {
     /// helper. Only callable from compiled code, so the engine exists.
     #[cfg(feature = "jit")]
     pub(crate) fn global_version_cell(&mut self, name: &str) -> *mut u64 {
-        self.inner()
-            .global_version_cell(name)
+        self.inner().global_version_cell(name)
     }
 
     /// Lower the hot-threshold so `--jit` runs and tests don't need a long

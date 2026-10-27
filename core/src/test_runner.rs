@@ -84,17 +84,26 @@ fn nested_tests<'a>(stmts: &'a [Statement], where_: &str, out: &mut Vec<(&'a Exp
                 nested_tests(body, where_, out);
             }
             Statement::Main { body, .. } => nested_tests(body, "`main`", out),
-            Statement::Let { name, value: Expression::FunctionLiteral { body, .. } }
-            | Statement::TypedLet { name, value: Expression::FunctionLiteral { body, .. }, .. } => {
-                nested_tests(body, &format!("function `{}`", name.value), out)
+            Statement::Let {
+                name,
+                value: Expression::FunctionLiteral { body, .. },
             }
+            | Statement::TypedLet {
+                name,
+                value: Expression::FunctionLiteral { body, .. },
+                ..
+            } => nested_tests(body, &format!("function `{}`", name.value), out),
             _ => {}
         }
     }
 }
 
 /// Run `program` (a test, or a test file's top level) on a fresh VM.
-fn run_test_program(program: &Program, source: &str, file_path: &Option<PathBuf>) -> Result<(), String> {
+fn run_test_program(
+    program: &Program,
+    source: &str,
+    file_path: &Option<PathBuf>,
+) -> Result<(), String> {
     let func = Compiler::new().compile(program).map_err(|errs| {
         errs.first()
             .map(|e| e.message.clone())
@@ -160,7 +169,10 @@ pub fn run_vm_tests(
 
         let mut statements = prelude.clone();
         statements.extend(body.iter().cloned());
-        let sub = Program { statements, hidden: Vec::new() };
+        let sub = Program {
+            statements,
+            hidden: Vec::new(),
+        };
 
         let result = run_test_program(&sub, source, &file_path);
         outcomes.push(TestOutcome {
@@ -190,7 +202,10 @@ pub fn run_vm_tests(
 
     // With no tests to run it, a failing top level would go unnoticed.
     if !has_tests && outcomes.is_empty() {
-        let top = Program { statements: prelude, hidden: program.hidden.clone() };
+        let top = Program {
+            statements: prelude,
+            hidden: program.hidden.clone(),
+        };
         if let Err(message) = run_test_program(&top, source, &file_path) {
             outcomes.push(TestOutcome {
                 name: "<top level>".to_string(),

@@ -56,7 +56,9 @@ fn assert_all_ok(source: &str, expected: &str) {
 fn assert_all_err(source: &str, needle: &str) {
     for (name, make) in backends() {
         match run_on(make(), source) {
-            Ok(v) => panic!("{name}: expected an error containing {needle:?}, got Ok({v})\n{source}"),
+            Ok(v) => {
+                panic!("{name}: expected an error containing {needle:?}, got Ok({v})\n{source}")
+            }
             Err(e) => assert!(
                 e.contains(needle),
                 "{name}: error {e:?} does not mention {needle:?}\n{source}"

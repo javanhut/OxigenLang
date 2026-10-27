@@ -48,7 +48,9 @@ fn assert_all_ok(source: &str, expected: &str) {
 fn assert_all_err(source: &str, needle: &str) {
     for (name, make) in backends() {
         match run_on(make(), source) {
-            Ok(v) => panic!("{name}: expected an error containing {needle:?}, got Ok({v})\n{source}"),
+            Ok(v) => {
+                panic!("{name}: expected an error containing {needle:?}, got Ok({v})\n{source}")
+            }
             Err(e) => assert!(
                 e.contains(needle),
                 "{name}: error {e:?} does not mention {needle:?}\n{source}"
@@ -72,7 +74,10 @@ fn literal_constructor_checks_field_types() {
 
 #[test]
 fn field_assignment_checks_the_declared_type() {
-    assert_all_err(&format!("{P}p := P(1, \"a\")\np.n = \"x\"\np.n"), "type mismatch");
+    assert_all_err(
+        &format!("{P}p := P(1, \"a\")\np.n = \"x\"\np.n"),
+        "type mismatch",
+    );
 }
 
 #[test]
@@ -86,7 +91,10 @@ fn field_assignment_from_a_method_checks_the_declared_type() {
 
 #[test]
 fn well_typed_construction_and_mutation_still_work() {
-    assert_all_ok(&format!("{P}p := P(1, \"a\")\np.n = 5\np.label = \"b\"\n[p.n, p.label]"), "[5, b]");
+    assert_all_ok(
+        &format!("{P}p := P(1, \"a\")\np.n = 5\np.label = \"b\"\n[p.n, p.label]"),
+        "[5, b]",
+    );
     assert_all_ok(&format!("{P}p := P {{ n: 3, label: \"z\" }}\np.n"), "3");
     // Zero-valued construction keeps working.
     assert_all_ok(&format!("{P}p <P>\n[p.n, p.label]"), "[0, ]");

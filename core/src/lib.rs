@@ -1,8 +1,8 @@
 pub mod ast;
 pub mod clock;
 pub mod compiler;
-pub mod diagnostics;
 pub mod concurrent;
+pub mod diagnostics;
 pub mod formatter;
 pub mod highlight;
 pub mod jit;
@@ -11,6 +11,7 @@ pub mod lexer;
 pub mod netres;
 pub mod output;
 pub mod parser;
+pub mod process;
 pub mod test_runner;
 pub mod token;
 pub mod vm;

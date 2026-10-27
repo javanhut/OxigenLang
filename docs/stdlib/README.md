@@ -40,13 +40,14 @@ examples:
 | Module | What it covers |
 |--------|----------------|
 | [io](io.md) | read/write/append files, console input |
-| [os](os.md) | run commands, environment, directories, process |
+| [os](os.md) | run commands, background processes, signals, environment, directories |
 | [path](path.md) | join, split, normalize, `is_within` containment check |
 | [time](time.md) | timestamps, sleep, monotonic durations |
 | [datetime](datetime.md) | UTC calendar dates, formatting, parsing |
 | [random](random.md) | random ints/floats/bools, `choice`, `seed` |
 | [env](env.md) | load a `.env` file into a map |
 | [parse_args](parse_args.md) | command-line flag parsing |
+| [channel](channel.md) | pass messages between `diverge` tasks, in order |
 
 ## Network
 
@@ -54,6 +55,12 @@ examples:
 |--------|----------------|
 | [net](net.md) | HTTP client, streaming HTTP, TCP and UDP sockets |
 | [api](api.md) | HTTP server: routing, JSON and HTML responses, static files, the accept loop |
+
+## C interop
+
+| Module | What it covers |
+|--------|----------------|
+| [ffi](ffi.md) | call C libraries by signature: structs, pointers, variadics, callbacks |
 
 ## Language support
 

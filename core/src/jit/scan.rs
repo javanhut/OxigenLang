@@ -95,8 +95,7 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
         if op_info.properties.touches_heap {
             info.touches_heap_values = true;
         } else if matches!(op, OpCode::Constant) {
-            let idx = read_u16(code, ip + 1)
-                .ok_or(ScanError::InvalidBytecode { offset: ip })?;
+            let idx = read_u16(code, ip + 1).ok_or(ScanError::InvalidBytecode { offset: ip })?;
             if let Some(v) = chunk.constants.get(idx as usize)
                 && !matches!(
                     v.repr(),
@@ -107,9 +106,10 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
                         | ValueRepr::Uint(_)
                         | ValueRepr::Char(_)
                         | ValueRepr::None
-                ) {
-                    info.touches_heap_values = true;
-                }
+                )
+            {
+                info.touches_heap_values = true;
+            }
         }
 
         // The canonical width decoder also validates fixed operands and Closure descriptors.

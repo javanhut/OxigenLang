@@ -57,8 +57,7 @@ fn converge_list_honours_its_timeout_and_uints_survive_the_round_trip() {
     // but to still terminate (rather than hang the suite) if the fix regresses
     // and these joins go back to blocking.
     let started = Instant::now();
-    let out = run(
-        "fun idn(x) { x }\n\
+    let out = run("fun idn(x) { x }\n\
          fun slow(x) {\n\
            s := 0\n\
            each i in range(400000000) { s = s + i }\n\
@@ -71,8 +70,7 @@ fn converge_list_honours_its_timeout_and_uints_survive_the_round_trip() {
          s3 := diverge { slow(3) }\n\
          s4 := diverge { slow(4) }\n\
          r := converge [fast, 7, s1, s2, s3, s4] within 200\n\
-         [r[0] == u, r[1], is_error(r[2]), is_error(r[5]), len(r), converge [fast]]\n",
-    );
+         [r[0] == u, r[1], is_error(r[2]), is_error(r[5]), len(r), converge [fast]]\n");
     let elapsed = started.elapsed();
 
     // r[0]: a uint above i64::MAX comes back intact and still equal to the

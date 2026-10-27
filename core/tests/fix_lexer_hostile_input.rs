@@ -57,7 +57,10 @@ fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T 
 #[test]
 fn embedded_nul_is_an_error_not_end_of_input() {
     let errs = errors("x := 1\n\0\ny := ( not valid ]]\n");
-    assert!(!errs.is_empty(), "code after a NUL byte was silently ignored");
+    assert!(
+        !errs.is_empty(),
+        "code after a NUL byte was silently ignored"
+    );
 }
 
 #[test]
@@ -65,7 +68,8 @@ fn code_after_nul_is_not_dropped() {
     // Even if the NUL is reported, the rest of the file must still be lexed.
     let errs = errors("x := 1\n\0\nthis is ( not valid ]]\n");
     assert!(
-        errs.iter().any(|m| !m.contains("NUL") && !m.contains("\\0")),
+        errs.iter()
+            .any(|m| !m.contains("NUL") && !m.contains("\\0")),
         "only the NUL was reported; the broken line after it was never looked at: {errs:?}"
     );
 }
@@ -75,11 +79,15 @@ fn code_after_nul_is_not_dropped() {
 #[test]
 fn indent_comment_lines_are_ignored() {
     assert_eq!(
-        run("#[indent]\nout := []\neach i in [1]:\n    out.push(\"a\")\n// c\n    out.push(\"b\")\nout\n"),
+        run(
+            "#[indent]\nout := []\neach i in [1]:\n    out.push(\"a\")\n// c\n    out.push(\"b\")\nout\n"
+        ),
         Ok("[a, b]".to_string())
     );
     assert_eq!(
-        run("#[indent]\nout := []\neach i in [1]:\n    out.push(\"a\")\n            // deeper\n    out.push(\"b\")\nout\n"),
+        run(
+            "#[indent]\nout := []\neach i in [1]:\n    out.push(\"a\")\n            // deeper\n    out.push(\"b\")\nout\n"
+        ),
         Ok("[a, b]".to_string())
     );
 }
@@ -88,7 +96,9 @@ fn indent_comment_lines_are_ignored() {
 
 #[test]
 fn indent_dedent_to_unknown_level_is_an_error() {
-    let errs = errors("#[indent]\neach i in [1, 2]:\n        println(\"a\")\n    println(\"b\")\nprintln(\"end\")\n");
+    let errs = errors(
+        "#[indent]\neach i in [1, 2]:\n        println(\"a\")\n    println(\"b\")\nprintln(\"end\")\n",
+    );
     assert!(
         errs.iter().any(|m| m.contains("indent")),
         "inconsistent dedent was accepted silently: {errs:?}"
@@ -100,7 +110,9 @@ fn indent_dedent_to_unknown_level_is_an_error() {
 #[test]
 fn indent_crlf_blank_line_does_not_close_the_block() {
     assert_eq!(
-        run("#[indent]\r\nout := []\r\neach i in [1, 2]:\r\n    out.push(i)\r\n\r\n    out.push(i * 10)\r\nout\r\n"),
+        run(
+            "#[indent]\r\nout := []\r\neach i in [1, 2]:\r\n    out.push(i)\r\n\r\n    out.push(i * 10)\r\nout\r\n"
+        ),
         Ok("[1, 10, 2, 20]".to_string())
     );
 }
@@ -110,7 +122,9 @@ fn indent_crlf_blank_line_does_not_close_the_block() {
 #[test]
 fn indent_multiline_map_and_call() {
     assert_eq!(
-        run("#[indent]\nm := {\n    \"a\": 1,\n    \"b\": 2\n}\nfun add(x, y):\n    x + y\nr := add(\n    1,\n    2\n)\n[m[\"b\"], r]\n"),
+        run(
+            "#[indent]\nm := {\n    \"a\": 1,\n    \"b\": 2\n}\nfun add(x, y):\n    x + y\nr := add(\n    1,\n    2\n)\n[m[\"b\"], r]\n"
+        ),
         Ok("[2, 3]".to_string())
     );
 }
@@ -179,5 +193,8 @@ fn deeply_nested_interpolations_are_an_error_not_a_crash() {
     let depth = 50_000;
     let source = format!("{}1{}\n", "\"{".repeat(depth), "}\"".repeat(depth));
     let errs = on_big_stack(move || errors(&source));
-    assert!(!errs.is_empty(), "absurdly nested interpolation was accepted");
+    assert!(
+        !errs.is_empty(),
+        "absurdly nested interpolation was accepted"
+    );
 }

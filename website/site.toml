@@ -6,7 +6,7 @@
 # search engines see one site rather than copies competing with each other.
 url = "https://www.oxigenlang.org"
 name = "OxigenLang"
-description = "OxigenLang is a modern general-purpose programming language created by Javan Hutchinson: a Rust-built bytecode VM with a Cranelift JIT, pattern matching, enums, structs, a two-tier error model, share-nothing concurrency and a 21-module standard library."
+description = "OxigenLang is a modern general-purpose programming language created by Javan Hutchinson: a Rust-built bytecode VM with a Cranelift JIT, pattern matching, enums, structs, a two-tier error model, share-nothing concurrency, C interop and a 23-module standard library."
 repo = "https://github.com/javanhut/OxigenLang"
 branch = "main"
 
@@ -54,7 +54,7 @@ pages = [
 [[section]]
 title = "Standard library"
 pages = [
-    { file = "stdlib/README.md", slug = "stdlib", title = "Overview", description = "The 21 modules of the OxigenLang standard library, what each is for, and how to import them." },
+    { file = "stdlib/README.md", slug = "stdlib", title = "Overview", description = "The 23 modules of the OxigenLang standard library, what each is for, and how to import them." },
     { file = "stdlib/math.md", slug = "stdlib/math", title = "math", description = "The OxigenLang math module: arithmetic, rounding, trigonometry, logarithms and integer number theory." },
     { file = "stdlib/strings.md", slug = "stdlib/strings", title = "strings", description = "The OxigenLang strings module: splitting, joining, trimming, case conversion, searching and padding." },
     { file = "stdlib/array.md", slug = "stdlib/array", title = "array", description = "The OxigenLang array module: map, filter, reduce, folds, searching, grouping and sorting." },
@@ -63,7 +63,7 @@ pages = [
     { file = "stdlib/regex.md", slug = "stdlib/regex", title = "regex", description = "The OxigenLang regex module: matching, searching, capturing and replacing with regular expressions." },
     { file = "stdlib/result.md", slug = "stdlib/result", title = "result", description = "The OxigenLang result module: check, default, chain and recover Error || Value results without an option block." },
     { file = "stdlib/io.md", slug = "stdlib/io", title = "io", description = "The OxigenLang io module: whole-file reads and writes, and line input from the console." },
-    { file = "stdlib/os.md", slug = "stdlib/os", title = "os", description = "The OxigenLang os module: processes, environment variables, directories, script arguments and facts about the machine." },
+    { file = "stdlib/os.md", slug = "stdlib/os", title = "os", description = "The OxigenLang os module: running programs, background processes, signals, environment variables, directories and facts about the machine." },
     { file = "stdlib/path.md", slug = "stdlib/path", title = "path", description = "The OxigenLang path module: build, split and inspect path strings, and check that one path is inside another." },
     { file = "stdlib/net.md", slug = "stdlib/net", title = "net", description = "The OxigenLang net module: an HTTP and HTTPS client with streaming, plus TCP and UDP sockets." },
     { file = "stdlib/api.md", slug = "stdlib/api", title = "api", description = "The OxigenLang api module: an HTTP server with routing, JSON, HTML and static-file responses and a threaded accept loop." },
@@ -76,11 +76,14 @@ pages = [
     { file = "stdlib/parse_args.md", slug = "stdlib/parse-args", title = "parse_args", description = "The OxigenLang parse_args module: a command-line flag parser built on os.args()." },
     { file = "stdlib/env.md", slug = "stdlib/env", title = "env", description = "The OxigenLang env module: load key/value pairs from a .env file." },
     { file = "stdlib/test.md", slug = "stdlib/test", title = "test", description = "The OxigenLang test module: the expect() assertion matchers behind oxigen test." },
+    { file = "stdlib/channel.md", slug = "stdlib/channel", title = "channel", description = "The OxigenLang channel module: pass messages between diverge tasks in order, with timeouts and closing." },
+    { file = "stdlib/ffi.md", slug = "stdlib/ffi", title = "ffi", description = "The OxigenLang ffi module: call C libraries by their C signatures, with structs, pointers, variadic functions and callbacks." },
 ]
 
 [[section]]
 title = "Embedding and internals"
 pages = [
     { file = "embedding.md", slug = "embedding", title = "Embedding in Rust", description = "Embed OxigenLang in a Rust program such as a game engine: native functions, host values, capability sandboxing, loop budgets and hot reload." },
+    { file = "FFI_ARCHITECTURE.md", slug = "ffi-architecture", title = "FFI architecture", description = "How OxigenLang calls C: signature parsing, value marshalling through libffi, struct layout, callbacks re-entering the VM, and the ffi capability." },
     { file = "JIT_ARCHITECTURE.md", slug = "jit-architecture", title = "JIT architecture", description = "How OxigenLang's Cranelift baseline JIT works: tiering, supported opcodes, inline caches, specialized entries, safety invariants and benchmarks." },
 ]

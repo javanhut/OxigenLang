@@ -54,7 +54,8 @@ fn block_local_inside_an_array_literal() {
     assert_all_ok(src, "[10, 20, 10]");
 }
 
-const RIGHT_OPERAND: &str = "fun f() {\n  a := 10\n  a + option { a > 1 -> {\n    y := 5\n    y + 1\n  }, 0 }\n}\nf()";
+const RIGHT_OPERAND: &str =
+    "fun f() {\n  a := 10\n  a + option { a > 1 -> {\n    y := 5\n    y + 1\n  }, 0 }\n}\nf()";
 
 #[test]
 fn block_local_as_right_operand() {
@@ -73,7 +74,8 @@ fn block_local_as_right_operand_jit() {
 
 #[test]
 fn block_local_at_top_level_inside_call_arguments() {
-    let src = "fun pair(a, b) { [a, b] }\nk := 3\npair(k, option { True -> {\n  y := 4\n  y * k\n} })";
+    let src =
+        "fun pair(a, b) { [a, b] }\nk := 3\npair(k, option { True -> {\n  y := 4\n  y * k\n} })";
     assert_all_ok(src, "[3, 12]");
 }
 

@@ -1,5 +1,75 @@
 # Changelog
 
+## Unreleased
+
+### Added: background processes, signals and channels
+
+- `os.spawn(prog, argv, capture)` starts a program and returns a handle at
+  once. Talk to it with `os.write_stdin`, `os.close_stdin`,
+  `os.read_output_line` and `os.read_output`; control it with `os.wait`
+  (with an optional timeout), `os.kill`, `os.is_running` and
+  `os.process_pid`. Children still running when the script ends, whether
+  normally, through `os.exit`, or on Ctrl-C, SIGTERM or SIGHUP, are stopped.
+- `os.signals(["INT", "TERM"])` delivers signals as messages on a channel.
+  A subscribed signal no longer ends the program, so it can clean up first.
+- `os.exec_argv(prog, argv, stdin)` sends text to the program's standard
+  input, with no shell and no temporary file.
+- A new `channel` module passes messages between `diverge` tasks in order:
+  `new`, `send`, `recv` (with an optional timeout), `try_recv`, `close`,
+  `len` and `is_closed`. Channels need the `threads` capability.
+
+### Added: binary data
+
+- `net.download` takes `method`, `headers` and `body`, so the response to a
+  POST (audio from a text-to-speech API, say) streams to a file byte for
+  byte. `net.post_to_file` is the POST shorthand.
+- `io.read_bytes` and `io.write_bytes` read and write files as arrays of
+  bytes.
+
+### Added: tooling
+
+- `oxigen check` now finds names nothing defines (`E0038`, an error) and
+  logic that compiles but is almost certainly wrong (`E0039`, a warning):
+  `x == "a" or "b"`, `("a" or "b")`, and `x != ("a" or "b")`. At a terminal it
+  prints readable diagnostics; piped, or with `--json`, it prints JSON as
+  before.
+- `oxigen doc` shows the reference docs in the terminal: the module list,
+  one module (`oxigen doc os`), one function (`oxigen doc os.exec_argv`, or
+  just `oxigen doc exec_argv`), or `oxigen doc builtins`.
+- Writing `return x`, `let x`, `def f`, `break`, `while` and other keywords
+  from other languages now says what Oxigen calls them, instead of
+  "expected a new line".
+- `strings.index_of(s, sub, start)` searches from a start index.
+
+### Added: calling C (`ffi`)
+
+A new standard library module, `ffi`, calls C libraries from scripts. Declare
+functions with their C signatures and call them like Oxigen functions:
+
+```oxi
+introduce ffi
+libm := ffi.open("m", {"pow": "double(double x, double y)"})
+libm.pow(2.0, 10.0)   // 1024
+```
+
+- Libraries by bare name (`"m"`, `"sqlite3"`), file name, path, or `None` for
+  the C runtime.
+- C type spellings in signatures (`const char *`, `size_t`, `unsigned long`,
+  `enum X`, `T *`), plus short names (`i32`, `f64`, `ptr`).
+- Variadic functions (`printf`, `snprintf`), structs by value
+  (`ffi.cstruct`), arrays and maps passed to `T *` and copied back
+  (out-parameters), and callbacks (`ffi.callback`) that can re-enter the VM.
+- Memory helpers: `alloc`, `new`, `free`, `read`, `write`, `sizeof`, `string`
+  and `cstring`.
+- A new capability, `Capability::Ffi`. A host that calls `vm.restrict` must
+  list it for scripts to use `ffi`.
+
+Building from source now needs a C compiler and `make`, for the bundled
+libffi. The prebuilt Linux binaries are statically linked against musl and
+cannot load shared libraries, so `ffi.open` fails there; build from source to
+use it on Linux. See [docs/stdlib/ffi.md](docs/stdlib/ffi.md) and
+[docs/FFI_ARCHITECTURE.md](docs/FFI_ARCHITECTURE.md).
+
 ## 0.2.0
 
 A correctness release. An adversarial review of the whole toolchain (front

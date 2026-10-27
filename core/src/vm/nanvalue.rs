@@ -235,7 +235,9 @@ impl NanValue {
 
     /// `None` as a `const`-evaluable value, so `Value::None` can be a
     /// `pub const` after the A1.2.5 storage swap.
-    pub const NONE: NanValue = NanValue { raw: NANVALUE_NONE_BITS };
+    pub const NONE: NanValue = NanValue {
+        raw: NANVALUE_NONE_BITS,
+    };
 
     #[inline]
     pub fn none() -> Self {
@@ -870,18 +872,13 @@ impl NanValue {
                     let rc = Rc::<RefCell<Vec<NanValue>>>::from_raw(
                         addr as *const RefCell<Vec<NanValue>>,
                     );
-                    let owned: Vec<OldValue> = rc
-                        .borrow()
-                        .iter()
-                        .map(|n| n.clone().into_value())
-                        .collect();
+                    let owned: Vec<OldValue> =
+                        rc.borrow().iter().map(|n| n.clone().into_value()).collect();
                     drop(rc);
                     OldValue::Array(Rc::new(RefCell::new(owned.into())))
                 } else if sub == PointerKindA::Tuple as u8 {
-                    let rc =
-                        Rc::<Vec<NanValue>>::from_raw(addr as *const Vec<NanValue>);
-                    let owned: Vec<OldValue> =
-                        rc.iter().map(|n| n.clone().into_value()).collect();
+                    let rc = Rc::<Vec<NanValue>>::from_raw(addr as *const Vec<NanValue>);
+                    let owned: Vec<OldValue> = rc.iter().map(|n| n.clone().into_value()).collect();
                     drop(rc);
                     OldValue::Tuple(Rc::new(owned.into()))
                 } else if sub == PointerKindA::Map as u8 {
@@ -901,11 +898,8 @@ impl NanValue {
                     let rc = Rc::<RefCell<Vec<NanValue>>>::from_raw(
                         addr as *const RefCell<Vec<NanValue>>,
                     );
-                    let owned: Vec<OldValue> = rc
-                        .borrow()
-                        .iter()
-                        .map(|n| n.clone().into_value())
-                        .collect();
+                    let owned: Vec<OldValue> =
+                        rc.borrow().iter().map(|n| n.clone().into_value()).collect();
                     drop(rc);
                     OldValue::Set(Rc::new(RefCell::new(
                         crate::vm::collections::OxSet::from_iter_dedup(owned),
@@ -917,9 +911,7 @@ impl NanValue {
                     let rc = Rc::<ObjStructDef>::from_raw(addr as *const ObjStructDef);
                     OldValue::StructDef(rc)
                 } else if sub == PointerKindA::StructInstance as u8 {
-                    let rc = Rc::<ObjStructInstance>::from_raw(
-                        addr as *const ObjStructInstance,
-                    );
+                    let rc = Rc::<ObjStructInstance>::from_raw(addr as *const ObjStructInstance);
                     OldValue::StructInstance(rc)
                 } else {
                     unreachable_subkind(sub)
@@ -930,16 +922,13 @@ impl NanValue {
                     let rc = Rc::<ObjEnumDef>::from_raw(addr as *const ObjEnumDef);
                     OldValue::EnumDef(rc)
                 } else if sub == PointerKindB::EnumInstance as u8 {
-                    let rc =
-                        Rc::<ObjEnumInstance>::from_raw(addr as *const ObjEnumInstance);
+                    let rc = Rc::<ObjEnumInstance>::from_raw(addr as *const ObjEnumInstance);
                     OldValue::EnumInstance(rc)
                 } else if sub == PointerKindB::Module as u8 {
                     let rc = Rc::<ObjModule>::from_raw(addr as *const ObjModule);
                     OldValue::Module(rc)
                 } else if sub == PointerKindB::ErrorValue as u8 {
-                    let rc = Rc::<ErrorValueStorage>::from_raw(
-                        addr as *const ErrorValueStorage,
-                    );
+                    let rc = Rc::<ErrorValueStorage>::from_raw(addr as *const ErrorValueStorage);
                     let data = ErrorValueData {
                         msg: Rc::new(rc.msg.to_string()),
                         tag: rc.tag.as_ref().map(|t| Rc::new(t.to_string())),
@@ -947,8 +936,7 @@ impl NanValue {
                     drop(rc);
                     OldValue::ErrorValue(Rc::new(data))
                 } else if sub == PointerKindB::Wrapped as u8 {
-                    let rc =
-                        Rc::<WrappedStorage>::from_raw(addr as *const WrappedStorage);
+                    let rc = Rc::<WrappedStorage>::from_raw(addr as *const WrappedStorage);
                     let inner_value = rc.inner.clone().into_value();
                     drop(rc);
                     OldValue::Wrapped(Rc::new(inner_value))
@@ -1106,7 +1094,11 @@ mod tests {
         // The payload points at T inside the RcBox, not the header; the JIT casts it directly.
         let expected_raw = Rc::as_ptr(&inst) as usize;
         // Sanity: alignment lets us repurpose the low 3 bits.
-        assert_eq!(expected_raw & 0x7, 0, "Rc::into_raw target must be 8-aligned");
+        assert_eq!(
+            expected_raw & 0x7,
+            0,
+            "Rc::into_raw target must be 8-aligned"
+        );
 
         let nan = NanValue::from_struct_instance(Rc::clone(&inst));
         let extracted = ((nan.raw_bits() & PAYLOAD_MASK) & !0x7) as usize;
@@ -1370,9 +1362,9 @@ mod tests {
     /// Used to exercise the bridge round-trip.
     fn build_value_corpus() -> Vec<OldValue> {
         use crate::vm::value::{
-            FieldLayout, Function, ObjEnumDef, ObjEnumInstance, ObjModule,
-            ObjStructDef, ObjStructInstance, VmEnumPayload, VmEnumVariantDef,
-            VmEnumVariantKind, make_upvalue_int_caches,
+            FieldLayout, Function, ObjEnumDef, ObjEnumInstance, ObjModule, ObjStructDef,
+            ObjStructInstance, VmEnumPayload, VmEnumVariantDef, VmEnumVariantKind,
+            make_upvalue_int_caches,
         };
         use std::cell::Cell;
 
@@ -1461,8 +1453,8 @@ mod tests {
             OldValue::Integer(0),
             OldValue::Integer(42),
             OldValue::Integer(-1),
-            OldValue::Integer(i64::MAX),  // forces boxed-int path
-            OldValue::Integer(i64::MIN),  // forces boxed-int path
+            OldValue::Integer(i64::MAX), // forces boxed-int path
+            OldValue::Integer(i64::MIN), // forces boxed-int path
             OldValue::Float(0.0),
             OldValue::Float(-std::f64::consts::PI),
             OldValue::Float(f64::INFINITY),
@@ -1477,14 +1469,12 @@ mod tests {
             OldValue::None,
             OldValue::String(Rc::new("hello".into())),
             OldValue::Error(Rc::new("oops".into())),
-            OldValue::Array(Rc::new(RefCell::new(vec![
-                OldValue::Integer(1),
-                OldValue::Integer(2),
-            ].into()))),
-            OldValue::Tuple(Rc::new(vec![
-                OldValue::Boolean(true),
-                OldValue::Integer(7),
-            ].into())),
+            OldValue::Array(Rc::new(RefCell::new(
+                vec![OldValue::Integer(1), OldValue::Integer(2)].into(),
+            ))),
+            OldValue::Tuple(Rc::new(
+                vec![OldValue::Boolean(true), OldValue::Integer(7)].into(),
+            )),
             OldValue::Map(Rc::new(RefCell::new(
                 crate::vm::collections::OxMap::from_pairs(vec![(
                     OldValue::String(Rc::new("k".into())),
@@ -1522,7 +1512,8 @@ mod tests {
                 values_equivalent(&original, &back),
                 "round-trip mismatch at corpus[{}] ({}): nan_bits=...; \
                  see values_equivalent for which equality the variant uses",
-                idx, label,
+                idx,
+                label,
             );
         }
     }
@@ -1566,9 +1557,7 @@ mod tests {
             (OldValue::EnumDef(x), OldValue::EnumDef(y)) => Rc::ptr_eq(x, y),
             (OldValue::Module(x), OldValue::Module(y)) => Rc::ptr_eq(x, y),
             (OldValue::Error(x), OldValue::Error(y)) => x == y,
-            (OldValue::Builtin(x), OldValue::Builtin(y)) => {
-                (*x as usize) == (*y as usize)
-            }
+            (OldValue::Builtin(x), OldValue::Builtin(y)) => (*x as usize) == (*y as usize),
             _ => a == b,
         }
     }
@@ -1834,7 +1823,8 @@ mod tests {
             let value_text = format!("{}", v);
             let nan_text = format!("{}", NanValue::from(&v));
             assert_eq!(
-                value_text, nan_text,
+                value_text,
+                nan_text,
                 "Display divergence on {:?}",
                 variant_label(&v)
             );
@@ -1864,14 +1854,12 @@ mod tests {
                 OldValue::String(Rc::new("HI".into())),
             ),
             (
-                OldValue::Array(Rc::new(RefCell::new(vec![
-                    OldValue::Integer(1),
-                    OldValue::Integer(2),
-                ].into()))),
-                OldValue::Array(Rc::new(RefCell::new(vec![
-                    OldValue::Integer(1),
-                    OldValue::Integer(2),
-                ].into()))),
+                OldValue::Array(Rc::new(RefCell::new(
+                    vec![OldValue::Integer(1), OldValue::Integer(2)].into(),
+                ))),
+                OldValue::Array(Rc::new(RefCell::new(
+                    vec![OldValue::Integer(1), OldValue::Integer(2)].into(),
+                ))),
             ),
             (
                 OldValue::Tuple(Rc::new(vec![OldValue::Boolean(true)].into())),
@@ -1886,7 +1874,8 @@ mod tests {
             let value_eq = a == b;
             let nan_eq = NanValue::from(&a) == NanValue::from(&b);
             assert_eq!(
-                value_eq, nan_eq,
+                value_eq,
+                nan_eq,
                 "PartialEq divergence: a={:?} b={:?} (Value::eq={}, NanValue::eq={})",
                 variant_label(&a),
                 variant_label(&b),
@@ -1925,19 +1914,24 @@ mod tests {
         let a = NanValue::from_closure(Rc::clone(&rc));
         let b = a.clone();
         // Same encoded pointer → same raw bits → fast-path true.
-        assert!(a == b, "NanValue with same closure pointer must compare equal");
+        assert!(
+            a == b,
+            "NanValue with same closure pointer must compare equal"
+        );
     }
 
     #[test]
     fn bridge_preserves_array_contents_with_cycle_free_recursion() {
-        let original = OldValue::Array(Rc::new(RefCell::new(vec![
-            OldValue::Tuple(Rc::new(vec![
-                OldValue::Integer(1),
-                OldValue::Integer(2),
-            ].into())),
-            OldValue::Boolean(true),
-            OldValue::String(Rc::new("nested".into())),
-        ].into())));
+        let original = OldValue::Array(Rc::new(RefCell::new(
+            vec![
+                OldValue::Tuple(Rc::new(
+                    vec![OldValue::Integer(1), OldValue::Integer(2)].into(),
+                )),
+                OldValue::Boolean(true),
+                OldValue::String(Rc::new("nested".into())),
+            ]
+            .into(),
+        )));
         let nan = NanValue::from(&original);
         let back = nan.into_value();
         assert_eq!(original, back);

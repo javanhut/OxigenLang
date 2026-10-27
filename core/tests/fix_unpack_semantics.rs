@@ -54,7 +54,9 @@ fn assert_all_ok(source: &str, expected: &str) {
 fn assert_all_err(source: &str, needle: &str) {
     for (name, make) in backends() {
         match run_on(make(), source) {
-            Ok(v) => panic!("{name}: expected an error containing {needle:?}, got Ok({v})\n{source}"),
+            Ok(v) => {
+                panic!("{name}: expected an error containing {needle:?}, got Ok({v})\n{source}")
+            }
             Err(e) => assert!(
                 e.contains(needle),
                 "{name}: error {e:?} does not mention {needle:?}\n{source}"
@@ -70,7 +72,10 @@ fn swap_at_top_level() {
 
 #[test]
 fn swap_inside_a_function() {
-    assert_all_ok("fun f() {\n  a := 1\n  b := 2\n  a, b = b, a\n  [a, b]\n}\nf()", "[2, 1]");
+    assert_all_ok(
+        "fun f() {\n  a := 1\n  b := 2\n  a, b = b, a\n  [a, b]\n}\nf()",
+        "[2, 1]",
+    );
 }
 
 #[test]
@@ -91,18 +96,27 @@ fn multi_expression_define_binds_in_order() {
 fn multi_expression_count_mismatch_is_a_compile_error() {
     assert_all_err("a, b := 1, 2, 3\na", "expected 2 values, got 3");
     assert_all_err("a, b, c := 1, 2\na", "expected 3 values, got 2");
-    assert_all_err("a := 0\nb := 0\na, b = 1, 2, 3\na", "expected 2 values, got 3");
+    assert_all_err(
+        "a := 0\nb := 0\na, b = 1, 2, 3\na",
+        "expected 2 values, got 3",
+    );
 }
 
 #[test]
 fn single_value_count_mismatch_is_a_runtime_error() {
     assert_all_err("x, y := [1, 2, 3]\nx", "expected 2 values, got 3");
     assert_all_err("x, y, z := [1]\nx", "expected 3 values, got 1");
-    assert_all_err("fun f() {\n  x, y := (1, 2, 3)\n  x\n}\nf()", "expected 2 values, got 3");
+    assert_all_err(
+        "fun f() {\n  x, y := (1, 2, 3)\n  x\n}\nf()",
+        "expected 2 values, got 3",
+    );
 }
 
 #[test]
 fn exact_unpacks_still_work() {
     assert_all_ok("x, y := [1, 2]\n[x, y]", "[1, 2]");
-    assert_all_ok("fun f() {\n  first, _, third := (1, 2, 3)\n  [first, third]\n}\nf()", "[1, 3]");
+    assert_all_ok(
+        "fun f() {\n  first, _, third := (1, 2, 3)\n  [first, third]\n}\nf()",
+        "[1, 3]",
+    );
 }

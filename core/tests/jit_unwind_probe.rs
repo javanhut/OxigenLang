@@ -117,9 +117,11 @@ fn build_recursive_jit() -> (JITModule, *const u8) {
         let cold_block = b.create_block();
         let recurse_block = b.create_block();
         let zero = b.ins().iconst(types::I64, 0);
-        let done = b
-            .ins()
-            .icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual, n, zero);
+        let done = b.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
+            n,
+            zero,
+        );
         b.ins().brif(done, cold_block, &[], recurse_block, &[]);
 
         // Budget exhausted: hand off to the cold adapter, which does not return.
@@ -197,7 +199,6 @@ fn jit_still_usable_after_a_non_local_exit() {
     }
 }
 
-
 /// Control: the same setjmp/longjmp round trip with NO JIT code involved, so a
 /// failure here indicts the Rust-side FFI rather than Cranelift's frames.
 ///
@@ -226,7 +227,6 @@ fn control_longjmp_across_rust_frames_only() {
     };
     assert_eq!(landed, 1);
 }
-
 
 /// The constraint the global buffer violated: several threads unwinding through
 /// their own JIT frames at once must not interfere. This is the shape Oxigen's

@@ -19,7 +19,12 @@ fn parse_ok(src: &str) -> Program {
     program
 }
 
-fn first_struct(program: &Program) -> (&Option<oxigen_core::ast::Identifier>, &Vec<oxigen_core::ast::StructField>) {
+fn first_struct(
+    program: &Program,
+) -> (
+    &Option<oxigen_core::ast::Identifier>,
+    &Vec<oxigen_core::ast::StructField>,
+) {
     match &program.statements[0] {
         Statement::StructDef { parent, fields, .. } => (parent, fields),
         other => panic!("expected StructDef as first statement, got {other:?}"),
@@ -65,7 +70,10 @@ fn struct_hidden_field_keyword_parses_with_flag() {
     let (_parent, fields) = first_struct(&program);
     assert_eq!(fields.len(), 2);
     assert_eq!(fields[0].name.value, "secret");
-    assert!(fields[0].hidden, "field marked `hidden` should set hidden flag");
+    assert!(
+        fields[0].hidden,
+        "field marked `hidden` should set hidden flag"
+    );
     assert_eq!(fields[1].name.value, "public");
     assert!(!fields[1].hidden, "unmarked field should not be hidden");
 }

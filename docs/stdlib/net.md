@@ -13,7 +13,7 @@ For an HTTP **server**, use [api](api.md), which is built on this module.
 
 - [Enum: `HttpMethod`](#enum-httpmethod)
 - [HTTP requests](#http-requests) — `get`, `post`, `put`, `patch`, `delete`, `head`, `request`
-- [Streaming HTTP](#streaming-http) — `download`, `upload`, `open_stream`, `stream_*`, `read_line`, `read_chunk`
+- [Streaming HTTP](#streaming-http) — `download`, `post_to_file`, `upload`, `open_stream`, `stream_*`, `read_line`, `read_chunk`
 - [TCP sockets](#tcp-sockets) — `connect`, `listen`, `accept`, `send`, `receive`, `set_timeout`, `close`
 - [UDP sockets](#udp-sockets) — `udp_bind`, `udp_send`, `udp_receive`
 - [Errors](#errors), [ports](#ports), [blocking and timeouts](#blocking-and-timeouts), [receive buffers](#receive-buffers)
@@ -27,7 +27,8 @@ For an HTTP **server**, use [api](api.md), which is built on this module.
 | [`delete`](#deleteurl) | `delete(url)` | `{status, body}` |
 | [`head`](#headurl) | `head(url)` | `{status, body}` |
 | [`request`](#requestmethod-url-headers-body) | `request(method, url, headers, body)` | `{status, body}` |
-| [`download`](#downloadurl-path) | `download(url, path)` | `int` status |
+| [`download`](#downloadurl-path-method-headers-body) | `download(url, path, method?, headers?, body?)` | `int` status |
+| [`post_to_file`](#post_to_fileurl-body-path-headers) | `post_to_file(url, body, path, headers?)` | `int` status |
 | [`upload`](#uploadmethod-url-file_path-headers) | `upload(method, url, file_path, headers = {})` | `{status, body}` |
 | [`open_stream`](#open_streamurl-method-headers-body) | `open_stream(url, method = "GET", headers = {}, body = "")` | stream handle |
 | [`stream_get`](#stream_get-stream_post-stream_put-stream_patch) | `stream_get(url, headers = {})` | stream handle |
@@ -150,9 +151,15 @@ A stream applies **back-pressure**: the reader stays at most ~72 KiB ahead of
 you, so a consumer slower than the network cannot accumulate the whole body in
 memory.
 
-### `download(url, path)`
+### `download(url, path, method?, headers?, body?)`
 
-Stream a GET response body straight to a file. Returns the HTTP status code.
+Stream a response body straight to a file. Returns the HTTP status code. The
+bytes are written as they arrive, so a **binary** response (audio, an image,
+an archive) is saved intact, which a string body cannot do.
+
+It sends a GET by default. Pass `method` `"POST"`, `"PUT"` or `"PATCH"`, with
+`headers` and a `body`, to download what a request returns, such as audio from
+a text-to-speech API:
 
 Because it writes a file, an embedded VM needs the `filesystem` capability as
 well as `network` to call it (see [embedding](../embedding.md)).
@@ -160,6 +167,22 @@ well as `network` to call it (see [embedding](../embedding.md)).
 ```oxi
 status := net.download("https://example.com/big.iso", "big.iso")
 println(status)   // 200
+```
+
+### `post_to_file(url, body, path, headers?)`
+
+`download(url, path, "POST", headers, body)`, with JSON as the default
+content type:
+
+```oxi
+introduce net
+introduce json
+
+body := json.stringify({"model": "tts-1", "voice": "alloy", "input": "Hello!"})
+status := net.post_to_file("https://api.example.com/v1/audio/speech", body, "hello.mp3", {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer " + key,
+})
 ```
 
 ### `upload(method, url, file_path, headers)`

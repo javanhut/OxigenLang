@@ -90,7 +90,13 @@ fn read_token(fd: i32) -> std::io::Result<String> {
         b if b < 0x80 => (b as char).to_string(),
         // UTF-8 lead byte → pull its continuation bytes and decode the char.
         b => {
-            let extra = if b >= 0xf0 { 3 } else if b >= 0xe0 { 2 } else { 1 };
+            let extra = if b >= 0xf0 {
+                3
+            } else if b >= 0xe0 {
+                2
+            } else {
+                1
+            };
             let mut bytes = vec![b];
             for _ in 0..extra {
                 if let Some(c) = read_one(fd) {

@@ -51,7 +51,10 @@ fn assert_all_backends_reject_with(source: &str, needle: &str) -> String {
     let interp = run_on(VM::new_interpreter(), source).expect_err("interpreter should reject");
     let jit = run_on(VM::new_eager_jit(), source).expect_err("jit should reject");
     assert_eq!(interp, jit, "backends disagree for:\n{source}");
-    assert!(interp.contains(needle), "expected {needle:?}, got: {interp}");
+    assert!(
+        interp.contains(needle),
+        "expected {needle:?}, got: {interp}"
+    );
     interp
 }
 
@@ -151,10 +154,7 @@ fn the_error_names_the_index_and_the_length() {
 
 #[test]
 fn dot_access_on_a_missing_key_is_an_error() {
-    let err = assert_all_backends_reject_with(
-        "m := {\"name\": \"ada\"}\nm.nmae",
-        "not found",
-    );
+    let err = assert_all_backends_reject_with("m := {\"name\": \"ada\"}\nm.nmae", "not found");
     assert!(err.contains("nmae"), "should name the key: {err}");
 }
 

@@ -92,11 +92,7 @@ fn result_closure_strong_count(source: &str, eager_jit: bool) -> usize {
 
 /// Asserts the callee's strong count is independent of the call count, on both
 /// backends. `src_for(n)` must build the same program with `n` iterations.
-fn assert_balanced_across_call_counts(
-    label: &str,
-    callee: &str,
-    src_for: impl Fn(u32) -> String,
-) {
+fn assert_balanced_across_call_counts(label: &str, callee: &str, src_for: impl Fn(u32) -> String) {
     for (backend, eager) in [("interpreter", false), ("eager-jit", true)] {
         // Both points are past the compile threshold on purpose. Comparing an
         // uncompiled run against a compiled one measures one-time installation
@@ -105,7 +101,8 @@ fn assert_balanced_across_call_counts(
         let few = closure_strong_count(&src_for(2_000), callee, eager);
         let many = closure_strong_count(&src_for(20_000), callee, eager);
         assert_eq!(
-            few, many,
+            few,
+            many,
             "{label} on {backend}: `{callee}` strong count depends on call count \
              ({few} after 2k calls, {many} after 20k) — each call leaks {} reference(s)",
             (many as i64 - few as i64) as f64 / 18_000.0

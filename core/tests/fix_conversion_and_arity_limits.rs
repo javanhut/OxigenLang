@@ -58,7 +58,9 @@ fn assert_all_ok(source: &str, expected: &str) {
 fn assert_all_err(source: &str, needle: &str) {
     for (name, make) in backends() {
         match run_on(make(), source) {
-            Ok(v) => panic!("{name}: expected an error containing {needle:?}, got Ok({v})\n{source}"),
+            Ok(v) => {
+                panic!("{name}: expected an error containing {needle:?}, got Ok({v})\n{source}")
+            }
             Err(e) => assert!(
                 e.contains(needle),
                 "{name}: error {e:?} does not mention {needle:?}\n{source}"
@@ -88,7 +90,10 @@ fn int_declaration_rejects_unrepresentable_floats() {
 }
 
 fn params(n: usize) -> String {
-    (0..n).map(|i| format!("p{i}")).collect::<Vec<_>>().join(", ")
+    (0..n)
+        .map(|i| format!("p{i}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[test]
@@ -99,7 +104,10 @@ fn more_than_255_parameters_is_a_compile_error() {
 
 #[test]
 fn more_than_255_arguments_is_a_compile_error() {
-    let args = (0..258).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+    let args = (0..258)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     assert_all_err(&format!("print({args})"), "255");
     assert_all_err(&format!("fun f(a) {{ a }}\nf({args})"), "255");
 }

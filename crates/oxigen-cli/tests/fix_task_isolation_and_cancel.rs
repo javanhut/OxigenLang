@@ -108,7 +108,10 @@ fn a_task_does_not_see_module_state_left_by_an_earlier_task() {
                     "main.oxi",
                     "introduce .counter\nrs := converge diverge each i in range(0, 40) { counter.inc() }\nprintln(rs)\n",
                 ),
-                ("counter.oxi", "hits := []\nfun inc() {\n    push(hits, 1)\n    len(hits)\n}\n"),
+                (
+                    "counter.oxi",
+                    "hits := []\nfun inc() {\n    push(hits, 1)\n    len(hits)\n}\n",
+                ),
             ],
             LIMIT,
         );
@@ -147,7 +150,11 @@ fn cancel_stops_a_jit_compiled_loop_that_makes_calls() {
         LIMIT,
     );
     assert_prints(&out, "True\n");
-    assert!(start.elapsed() < Duration::from_secs(20), "cancel took {:?}", start.elapsed());
+    assert!(
+        start.elapsed() < Duration::from_secs(20),
+        "cancel took {:?}",
+        start.elapsed()
+    );
 }
 
 #[test]
@@ -263,6 +270,14 @@ fn diverge_works_in_the_repl() {
     wait_with_limit(&mut child, LIMIT, "repl");
     let out = child.wait_with_output().unwrap();
     let text = stdout(&out);
-    assert!(text.contains("42\n"), "stdout:\n{text}\nstderr:\n{}", stderr(&out));
-    assert!(text.contains("[2, 8, 18]"), "stdout:\n{text}\nstderr:\n{}", stderr(&out));
+    assert!(
+        text.contains("42\n"),
+        "stdout:\n{text}\nstderr:\n{}",
+        stderr(&out)
+    );
+    assert!(
+        text.contains("[2, 8, 18]"),
+        "stdout:\n{text}\nstderr:\n{}",
+        stderr(&out)
+    );
 }

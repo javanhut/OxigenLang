@@ -56,6 +56,10 @@ pub const NON_HASHABLE_KEY: Code = Code("E0035");
 pub const LOOP_BUDGET_EXHAUSTED: Code = Code("E0036");
 pub const INTERRUPTED: Code = Code("E0037");
 
+// ── Check ───────────────────────────────────────────────────────────────────
+pub const UNDEFINED_NAME: Code = Code("E0038");
+pub const SUSPICIOUS_LOGIC: Code = Code("E0039");
+
 pub struct Entry {
     pub code: Code,
     pub title: &'static str,
@@ -515,6 +519,43 @@ because it took too long or the user cancelled it.
 
 The error cannot be caught with `<guard>` or `guard`, so the script stops
 wherever it was.
+",
+    },
+    Entry {
+        code: UNDEFINED_NAME,
+        title: "undefined name",
+        explanation: "\
+The program reads a name that nothing defines: no `:=` or typed declaration,
+function, struct, enum, import or built-in has that name. `oxigen check`
+reports it, because running the line would fail with `undefined variable`.
+
+    reply := ask(prompt)
+    println(object.message)   // error: undefined name `object`
+
+Usually it is a typo, a variable that was renamed, or a module that was never
+imported:
+
+    introduce json
+    println(json.parse(reply))
+",
+    },
+    Entry {
+        code: SUSPICIOUS_LOGIC,
+        title: "suspicious logic",
+        explanation: "\
+A warning: this `or`, `and` or `!=` compiles, but almost certainly does not do
+what it reads as.
+
+    cmd == \"quit\" or \"exit\"      // (cmd == \"quit\") or \"exit\": always true
+    (\"quit\" or \"exit\")           // just \"quit\"
+    cmd != (\"quit\" or \"exit\")    // true for every cmd
+
+To compare against several values, put the values in a group on one side of
+the comparison, which Oxigen distributes, or spell each comparison out:
+
+    cmd == (\"quit\" or \"exit\")
+    cmd == \"quit\" or cmd == \"exit\"
+    cmd != \"quit\" and cmd != \"exit\"
 ",
     },
     Entry {

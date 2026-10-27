@@ -1,0 +1,78 @@
+introduce ffi
+ffi.cstruct("div_t", "int quot; int rem")
+ffi.cstruct("Vec2", ["double x", "double y"])
+libc := ffi.open(None, {"labs": "long(long)", "strlen": "size_t(const char *s)", "snprintf": "int(char *buf, size_t n, const char *fmt, ...)", "frexp": "double(double x, int *exp)", "qsort": "void(int *base, size_t n, size_t size, void *cmp)", "div": "div_t(int, int)", "getenv": "char *(const char *name)"})
+
+<test>("calls C like an Oxigen function") {
+    expect(libc.labs(-42)).eq(42)
+    expect(libc.strlen("hello")).eq(uint(5))
+    expect(libc.getenv("OXIGEN_FFI_UNSET_VAR")).eq(None)
+}
+
+<test>("binds a single function by signature") {
+    abs := ffi.fn(None, "int abs(int)")
+    expect(abs(-3)).eq(3)
+}
+
+<test>("loads a library by bare name") {
+    libm := ffi.open("m", {"pow": "double(double, double)", "sinf": "float(float)"})
+    expect(libm.pow(2.0, 10.0)).eq(1024.0)
+    expect(libm.sinf(0.0)).eq(0.0)
+}
+
+<test>("variadic functions") {
+    buf := ffi.alloc(64)
+    n := libc.snprintf(buf, 64, "%s=%d (%.1f)", "x", 42, 2.5)
+    expect(ffi.string(buf)).eq("x=42 (2.5)")
+    expect(n).eq(10)
+    ffi.free(buf)
+}
+
+<test>("arrays passed to T* are copied back") {
+    exp := [0]
+    expect(libc.frexp(8.0, exp)).eq(0.5)
+    expect(exp[0]).eq(4)
+}
+
+<test>("structs by value") {
+    expect(libc.div(7, 2)).eq({"quot": 3, "rem": 1})
+}
+
+<test>("struct arguments by value, through a callback") {
+    len2 := ffi.callback("double(Vec2)", fun(v) { v["x"] * v["x"] + v["y"] * v["y"] })
+    call_it := ffi.fn(len2, "double(Vec2)")
+    expect(call_it({"x": 3.0, "y": 4.0})).eq(25.0)
+}
+
+<test>("callbacks") {
+    cmp := ffi.callback("int(const void *a, const void *b)", fun(a, b) { ffi.read(a, "int") - ffi.read(b, "int") })
+    xs := [5, 1, 4, 2, 3]
+    libc.qsort(xs, len(xs), ffi.sizeof("int"), cmp)
+    expect(xs).eq([1, 2, 3, 4, 5])
+}
+
+<test>("an error in a callback fails the C call") {
+    boom := ffi.callback("int(int)", fun(x) { error("bad") })
+    expect(<type<Error> || <Value>>(ffi.fn(boom, "int(int)")(1))).is_error()
+}
+
+<test>("structs pasted from a header") {
+    expect(ffi.cstruct("typedef struct \{ int a; char *name; } Item;")).eq("Item")
+    p := ffi.new("Item", {"a": 7})
+    expect(ffi.read(p, "Item")).eq({"a": 7, "name": None})
+    ffi.free(p)
+}
+
+<test>("memory helpers") {
+    p := ffi.new("Vec2", {"x": 1.5, "y": -2.0})
+    expect(ffi.read(p, "Vec2")).eq({"x": 1.5, "y": -2.0})
+    expect(ffi.read(p, "double", 1)).eq(-2.0)
+    ffi.free(p)
+    expect(ffi.sizeof("Vec2")).eq(16)
+}
+
+<test>("bad declarations explain themselves") {
+    expect(<type<Error> || <Value>>(ffi.fn(None, "int nope_not_a_symbol_xyz(int)"))).is_error()
+    expect(<type<Error> || <Value>>(libc.labs(1, 2))).is_error()
+    expect(<type<Error> || <Value>>(ffi.fn(None, "Nope f(int)"))).is_error()
+}

@@ -145,8 +145,7 @@ pub fn render_human(d: &Diagnostic, src: &SourceFile) -> String {
                         if let (Some(before), Some(after)) =
                             (src.text.get(..start), src.text.get(end..))
                         {
-                            let line_start =
-                                before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+                            let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
                             let line_end = after.find('\n').unwrap_or(after.len());
                             let fixed = format!(
                                 "{}{}{}",

@@ -197,7 +197,11 @@ pub struct OxSet {
 impl Drop for OxMap {
     fn drop(&mut self) {
         // A map holding a map holding a map... would drop one frame per level.
-        if self.entries.iter().any(|(k, v)| k.may_own_values() || v.may_own_values()) {
+        if self
+            .entries
+            .iter()
+            .any(|(k, v)| k.may_own_values() || v.may_own_values())
+        {
             let mut values = Vec::with_capacity(self.entries.len() * 2);
             self.drain_into(&mut values);
             crate::vm::value::drop_nested(values);

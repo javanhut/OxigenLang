@@ -44,11 +44,11 @@ pub(super) struct HelperIds {
     pub struct_field_add_local: FuncId,    // (vm, u32, u32, u32) -> u32
 
     // Locals
-    pub get_local: FuncId,         // (vm, u32)
-    pub set_local: FuncId,         // (vm, u32)
-    pub set_local_checked: FuncId, // (vm, u32) -> u32
+    pub get_local: FuncId,             // (vm, u32)
+    pub set_local: FuncId,             // (vm, u32)
+    pub set_local_checked: FuncId,     // (vm, u32) -> u32
     pub check_recursion_depth: FuncId, // (vm) -> u32
-    pub check_param_types: FuncId, // (vm) -> u32
+    pub check_param_types: FuncId,     // (vm) -> u32
     pub loop_stop: FuncId,             // (vm) -> u32
 
     // Arithmetic (fallible)
@@ -231,7 +231,10 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
 
     // Phase 2.2: the lean entry's cold exit. Never returns — it longjmps to the
     // boundary's thread-local unwind target.
-    reg!("oxigen_lean_overflow", crate::jit::runtime::jit_lean_overflow);
+    reg!(
+        "oxigen_lean_overflow",
+        crate::jit::runtime::jit_lean_overflow
+    );
 
     reg!("jit_run_via_interpreter", runtime::jit_run_via_interpreter);
     reg!("jit_push_constant", runtime::jit_push_constant);
@@ -265,7 +268,10 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_get_local", runtime::jit_get_local);
     reg!("jit_set_local", runtime::jit_set_local);
     reg!("jit_set_local_checked", runtime::jit_set_local_checked);
-    reg!("jit_check_recursion_depth", runtime::jit_check_recursion_depth);
+    reg!(
+        "jit_check_recursion_depth",
+        runtime::jit_check_recursion_depth
+    );
     reg!("jit_check_param_types", runtime::jit_check_param_types);
     reg!("jit_loop_stop", runtime::jit_loop_stop);
     reg!("jit_op_add", runtime::jit_op_add);

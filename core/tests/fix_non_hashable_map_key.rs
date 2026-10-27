@@ -33,7 +33,9 @@ fn run(source: &str) -> Result<String, String> {
     let mut vm = VM::new();
     vm.set_source(source);
     vm.set_script_args(&[]);
-    vm.run(function).map(|v| format!("{v}")).map_err(|e| e.message)
+    vm.run(function)
+        .map(|v| format!("{v}"))
+        .map_err(|e| e.message)
 }
 
 fn assert_rejected(source: &str, needle: &str) {
@@ -79,7 +81,10 @@ fn the_set_builtin_rejects_a_non_hashable_element() {
 fn the_error_names_the_kind_and_carries_its_code() {
     let e = run("m := {[1]: 1}").unwrap_err();
     assert!(e.contains("E0035"), "expected code E0035, got: {e}");
-    assert!(e.contains("map key"), "expected the position named, got: {e}");
+    assert!(
+        e.contains("map key"),
+        "expected the position named, got: {e}"
+    );
 }
 
 // ── every hashable kind still works ───────────────────────────────────────

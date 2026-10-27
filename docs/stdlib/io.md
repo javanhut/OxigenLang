@@ -11,15 +11,19 @@ introduce io
 | [`read_file`](#read_filepath) | `read_file(path)` | `str` |
 | [`write_file`](#write_filepath-content) | `write_file(path, content)` | `None` |
 | [`append_file`](#append_filepath-content) | `append_file(path, content)` | `None` |
+| [`read_bytes`](#read_bytespath) | `read_bytes(path)` | `array` of `byte` |
+| [`write_bytes`](#write_bytespath-data) | `write_bytes(path, data)` | `None` |
 | [`file_exists`](#file_existspath) | `file_exists(path)` | `bool` |
 | [`file_size`](#file_sizepath) | `file_size(path)` | `int` bytes |
 | [`input`](#inputprompt) | `input(prompt)` | `str` |
 | [`read_line`](#read_line) | `read_line()` | `str` |
 
-Files are read and written as **UTF-8 text**. There is no streaming reader and
-no binary mode: a file is one string. For a large download, stream it straight
-to disk with [`net.download`](net.md#downloadurl-path) instead of building the
-string in memory.
+`read_file` and `write_file` work with **UTF-8 text**: a file is one string.
+For a binary file, use [`read_bytes`](#read_bytespath) and
+[`write_bytes`](#write_bytespath-data), which work with arrays of bytes. There
+is no streaming reader. For a large or binary download, stream it straight to
+disk with [`net.download`](net.md#downloadurl-path-method-headers-body)
+instead of building it in memory.
 
 Directory work (create, list, walk, delete) lives in [os](os.md); path string
 manipulation lives in [path](path.md).
@@ -82,6 +86,34 @@ one in the string yourself.
 io.append_file("log.txt", "started\n")
 io.append_file("log.txt", "finished\n")
 ```
+
+### `read_bytes(path)`
+
+The file's raw contents, as an array of `byte` values. For binary files that
+`read_file` cannot hold as text:
+
+```oxi
+introduce io
+
+data := io.read_bytes("photo.jpg")
+println(len(data))                       // the size in bytes
+println(data[0] == byte(255))            // True: a JPEG starts FF D8
+```
+
+Each byte takes the room of a full value in an array, so this suits small
+binary files (headers, icons, short clips), not large ones. Move large files
+with `net.download` or `os.exec_argv("cp", ...)`.
+
+### `write_bytes(path, data)`
+
+Write an array of bytes, or ints from 0 to 255, to a file exactly as given,
+replacing what was there:
+
+```oxi
+io.write_bytes("magic.bin", [127, 69, 76, 70])   // the ELF header, \x7F E L F
+```
+
+Anything else in the array is an error, and nothing is written.
 
 ### `file_exists(path)`
 

@@ -10,6 +10,7 @@ Account includes {
         self.balance = self.balance + amount
         give self
     }
+
     fun describe() { "{self.owner}: ${self.balance}" }
 }
 
@@ -25,8 +26,7 @@ main {
     acct := Account("Ada", 120.0)
     acct.deposit(30.0)
     println(acct.describe())
-
-    savings := Savings { owner: "Grace", balance: 1000.0, rate: 0.05 }
+    savings := Savings(owner="Grace", balance=1000.0, rate=0.05)
     savings.add_interest()
     println(savings.describe())
 }

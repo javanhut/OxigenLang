@@ -12,7 +12,6 @@
 //! break — both directions are asserted here, in the interpreter and under the
 //! JIT (the emitted call sequence copied the same caller-frame pointer).
 
-
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
 use oxigen_core::parser::Parser;
@@ -117,5 +116,8 @@ fn hot_callback_keeps_its_own_module_under_jit() {
          total\n",
         "jit",
     );
-    assert_eq!(out, "600", "compiled calls must carry the callee's module too");
+    assert_eq!(
+        out, "600",
+        "compiled calls must carry the callee's module too"
+    );
 }

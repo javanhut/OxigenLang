@@ -108,8 +108,9 @@ fun capitalize(s <str>) {
 }
 
 // ── Searching ──
-// Indexes count characters, matching `s[i]`.
-fun index_of(s <str>, sub <str>) { __str_index_of(s, sub) }
+// Indexes count characters, matching `s[i]`. index_of searches from character
+// start (default 0) and returns -1 when sub is not found.
+fun index_of(s <str>, sub <str>, start <int> = 0) { __str_index_of(s, sub, start) }
 
 fun count(s <str>, sub <str>) { __str_count(s, sub) }
 

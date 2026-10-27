@@ -65,20 +65,32 @@ fn errors_on_stack(source: String) -> Vec<String> {
 fn deep_parentheses_are_a_diagnostic() {
     let n = 100_000;
     let errs = errors_on_stack(format!("x := {}1{}\n", "(".repeat(n), ")".repeat(n)));
-    assert!(errs.iter().any(|m| m.contains("nest")), "{:?}", errs.first());
+    assert!(
+        errs.iter().any(|m| m.contains("nest")),
+        "{:?}",
+        errs.first()
+    );
 }
 
 #[test]
 fn deep_brackets_are_a_diagnostic() {
     let n = 100_000;
     let errs = errors_on_stack(format!("x := {}1{}\n", "[".repeat(n), "]".repeat(n)));
-    assert!(errs.iter().any(|m| m.contains("nest")), "{:?}", errs.first());
+    assert!(
+        errs.iter().any(|m| m.contains("nest")),
+        "{:?}",
+        errs.first()
+    );
 }
 
 #[test]
 fn deep_prefix_chains_are_a_diagnostic() {
     let errs = errors_on_stack(format!("x := {}True\n", "not ".repeat(100_000)));
-    assert!(errs.iter().any(|m| m.contains("nest")), "{:?}", errs.first());
+    assert!(
+        errs.iter().any(|m| m.contains("nest")),
+        "{:?}",
+        errs.first()
+    );
 }
 
 #[test]
@@ -89,7 +101,11 @@ fn deep_blocks_are_a_diagnostic() {
         "each i in [1] {\n".repeat(n),
         "}\n".repeat(n)
     ));
-    assert!(errs.iter().any(|m| m.contains("nest")), "{:?}", errs.first());
+    assert!(
+        errs.iter().any(|m| m.contains("nest")),
+        "{:?}",
+        errs.first()
+    );
 }
 
 #[test]
@@ -109,7 +125,13 @@ fn reasonable_nesting_still_parses() {
 
 #[test]
 fn dot_requires_a_field_name() {
-    for bad in ["y := m.(", "y := m.{", "y := m.+", "y := m.\"a\"", "x := p.\ny := 1"] {
+    for bad in [
+        "y := m.(",
+        "y := m.{",
+        "y := m.+",
+        "y := m.\"a\"",
+        "x := p.\ny := 1",
+    ] {
         assert_rejected(&format!("m := {{\"a\": 1}}\np := m\n{bad}\n"));
     }
 }
@@ -129,7 +151,10 @@ fn dot_still_accepts_field_names() {
 fn less_than_an_angle_form_name() {
     assert_eq!(run("log := 10\n5 < log\n"), Ok("True".to_string()));
     assert_eq!(run("type := 10\n5 < type\n"), Ok("True".to_string()));
-    assert_eq!(run("Value := 10\nx := 3\nx < Value\n"), Ok("True".to_string()));
+    assert_eq!(
+        run("Value := 10\nx := 3\nx < Value\n"),
+        Ok("True".to_string())
+    );
 }
 
 // ── M7: `<Error<tag>>` as a whole annotation ──
@@ -140,7 +165,11 @@ fn tagged_error_type_annotation() {
         run("r <Error<net>> := <Error<net>>(\"x\")\ntype(r)\n"),
         Ok("ERROR<net>".to_string())
     );
-    assert!(errors("x <Error<net>>\n").is_empty(), "{:?}", errors("x <Error<net>>\n"));
+    assert!(
+        errors("x <Error<net>>\n").is_empty(),
+        "{:?}",
+        errors("x <Error<net>>\n")
+    );
     assert!(
         errors("fun f(e <Error<net>>) { e }\n").is_empty(),
         "{:?}",
@@ -159,7 +188,10 @@ fn two_statements_on_one_line_are_rejected() {
 #[test]
 fn single_line_blocks_still_parse() {
     assert_eq!(run("fun f(x) { x + 1 }\nf(1)\n"), Ok("2".to_string()));
-    assert_eq!(run("out := []\neach i in [1, 2] { out.push(i) }\nout\n"), Ok("[1, 2]".to_string()));
+    assert_eq!(
+        run("out := []\neach i in [1, 2] { out.push(i) }\nout\n"),
+        Ok("[1, 2]".to_string())
+    );
 }
 
 // ── L2: float overflow ──
@@ -176,7 +208,9 @@ fn float_literal_out_of_range_is_an_error() {
 #[test]
 fn repeat_unless_negates_rather_than_inverting_the_comparison() {
     assert_eq!(
-        run("n := float(\"nan\")\ncount := 0\nrepeat unless n < 1.0 {\n    count = count + 1\n    stop\n}\ncount\n"),
+        run(
+            "n := float(\"nan\")\ncount := 0\nrepeat unless n < 1.0 {\n    count = count + 1\n    stop\n}\ncount\n"
+        ),
         Ok("1".to_string())
     );
 }

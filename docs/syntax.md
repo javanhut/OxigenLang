@@ -75,7 +75,7 @@ fun add(a <int>, b <int>) { a + b }             // typed parameters
 fun greet(name <str>, msg <str> = "Hi") { ... } // default value
 fun connect(host <str>, port? <int>) { ... }     // optional parameter
 greet("Alice", msg="Hey")                        // named argument
-give value                                       // return
+give value                                       // return early (there is no `return`; the last expression is returned)
 give value when condition                        // conditional return
 ```
 

@@ -22,7 +22,9 @@ On Windows, run the installer inside WSL.
 
 ### Build from source
 
-Ensure you have [Rust](https://www.rust-lang.org/) installed. Clone the repository and build the project:
+Ensure you have [Rust](https://www.rust-lang.org/), a C compiler and `make`
+installed (the build compiles the bundled libffi for the [`ffi`](stdlib/ffi.md)
+module). Clone the repository and build the project:
 
 ```bash
 cargo build --release -p oxigen
@@ -139,7 +141,9 @@ The REPL maintains state across lines — variables, functions, structs, and pat
 | `oxigen --no-jit file.oxi` | Force the pure interpreter even in a JIT-enabled build. |
 | `oxigen` | Start the interactive REPL |
 | `oxigen fmt file.oxi [...]` | Format one or more `.oxi` files in-place |
-| `oxigen check file.oxi` | Parse a file and output diagnostics as JSON |
+| `oxigen check file.oxi` | Report problems without running the file: syntax and compile errors, names nothing defines, and suspicious logic such as `x == "a" or "b"`. Exits 1 on an error. Prints text at a terminal, JSON otherwise or with `--json` (for editors) |
+| `oxigen doc [topic]` | Show the reference docs: `oxigen doc` lists the modules, `oxigen doc os` shows one, `oxigen doc os.exec_argv` or `oxigen doc exec_argv` one function, `oxigen doc builtins` the built-in functions |
+| `oxigen explain CODE` | Explain an error code, such as `oxigen explain E0038` |
 | `oxigen test [path ...]` | Run `<test>` blocks. With no arguments, discovers `*_test.oxi` files recursively; a path may be a file or directory ([testing guide](testing.md)) |
 | `--version`, `-v` | Print the version and exit |
 

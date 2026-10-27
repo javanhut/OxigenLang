@@ -75,7 +75,10 @@ fn assert_yields(source: &str, expected: &str) {
 fn assert_fails_with(source: &str, needle: &str) {
     match run_all(source) {
         Ok(got) => panic!("expected an error containing {needle:?}, got {got}\nfor:\n{source}"),
-        Err(e) => assert!(e.contains(needle), "error {e:?} lacks {needle:?}\nfor:\n{source}"),
+        Err(e) => assert!(
+            e.contains(needle),
+            "error {e:?} lacks {needle:?}\nfor:\n{source}"
+        ),
     }
 }
 
@@ -91,7 +94,9 @@ fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) 
 }
 
 fn json_literal(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace('{', "\\{")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('{', "\\{")
 }
 
 // ── JSON ────────────────────────────────────────────────────────────────────
@@ -114,7 +119,10 @@ fn json_parse_still_reads_reasonable_nesting() {
 #[test]
 fn json_stringify_reports_a_cycle_instead_of_recursing_forever() {
     assert_fails_with("a := [1, 2]\na[1] = a\n__json_stringify(a)", "cycl");
-    assert_fails_with("m := {\"k\": 1}\nm[\"self\"] = m\n__json_stringify(m)", "cycl");
+    assert_fails_with(
+        "m := {\"k\": 1}\nm[\"self\"] = m\n__json_stringify(m)",
+        "cycl",
+    );
 }
 
 #[test]
@@ -179,7 +187,10 @@ fn json_stringify_escapes_a_quote_char() {
 #[test]
 fn sort_orders_ints_and_floats_numerically() {
     assert_yields("__sort([3, 2.5, 1, 0.5])", "[0.5, 1, 2.5, 3]");
-    assert_yields("__sort([2, 1.5, -1, uint(7), byte(3)])", "[-1, 1.5, 2, 3, 7]");
+    assert_yields(
+        "__sort([2, 1.5, -1, uint(7), byte(3)])",
+        "[-1, 1.5, 2, 3, 7]",
+    );
 }
 
 #[test]
@@ -295,7 +306,10 @@ fn net_download_and_upload_need_the_filesystem_capability_too() {
     let upload = "__net_upload(\"POST\", \"http://127.0.0.1:9/x\", \"/etc/hostname\", {})";
     for src in [download.as_str(), upload] {
         let got = run_restricted(src, &[Capability::Network]).unwrap_err();
-        assert!(got.contains("needs the 'filesystem' capability"), "got: {got}");
+        assert!(
+            got.contains("needs the 'filesystem' capability"),
+            "got: {got}"
+        );
         let got = run_restricted(src, &[Capability::FileSystem]).unwrap_err();
         assert!(got.contains("needs the 'network' capability"), "got: {got}");
         // With both, the call is attempted (and fails to connect).
@@ -359,5 +373,8 @@ fn http_read_line_caps_a_line_that_never_ends() {
 #[test]
 fn http_read_line_still_reads_ordinary_lines() {
     let port = one_shot_server(b"hello\nworld\n".to_vec());
-    assert_eq!(within(30, move || read_line_from(port)), Ok("5".to_string()));
+    assert_eq!(
+        within(30, move || read_line_from(port)),
+        Ok("5".to_string())
+    );
 }

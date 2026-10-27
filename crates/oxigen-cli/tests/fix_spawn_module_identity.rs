@@ -76,7 +76,11 @@ fn run_with_limit(script: &Path, limit: Duration) -> Output {
 fn assert_prints(out: &Output, expected: &str) {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "exit {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}", out.status);
+    assert!(
+        out.status.success(),
+        "exit {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status
+    );
     assert_eq!(stdout, expected, "stderr:\n{stderr}");
 }
 
@@ -105,7 +109,10 @@ fn diverge_in_a_module_does_not_rerun_the_main_script() {
     let out = run_files(
         "spawn-mod-script",
         &[
-            ("main.oxi", "introduce .modpar\nprintln(modpar.tenfold([1, 2, 3]))\n"),
+            (
+                "main.oxi",
+                "introduce .modpar\nprintln(modpar.tenfold([1, 2, 3]))\n",
+            ),
             ("modpar.oxi", MODPAR),
         ],
         LIMIT,
@@ -137,7 +144,10 @@ fn a_capturing_block_in_a_module_runs_on_a_worker() {
     let out = run_files(
         "spawn-mod-capture",
         &[
-            ("main.oxi", "introduce .scale\nprintln(scale.by([1, 2, 3], 7))\n"),
+            (
+                "main.oxi",
+                "introduce .scale\nprintln(scale.by([1, 2, 3], 7))\n",
+            ),
             (
                 "scale.oxi",
                 "fun by(xs, k) {\n    diverge each x in xs { x * k }\n}\n",
@@ -184,7 +194,8 @@ fn a_nested_named_function_is_not_resolved_by_name_in_main() {
     assert_prints(&out, "15\n");
 }
 
-const SHAPES: &str = "struct Point {\n    x <int>\n    y <int>\n}\nfun mk(a) { Point(x=a, y=a+1) }\n";
+const SHAPES: &str =
+    "struct Point {\n    x <int>\n    y <int>\n}\nfun mk(a) { Point(x=a, y=a+1) }\n";
 
 #[test]
 fn a_struct_from_a_module_comes_back_from_a_task() {

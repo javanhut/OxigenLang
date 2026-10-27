@@ -546,7 +546,6 @@ pub(super) fn emit_counter_bump(
     counters_ptr: *const JitCounters,
     offset: isize,
 ) {
-    
     let addr = unsafe { (counters_ptr as *const u8).offset(offset) } as i64;
     let ptr = builder.ins().iconst(types::I64, addr);
     let flags = cranelift_codegen::ir::MemFlagsData::trusted();

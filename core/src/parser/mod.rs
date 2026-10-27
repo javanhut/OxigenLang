@@ -56,9 +56,9 @@ fn precedence_of(tt: &TokenType) -> Precedence {
 type PrefixParseFn = fn(&mut Parser) -> Option<Expression>;
 type InfixParseFn = fn(&mut Parser, Expression) -> Option<Expression>;
 
-pub use crate::diagnostics::{Diagnostic, Severity};
 use crate::diagnostics::registry as codes;
 use crate::diagnostics::{Code, SourceFile, render};
+pub use crate::diagnostics::{Diagnostic, Severity};
 
 /// Builds a parser diagnostic. Every call site names a code so the message text
 /// stays free to change without breaking tests or tooling.
@@ -250,7 +250,6 @@ impl Parser {
         render::render_human(diag, &self.source_file())
     }
 
-
     fn negate_expression(expr: Expression) -> Expression {
         Expression::Prefix {
             token: Token {
@@ -278,7 +277,8 @@ impl Parser {
             if self.peek_token.token_type == TokenType::Lt {
                 self.next_token(); // consume inner '<'
                 if self.peek_token.token_type != TokenType::Ident {
-                    self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
+                    self.errors.push(diag_hint(
+                        codes::EXPECTED_IDENTIFIER,
                         self.peek_token.span,
                         format!("expected error tag name, got {:?}", self.peek_token.literal),
                         "provide a tag name like Error<MyTag>",
@@ -308,7 +308,8 @@ impl Parser {
 
     fn parse_type_union_member(&mut self) -> Option<TypeAnnotation> {
         if !Self::is_type_name_token(&self.curr_token.token_type) {
-            self.errors.push(diag_hint(codes::EXPECTED_TYPE_NAME, 
+            self.errors.push(diag_hint(
+                codes::EXPECTED_TYPE_NAME,
                 self.curr_token.span,
                 format!("expected type name, got {:?}", self.curr_token.literal),
                 "valid types: int, str, float, char, bool, array, byte, uint, tuple, map, set",
@@ -322,7 +323,8 @@ impl Parser {
     /// Supports both `<A || B>` and legacy `<A> || <B>` unions.
     fn parse_type_annotation(&mut self) -> Option<TypeAnnotation> {
         if !Self::is_type_name_token(&self.peek_token.token_type) {
-            self.errors.push(diag_hint(codes::EXPECTED_TYPE_NAME, 
+            self.errors.push(diag_hint(
+                codes::EXPECTED_TYPE_NAME,
                 self.peek_token.span,
                 format!(
                     "expected type name after `<`, got {:?}",
@@ -357,7 +359,8 @@ impl Parser {
                         self.next_token(); // consume legacy '<'
                     }
                     if !Self::is_type_name_token(&self.peek_token.token_type) {
-                        self.errors.push(diag_hint(codes::EXPECTED_TYPE_NAME, 
+                        self.errors.push(diag_hint(
+                            codes::EXPECTED_TYPE_NAME,
                             self.peek_token.span,
                             format!(
                                 "expected type name in union, got {:?}",
@@ -376,7 +379,8 @@ impl Parser {
                     break;
                 }
                 _ => {
-                    self.errors.push(diag_hint(codes::EXPECTED_TYPE_NAME, 
+                    self.errors.push(diag_hint(
+                        codes::EXPECTED_TYPE_NAME,
                         self.peek_token.span,
                         format!(
                             "expected `>` or `||` in type annotation, got {:?}",
@@ -523,7 +527,9 @@ impl Parser {
         if !self.enter_nesting() {
             return None;
         }
-        let stmt = self.parse_statement_inner().and_then(|stmt| self.try_postfix_guard(stmt));
+        let stmt = self
+            .parse_statement_inner()
+            .and_then(|stmt| self.try_postfix_guard(stmt));
         self.depth -= 1;
         stmt
     }
@@ -566,6 +572,23 @@ impl Parser {
         // In `#[indent]` files a block is closed by the next line's dedent, so a
         // statement ending in a block has no newline token after it.
         if ok || self.too_deep || self.curr_token.token_type == TokenType::RBrace {
+            return;
+        }
+        // `return x` parses as a statement `return` followed by `x`; say what
+        // the other language's keyword is called here instead.
+        if self.curr_token.token_type == TokenType::Ident
+            && let Some(instead) = foreign_keyword(&self.curr_token.literal)
+        {
+            let word = self.curr_token.literal.clone();
+            self.errors.push(
+                diag(
+                    codes::UNEXPECTED_TOKEN,
+                    self.curr_token.span,
+                    format!("`{word}` is not an Oxigen keyword"),
+                )
+                .label("read as a variable name, so the next word starts a second statement")
+                .help(instead),
+            );
             return;
         }
         self.errors.push(
@@ -654,8 +677,12 @@ impl Parser {
             TokenType::Choose => self.parse_choose_statement(),
             TokenType::Unless => self.parse_unless_statement(),
             TokenType::OptionKw => self.parse_expression_statement(),
-            TokenType::Skip => Some(Statement::Skip { token: self.curr_token.clone() }),
-            TokenType::Stop => Some(Statement::Stop { token: self.curr_token.clone() }),
+            TokenType::Skip => Some(Statement::Skip {
+                token: self.curr_token.clone(),
+            }),
+            TokenType::Stop => Some(Statement::Stop {
+                token: self.curr_token.clone(),
+            }),
             TokenType::Function => {
                 if self.peek_token.token_type == TokenType::Ident {
                     self.parse_named_function_statement()
@@ -717,7 +744,8 @@ impl Parser {
             self.next_token(); // consume ','
             self.next_token(); // move to next ident
             if self.curr_token.token_type != TokenType::Ident {
-                self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
+                self.errors.push(diag_hint(
+                    codes::EXPECTED_IDENTIFIER,
                     self.curr_token.span,
                     format!(
                         "expected identifier in unpack, got {:?}",
@@ -794,7 +822,8 @@ impl Parser {
             self.next_token(); // consume ','
             self.next_token(); // move to next ident
             if self.curr_token.token_type != TokenType::Ident {
-                self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
+                self.errors.push(diag_hint(
+                    codes::EXPECTED_IDENTIFIER,
                     self.curr_token.span,
                     format!(
                         "expected identifier in unpack, got {:?}",
@@ -919,39 +948,40 @@ impl Parser {
 
         // Check for dot-assign: expr.field = value
         if let Expression::DotAccess { token, left, field } = &expr
-            && self.peek_token.token_type == TokenType::Assign {
-                let tok = token.clone();
-                let obj = *left.clone();
-                let fld = field.clone();
-                self.next_token(); // consume '='
-                self.next_token(); // move to value expression
-                let value = self.parse_expression(Precedence::Lowest)?;
-                return Some(Statement::DotAssign {
-                    token: tok,
-                    object: obj,
-                    field: fld,
-                    value,
-                });
-            }
+            && self.peek_token.token_type == TokenType::Assign
+        {
+            let tok = token.clone();
+            let obj = *left.clone();
+            let fld = field.clone();
+            self.next_token(); // consume '='
+            self.next_token(); // move to value expression
+            let value = self.parse_expression(Precedence::Lowest)?;
+            return Some(Statement::DotAssign {
+                token: tok,
+                object: obj,
+                field: fld,
+                value,
+            });
+        }
 
         // Check for index-assign: expr[key] = value  or  expr[key] := value
         if let Expression::Index { token, left, index } = &expr
             && (self.peek_token.token_type == TokenType::Assign
                 || self.peek_token.token_type == TokenType::Walrus)
-            {
-                let tok = token.clone();
-                let obj = *left.clone();
-                let idx = *index.clone();
-                self.next_token(); // consume '=' or ':='
-                self.next_token(); // move to value expression
-                let value = self.parse_expression(Precedence::Lowest)?;
-                return Some(Statement::IndexAssign {
-                    token: tok,
-                    object: obj,
-                    index: idx,
-                    value,
-                });
-            }
+        {
+            let tok = token.clone();
+            let obj = *left.clone();
+            let idx = *index.clone();
+            self.next_token(); // consume '=' or ':='
+            self.next_token(); // move to value expression
+            let value = self.parse_expression(Precedence::Lowest)?;
+            return Some(Statement::IndexAssign {
+                token: tok,
+                object: obj,
+                index: idx,
+                value,
+            });
+        }
 
         Some(Statement::Expr(expr))
     }
@@ -977,7 +1007,8 @@ impl Parser {
                 {
                     return None;
                 }
-                self.errors.push(diag(codes::UNEXPECTED_TOKEN, 
+                self.errors.push(diag(
+                    codes::UNEXPECTED_TOKEN,
                     self.curr_token.span,
                     format!("unexpected token {:?}", self.curr_token.literal),
                 ));
@@ -1088,8 +1119,12 @@ impl Parser {
         let Some(value) = value else {
             // Used to become `inf` silently, which `fmt` then wrote back as `inf.0`.
             self.errors.push(
-                diag(codes::MALFORMED_NUMBER, tok.span, "float literal out of range")
-                    .label("too large for a 64-bit float"),
+                diag(
+                    codes::MALFORMED_NUMBER,
+                    tok.span,
+                    "float literal out of range",
+                )
+                .label("too large for a 64-bit float"),
             );
             return None;
         };
@@ -1132,7 +1167,8 @@ impl Parser {
                     self.next_token(); // move past InterpExprEnd
                 }
                 TokenType::Eof => {
-                    self.errors.push(diag_hint(codes::BAD_STRING_INTERPOLATION, 
+                    self.errors.push(diag_hint(
+                        codes::BAD_STRING_INTERPOLATION,
                         self.curr_token.span,
                         "unterminated string interpolation",
                         "make sure the string is properly closed with a matching quote",
@@ -1140,7 +1176,8 @@ impl Parser {
                     break;
                 }
                 _ => {
-                    self.errors.push(diag(codes::BAD_STRING_INTERPOLATION, 
+                    self.errors.push(diag(
+                        codes::BAD_STRING_INTERPOLATION,
                         self.curr_token.span,
                         format!(
                             "unexpected token in string interpolation: {:?}",
@@ -1190,7 +1227,8 @@ impl Parser {
     fn parse_effect_header(&mut self) -> Option<(Token, String, Option<String>)> {
         self.next_token(); // move to effect name after '<'
         if !Self::is_angle_effect_name_token(&self.curr_token) {
-            self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
+            self.errors.push(diag_hint(
+                codes::EXPECTED_IDENTIFIER,
                 self.curr_token.span,
                 format!(
                     "expected effect name after `<`, got {:?}",
@@ -1211,7 +1249,8 @@ impl Parser {
             if self.curr_token.token_type != TokenType::Ident
                 && self.curr_token.token_type != TokenType::None
             {
-                self.errors.push(diag(codes::UNSUPPORTED_EFFECT_FILTER, 
+                self.errors.push(diag(
+                    codes::UNSUPPORTED_EFFECT_FILTER,
                     self.curr_token.span,
                     format!(
                         "expected effect filter name, got {:?}",
@@ -1223,7 +1262,8 @@ impl Parser {
             if self.curr_token.literal == "Error" && self.peek_token.token_type == TokenType::Lt {
                 self.next_token(); // consume tag '<'
                 if self.peek_token.token_type != TokenType::Ident {
-                    self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
+                    self.errors.push(diag_hint(
+                        codes::EXPECTED_IDENTIFIER,
                         self.peek_token.span,
                         format!("expected error tag name, got {:?}", self.peek_token.literal),
                         "provide a tag name like Error<MyTag>",
@@ -1243,7 +1283,8 @@ impl Parser {
                 self.expect_peek(TokenType::Gt)?; // close Error<tag>
             } else {
                 if self.curr_token.literal != "Error" {
-                    self.errors.push(diag_hint(codes::UNSUPPORTED_EFFECT_FILTER, 
+                    self.errors.push(diag_hint(
+                        codes::UNSUPPORTED_EFFECT_FILTER,
                         self.curr_token.span,
                         format!("unsupported effect filter '{}'", self.curr_token.literal),
                         "only `Error` is supported as a filter for guard/fail",
@@ -1297,7 +1338,8 @@ impl Parser {
             self.next_token(); // consume inner '<'
             self.next_token(); // move to tag name
             if self.curr_token.token_type != TokenType::Ident {
-                self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
+                self.errors.push(diag_hint(
+                    codes::EXPECTED_IDENTIFIER,
                     self.curr_token.span,
                     format!(
                         "expected tag name after <log<, got {:?}",
@@ -1314,7 +1356,8 @@ impl Parser {
                 self.next_token(); // consume sub '<'
                 self.next_token(); // move to sub_tag name
                 if self.curr_token.token_type != TokenType::Ident {
-                    self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
+                    self.errors.push(diag_hint(
+                        codes::EXPECTED_IDENTIFIER,
                         self.curr_token.span,
                         format!("expected sub-tag name, got {:?}", self.curr_token.literal),
                         "use like: <log<Error<network>>>(\"message\")",
@@ -1383,7 +1426,8 @@ impl Parser {
                 if self.peek_token.token_type == TokenType::LParen {
                     let fallback = self.parse_single_parenthesized_expression()?;
                     let Some(value) = value else {
-                        self.errors.push(diag_hint(codes::UNEXPECTED_TOKEN, 
+                        self.errors.push(diag_hint(
+                            codes::UNEXPECTED_TOKEN,
                             token.span,
                             "<guard>(...) requires a target expression",
                             "use like: value <guard>(fallback)",
@@ -1400,7 +1444,8 @@ impl Parser {
                 } else {
                     self.next_token(); // move to binding identifier
                     if self.curr_token.token_type != TokenType::Ident {
-                        self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
+                        self.errors.push(diag_hint(
+                            codes::EXPECTED_IDENTIFIER,
                             self.curr_token.span,
                             format!(
                                 "expected identifier after <guard>, got {:?}",
@@ -1418,7 +1463,8 @@ impl Parser {
                     self.next_token(); // move to fallback
                     let fallback = self.parse_expression(Precedence::Lowest)?;
                     let Some(value) = value else {
-                        self.errors.push(diag_hint(codes::UNEXPECTED_TOKEN, 
+                        self.errors.push(diag_hint(
+                            codes::UNEXPECTED_TOKEN,
                             token.span,
                             "<guard> err -> ... requires a target expression",
                             "use like: value <guard> err -> fallback",
@@ -1454,7 +1500,8 @@ impl Parser {
                 }
             }
             "log" => {
-                self.errors.push(diag_hint(codes::UNEXPECTED_TOKEN, 
+                self.errors.push(diag_hint(
+                    codes::UNEXPECTED_TOKEN,
                     token.span,
                     "<log> is no longer a postfix effect",
                     "use <log>(\"message\") or <log<tag>>(\"message\") as a standalone expression",
@@ -1462,7 +1509,8 @@ impl Parser {
                 None
             }
             _ => {
-                self.errors.push(diag_hint(codes::UNKNOWN_ANGLE_EFFECT, 
+                self.errors.push(diag_hint(
+                    codes::UNKNOWN_ANGLE_EFFECT,
                     token.span,
                     format!("unknown angle effect '{}'", effect_name),
                     "valid effects: guard, fail, log, type, Error, Value",
@@ -1507,7 +1555,8 @@ impl Parser {
                 let tag = if self.peek_token.token_type == TokenType::Lt {
                     self.next_token(); // consume inner '<'
                     if self.peek_token.token_type != TokenType::Ident {
-                        self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
+                        self.errors.push(diag_hint(
+                            codes::EXPECTED_IDENTIFIER,
                             self.peek_token.span,
                             format!("expected error tag name, got {:?}", self.peek_token.literal),
                             "provide a tag name like Error<MyTag>",
@@ -1709,7 +1758,8 @@ impl Parser {
     fn parse_converge_expression(&mut self) -> Option<Expression> {
         let tok = self.curr_token.clone(); // 'converge'
         if self.peek_token.token_type == TokenType::LBrace {
-            self.errors.push(diag(codes::UNEXPECTED_TOKEN, 
+            self.errors.push(diag(
+                codes::UNEXPECTED_TOKEN,
                 tok.span,
                 "structured `converge { ... }` blocks aren't supported yet; use `converge <task>`"
                     .to_string(),
@@ -1791,7 +1841,8 @@ impl Parser {
         // Validate ordering: once we see an optional/default param, all following must be too
         let has_default = optional || default.is_some();
         if *seen_optional && !has_default {
-            self.errors.push(diag_hint(codes::REQUIRED_AFTER_OPTIONAL, 
+            self.errors.push(diag_hint(
+                codes::REQUIRED_AFTER_OPTIONAL,
                 ident.token.span,
                 format!(
                     "required parameter '{}' cannot follow optional/default parameters",
@@ -1921,7 +1972,8 @@ impl Parser {
                     self.next_token(); // consume next ident
                     segments.push(self.curr_token.literal.clone());
                 } else {
-                    self.errors.push(diag(codes::EXPECTED_MODULE_PATH, 
+                    self.errors.push(diag(
+                        codes::EXPECTED_MODULE_PATH,
                         self.peek_token.span,
                         "expected identifier after `.` in module path",
                     ));
@@ -1929,7 +1981,8 @@ impl Parser {
                 }
             }
         } else {
-            self.errors.push(diag_hint(codes::EXPECTED_MODULE_PATH, 
+            self.errors.push(diag_hint(
+                codes::EXPECTED_MODULE_PATH,
                 self.peek_token.span,
                 format!("expected module name, got {:?}", self.peek_token.literal),
                 "use like: introduce math or introduce .utils",
@@ -1951,7 +2004,8 @@ impl Parser {
 
         self.next_token(); // move to binding identifier
         if self.curr_token.token_type != TokenType::Ident {
-            self.errors.push(diag_hint(codes::EXPECTED_IDENTIFIER, 
+            self.errors.push(diag_hint(
+                codes::EXPECTED_IDENTIFIER,
                 self.curr_token.span,
                 format!(
                     "expected identifier after guard, got {:?}",
@@ -1983,7 +2037,10 @@ impl Parser {
         // After a value only `<guard...>` and `<fail...>` mean anything, and
         // both are keywords. `log`, `type`, `Error` and `Value` are ordinary
         // names here: `5 < log` is a comparison.
-        if matches!(self.peek_token.token_type, TokenType::Guard | TokenType::Fail) {
+        if matches!(
+            self.peek_token.token_type,
+            TokenType::Guard | TokenType::Fail
+        ) {
             return self.parse_angle_effect_with_target(Some(left));
         }
         self.parse_infix_expression(left)
@@ -2079,7 +2136,8 @@ impl Parser {
                 in_named = true;
             } else {
                 if in_named {
-                    self.errors.push(diag_hint(codes::POSITIONAL_AFTER_NAMED, 
+                    self.errors.push(diag_hint(
+                        codes::POSITIONAL_AFTER_NAMED,
                         self.curr_token.span,
                         "positional argument cannot follow named arguments",
                         "put all positional arguments before named ones",
@@ -2182,13 +2240,23 @@ impl Parser {
         let is_name = !matches!(
             self.curr_token.token_type,
             TokenType::String | TokenType::MultilineString | TokenType::Char | TokenType::Illegal
-        ) && self.curr_token.literal.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-            && self.curr_token.literal.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        ) && self
+            .curr_token
+            .literal
+            .starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && self
+                .curr_token
+                .literal
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_');
         if !is_name && self.curr_token.token_type != TokenType::Integer {
             self.errors.push(diag(
                 codes::EXPECTED_IDENTIFIER,
                 self.curr_token.span,
-                format!("expected a field name after `.`, got {:?}", self.curr_token.literal),
+                format!(
+                    "expected a field name after `.`, got {:?}",
+                    self.curr_token.literal
+                ),
             ));
             return None;
         }
@@ -2199,32 +2267,33 @@ impl Parser {
 
         // Only when the LHS is a plain Ident and the braces hold a struct-literal shape.
         if let Expression::Ident(ref ident) = left
-            && self.peek_token.token_type == TokenType::LBrace {
-                let mut idx = 1;
-                let mut is_struct_shape = false;
-                let mut is_empty = false;
-                loop {
-                    let t = self.peek_nth(idx).token_type.clone();
-                    if t == TokenType::Newline {
-                        idx += 1;
-                        continue;
-                    }
-                    if t == TokenType::RBrace {
-                        is_empty = true;
-                        break;
-                    }
-                    if t == TokenType::Ident {
-                        let t2 = self.peek_nth(idx + 1).token_type.clone();
-                        if t2 == TokenType::Colon {
-                            is_struct_shape = true;
-                        }
-                    }
+            && self.peek_token.token_type == TokenType::LBrace
+        {
+            let mut idx = 1;
+            let mut is_struct_shape = false;
+            let mut is_empty = false;
+            loop {
+                let t = self.peek_nth(idx).token_type.clone();
+                if t == TokenType::Newline {
+                    idx += 1;
+                    continue;
+                }
+                if t == TokenType::RBrace {
+                    is_empty = true;
                     break;
                 }
-                if is_struct_shape || is_empty {
-                    return self.parse_enum_struct_variant(tok, ident.value.clone(), field.value);
+                if t == TokenType::Ident {
+                    let t2 = self.peek_nth(idx + 1).token_type.clone();
+                    if t2 == TokenType::Colon {
+                        is_struct_shape = true;
+                    }
                 }
+                break;
             }
+            if is_struct_shape || is_empty {
+                return self.parse_enum_struct_variant(tok, ident.value.clone(), field.value);
+            }
+        }
 
         Some(Expression::DotAccess {
             token: tok,
@@ -2683,9 +2752,7 @@ impl Parser {
             }
 
             // A `{` default arm is a block unless it opens a map literal, which falls through to the expression path below.
-            if self.curr_token.token_type == TokenType::LBrace
-                && !self.brace_opens_map_literal()
-            {
+            if self.curr_token.token_type == TokenType::LBrace && !self.brace_opens_map_literal() {
                 default = Some(self.parse_block()?);
                 if self.peek_token.token_type == TokenType::Comma {
                     self.next_token();
@@ -2720,7 +2787,8 @@ impl Parser {
                 });
             } else if self.peek_token.token_type == TokenType::LBrace {
                 // User likely forgot '->' before the block
-                self.errors.push(diag_hint(codes::MISSING_ARROW_IN_OPTION_ARM, 
+                self.errors.push(diag_hint(
+                    codes::MISSING_ARROW_IN_OPTION_ARM,
                     self.peek_token.span,
                     "missing `->` before block in option arm",
                     "add `->` between the condition and its body: condition -> { ... }",
@@ -2908,7 +2976,8 @@ impl Parser {
         }
 
         if self.curr_token.token_type == TokenType::Eof {
-            self.errors.push(diag_hint(codes::UNCLOSED_DELIMITER, 
+            self.errors.push(diag_hint(
+                codes::UNCLOSED_DELIMITER,
                 open_brace_span,
                 "unclosed block: expected '}' before end of file",
                 "add a closing '}' to match this opening brace",
@@ -3196,7 +3265,8 @@ impl Parser {
             }
 
             if self.curr_token.token_type != TokenType::Function {
-                self.errors.push(diag_hint(codes::EXPECTED_FUN_IN_INCLUDES, 
+                self.errors.push(diag_hint(
+                    codes::EXPECTED_FUN_IN_INCLUDES,
                     self.curr_token.span,
                     format!(
                         "expected `fun` inside includes block, got {:?}",
@@ -3359,7 +3429,10 @@ impl Parser {
                 | TokenType::LBrace
                 | TokenType::InterpStart
                 | TokenType::MultilineInterpStart => depth += 1,
-                TokenType::RParen | TokenType::RBracket | TokenType::RBrace | TokenType::InterpEnd => {
+                TokenType::RParen
+                | TokenType::RBracket
+                | TokenType::RBrace
+                | TokenType::InterpEnd => {
                     if depth == 0 {
                         return false;
                     }
@@ -3546,3 +3619,26 @@ impl Parser {
 
 #[cfg(test)]
 mod tests;
+
+/// What Oxigen calls a keyword from another language, for a word that is not
+/// one here and so parses as a plain name.
+fn foreign_keyword(word: &str) -> Option<&'static str> {
+    Some(match word {
+        "return" => {
+            "Oxigen has no `return`: a function returns its last expression. \
+             To return early, use `give value` (or `give value when condition`)"
+        }
+        "break" => "to leave a loop, use `stop`",
+        "continue" => "to go to the next loop iteration, use `skip`",
+        "let" | "var" | "const" => "declare a variable with `name := value`",
+        "def" | "func" | "function" | "fn" => "define a function with `fun name(params) { ... }`",
+        "import" | "require" | "use" | "include" => "import a module with `introduce name`",
+        "if" | "elif" | "switch" => {
+            "branch with `option { condition -> { ... } }` (see control flow docs)"
+        }
+        "while" => "loop with `repeat when condition { ... }`",
+        "for" | "foreach" => "loop with `each item in collection { ... }`",
+        "throw" | "raise" => "raise an error with `fail \"message\"`",
+        _ => return None,
+    })
+}

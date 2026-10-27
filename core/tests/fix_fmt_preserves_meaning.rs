@@ -60,7 +60,11 @@ fn fmt(source: &str) -> String {
     );
     let indent = source.starts_with(INDENT);
     let body = Formatter::format_source(&program, parser.comments(), indent);
-    if indent { format!("{INDENT}{body}") } else { body }
+    if indent {
+        format!("{INDENT}{body}")
+    } else {
+        body
+    }
 }
 
 /// Formatting must keep the result, produce parseable output, and be stable.
@@ -73,7 +77,10 @@ fn assert_fmt_preserves(source: &str) -> String {
         "fmt changed the program's result\n--- before ---\n{source}\n--- after ---\n{once}"
     );
     let twice = fmt(&once);
-    assert_eq!(once, twice, "fmt is not idempotent\n--- once ---\n{once}\n--- twice ---\n{twice}");
+    assert_eq!(
+        once, twice,
+        "fmt is not idempotent\n--- once ---\n{once}\n--- twice ---\n{twice}"
+    );
     once
 }
 
@@ -131,7 +138,9 @@ fn unless_block_whose_condition_interpolates_an_unless_then() {
 
 #[test]
 fn plain_postfix_guards_still_fold() {
-    let out = assert_fmt_preserves("out := []\nx := 1\nout.push(1) when x > 0\nout.push(2) unless x > 0\nout\n");
+    let out = assert_fmt_preserves(
+        "out := []\nx := 1\nout.push(1) when x > 0\nout.push(2) unless x > 0\nout\n",
+    );
     assert!(out.contains("out.push(1) when x > 0"), "{out}");
     assert!(out.contains("out.push(2) unless x > 0"), "{out}");
 }
@@ -197,10 +206,19 @@ fn double_negation_does_not_become_decrement() {
 #[test]
 fn control_characters_in_strings_are_escaped() {
     let out = assert_fmt_preserves("s := \"nul\\0end\"\nt := \"bell\\x07\"\n[len(s), len(t)]\n");
-    assert!(!out.contains('\0'), "raw NUL written into the file:\n{out:?}");
-    assert!(!out.contains('\x07'), "raw control character written into the file:\n{out:?}");
+    assert!(
+        !out.contains('\0'),
+        "raw NUL written into the file:\n{out:?}"
+    );
+    assert!(
+        !out.contains('\x07'),
+        "raw control character written into the file:\n{out:?}"
+    );
     let out = assert_fmt_preserves("s := \"\"\"a\\0b\"\"\"\nlen(s)\n");
-    assert!(!out.contains('\0'), "raw NUL written into the file:\n{out:?}");
+    assert!(
+        !out.contains('\0'),
+        "raw NUL written into the file:\n{out:?}"
+    );
 }
 
 // ── H4: tagged and synthetic guards ──
@@ -252,5 +270,8 @@ fn trailing_comment_stays_inside_a_one_line_body() {
 fn comments_in_an_empty_body_stay_put() {
     let out = assert_fmt_preserves("fun f() { // note\n    // body\n}\nf()\n");
     let close = out.find('}').expect("closing brace");
-    assert!(out.find("// body").unwrap() < close, "comment moved out of the body:\n{out}");
+    assert!(
+        out.find("// body").unwrap() < close,
+        "comment moved out of the body:\n{out}"
+    );
 }

@@ -61,13 +61,7 @@ fn assert_both_yield(source: &str, expected: &str) {
 #[test]
 fn float_division_by_zero_is_an_error() {
     // Was: inf / -inf / NaN.
-    for source in [
-        "1.0 / 0.0",
-        "-1.0 / 0.0",
-        "0.0 / 0.0",
-        "1.0 / 0",
-        "1 / 0.0",
-    ] {
+    for source in ["1.0 / 0.0", "-1.0 / 0.0", "0.0 / 0.0", "1.0 / 0", "1 / 0.0"] {
         assert_both_reject(source, "division by zero");
     }
 }

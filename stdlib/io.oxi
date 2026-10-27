@@ -5,6 +5,13 @@ fun write_file(path <str>, content <str>) { __write_file(path, content) }
 
 fun append_file(path <str>, content <str>) { __append_file(path, content) }
 
+// Read a file's raw bytes into an array of bytes. For binary files (audio,
+// images) that read_file cannot hold as text.
+fun read_bytes(path <str>) { __read_bytes(path) }
+
+// Write an array of bytes (or ints 0-255) to a file exactly as given.
+fun write_bytes(path <str>, data) { __write_bytes(path, data) }
+
 fun file_exists(path <str>) { __file_exists(path) }
 
 // Size of a file in bytes.

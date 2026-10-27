@@ -262,7 +262,8 @@ fn assert_reparses_and_stable(source: &str, formatted: &str) {
 
 #[test]
 fn fmt_preserves_comments() {
-    let input = "// leading comment\nfun add(a, b) {\n// inner comment\na + b // trailing comment\n}\n";
+    let input =
+        "// leading comment\nfun add(a, b) {\n// inner comment\na + b // trailing comment\n}\n";
     let out = format_faithful(input);
     assert!(out.contains("// leading comment"), "{out}");
     assert!(out.contains("// inner comment"), "{out}");
@@ -288,8 +289,14 @@ fn fmt_preserves_block_comments_and_trailing_file_comments() {
 fn fmt_emits_indent_style_for_indent_files() {
     let input = "#[indent]\nfun add(a, b):\n  // inner\n  a + b\n\nmain:\n  println(add(1, 2))\n";
     let out = format_faithful(input);
-    assert!(!out.contains('{'), "indent file must not gain braces:\n{out}");
-    assert!(!out.contains('}'), "indent file must not gain braces:\n{out}");
+    assert!(
+        !out.contains('{'),
+        "indent file must not gain braces:\n{out}"
+    );
+    assert!(
+        !out.contains('}'),
+        "indent file must not gain braces:\n{out}"
+    );
     assert!(out.contains("fun add(a, b):"), "{out}");
     assert!(out.contains("// inner"), "{out}");
     assert_reparses_and_stable(input, &out);
@@ -335,7 +342,10 @@ fn line_of(haystack: &str, needle: &str) -> usize {
 #[test]
 fn fmt_keeps_end_of_block_comment_inside_the_block() {
     let out = format_faithful("main {\nx := 1\n  // end of block\n}\n\ny := 2\n");
-    assert!(line_of(&out, "// end of block") < line_of(&out, "}"), "{out}");
+    assert!(
+        line_of(&out, "// end of block") < line_of(&out, "}"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -346,7 +356,10 @@ fn fmt_treats_a_margin_comment_at_a_block_boundary_as_outside() {
     let inside = format_faithful("main {\nx := 1\n// boundary\n}\n\ny := 2\n");
     let outside = format_faithful("main {\nx := 1\n}\n// boundary\n\ny := 2\n");
     assert_eq!(inside, outside);
-    assert!(line_of(&inside, "}") < line_of(&inside, "// boundary"), "{inside}");
+    assert!(
+        line_of(&inside, "}") < line_of(&inside, "// boundary"),
+        "{inside}"
+    );
 }
 
 #[test]
@@ -354,13 +367,19 @@ fn fmt_keeps_end_of_block_comment_inside_the_files_last_block() {
     // Nothing follows the block, so the line bound alone cannot place this —
     // the comment's indentation is what marks it as inside.
     let out = format_faithful("y := 2\n\nmain {\nx := 1\n  // end of block\n}\n");
-    assert!(line_of(&out, "// end of block") < line_of(&out, "}"), "{out}");
+    assert!(
+        line_of(&out, "// end of block") < line_of(&out, "}"),
+        "{out}"
+    );
 }
 
 #[test]
 fn fmt_keeps_a_margin_comment_after_the_final_block_outside_it() {
     let out = format_faithful("main {\nx := 1\n}\n// file trailer\n");
-    assert!(line_of(&out, "}") < line_of(&out, "// file trailer"), "{out}");
+    assert!(
+        line_of(&out, "}") < line_of(&out, "// file trailer"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -373,7 +392,10 @@ fn fmt_places_nested_end_of_block_comments_in_the_innermost_block() {
         .lines()
         .position(|l| l == "}")
         .unwrap_or_else(|| panic!("no top-level close in:\n{out}"));
-    assert!(inner < close_each, "inner comment escaped its block:\n{out}");
+    assert!(
+        inner < close_each,
+        "inner comment escaped its block:\n{out}"
+    );
     assert!(close_each < outer && outer < close_main, "{out}");
     assert!(close_main < line_of(&out, "// file trailer"), "{out}");
     assert_reparses_and_stable(src, &out);
@@ -452,9 +474,24 @@ fn parse_ok_source(source: &str) {
 #[test]
 fn interpolation_accepts_operators_the_parser_supports() {
     for expr in [
-        "a == b", "a != b", "a < b", "a <= b", "a > b", "a >= b", "x % 2",
-        "a and b", "a or b", "not a", "-a", "a + b * 2", "(a + b) * 2",
-        "f(a, b)", "items[0]", "p.n", "p.m()", "a == b or x % 2 == 0",
+        "a == b",
+        "a != b",
+        "a < b",
+        "a <= b",
+        "a > b",
+        "a >= b",
+        "x % 2",
+        "a and b",
+        "a or b",
+        "not a",
+        "-a",
+        "a + b * 2",
+        "(a + b) * 2",
+        "f(a, b)",
+        "items[0]",
+        "p.n",
+        "p.m()",
+        "a == b or x % 2 == 0",
     ] {
         parse_ok_source(&format!("println(\"{{{expr}}}\")"));
     }
@@ -474,7 +511,11 @@ fn interpolated_expressions_survive_formatting() {
     let src = "println(\"{a == b} {x % 2} {a < b and b > 0} {items[0]} {(a + b) * 2}\")\n";
     let formatted = format_source(src);
     parse_ok_source(&formatted);
-    assert_eq!(format_source(&formatted), formatted, "fmt is not idempotent");
+    assert_eq!(
+        format_source(&formatted),
+        formatted,
+        "fmt is not idempotent"
+    );
     assert!(formatted.contains("{a == b}"), "{formatted}");
     assert!(formatted.contains("{x % 2}"), "{formatted}");
 }
@@ -489,5 +530,9 @@ fn escaped_braces_are_literal_and_round_trip() {
     parse_ok_source(&formatted);
     assert!(!formatted.contains("\\\\{"), "double-escaped: {formatted}");
     assert!(formatted.contains("\\{"), "brace not escaped: {formatted}");
-    assert_eq!(format_source(&formatted), formatted, "fmt is not idempotent");
+    assert_eq!(
+        format_source(&formatted),
+        formatted,
+        "fmt is not idempotent"
+    );
 }

@@ -215,8 +215,13 @@ mod layout_tests {
         let dict = Rc::new(HashMap::from([("x".to_string(), Value::Integer(1))]));
         let mg = ModuleGlobals::from(Some(Rc::clone(&dict)));
 
-        let first_word = unsafe { *(&mg as *const ModuleGlobals as *const *const HashMap<String, Value>) };
-        assert_eq!(first_word, Rc::as_ptr(&dict), "raw view must be at offset 0");
+        let first_word =
+            unsafe { *(&mg as *const ModuleGlobals as *const *const HashMap<String, Value>) };
+        assert_eq!(
+            first_word,
+            Rc::as_ptr(&dict),
+            "raw view must be at offset 0"
+        );
         assert_eq!(first_word, mg.as_ptr());
         assert!(mg.get().unwrap().contains_key("x"));
 
@@ -831,11 +836,8 @@ impl ModuleGlobals {
     }
 
     pub fn set(&self, globals: Option<Rc<HashMap<String, Value>>>) {
-        self.ptr.set(
-            globals
-                .as_ref()
-                .map_or(std::ptr::null(), Rc::as_ptr),
-        );
+        self.ptr
+            .set(globals.as_ref().map_or(std::ptr::null(), Rc::as_ptr));
         *self.rc.borrow_mut() = globals;
     }
 
@@ -1255,71 +1257,177 @@ impl Value {
 
     // Mirror NanValue's accessors so call sites stop relying on the enum's pattern shape.
 
-    #[inline] pub fn as_integer(&self) -> Option<i64> {
-        if let Value::Integer(n) = self { Some(*n) } else { None }
+    #[inline]
+    pub fn as_integer(&self) -> Option<i64> {
+        if let Value::Integer(n) = self {
+            Some(*n)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_float(&self) -> Option<f64> {
-        if let Value::Float(f) = self { Some(*f) } else { None }
+    #[inline]
+    pub fn as_float(&self) -> Option<f64> {
+        if let Value::Float(f) = self {
+            Some(*f)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_char(&self) -> Option<char> {
-        if let Value::Char(c) = self { Some(*c) } else { None }
+    #[inline]
+    pub fn as_char(&self) -> Option<char> {
+        if let Value::Char(c) = self {
+            Some(*c)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_bool(&self) -> Option<bool> {
-        if let Value::Boolean(b) = self { Some(*b) } else { None }
+    #[inline]
+    pub fn as_bool(&self) -> Option<bool> {
+        if let Value::Boolean(b) = self {
+            Some(*b)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_byte(&self) -> Option<u8> {
-        if let Value::Byte(b) = self { Some(*b) } else { None }
+    #[inline]
+    pub fn as_byte(&self) -> Option<u8> {
+        if let Value::Byte(b) = self {
+            Some(*b)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_uint(&self) -> Option<u64> {
-        if let Value::Uint(n) = self { Some(*n) } else { None }
+    #[inline]
+    pub fn as_uint(&self) -> Option<u64> {
+        if let Value::Uint(n) = self {
+            Some(*n)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn is_none(&self) -> bool {
+    #[inline]
+    pub fn is_none(&self) -> bool {
         matches!(self, Value::None)
     }
-    #[inline] pub fn as_string(&self) -> Option<&Rc<String>> {
-        if let Value::String(s) = self { Some(s) } else { None }
+    #[inline]
+    pub fn as_string(&self) -> Option<&Rc<String>> {
+        if let Value::String(s) = self {
+            Some(s)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_array(&self) -> Option<&Rc<RefCell<ValueVec>>> {
-        if let Value::Array(a) = self { Some(a) } else { None }
+    #[inline]
+    pub fn as_array(&self) -> Option<&Rc<RefCell<ValueVec>>> {
+        if let Value::Array(a) = self {
+            Some(a)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_tuple(&self) -> Option<&Rc<ValueVec>> {
-        if let Value::Tuple(t) = self { Some(t) } else { None }
+    #[inline]
+    pub fn as_tuple(&self) -> Option<&Rc<ValueVec>> {
+        if let Value::Tuple(t) = self {
+            Some(t)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_map(&self) -> Option<&Rc<RefCell<crate::vm::collections::OxMap>>> {
-        if let Value::Map(m) = self { Some(m) } else { None }
+    #[inline]
+    pub fn as_map(&self) -> Option<&Rc<RefCell<crate::vm::collections::OxMap>>> {
+        if let Value::Map(m) = self {
+            Some(m)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_set(&self) -> Option<&Rc<RefCell<crate::vm::collections::OxSet>>> {
-        if let Value::Set(s) = self { Some(s) } else { None }
+    #[inline]
+    pub fn as_set(&self) -> Option<&Rc<RefCell<crate::vm::collections::OxSet>>> {
+        if let Value::Set(s) = self {
+            Some(s)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_closure(&self) -> Option<&Rc<ObjClosure>> {
-        if let Value::Closure(c) = self { Some(c) } else { None }
+    #[inline]
+    pub fn as_closure(&self) -> Option<&Rc<ObjClosure>> {
+        if let Value::Closure(c) = self {
+            Some(c)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_builtin(&self) -> Option<BuiltinFn> {
-        if let Value::Builtin(f) = self { Some(*f) } else { None }
+    #[inline]
+    pub fn as_builtin(&self) -> Option<BuiltinFn> {
+        if let Value::Builtin(f) = self {
+            Some(*f)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_struct_def(&self) -> Option<&Rc<ObjStructDef>> {
-        if let Value::StructDef(d) = self { Some(d) } else { None }
+    #[inline]
+    pub fn as_struct_def(&self) -> Option<&Rc<ObjStructDef>> {
+        if let Value::StructDef(d) = self {
+            Some(d)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_struct_instance(&self) -> Option<&Rc<ObjStructInstance>> {
-        if let Value::StructInstance(i) = self { Some(i) } else { None }
+    #[inline]
+    pub fn as_struct_instance(&self) -> Option<&Rc<ObjStructInstance>> {
+        if let Value::StructInstance(i) = self {
+            Some(i)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_enum_def(&self) -> Option<&Rc<ObjEnumDef>> {
-        if let Value::EnumDef(d) = self { Some(d) } else { None }
+    #[inline]
+    pub fn as_enum_def(&self) -> Option<&Rc<ObjEnumDef>> {
+        if let Value::EnumDef(d) = self {
+            Some(d)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_enum_instance(&self) -> Option<&Rc<ObjEnumInstance>> {
-        if let Value::EnumInstance(i) = self { Some(i) } else { None }
+    #[inline]
+    pub fn as_enum_instance(&self) -> Option<&Rc<ObjEnumInstance>> {
+        if let Value::EnumInstance(i) = self {
+            Some(i)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_module(&self) -> Option<&Rc<ObjModule>> {
-        if let Value::Module(m) = self { Some(m) } else { None }
+    #[inline]
+    pub fn as_module(&self) -> Option<&Rc<ObjModule>> {
+        if let Value::Module(m) = self {
+            Some(m)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_error_value(&self) -> Option<&Rc<ErrorValueData>> {
-        if let Value::ErrorValue(d) = self { Some(d) } else { None }
+    #[inline]
+    pub fn as_error_value(&self) -> Option<&Rc<ErrorValueData>> {
+        if let Value::ErrorValue(d) = self {
+            Some(d)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_wrapped(&self) -> Option<&Rc<Value>> {
-        if let Value::Wrapped(v) = self { Some(v) } else { None }
+    #[inline]
+    pub fn as_wrapped(&self) -> Option<&Rc<Value>> {
+        if let Value::Wrapped(v) = self {
+            Some(v)
+        } else {
+            None
+        }
     }
-    #[inline] pub fn as_error_string(&self) -> Option<&Rc<String>> {
-        if let Value::Error(s) = self { Some(s) } else { None }
+    #[inline]
+    pub fn as_error_string(&self) -> Option<&Rc<String>> {
+        if let Value::Error(s) = self {
+            Some(s)
+        } else {
+            None
+        }
     }
 
     /// Borrow as a [`ValueRepr`] — the migration-friendly view enum.
@@ -1620,26 +1728,28 @@ impl fmt::Display for Value {
             }),
             Value::Error(msg) => write!(f, "Error: {}", msg),
             Value::EnumDef(d) => write!(f, "enum {}", d.name),
-            Value::EnumInstance(i) => nested(f, Rc::as_ptr(i) as usize, "", "", |f| match &i.payload {
-                VmEnumPayload::Unit(_) => write!(f, "{}.{}", i.enum_name, i.variant_name),
-                VmEnumPayload::Tuple(items) => {
-                    let s: Vec<String> = items.iter().map(|v| v.to_string()).collect();
-                    write!(f, "{}.{}({})", i.enum_name, i.variant_name, s.join(", "))
-                }
-                VmEnumPayload::Struct(fields) => {
-                    let s: Vec<String> = fields
-                        .iter()
-                        .map(|(k, v)| format!("{}: {}", k, v))
-                        .collect();
-                    write!(
-                        f,
-                        "{}.{} {{ {} }}",
-                        i.enum_name,
-                        i.variant_name,
-                        s.join(", ")
-                    )
-                }
-            }),
+            Value::EnumInstance(i) => {
+                nested(f, Rc::as_ptr(i) as usize, "", "", |f| match &i.payload {
+                    VmEnumPayload::Unit(_) => write!(f, "{}.{}", i.enum_name, i.variant_name),
+                    VmEnumPayload::Tuple(items) => {
+                        let s: Vec<String> = items.iter().map(|v| v.to_string()).collect();
+                        write!(f, "{}.{}({})", i.enum_name, i.variant_name, s.join(", "))
+                    }
+                    VmEnumPayload::Struct(fields) => {
+                        let s: Vec<String> = fields
+                            .iter()
+                            .map(|(k, v)| format!("{}: {}", k, v))
+                            .collect();
+                        write!(
+                            f,
+                            "{}.{} {{ {} }}",
+                            i.enum_name,
+                            i.variant_name,
+                            s.join(", ")
+                        )
+                    }
+                })
+            }
             Value::Task(_) => write!(f, "<task>"),
             Value::Native(n) => write!(f, "<builtin {}>", n.name),
             Value::Host(h) => write!(f, "<{}>", h.type_name),
@@ -1709,16 +1819,22 @@ impl PartialEq for Value {
             (Value::Byte(a), Value::Byte(b)) => a == b,
             (Value::Uint(a), Value::Uint(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => {
-                compare_nested(Rc::as_ptr(a) as usize, Rc::as_ptr(b) as usize, || *a.borrow() == *b.borrow())
+                compare_nested(Rc::as_ptr(a) as usize, Rc::as_ptr(b) as usize, || {
+                    *a.borrow() == *b.borrow()
+                })
             }
             (Value::Tuple(a), Value::Tuple(b)) => {
                 compare_nested(Rc::as_ptr(a) as usize, Rc::as_ptr(b) as usize, || a == b)
             }
             (Value::Map(a), Value::Map(b)) => {
-                compare_nested(Rc::as_ptr(a) as usize, Rc::as_ptr(b) as usize, || *a.borrow() == *b.borrow())
+                compare_nested(Rc::as_ptr(a) as usize, Rc::as_ptr(b) as usize, || {
+                    *a.borrow() == *b.borrow()
+                })
             }
             (Value::Set(a), Value::Set(b)) => {
-                compare_nested(Rc::as_ptr(a) as usize, Rc::as_ptr(b) as usize, || *a.borrow() == *b.borrow())
+                compare_nested(Rc::as_ptr(a) as usize, Rc::as_ptr(b) as usize, || {
+                    *a.borrow() == *b.borrow()
+                })
             }
             (Value::ErrorValue(a), Value::ErrorValue(b)) => a.msg == b.msg && a.tag == b.tag,
             (Value::Wrapped(a), Value::Wrapped(b)) => a == b,

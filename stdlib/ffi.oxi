@@ -1,0 +1,58 @@
+// Call C libraries. Declare functions with their C signatures and call them
+// like Oxigen functions:
+//
+//     libm := ffi.open("m", {"cos": "double(double)"})
+//     libm.cos(0.0)
+//
+// A library is a bare name ("m", "sqlite3"), a file name, a path, or None for
+// the C runtime. A wrong signature is undefined behaviour, as in C.
+// Load a library and bind every function in decls, a map of name to C
+// signature. The result is called like a module: lib.name(args).
+fun open(lib, decls = None) { __ffi_open(lib, decls) }
+
+// Bind one function, from a library ("int abs(int)") or from a function
+// pointer you already have ("int(int)").
+fun fn(lib, signature <str>) { __ffi_fn(lib, signature) }
+
+// Declare a C struct: ffi.cstruct("Vec2", "double x; double y"). Returns its
+// name, which then works as a type in signatures ("Vec2", "Vec2*"). Struct
+// values are maps of field name to value.
+fun cstruct(name <str>, fields = None) { __ffi_struct(name, fields) }
+
+// A C function pointer that calls func, for C APIs that take a callback.
+fun callback(signature <str>, func) { __ffi_callback(signature, func) }
+
+// The address of a symbol, such as a global variable.
+fun sym(lib, name <str>) { __ffi_sym(lib, name) }
+
+// Zeroed C memory of size bytes. Free it with ffi.free.
+fun alloc(size <int>) { __ffi_alloc(size) }
+
+// Zeroed C memory for one value of a C type, optionally set to value.
+fun new(type <str>, value = None) {
+    p := __ffi_alloc(__ffi_sizeof(type))
+    option {
+        value != None -> {
+            __ffi_write(p, type, value)
+        }
+    }
+    p
+}
+
+// Free memory from ffi.alloc, ffi.new or ffi.cstring.
+fun free(ptr) { __ffi_free(ptr) }
+
+// The size of a C type in bytes.
+fun sizeof(type <str>) { __ffi_sizeof(type) }
+
+// Read element index (default 0) of a C array of type at ptr.
+fun read(ptr, type <str>, index = 0) { __ffi_read(ptr, type, index) }
+
+// Write element index (default 0) of a C array of type at ptr.
+fun write(ptr, type <str>, value, index = 0) { __ffi_write(ptr, type, value, index) }
+
+// The C string at ptr, or len bytes from it.
+fun string(ptr, len = None) { __ffi_string(ptr, len) }
+
+// A C copy of s that lives until ffi.free, for char* fields and globals.
+fun cstring(s <str>) { __ffi_cstring(s) }
