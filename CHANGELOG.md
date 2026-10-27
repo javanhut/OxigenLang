@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Added: adding, removing and searching in collections
+
+Arrays, maps and sets now share one set of builtins, all of which change the
+collection in place:
+
+- `push(set, x)` adds to a set, as it already appended to an array.
+- `insert(set, x)` takes two arguments, and `insert(arr, index, x)` puts an
+  element at a position (negative indices count from the end).
+- `remove(arr, x)` removes the first element equal to `x`.
+- `pop` removes one entry and returns it: `pop(arr)` the last element,
+  `pop(arr, index)` the one at `index`, `pop(map, key)` the key's value
+  (`None` if absent), and `pop(set)` the most recently added value.
+- `extend(arr|set, items)` adds every element of an array, tuple or set;
+  `extend(map, other)` copies in another map's entries.
+- `clear(collection)` empties an array, map or set.
+- `copy(collection)` makes a separate (shallow) copy, since `b := a` shares
+  one collection between two names.
+- `has(str, sub)` finds a substring or character.
+- `set(arr)` makes a set of the array's elements.
+
+A new `sets` module does set algebra: `union`, `intersection`, `difference`,
+`symmetric_difference`, `is_subset`, `is_superset`, `is_disjoint`,
+`to_array`, `filter` and `map`.
+
+### Changed
+
+- `insert(set, value, extra)` is an error. It used to need the third argument
+  and ignore it; write `insert(set, value)` or `push(set, value)`.
+- The docs for `insert` and `remove` said they returned a new map. They have
+  always changed the map in place, and the docs now say so.
+
 ### Added: background processes, signals and channels
 
 - `os.spawn(prog, argv, capture)` starts a program and returns a handle at

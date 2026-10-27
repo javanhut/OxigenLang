@@ -7,9 +7,9 @@
 //! O(n) instead of O(1), and the key was mutable, so it could be changed after
 //! insertion and no longer match its own entry.
 //!
-//! The refusal goes at the six places a user-controlled key can enter — the
-//! `BuildMap`/`BuildSet` opcodes, index assignment, and the `insert()`/`set()`
-//! builtins. The other `from_pairs`/`from_iter_dedup` callers (JSON and TOML
+//! The refusal goes at every place a user-controlled key can enter — the
+//! `BuildMap`/`BuildSet` opcodes, index assignment, and the `insert()`,
+//! `push()`, `extend()` and `set()` builtins. The other `from_pairs`/`from_iter_dedup` callers (JSON and TOML
 //! parsing, env vars, process output, HTTP responses, cross-task transfer) build
 //! their keys from strings by construction and cannot carry a bad one.
 
@@ -68,8 +68,14 @@ fn the_insert_builtin_rejects_a_non_hashable_map_key() {
 
 #[test]
 fn the_insert_builtin_rejects_a_non_hashable_set_element() {
-    // `insert()` is arity-3 for sets too; the set branch ignores the value.
-    assert_rejected("insert(set(1), [1], 0)", "ARRAY is not hashable");
+    assert_rejected("insert(set(1), [1])", "ARRAY is not hashable");
+}
+
+#[test]
+fn the_push_and_extend_builtins_reject_a_non_hashable_set_element() {
+    assert_rejected("push(set(1), [1])", "ARRAY is not hashable");
+    assert_rejected("extend(set(1), [1, [2]])", "ARRAY is not hashable");
+    assert_rejected("set([1, [2]])", "ARRAY is not hashable");
 }
 
 #[test]

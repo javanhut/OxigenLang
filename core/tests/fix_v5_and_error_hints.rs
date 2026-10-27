@@ -101,16 +101,15 @@ b() + b() + b()
 
 #[test]
 fn typed_set_default_is_fresh_per_call() {
-    // Same aliasing hazard for a typed `<set>` default. The VM's `insert`
-    // builtin is 3-arg (map-shaped) and accepts a set as its first argument
-    // (the value arg is ignored for sets); the tree-walker's `insert` is
-    // map-only, so this is a VM(interp) == VM(JIT) check rather than a
-    // tree-walker parity check. A fresh set per call means each `len(s)` is 1,
-    // so `b() + b() + b() == 3`; an aliased set default would give `1 + 2 + 3`.
+    // Same aliasing hazard for a typed `<set>` default. The tree-walker's
+    // `insert` is map-only, so this is a VM(interp) == VM(JIT) check rather
+    // than a tree-walker parity check. A fresh set per call means each
+    // `len(s)` is 1, so `b() + b() + b() == 3`; an aliased set default would
+    // give `1 + 2 + 3`.
     let src = r#"
 fun b(){
   s <set>
-  s = insert(s, 7, 7)
+  s = insert(s, 7)
   len(s)
 }
 b() + b() + b()

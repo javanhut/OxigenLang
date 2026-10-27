@@ -9,7 +9,7 @@ OxigenLang is a modern, lightweight programming language implemented in Rust. It
 ## Features
 
 - **Module System**: Import standard library modules or local files with `introduce`/`intro`. Namespace imports, selective imports, and module caching.
-- **Standard Library**: 23 modules — math, strings, array, io, os (including background processes and signals), path, time, datetime, random, json, toml, encoding, hash, regex, net (HTTP/HTTPS client with streaming download/upload, plus TCP and UDP sockets), api (HTTP servers — routing, JSON/HTML/static-file responses, and a threaded server in one module), ansi (terminal colors), parse_args (CLI flag parsing), env (.env files), channel (message passing between tasks), ffi (calling C libraries), test (the `expect` matchers), and result (Error/Value helpers).
+- **Standard Library**: 24 modules — math, strings, array, sets (union, intersection, difference, subset tests), io, os (including background processes and signals), path, time, datetime, random, json, toml, encoding, hash, regex, net (HTTP/HTTPS client with streaming download/upload, plus TCP and UDP sockets), api (HTTP servers — routing, JSON/HTML/static-file responses, and a threaded server in one module), ansi (terminal colors), parse_args (CLI flag parsing), env (.env files), channel (message passing between tasks), ffi (calling C libraries), test (the `expect` matchers), and result (Error/Value helpers).
 - **Flexible Block Styles**: Choose between traditional brace-based blocks or Python-style indentation blocks with the `#[indent]` directive.
 - **Conditional Expressions**: Multi-arm `option` blocks, ternary shorthand, `unless` inverse conditionals, `unless ... then ...` fallback expressions, `when`/`unless` postfix guards, and short-circuit `and`/`or` logical operators.
 - **Pattern Matching**: Define reusable patterns with the `pattern` keyword and match against them with `choose`.
@@ -18,6 +18,7 @@ OxigenLang is a modern, lightweight programming language implemented in Rust. It
 - **Data Types**: Integers, Floats, Strings (with escape sequences, interpolation, and triple-quoted multi-line literals), Characters, Booleans, Arrays, Bytes, Uints, Tuples, Maps, Sets, and `None`.
 - **Structs**: Composite data types with typed fields, single-inheritance, methods via `includes` blocks, `self` access, hidden fields, and dot-chaining.
 - **First-Class Functions**: Named and anonymous functions, closures, typed parameters, default values, optional parameters, and implicit/explicit returns.
+- **Collections**: Arrays, maps and sets share one set of builtins for changing them in place — `push`, `insert`, `remove`, `pop`, `extend`, `clear`, `copy` and `has`.
 - **Unpacking**: Destructure arrays and tuples into multiple variables with `a, b := [1, 2]`.
 - **Index Assignment**: Set map keys and array elements directly with `m[key] = value` and `arr[i] = value`.
 - **Built-in Functions**: Built-in functions for I/O, collection manipulation, type conversion, and introspection.

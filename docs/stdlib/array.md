@@ -8,8 +8,8 @@ introduce array
 ```
 
 Every function here returns a **new** array; none modify the one you passed in.
-(The `push` builtin is the exception to watch — it appends in place and returns
-the same array.) Note that the *records inside* an array are shared references,
+(The builtins `push`, `insert`, `remove`, `pop`, `extend` and `clear` are the
+ones to watch: they change the array in place.) Note that the *records inside* an array are shared references,
 so editing one edits the array — see
 [`find_where`](#find_wherearr-key-val).
 
@@ -54,7 +54,9 @@ needs a named one.
 | [`pmap`](#pmaparr-f) | `pmap(arr, f)` | `array` |
 
 Basic array operations are **global builtins**, not part of this module:
-`len(arr)`, `push(arr, x)`, `rest(arr)`, `has(arr, x)`, `range(n)`, `tuple(...)`.
+`len(arr)`, `push(arr, x)`, `insert(arr, i, x)`, `remove(arr, x)`,
+`pop(arr, i?)`, `extend(arr, items)`, `clear(arr)`, `copy(arr)`, `rest(arr)`,
+`has(arr, x)`, `range(n)`, `tuple(...)`.
 See [builtins.md](../builtins.md).
 
 ---

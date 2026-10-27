@@ -58,6 +58,7 @@ pages = [
     { file = "stdlib/math.md", slug = "stdlib/math", title = "math", description = "The OxigenLang math module: arithmetic, rounding, trigonometry, logarithms and integer number theory." },
     { file = "stdlib/strings.md", slug = "stdlib/strings", title = "strings", description = "The OxigenLang strings module: splitting, joining, trimming, case conversion, searching and padding." },
     { file = "stdlib/array.md", slug = "stdlib/array", title = "array", description = "The OxigenLang array module: map, filter, reduce, folds, searching, grouping and sorting." },
+    { file = "stdlib/sets.md", slug = "stdlib/sets", title = "sets", description = "The OxigenLang sets module: union, intersection, difference, subset tests and filtering." },
     { file = "stdlib/json.md", slug = "stdlib/json", title = "json", description = "The OxigenLang json module: parse and serialize JSON, read and write JSON files, and query nested maps by dotted path." },
     { file = "stdlib/toml.md", slug = "stdlib/toml", title = "toml", description = "The OxigenLang toml module: parse and serialize TOML, read and write TOML files, and query nested tables by dotted path." },
     { file = "stdlib/regex.md", slug = "stdlib/regex", title = "regex", description = "The OxigenLang regex module: matching, searching, capturing and replacing with regular expressions." },

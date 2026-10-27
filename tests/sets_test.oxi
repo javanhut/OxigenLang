@@ -1,0 +1,30 @@
+introduce sets
+
+<test>("combining") {
+    a := set(1, 2, 3)
+    b := set(3, 4)
+    expect(sets.union(a, b)).eq(set(1, 2, 3, 4))
+    expect(sets.intersection(a, b)).eq(set(3))
+    expect(sets.difference(a, b)).eq(set(1, 2))
+    expect(sets.symmetric_difference(a, b)).eq(set(1, 2, 4))
+    // The arguments are left alone.
+    expect(a).eq(set(1, 2, 3))
+    expect(b).eq(set(3, 4))
+}
+
+<test>("comparing") {
+    a := set(1, 2, 3)
+    expect(sets.is_subset(set(1, 2), a)).truthy()
+    expect(sets.is_subset(set(), a)).truthy()
+    expect(sets.is_subset(set(1, 9), a)).falsy()
+    expect(sets.is_superset(a, set(3))).truthy()
+    expect(sets.is_disjoint(a, set(7, 8))).truthy()
+    expect(sets.is_disjoint(a, set(3))).falsy()
+}
+
+<test>("transforms") {
+    a := set(1, 2, 3)
+    expect(sets.to_array(a)).eq([1, 2, 3])
+    expect(sets.filter(a, fun(x <int>) { x > 1 })).eq(set(2, 3))
+    expect(sets.map(a, fun(x <int>) { x % 2 })).eq(set(1, 0))
+}

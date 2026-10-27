@@ -32,6 +32,7 @@ const MODULES: &[(&str, &str)] = pages!(
     "random",
     "regex",
     "result",
+    "sets",
     "strings",
     "test",
     "time",

@@ -71,23 +71,165 @@ A string's length is counted in characters, the same unit as `s[i]` and
 slices: `len("héllo")` is 5. For the UTF-8 byte count use
 `strings.byte_len`.
 
-### `push(array, element)`
+Arrays, maps and sets share one set of builtins for adding, removing and
+searching. They all change the collection **in place**: collections are shared
+references, so every variable holding the same collection sees the change.
+Each one also returns the collection (except `pop`, which returns what it
+removed), so `arr := push(arr, x)` still works. Use `copy` when you need a
+separate collection.
 
-Appends the element to the end of the array and returns **that same array** — arrays are shared references, so the original is modified too.
+| Builtin | Array | Map | Set |
+|---------|-------|-----|-----|
+| `push(c, x)` | append `x` | — | add `x` |
+| `insert(...)` | `insert(arr, index, x)` | `insert(m, key, value)` | `insert(s, x)` |
+| `remove(c, x)` | first element equal to `x` | key `x` | value `x` |
+| `pop(...)` | `pop(arr)` last, `pop(arr, index)` | `pop(m, key)` | `pop(s)` last added |
+| `extend(c, items)` | append each item | copy entries from a map | add each item |
+| `clear(c)` | empty it | empty it | empty it |
+| `copy(c)` | new array | new map | new set |
+| `has(c, x)` | element equal to `x` | key `x` | member `x` |
+
+Set algebra (union, intersection, subsets) is in the [`sets`](stdlib/sets.md)
+module, and searching arrays with a predicate (`find`, `index_of`, `filter`)
+is in [`array`](stdlib/array.md).
+
+### `push(collection, element)`
+
+Adds the element to an array (at the end) or a set, and returns **that same
+collection**. Pushing a value a set already holds does nothing.
 
 ```oxi
 arr := [1, 2]
-arr := push(arr, 3)
+push(arr, 3)
 println(arr)          // [1, 2, 3]
 
 a := [1, 2]
 b := push(a, 3)
 println(a)            // [1, 2, 3]  <- a changed as well
+
+s := set(1, 2)
+push(s, 2)
+push(s, 3)
+println(s)            // set(1, 2, 3)
 ```
 
-Assigning the result back (`arr := push(arr, x)`) is the idiomatic form and is always correct. If you need the original left alone, copy it first — for example `array.slice(a, 0, len(a))`.
+**Argument types:** Array or Set. A set element must be hashable.
 
-**Argument types:** First argument must be an Array.
+### `insert(map, key, value)` / `insert(set, value)` / `insert(array, index, value)`
+
+Adds an entry and returns the same collection.
+
+- **Map**: sets `key` to `value`, replacing the value if the key exists.
+- **Set**: adds `value`. The same as `push(set, value)`.
+- **Array**: puts `value` at `index`, moving the later elements up. `index`
+  can be `len(arr)` to append, and a negative index counts from the end
+  (`-1` inserts before the last element). Any other index is an error.
+
+```oxi
+m := {"a": 1}
+insert(m, "b", 2)       // {a: 1, b: 2}
+
+s := set(1)
+insert(s, 2)            // set(1, 2)
+
+arr := [1, 3]
+insert(arr, 1, 2)       // [1, 2, 3]
+insert(arr, 0, 0)       // [0, 1, 2, 3]
+```
+
+**Argument types:** Map, Set or Array.
+
+### `remove(collection, key_or_value)`
+
+Removes an entry and returns the same collection. Removing something that
+isn't there does nothing.
+
+- **Map**: removes the key.
+- **Set**: removes the value.
+- **Array**: removes the first element equal to the value. To remove by
+  position, use `pop(arr, index)`.
+
+```oxi
+remove({"a": 1, "b": 2}, "a")    // {b: 2}
+remove(set(1, 2, 3), 2)          // set(1, 3)
+remove([1, 2, 3, 2], 2)          // [1, 3, 2]
+```
+
+**Supported types:** Map (by key), Set (by value), Array (by value).
+
+### `pop(array)` / `pop(array, index)` / `pop(map, key)` / `pop(set)`
+
+Removes one entry and returns it.
+
+- **Array**: removes the last element, or the one at `index` (negative
+  counts from the end). Popping an empty array, or an index out of range,
+  is an error.
+- **Map**: removes `key` and returns its value, or `None` if the key wasn't
+  there (the same as reading `m[key]`).
+- **Set**: removes the most recently added value. Popping an empty set is an
+  error.
+
+```oxi
+stack := [1, 2, 3]
+top := pop(stack)          // 3; stack is [1, 2]
+head := pop(stack, 0)      // 1; stack is [2]
+
+m := {"a": 1}
+pop(m, "a")                // 1
+pop(m, "a")                // None
+```
+
+**Supported types:** Array, Map, Set.
+
+### `extend(collection, items)`
+
+Adds many entries at once and returns the same collection.
+
+- **Array**: appends every element of an array, tuple or set, in order.
+- **Set**: adds every element of an array, tuple or set.
+- **Map**: copies every entry of another map, replacing existing keys.
+
+```oxi
+arr := [1]
+extend(arr, [2, 3])                 // [1, 2, 3]
+
+s := set(1)
+extend(s, [1, 2, 2])                // set(1, 2)
+
+m := {"a": 1, "b": 2}
+extend(m, {"b": 20, "c": 3})        // {a: 1, b: 20, c: 3}
+```
+
+**Supported types:** Array, Set, Map.
+
+### `clear(collection)`
+
+Removes every entry and returns the same, now empty, collection.
+
+```oxi
+arr := [1, 2, 3]
+clear(arr)
+println(len(arr))      // 0
+```
+
+**Supported types:** Array, Map, Set.
+
+### `copy(collection)`
+
+Returns a new collection with the same entries, so changing one doesn't
+change the other. The copy is shallow: an array inside an array is still
+shared.
+
+```oxi
+a := [1, 2]
+b := copy(a)
+push(b, 3)
+println(a)            // [1, 2]
+println(b)            // [1, 2, 3]
+```
+
+**Supported types:** Array, Map, Set. Tuples and strings can't change, so
+`copy` returns them as they are.
 
 ### `first(array)`
 
@@ -128,16 +270,19 @@ rest([])
 Returns `True` if the collection contains the value. The meaning of "contains" depends on the collection type:
 - **Array/Tuple**: checks if any element equals the value.
 - **Set**: checks if the value is a member.
-- **Map**: checks if the value is a **key** (not a value).
+- **Map**: checks if the value is a **key** (not a value). To search the
+  values, use `has(values(m), x)`.
+- **String**: checks if a substring or character appears in it.
 
 ```oxi
 has([1, 2, 3], 2)
 has(set(1, 2, 3), 5)
 has({"a": 1}, "a")
 has((10, 20), 10)
+has("hello", "ell")
 ```
 
-**Supported types:** Array, Tuple, Set, Map.
+**Supported types:** Array, Tuple, Set, Map, String.
 
 ## Iteration
 
@@ -304,17 +449,20 @@ uint(byte(255))
 
 Negative values and unparseable strings produce an error.
 
-### `set(values...)`
+### `set(values...)` / `set(array)`
 
 Creates a set from the given values. Duplicates are removed automatically.
+Given a single array, it makes a set of the array's elements.
 
 ```oxi
 set(1, 2, 3)
 set(1, 1, 2, 2)
+set([1, 2, 2, 3])     // set(1, 2, 3)
 set()
 ```
 
-Accepts any number of arguments of any type.
+Accepts any number of hashable values: int, uint, float, bool, char, byte,
+str, `None`, and tuples of those.
 
 ### `tuple(values...)`
 
@@ -364,30 +512,6 @@ values({})
 ```
 
 **Argument types:** Map only.
-
-### `insert(map, key, value)`
-
-Returns a **new** map with the key-value pair added. If the key already exists, its value is updated. The original map is not modified.
-
-```oxi
-m := {"a": 1}
-m := insert(m, "b", 2)
-m := insert(m, "a", 10)
-println(m)
-```
-
-**Argument types:** First argument must be a Map.
-
-### `remove(collection, key_or_value)`
-
-Returns a **new** collection with the specified element removed. Works on maps (removes by key) and sets (removes by value). The original collection is not modified.
-
-```oxi
-remove({"a": 1, "b": 2}, "a")
-remove(set(1, 2, 3), 2)
-```
-
-**Supported types:** Map (removes by key), Set (removes by value).
 
 ## Introspection
 
@@ -549,11 +673,11 @@ option {
 | `print`     | `(args...)`            | `None`       | Print args separated by spaces        |
 | `println`   | `(args...)`            | `None`       | Print args separated by spaces        |
 | `len`       | `(collection)`         | `Integer`    | Length of string/array/tuple/map/set  |
-| `push`      | `(array, element)`     | `Array`      | Appends in place; returns same array  |
+| `push`      | `(array\|set, element)` | same collection | Adds in place                    |
 | `first`     | `(array)`              | `any`/`None` | First element or None                 |
 | `last`      | `(array)`              | `any`/`None` | Last element or None                  |
 | `rest`      | `(array)`              | `Array`/`None`| All elements except first            |
-| `has`       | `(collection, value)`  | `Boolean`    | Membership test                       |
+| `has`       | `(collection, value)`  | `Boolean`    | Membership test (also substrings)     |
 | `range`     | `(n)`                  | `Array`      | `[0, 1, ..., n-1]`                   |
 | `int`       | `(value)`              | `Integer`    | Parse/convert to integer              |
 | `float`     | `(value)`              | `Float`      | Parse/convert to float                |
@@ -568,8 +692,12 @@ option {
 | `vec2`/`vec3`/`vec4` | `(numbers...)` | `Vec2`/`Vec3`/`Vec4` | Create a vector             |
 | `keys`      | `(map)`                | `Array`      | Array of map keys                     |
 | `values`    | `(map)`                | `Array`      | Array of map values                   |
-| `insert`    | `(map, key, value)`    | `Map`        | New map with entry added/updated      |
-| `remove`    | `(map\|set, key\|val)` | `Map`/`Set`  | New collection without entry          |
+| `insert`    | `(map, key, value)` / `(set, value)` / `(array, index, value)` | same collection | Adds in place |
+| `remove`    | `(collection, key\|value)` | same collection | Removes in place                 |
+| `pop`       | `(array, index?)` / `(map, key)` / `(set)` | removed item | Removes and returns one entry |
+| `extend`    | `(collection, items)`  | same collection | Adds many in place                 |
+| `clear`     | `(collection)`         | same collection | Empties in place                   |
+| `copy`      | `(collection)`         | new collection | Shallow copy                        |
 | `type`      | `(value)`              | `String`     | Type name (struct name for instances) |
 | `is_type`   | `(value, type_name)`   | `Boolean`    | Runtime type check                    |
 | `is_mut`    | `(variable)`           | `Boolean`    | Value mutability check                |

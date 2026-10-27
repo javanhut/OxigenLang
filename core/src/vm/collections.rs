@@ -269,6 +269,15 @@ impl OxSet {
         }
     }
 
+    /// Remove and return the most recently inserted value.
+    pub fn pop(&mut self) -> Option<Value> {
+        let v = self.items.pop()?;
+        if let Some(hk) = v.try_hash_key() {
+            self.index.remove(&hk);
+        }
+        Some(v)
+    }
+
     fn reindex(&mut self) {
         self.index.clear();
         for (i, v) in self.items.iter().enumerate() {

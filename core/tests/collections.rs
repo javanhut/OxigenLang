@@ -139,3 +139,18 @@ fn map_large_is_not_linear() {
     // which leaves the sum's type ambiguous without it.
     assert_eq!(acc, (0..100_000i64).map(|i| i * 2).sum::<i64>());
 }
+
+#[test]
+fn set_pop_keeps_index_in_step() {
+    let mut st = OxSet::new();
+    st.insert(Value::Integer(1));
+    st.insert(Value::Integer(2));
+    assert_eq!(st.pop(), Some(Value::Integer(2)));
+    assert!(!st.contains(&Value::Integer(2)));
+    // Re-inserting the popped value must land at the end, not be skipped.
+    assert!(st.insert(Value::Integer(2)));
+    assert!(st.remove(&Value::Integer(1)));
+    assert_eq!(st.items(), &[Value::Integer(2)]);
+    assert_eq!(st.pop(), Some(Value::Integer(2)));
+    assert_eq!(st.pop(), None);
+}
