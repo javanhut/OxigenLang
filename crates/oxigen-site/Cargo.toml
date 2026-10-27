@@ -1,6 +1,6 @@
 [package]
 name = "oxigen-site"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Builds oxigenlang.org from docs/ and website/"
