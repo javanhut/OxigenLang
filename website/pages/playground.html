@@ -19,16 +19,19 @@ class = "page-playground"
   </div>
   <div class="pg-panes">
     <div class="pg-editor">
-      <div class="pg-gutter" id="pg-gutter" aria-hidden="true"></div>
-      <div class="pg-code" id="pg-code">
-        <pre aria-hidden="true"><code id="pg-hl">{{playground_initial}}</code></pre>
-        <textarea id="pg-src" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off" aria-label="OxigenLang source code">{{playground_initial_raw}}</textarea>
+      <div class="pg-editor-surface">
+        <div class="pg-gutter" id="pg-gutter" aria-hidden="true"></div>
+        <div class="pg-code" id="pg-code">
+          <div class="pg-highlight" aria-hidden="true"><pre><code id="pg-hl">{{playground_initial}}</code></pre></div>
+          <textarea id="pg-src" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off" aria-label="OxigenLang source code" aria-describedby="pg-shortcuts">{{playground_initial_raw}}</textarea>
+        </div>
       </div>
+      <div class="pg-editor-status"><span>Oxigen</span><span id="pg-position">Ln 1, Col 1</span><span>Spaces: 4</span></div>
     </div>
     <div class="pg-output">
       <div class="pg-output-bar"><span>Output</span><button id="pg-clear" type="button">Clear</button></div>
       <pre id="pg-out" aria-live="polite"><span class="placeholder">Press Run or Ctrl+Enter to run this program.</span></pre>
-      <p class="pg-help">Runs the real OxigenLang interpreter, compiled to WebAssembly, in a sandbox: no files, network, processes or threads, and runs stop after 20 seconds. Everything else in the language and the standard library works.<br><kbd>Ctrl</kbd>+<kbd>Enter</kbd> runs, <kbd>Ctrl</kbd>+<kbd>S</kbd> formats, <kbd>Ctrl</kbd>+<kbd>/</kbd> comments lines out, <kbd>Tab</kbd> and <kbd>Shift</kbd>+<kbd>Tab</kbd> indent. <kbd>Esc</kbd> then <kbd>Tab</kbd> leaves the editor. <a href="/docs/syntax/">Syntax reference</a> · <a href="/docs/getting-started/">Install Oxigen</a></p>
+      <p class="pg-help" id="pg-shortcuts">Runs the real OxigenLang interpreter, compiled to WebAssembly, in a sandbox: no files, network, processes or threads, and runs stop after 20 seconds. Everything else in the language and the standard library works.<br><kbd>Ctrl</kbd>+<kbd>Enter</kbd> runs, <kbd>Ctrl</kbd>+<kbd>S</kbd> formats, <kbd>Ctrl</kbd>+<kbd>/</kbd> comments lines out, <kbd>Tab</kbd> and <kbd>Shift</kbd>+<kbd>Tab</kbd> indent. <kbd>Esc</kbd> then <kbd>Tab</kbd> leaves the editor. <a href="/docs/syntax/">Syntax reference</a> · <a href="/docs/getting-started/">Install Oxigen</a></p>
     </div>
   </div>
 </div>

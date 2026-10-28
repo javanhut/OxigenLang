@@ -20,6 +20,8 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
   const area = el("pg-src");
   const code = el("pg-hl");
   const scroller = el("pg-code");
+  const highlight = code.parentElement.parentElement;
+  const position = el("pg-position");
   const gutter = el("pg-gutter");
   const output = el("pg-out");
   const status = el("pg-status");
@@ -42,13 +44,15 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
   scroller.prepend(active);
   const lineHeight = () => parseFloat(getComputedStyle(area).lineHeight);
   const padTop = () => parseFloat(getComputedStyle(area).paddingTop);
-  let charWidth = 0;
-  const measure = () => {
-    const probe = document.createElement("span");
-    probe.textContent = "0".repeat(64);
-    code.append(probe);
-    charWidth = probe.getBoundingClientRect().width / 64;
-    probe.remove();
+  const caretPosition = () => area.selectionDirection === "backward" ? area.selectionStart : area.selectionEnd;
+  const syncScroll = () => {
+    code.parentElement.style.transform = `translate(${-area.scrollLeft}px, ${-area.scrollTop}px)`;
+    // Clip the copy before the native scrollbars, including on platforms
+    // whose scrollbars take up layout space.
+    highlight.style.width = `${area.clientWidth}px`;
+    highlight.style.height = `${area.clientHeight}px`;
+    gutter.scrollTop = area.scrollTop;
+    markLine();
   };
 
   // The caret's line (1-based) and visual column, tabs counted as 4.
@@ -61,8 +65,9 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
   };
   let currentLine = 0;
   const markLine = () => {
-    const { line } = caretAt(area.selectionEnd);
-    active.style.top = `${padTop() + (line - 1) * lineHeight()}px`;
+    const { line, col } = caretAt(caretPosition());
+    position.textContent = `Ln ${line}, Col ${col + 1}`;
+    active.style.top = `${padTop() + (line - 1) * lineHeight() - area.scrollTop}px`;
     active.style.height = `${lineHeight()}px`;
     active.hidden = document.activeElement !== area || area.selectionStart !== area.selectionEnd;
     if (line !== currentLine) {
@@ -71,51 +76,59 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
       currentLine = line;
     }
   };
-  // Keep the caret in view: the textarea is sized to its text, so the
-  // scroller around it, not the textarea, has to follow the caret.
+  // Programmatic edits need to reveal the final selection. Measure the
+  // actual rendered caret, so tabs, Unicode and font changes stay accurate.
+  // Ordinary typing, navigation and selection use native textarea scrolling.
   const reveal = () => {
-    if (!charWidth) measure();
-    const { line, col } = caretAt(area.selectionEnd);
-    const lh = lineHeight();
-    const top = padTop() + (line - 1) * lh;
-    if (top < scroller.scrollTop) scroller.scrollTop = top - lh;
-    else if (top + lh > scroller.scrollTop + scroller.clientHeight) scroller.scrollTop = top + 2 * lh - scroller.clientHeight;
-    const left = 8 + col * charWidth;
-    if (left < scroller.scrollLeft + 8) scroller.scrollLeft = Math.max(0, left - 40);
-    else if (left > scroller.scrollLeft + scroller.clientWidth - 24) scroller.scrollLeft = left - scroller.clientWidth + 60;
+    let remaining = caretPosition();
+    const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      if (remaining <= node.length) break;
+      remaining -= node.length;
+    }
+    if (!node) return;
+    const range = document.createRange();
+    range.setStart(node, remaining);
+    range.collapse(true);
+    const rect = range.getBoundingClientRect();
+    const bounds = area.getBoundingClientRect();
+    const top = padTop() + (caretAt(caretPosition()).line - 1) * lineHeight();
+    if (top < area.scrollTop) area.scrollTop = top;
+    else if (top + lineHeight() > area.scrollTop + area.clientHeight) area.scrollTop = top + lineHeight() - area.clientHeight;
+    if (rect.height) {
+      if (rect.left < bounds.left + 8) area.scrollLeft -= bounds.left + 8 - rect.left;
+      else if (rect.right > bounds.left + area.clientWidth - 20) area.scrollLeft += rect.right - (bounds.left + area.clientWidth - 20);
+    }
+    syncScroll();
   };
 
   const paint = () => {
     const text = area.value;
-    // A trailing newline needs a character after it to take up a line.
-    code.innerHTML = (tools ? tools.highlight(text) : escapeHtml(text)) + "\n ";
+    // A sentinel gives empty text and a trailing newline their final line.
+    code.innerHTML = (tools ? tools.highlight(text) : escapeHtml(text)) + " ";
     const lines = text.split("\n").length;
     let numbers = "";
     for (let i = 1; i <= lines; i++) numbers += errorLines.has(i) ? `<span class="err-line" title="${escapeHtml(errorLines.get(i))}">${i}</span>` : `<span>${i}</span>`;
     gutter.innerHTML = numbers;
     currentLine = 0;
-    // Size the textarea to the highlighted copy. It is never collapsed to
-    // measure, which would clamp the scroll position and make it jump.
-    const pre = code.parentElement;
-    area.style.height = `${pre.offsetHeight}px`;
-    area.style.width = `${pre.offsetWidth}px`;
-    active.style.width = `${pre.offsetWidth}px`;
-    markLine();
+    // Match the gutter's scroll range even when a horizontal scrollbar
+    // reduces the textarea's visible height.
+    gutter.style.paddingBottom = `${20 + area.offsetHeight - area.clientHeight}px`;
+    syncScroll();
   };
   let frame = 0;
   const schedule = () => {
     cancelAnimationFrame(frame);
     frame = requestAnimationFrame(paint);
   };
-  scroller.addEventListener("scroll", () => (gutter.scrollTop = scroller.scrollTop));
+  area.addEventListener("scroll", syncScroll);
+  new ResizeObserver(schedule).observe(scroller);
   addEventListener("resize", schedule);
   document.addEventListener("selectionchange", () => document.activeElement === area && markLine());
   area.addEventListener("focus", markLine);
   area.addEventListener("blur", markLine);
-  area.addEventListener("keyup", (e) => {
-    if (/^(Arrow|Page|Home|End)/.test(e.key)) reveal();
-  });
-  document.fonts?.ready.then(() => ((charWidth = 0), paint()));
+  document.fonts?.ready.then(paint);
 
   // ── Live diagnostics ──
   let checkTimer = 0;
@@ -131,14 +144,15 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
 
   const setSource = (text) => {
     area.value = text;
+    area.setSelectionRange(0, 0);
+    area.scrollTop = area.scrollLeft = 0;
     errorLines = new Map();
     paint();
     check();
   };
 
   // ── Editing keys ──
-  // Every change goes through insert(), so each keystroke is one step in the
-  // browser's own undo history (Ctrl+Z, Ctrl+Shift+Z).
+  // Use the browser's undo history for custom edits as well as native typing.
   const INDENT = "    ";
   const PAIRS = { "{": "}", "(": ")", "[": "]", '"': '"' };
   const CLOSERS = new Set(["}", ")", "]"]);
@@ -153,12 +167,14 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
     }
   };
   // Replace [from, to) with `text`, then select [selFrom, selTo).
-  const replace = (from, to, text, selFrom, selTo = selFrom) => {
+  const replace = (from, to, text, selFrom, selTo = selFrom, direction = "none") => {
     area.setSelectionRange(from, to);
     insert(text);
-    area.setSelectionRange(selFrom, selTo);
+    area.setSelectionRange(selFrom, selTo, direction);
+    markLine();
+    reveal();
   };
-  const lineStartOf = (pos) => area.value.lastIndexOf("\n", pos - 1) + 1;
+  const lineStartOf = (pos) => pos === 0 ? 0 : area.value.lastIndexOf("\n", pos - 1) + 1;
   const lineEndOf = (pos) => {
     const end = area.value.indexOf("\n", pos);
     return end === -1 ? area.value.length : end;
@@ -172,9 +188,25 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
     return { from, to, lines: area.value.slice(from, to).split("\n") };
   };
   const editLines = (fn) => {
+    const { selectionStart: s, selectionEnd: e, selectionDirection: direction } = area;
     const { from, to, lines } = selectedLines();
-    const text = lines.map(fn).join("\n");
-    if (text !== area.value.slice(from, to)) replace(from, to, text, from, from + text.length);
+    const edited = lines.map(fn);
+    const text = edited.join("\n");
+    if (text === area.value.slice(from, to)) return;
+    // Keep both selection endpoints on their original text, including a
+    // backward selection and one ending at the start of the following line.
+    const mapPosition = (pos) => {
+      let oldStart = from, newStart = from;
+      for (let i = 0; i < lines.length; i++) {
+        if (pos <= oldStart + lines[i].length) {
+          return newStart + Math.max(0, pos - oldStart + edited[i].length - lines[i].length);
+        }
+        oldStart += lines[i].length + 1;
+        newStart += edited[i].length + 1;
+      }
+      return pos + text.length - (to - from);
+    };
+    replace(from, to, text, mapPosition(s), mapPosition(e), direction);
   };
   const outdent = (line) => line.replace(/^(\t| {1,4})/, "");
 
@@ -192,7 +224,7 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
       return editLines(outdent);
     }
     if (s !== e) return editLines((line) => (line.trim() ? INDENT + line : line));
-    const col = s - lineStartOf(s);
+    const { col } = caretAt(s);
     insert(" ".repeat(4 - (col % 4)));
   };
 
@@ -204,7 +236,7 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
     if (opener) indent += INDENT;
     // Between a pair, as in `{|}`: open the block, closer on its own line.
     if (opener && value[e] === PAIRS[opener[0].trim()]) {
-      const outer = indent.slice(INDENT.length);
+      const outer = indent.slice(0, -INDENT.length);
       replace(s, e, `\n${indent}\n${outer}`, s + 1 + indent.length);
       return;
     }
@@ -233,7 +265,12 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
     // An odd number of quotes before the caret on this line means it is inside a string.
     const inString = (value.slice(lineStartOf(s), s).match(/(?<!\\)"/g)?.length ?? 0) % 2 === 1;
     // Typing a closer that is already there steps over it; a quote only when it ends the string.
-    if (s === e && next === ch && (CLOSERS.has(ch) || (ch === '"' && inString))) return area.setSelectionRange(s + 1, s + 1), true;
+    if (s === e && next === ch && (CLOSERS.has(ch) || (ch === '"' && inString))) {
+      area.setSelectionRange(s + 1, s + 1);
+      markLine();
+      reveal();
+      return true;
+    }
     if (CLOSERS.has(ch)) {
       // A closer typed as the first thing on a line moves out one level.
       const from = lineStartOf(s);
@@ -282,7 +319,6 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
   });
   area.addEventListener("input", () => {
     paint();
-    reveal();
     check();
     store.set(DRAFT, area.value);
   });
@@ -326,12 +362,15 @@ const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt
     if (result.source === area.value) return setStatus("Already formatted");
     // Keep the caret on the same line, as near the same place as the new text allows.
     const { line } = caretAt(area.selectionStart);
+    const column = area.selectionStart - lineStartOf(area.selectionStart);
     area.focus();
     area.select();
     insert(result.source);
     const lines = result.source.split("\n");
-    const at = lines.slice(0, Math.min(line, lines.length) - 1).reduce((n, l) => n + l.length + 1, 0);
+    const index = Math.min(line, lines.length) - 1;
+    const at = lines.slice(0, index).reduce((n, l) => n + l.length + 1, 0) + Math.min(column, lines[index].length);
     area.setSelectionRange(at, at);
+    markLine();
     reveal();
     setStatus("Formatted");
   }

@@ -9,6 +9,12 @@ imlazy site          # build into target/site (installs the wasm target first if
 imlazy site-serve    # build, then serve at http://localhost:8000
 ```
 
+Run the playground's dependency-free editing regressions with
+`node --test website/tests/playground.test.mjs` (Node 22+). In a sandbox that
+blocks process IPC, add `--test-isolation=none`. These cover editing and scroll
+synchronization; check native caret alignment, selection and undo in a browser
+with long lines, tabs, Unicode, trailing newlines and a narrow viewport.
+
 ## What comes from where
 
 | Source | Becomes |

@@ -449,17 +449,31 @@ code, kbd, pre, textarea { font-family: var(--mono); font-variant-ligatures: non
 .pg-status[data-state="error"]::before { background: #d64545; }
 @keyframes pulse { 50% { opacity: .3; } }
 .pg-panes { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); min-height: 0; background: var(--code-bg); }
-.pg-editor { position: relative; min-height: 0; display: flex; }
-.pg-gutter { flex-shrink: 0; padding: 20px 10px 20px 20px; text-align: right; overflow: hidden; user-select: none; font: 14px/1.7 var(--mono); color: #45525e; min-width: 56px; white-space: pre; }
+.pg-editor { --editor-size: 15px; --editor-line: 24px; position: relative; min-height: 0; min-width: 0; display: flex; flex-direction: column; border-right: 1px solid var(--code-rule); }
+.pg-editor-surface { display: flex; flex: 1; min-height: 0; position: relative; }
+.pg-editor-surface:focus-within { box-shadow: inset 0 2px var(--accent); }
+.pg-editor-status { display: flex; flex-shrink: 0; gap: 20px; padding: 6px 16px; border-top: 1px solid var(--code-rule); background: var(--code-bar); color: var(--code-muted); font: 12px/1.5 var(--mono); }
+.pg-editor-status span:first-child { margin-right: auto; color: var(--code-ink); }
+.pg-gutter { flex-shrink: 0; padding: 20px 10px 20px 20px; text-align: right; overflow: hidden; user-select: none; font: var(--editor-size)/var(--editor-line) var(--mono); color: var(--code-muted); min-width: 56px; white-space: pre; }
 .pg-gutter span { display: block; }
 .pg-gutter .cur { color: var(--code-ink); }
 .pg-gutter .err-line { color: #f19a8e; }
 .pg-active { position: absolute; left: 0; min-width: 100%; background: rgba(255, 255, 255, 0.045); pointer-events: none; }
-.pg-code { position: relative; flex: 1; min-width: 0; overflow: auto; }
-.pg-code pre, .pg-code textarea { margin: 0; padding: 20px 20px 20px 8px; border: 0; font: 14px/1.7 var(--mono); tab-size: 4; white-space: pre; letter-spacing: 0; min-height: 100%; }
-.pg-code pre { position: absolute; inset: 0 auto auto 0; min-width: 100%; color: var(--code-ink); pointer-events: none; }
-.pg-code textarea { position: relative; display: block; width: 100%; height: 100%; resize: none; outline: none; background: transparent; color: transparent; caret-color: var(--accent); overflow: hidden; }
+.pg-code { position: relative; flex: 1; min-width: 0; overflow: hidden; color-scheme: dark; }
+/* The textarea owns scrolling and caret placement. Both layers must have
+   identical text metrics, including highlighted tokens and browser defaults. */
+.pg-code pre, .pg-code textarea { margin: 0; padding: 20px 20px 20px 8px; border: 0; font: 400 var(--editor-size)/var(--editor-line) var(--mono); tab-size: 4; white-space: pre; letter-spacing: 0; word-spacing: 0; text-align: left; text-indent: 0; text-transform: none; font-kerning: none; overflow-wrap: normal; word-break: normal; }
+.pg-highlight { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.pg-code pre { width: max-content; min-width: 100%; color: var(--code-ink); }
+.pg-code pre code { display: block; font: inherit; }
+.pg-code pre span { font: inherit; }
+.pg-code textarea { position: absolute; inset: 0; display: block; width: 100%; height: 100%; resize: none; outline: none; border-radius: 0; background: transparent; color: transparent; caret-color: var(--code-ink); overflow: auto; }
 .pg-code textarea::selection { background: rgba(79, 163, 184, 0.32); color: transparent; }
+@media (forced-colors: active) {
+  .pg-highlight, .pg-active { display: none; }
+  .pg-code textarea { color: CanvasText; caret-color: CanvasText; }
+  .pg-code textarea::selection { color: HighlightText; background: Highlight; }
+}
 .pg-output { display: flex; flex-direction: column; min-height: 0; background: var(--code-out); }
 .pg-output-bar { display: flex; align-items: center; justify-content: space-between; height: 40px; padding: 0 20px; font: 12.5px var(--mono); color: var(--code-muted); }
 .pg-output-bar button { border: 0; background: none; color: var(--code-muted); font: 12.5px var(--mono); cursor: pointer; }
@@ -472,7 +486,7 @@ code, kbd, pre, textarea { font-family: var(--mono); font-variant-ligatures: non
 @media (max-width: 860px) {
   .page-playground { height: auto; min-height: 100dvh; }
   .pg-panes { grid-template-columns: minmax(0, 1fr); }
-  .pg-editor { height: 56vh; }
+  .pg-editor { --editor-size: 16px; height: 56vh; }
   .pg-output { min-height: 34vh; }
   .pg-toolbar { padding: 10px 16px; }
   .pg-toolbar h1 { width: 100%; }
