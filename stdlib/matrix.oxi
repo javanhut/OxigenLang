@@ -1,0 +1,139 @@
+// Matrices built on nested arrays. Every function and method returns a new
+// matrix and leaves its arguments alone, except `set`, which changes one
+// value in place. A shape mismatch or a negative size fails with
+// <Error<shape>>.
+introduce random
+
+struct Matrix {
+    rows <int>
+    cols <int>
+    data <array>
+}
+
+hide fun __check_size(rows <int>, cols <int>) {
+    <fail>(<Error<shape>>("matrix size must not be negative, got {rows}x{cols}")) when rows < 0 or cols < 0
+}
+
+hide fun __check_same_shape(a <Matrix>, b <Matrix>, op <str>) {
+    <fail>(<Error<shape>>("can't {op} {a.rows}x{a.cols} and {b.rows}x{b.cols}: shapes differ")) when a.rows != b.rows or a.cols != b.cols
+}
+
+// Builds a rows x cols matrix whose value at (r, c) is f(r, c).
+hide fun __build(rows <int>, cols <int>, f <generic>) {
+    __check_size(rows, cols)
+    data <array>
+    each r in range(rows) {
+        row <array>
+        each c in range(cols) {
+            push(row, f(r, c))
+        }
+        push(data, row)
+    }
+    Matrix(rows, cols, data)
+}
+
+// ── Building ──
+fun full(rows <int>, cols <int>, value <generic>) { __build(rows, cols, fun(r <int>, c <int>) { value }) }
+
+fun zeros(rows <int>, cols <int>) { full(rows, cols, 0) }
+
+fun ones(rows <int>, cols <int>) { full(rows, cols, 1) }
+
+fun identity(n <int>) {
+    __build(n, n, fun(r <int>, c <int>) { 1 unless r != c then 0 })
+}
+
+// Random integers in [min, max], both inclusive.
+fun rand_int(rows <int>, cols <int>, min <int> = 0, max <int> = 1000) {
+    __build(rows, cols, fun(r <int>, c <int>) { random.rand_int(min, max) })
+}
+
+// Random floats in [0.0, 1.0).
+fun rand_float(rows <int>, cols <int>) {
+    __build(rows, cols, fun(r <int>, c <int>) { random.rand_float() })
+}
+
+// The rows are copied, so changing `arr` afterwards doesn't change the matrix.
+fun from_array(arr <array>) {
+    rows := len(arr)
+    cols := 0 unless rows > 0 then len(arr[0])
+    each row in arr {
+        <fail>(<Error<shape>>("rows of a matrix must all have the same length")) when len(row) != cols
+    }
+    __build(rows, cols, fun(r <int>, c <int>) { arr[r][c] })
+}
+
+Matrix includes {
+    // ── Reading and writing ──
+    fun get(r <int>, c <int>) { self.data[r][c] }
+
+    fun set(r <int>, c <int>, value <generic>) { self.data[r][c] = value }
+
+    fun row(r <int>) { copy(self.data[r]) }
+
+    fun col(c <int>) {
+        result <array>
+        each row in self.data {
+            push(result, row[c])
+        }
+        result
+    }
+
+    // The values as nested arrays, copied.
+    fun to_array() {
+        result <array>
+        each row in self.data {
+            push(result, copy(row))
+        }
+        result
+    }
+
+    // ── Arithmetic ──
+    fun map(f <generic>) {
+        data := self.data
+        __build(self.rows, self.cols, fun(r <int>, c <int>) { f(data[r][c]) })
+    }
+
+    fun add(other <Matrix>) {
+        __check_same_shape(self, other, "add")
+        a := self.data
+        b := other.data
+        __build(self.rows, self.cols, fun(r <int>, c <int>) { a[r][c] + b[r][c] })
+    }
+
+    fun sub(other <Matrix>) {
+        __check_same_shape(self, other, "sub")
+        a := self.data
+        b := other.data
+        __build(self.rows, self.cols, fun(r <int>, c <int>) { a[r][c] - b[r][c] })
+    }
+
+    fun scale(k <int> || <float>) { self.map(fun(x <generic>) { x * k }) }
+
+    // Matrix product: (n x m) times (m x p) gives n x p.
+    fun mul(other <Matrix>) {
+        <fail>(<Error<shape>>("can't mul {self.rows}x{self.cols} by {other.rows}x{other.cols}: columns of the left must equal rows of the right")) when self.cols != other.rows
+        a := self.data
+        b := other.data
+        inner := self.cols
+        __build(self.rows, other.cols, fun(r <int>, c <int>) {
+            sum := 0
+            each k in range(inner) {
+                sum = sum + a[r][k] * b[k][c]
+            }
+            sum
+        })
+    }
+
+    fun transpose() {
+        data := self.data
+        __build(self.cols, self.rows, fun(r <int>, c <int>) { data[c][r] })
+    }
+
+    // ── Output ──
+    fun print() {
+        each row in self.data {
+            println(row)
+        }
+    }
+}

@@ -1,0 +1,99 @@
+introduce matrix
+
+<test>("building") {
+    expect(matrix.zeros(2, 3).to_array()).eq([[0, 0, 0], [0, 0, 0]])
+    expect(matrix.ones(1, 2).to_array()).eq([[1, 1]])
+    expect(matrix.identity(3).to_array()).eq([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+    // Falsy fill values are kept, not swapped for 0.
+    expect(matrix.full(1, 2, False).to_array()).eq([[False, False]])
+    expect(matrix.full(1, 2, "").to_array()).eq([["", ""]])
+    expect(matrix.full(1, 1, 2.5).to_array()).eq([[2.5]])
+    m := matrix.zeros(0, 0)
+    expect(m.rows).eq(0)
+    expect(m.to_array()).eq([])
+}
+
+<test>("negative size fails") {
+    expect(<type<Error> || <Value>>(matrix.zeros(-1, 2))).is_error()
+    expect(<type<Error> || <Value>>(matrix.identity(-3))).is_error()
+}
+
+<test>("random") {
+    m := matrix.rand_int(3, 4, 5, 7)
+    expect(m.rows).eq(3)
+    expect(m.cols).eq(4)
+    each row in m.to_array() {
+        each x in row {
+            expect(x >= 5 and x <= 7).truthy()
+        }
+    }
+    each row in matrix.rand_float(2, 2).to_array() {
+        each x in row {
+            expect(type(x)).eq("FLOAT")
+            expect(x >= 0.0 and x < 1.0).truthy()
+        }
+    }
+}
+
+<test>("from_array copies its input") {
+    arr := [[1, 2], [3, 4]]
+    m := matrix.from_array(arr)
+    arr[0][0] = 99
+    expect(m.get(0, 0)).eq(1)
+    out := m.to_array()
+    out[1][1] = 99
+    expect(m.get(1, 1)).eq(4)
+    expect(matrix.from_array([]).cols).eq(0)
+}
+
+<test>("from_array rejects ragged rows") {
+    expect(<type<Error> || <Value>>(matrix.from_array([[1, 2], [3]]))).is_error()
+}
+
+<test>("reading and writing") {
+    m := matrix.from_array([[1, 2, 3], [4, 5, 6]])
+    expect(m.get(1, 2)).eq(6)
+    expect(m.row(0)).eq([1, 2, 3])
+    expect(m.col(1)).eq([2, 5])
+    m.set(0, 0, 10)
+    expect(m.get(0, 0)).eq(10)
+}
+
+<test>("arithmetic") {
+    a := matrix.from_array([[1, 2], [3, 4]])
+    b := matrix.from_array([[5, 6], [7, 8]])
+    expect(a.add(b).to_array()).eq([[6, 8], [10, 12]])
+    expect(b.sub(a).to_array()).eq([[4, 4], [4, 4]])
+    expect(a.scale(2).to_array()).eq([[2, 4], [6, 8]])
+    expect(a.scale(0.5).to_array()).eq([[0.5, 1.0], [1.5, 2.0]])
+    expect(a.map(fun(x <int>) { x * x }).to_array()).eq([[1, 4], [9, 16]])
+    expect(a.mul(b).to_array()).eq([[19, 22], [43, 50]])
+    expect(a.mul(matrix.identity(2))).eq(a)
+    // The arguments are left alone.
+    expect(a.to_array()).eq([[1, 2], [3, 4]])
+}
+
+<test>("mul of different shapes") {
+    a := matrix.from_array([[1, 2, 3], [4, 5, 6]])
+    b := matrix.from_array([[1], [0], [2]])
+    expect(a.mul(b).to_array()).eq([[7], [16]])
+    f := matrix.from_array([[0.5, 1.5]])
+    expect(f.mul(matrix.from_array([[2], [2]])).to_array()).eq([[4.0]])
+}
+
+<test>("transpose") {
+    m := matrix.from_array([[1, 2, 3], [4, 5, 6]])
+    t := m.transpose()
+    expect(t.rows).eq(3)
+    expect(t.cols).eq(2)
+    expect(t.to_array()).eq([[1, 4], [2, 5], [3, 6]])
+}
+
+<test>("shape mismatches fail") {
+    a := matrix.zeros(2, 2)
+    b := matrix.zeros(2, 3)
+    expect(<type<Error> || <Value>>(a.add(b))).is_error()
+    expect(<type<Error> || <Value>>(a.sub(b))).is_error()
+    expect(<type<Error> || <Value>>(b.mul(a))).is_error()
+    expect(<type<Error> || <Value>>(a.add(b)).tag).eq("shape")
+}

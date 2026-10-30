@@ -29,6 +29,7 @@ examples:
 | [strings](strings.md) | split, join, trim, case, search, pad |
 | [array](array.md) | map/filter/reduce, folds, search, sort, group, `pmap` |
 | [sets](sets.md) | union, intersection, difference, subset tests |
+| [matrix](matrix.md) | build, add, multiply and transpose 2-D matrices |
 | [math](math.md) | arithmetic, rounding, trig, logs, gcd/lcm, `PI`/`E`/`TAU` |
 | [regex](regex.md) | match, find, captures, replace, split (Rust regex syntax) |
 | [json](json.md) | parse/stringify, files, dotted paths, merging |

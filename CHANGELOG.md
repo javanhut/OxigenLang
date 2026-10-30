@@ -26,6 +26,14 @@ A new `sets` module does set algebra: `union`, `intersection`, `difference`,
 `symmetric_difference`, `is_subset`, `is_superset`, `is_disjoint`,
 `to_array`, `filter` and `map`.
 
+### Added: the `matrix` module
+
+`matrix` builds 2-D matrices with `full`, `zeros`, `ones`, `identity`,
+`rand_int`, `rand_float` and `from_array`. A `Matrix` has `get`, `set`, `row`,
+`col`, `to_array`, `map`, `add`, `sub`, `scale`, `mul` (the matrix product),
+`transpose` and `print`. A negative size or mismatched shapes fail with
+`<Error<shape>>`.
+
 ### Changed
 
 - `insert(set, value, extra)` is an error. It used to need the third argument
