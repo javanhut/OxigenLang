@@ -29,6 +29,22 @@ fn test_format_function() {
 }
 
 #[test]
+fn test_format_qualified_type_annotations() {
+    let input = "p  <shapes.Pt>\nfun f(a <shapes.Pt||int>) {\na\n}";
+    let expected = "p <shapes.Pt>\n\nfun f(a <shapes.Pt> || <int>) { a }\n";
+    assert_eq!(format_source(input), expected);
+}
+
+#[test]
+fn test_format_empty_braces_after_a_dot() {
+    // `api.Res {}` (a module's struct, or an enum variant with no fields)
+    // used to come out as `api.Res {  }`.
+    let input = "r := api.Res {}\ns := api.Res {status: 1}";
+    let expected = "r := api.Res {}\ns := api.Res { status: 1 }\n";
+    assert_eq!(format_source(input), expected);
+}
+
+#[test]
 fn test_format_struct() {
     let input = "struct Point {\nx <int>\ny <int>\n}";
     let expected = "struct Point {\n    x <int>\n    y <int>\n}\n";

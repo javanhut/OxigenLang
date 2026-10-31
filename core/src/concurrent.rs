@@ -215,8 +215,7 @@ fn struct_def(vm: &VM, name: &str, module: Option<&Path>) -> Option<Rc<ObjStruct
 }
 
 /// A struct's flattened field layout, parents' fields first — the layout
-/// `VM::resolve_field_layout` builds, but for a definition found in a
-/// module rather than by name in the current scope.
+/// `VM::field_layout_of` builds, with the error as a plain message.
 fn field_layout(vm: &VM, def: &Rc<ObjStructDef>) -> Result<Rc<FieldLayout>, String> {
     if let Some(layout) = def.layout.get() {
         return Ok(Rc::clone(layout));

@@ -19,6 +19,13 @@ pub enum TypeAnnotation {
     ValueType,
     Union(Vec<TypeAnnotation>),
     Struct(String),
+    /// `<shapes.Pt>`: a struct or enum named through its module. Types are
+    /// checked by name, so it checks as `Pt`; the module is only needed to
+    /// build the zero value of `p <shapes.Pt>`.
+    Qualified {
+        module: String,
+        name: String,
+    },
     EnumGeneric,
 }
 
@@ -79,6 +86,7 @@ impl TypeAnnotation {
                 .collect::<Vec<_>>()
                 .join(" || "),
             TypeAnnotation::Struct(name) => name.clone(),
+            TypeAnnotation::Qualified { name, .. } => name.clone(),
             TypeAnnotation::EnumGeneric => "ENUM".to_string(),
         }
     }

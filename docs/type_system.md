@@ -31,6 +31,18 @@ p = 42
 
 Struct types support `as` declarations — the instance is created with all fields set to their zero values (e.g., `""` for `str`, `0` for `int`). See the [Structs](structs.md) guide for full details.
 
+A struct or enum from another module is named through the module, without importing the name:
+
+```oxi
+introduce .shapes
+
+p <shapes.Point>                       // Point's zero value
+fun area(r <shapes.Rect>) { r.w * r.h }
+c <shapes.Color> := shapes.Color.Red
+```
+
+Types are checked by name, so `<shapes.Point>` accepts the same values as `<Point>`. See [imports.md](imports.md#exports).
+
 ## Declaration Forms
 
 OxigenLang offers four ways to declare variables, each with different mutability and type-safety semantics. See the [Variables and Assignments](variables.md) guide for a comprehensive walkthrough.
