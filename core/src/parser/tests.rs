@@ -383,6 +383,56 @@ fn test_parse_each_statement() {
 }
 
 #[test]
+fn test_empty_loop_bodies_are_not_struct_literals() {
+    // `items {}` used to parse as an empty struct literal, leaving no body.
+    let program = parse_ok(
+        "each x in items {}
+each x in b.items {
+}
+repeat unless done {}
+repeat when b.ok {}
+unless b.ok {}
+fun f() { each x in items {} }
+",
+    );
+    assert_eq!(program.statements.len(), 6);
+    match &program.statements[1] {
+        Statement::Each { iterable, body, .. } => {
+            assert!(
+                matches!(iterable, Expression::DotAccess { .. }),
+                "{iterable:?}"
+            );
+            assert!(body.is_empty());
+        }
+        other => panic!("Expected each statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_struct_literals_inside_loop_headers() {
+    let program = parse_ok(
+        "each p in [Pt {}, m.Pt {}] {}
+each p in f(Pt {}) {}
+",
+    );
+    match &program.statements[0] {
+        Statement::Each {
+            iterable: Expression::Array { elements, .. },
+            ..
+        } => {
+            assert!(matches!(elements[0], Expression::StructLiteral { .. }));
+            assert!(matches!(
+                elements[1],
+                Expression::EnumVariantConstruct { .. }
+            ));
+        }
+        other => panic!("Expected each over an array, got {other:?}"),
+    }
+    // A block inside the header is ordinary code: `q := Pt {}` is a literal.
+    parse_ok("each x in g(fun() {\n    q := Pt {}\n    q\n}) {}\n");
+}
+
+#[test]
 fn test_parse_repeat_statement() {
     let program = parse_ok("repeat when x > 0 { x-- }");
     match &program.statements[0] {
@@ -932,6 +982,49 @@ fn test_parse_struct_type_annotation() {
         }
         other => panic!("Expected TypedLet, got {:?}", other),
     }
+}
+
+#[test]
+fn test_parse_qualified_type_annotation() {
+    let pt = || TypeAnnotation::Qualified {
+        module: "shapes".to_string(),
+        name: "Pt".to_string(),
+    };
+    let program =
+        parse_ok("p <shapes.Pt> := make()\nq <shapes.Pt>\nf := fun(a <shapes.Pt || int>) { a }");
+    match &program.statements[0] {
+        Statement::TypedLet { type_ann, .. } => assert_eq!(*type_ann, pt()),
+        other => panic!("Expected TypedLet, got {:?}", other),
+    }
+    match &program.statements[1] {
+        Statement::TypedDeclare { type_ann, .. } => assert_eq!(*type_ann, pt()),
+        other => panic!("Expected TypedDeclare, got {:?}", other),
+    }
+    let Statement::Let {
+        value: Expression::FunctionLiteral { parameters, .. },
+        ..
+    } = &program.statements[2]
+    else {
+        panic!("Expected function, got {:?}", program.statements[2]);
+    };
+    assert_eq!(
+        parameters[0].type_ann,
+        Some(TypeAnnotation::Union(vec![pt(), TypeAnnotation::Int]))
+    );
+    // Checked by name, like a struct imported with `introduce {Pt} from shapes`.
+    assert_eq!(pt().type_name(), "Pt");
+}
+
+#[test]
+fn test_qualified_builtin_type_is_an_error() {
+    let (_, errors) = parse("p <shapes.int>");
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.message.contains("`int` is a built-in type")),
+        "got {:?}",
+        errors
+    );
 }
 
 // ==================== FUNCTION PARSING TESTS ====================

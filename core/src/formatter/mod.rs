@@ -1495,6 +1495,7 @@ fn format_type_annotation(ann: &TypeAnnotation) -> String {
             .collect::<Vec<_>>()
             .join("> || <"),
         TypeAnnotation::Struct(name) => name.clone(),
+        TypeAnnotation::Qualified { module, name } => format!("{module}.{name}"),
         TypeAnnotation::EnumGeneric => "Enum".to_string(),
     }
 }

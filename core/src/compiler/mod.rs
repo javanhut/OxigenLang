@@ -1646,12 +1646,18 @@ impl Compiler {
 
             Statement::TypedDeclare { name, type_ann } => {
                 let type_name = type_ann.type_name();
-                if let TypeAnnotation::Struct(struct_name) = type_ann {
-                    // Struct type: call the struct constructor with 0 args to create default instance
-                    let sn_const =
-                        self.make_constant(Value::String(rc_str(struct_name.as_str())), line);
-                    self.emit_op_u16(OpCode::GetGlobal, sn_const, line);
-                    self.emit_op_u8(OpCode::Call, 0, line);
+                let struct_name = match type_ann {
+                    TypeAnnotation::Struct(name) => Some(name.clone()),
+                    TypeAnnotation::Qualified { module, name } => Some(format!("{module}.{name}")),
+                    _ => None,
+                };
+                if let Some(struct_name) = struct_name {
+                    // The zero value is an empty literal, which the VM builds only
+                    // for a struct. Calling the name instead would run a function
+                    // of that name: `p <make>` used to bind make()'s result.
+                    let sn_const = self.make_constant(Value::String(rc_str(struct_name)), line);
+                    self.emit_op_u16(OpCode::StructLiteral, sn_const, line);
+                    self.emit_byte(0, line);
                 } else {
                     let default = default_for_type(&type_name);
                     self.emit_constant(default, line);

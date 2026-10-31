@@ -32,6 +32,22 @@ A new `sets` module does set algebra: `union`, `intersection`, `difference`,
   and ignore it; write `insert(set, value)` or `push(set, value)`.
 - The docs for `insert` and `remove` said they returned a new map. They have
   always changed the map in place, and the docs now say so.
+- A struct can be built through its module's namespace: after
+  `introduce parse_args`, `parse_args.Parser()` works. It used to fail with
+  *struct 'Parser' is not defined in this scope* unless the struct was also
+  imported by name.
+- The brace form works through a module too: `shapes.Pt { x: 1, y: 2 }`.
+- A loop or `unless` with an empty body, `each x in items {}` or
+  `repeat unless b.ok {}`, parses. The `{}` used to be read as an empty struct
+  literal, which failed with *expected LBrace*.
+- Type annotations can name a struct or enum through its module:
+  `p <parse_args.Parser>`, `fun f(r <api.Res>)`. A declaration like
+  `x <random.rand_int>` is refused with *random.rand_int is a function, not a
+  struct*.
+- `p <make>`, where `make` is a function, is an error: *make is a function,
+  not a struct*. It used to call `make()` and bind the result. `l <Light>` on
+  an enum now says *Light is an enum, not a struct* instead of *cannot call
+  ENUM_DEF*.
 
 ### Added: background processes, signals and channels
 

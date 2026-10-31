@@ -1567,7 +1567,8 @@ fn transfer(
             // StructDef / EnumDef register in globals rather than consuming from the stack.
         }
         OpCode::StructLiteral => {
-            let count = read_u16(code, ip + 3) as usize;
+            // u16 name, then a u8 field count.
+            let count = code[ip + 3] as usize;
             for _ in 0..(2 * count) {
                 next.stack.pop();
             }
@@ -2228,6 +2229,44 @@ mod tests {
             OpCode::Constant as u8,
             0,
             1,
+            OpCode::Add as u8,
+            OpCode::SetLocal as u8,
+            0,
+            1,
+            OpCode::None as u8,
+            OpCode::Return as u8,
+        ];
+        let r = analyze(&f);
+        assert_eq!(r.get(1), SlotType::Int64);
+    }
+
+    #[test]
+    fn struct_literal_pops_only_its_fields() {
+        // The field count is one byte; reading two took the next opcode as
+        // part of it and emptied the stack under the literal, so 3 + 5 below
+        // came out as Value.
+        let mut f = make_fn(
+            "f",
+            0,
+            vec![],
+            vec![
+                Value::Integer(3),
+                Value::Integer(5),
+                Value::String(crate::vm::value::rc_str("Pt")),
+            ],
+        );
+        f.chunk.code = vec![
+            OpCode::Constant as u8,
+            0,
+            0,
+            OpCode::Constant as u8,
+            0,
+            1,
+            OpCode::StructLiteral as u8,
+            0,
+            2,
+            0,
+            OpCode::Pop as u8,
             OpCode::Add as u8,
             OpCode::SetLocal as u8,
             0,

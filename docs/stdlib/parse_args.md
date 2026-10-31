@@ -6,9 +6,9 @@ A small command-line flag parser built on [`os.args()`](os.md#args).
 introduce {Parser} from parse_args
 ```
 
-**Import the struct by name.** A struct is not constructible through a module
-namespace, so `parse_args.Parser` does not work — `introduce {Parser} from
-parse_args` does.
+**Import the struct by name** to write it as `Parser`. With only
+`introduce parse_args`, write `p <parse_args.Parser>` or
+`p := parse_args.Parser()`.
 
 | Item | Signature | Purpose |
 |------|-----------|---------|

@@ -783,15 +783,13 @@ An HTTP response.
 | `body` | `str` | response body |
 
 Build one with the [response helpers](#responses) rather than by hand. If you
-do need the constructor, import the struct by name — a struct is not
-constructible through a module namespace, so `api.Res(...)` fails with
-*struct 'Res' is not defined in this scope*:
+do need the constructor, call it through the module or import the struct by
+name:
 
 ```oxi
 introduce api
-introduce {Res} from api
 
-fun raw(req <map>) { Res(200, {"X-A": "1"}, "hi") }
+fun raw(req <map>) { api.Res(200, {"X-A": "1"}, "hi") }
 ```
 
 ### Struct: `FileRes`
