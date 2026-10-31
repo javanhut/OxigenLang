@@ -14,9 +14,11 @@ fun sq(x) { x * x }
 
 // Capturing closure crossing the spawn boundary. Capture happens in a function
 // scope (the supported path — capturing a `main`-scope local isn't wired yet).
-fun scaled_by(factor) { diverge each x in [1, 2, 3] {
-    x * factor
-} }
+fun scaled_by(factor) {
+    diverge each x in [1, 2, 3] {
+        x * factor
+    }
+}
 
 main {
     // diverge + converge: one task off to the side, then wait for it.

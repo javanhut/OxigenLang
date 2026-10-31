@@ -49,14 +49,18 @@ hide fun __build(rows <int>, cols <int>, f <generic>) {
 }
 
 // ── Building ──
-fun full(rows <int>, cols <int>, value <generic>) { __build(rows, cols, fun(r <int>, c <int>) { value }) }
+fun full(rows <int>, cols <int>, value <generic>) {
+    __build(rows, cols, fun(r <int>, c <int>) { value })
+}
 
 fun zeros(rows <int>, cols <int>) { full(rows, cols, 0) }
 
 fun ones(rows <int>, cols <int>) { full(rows, cols, 1) }
 
 fun identity(n <int>) {
-    __build(n, n, fun(r <int>, c <int>) { 1 unless r != c then 0 })
+    __build(n, n, fun(r <int>, c <int>) {
+        1 unless r != c then 0
+    })
 }
 
 // Random integers in [min, max], both inclusive.
