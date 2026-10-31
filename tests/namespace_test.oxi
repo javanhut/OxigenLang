@@ -1,0 +1,118 @@
+// Structs and enums used through their module's namespace, without importing
+// the name: construction, brace literals, type annotations and zero values.
+introduce api
+introduce parse_args
+introduce random
+
+fun status_of(r <api.Res>) { r.status }
+
+fun status_or_code(r <api.Res> || <int>) {
+    option {
+        type(r) == "INTEGER" -> {
+            r
+        }
+        {
+            r.status
+        }
+    }
+}
+
+fun declares_function() {
+    x <random.rand_int>
+    x
+}
+
+fun declares_missing() {
+    x <api.Nope>
+    x
+}
+
+fun declares_unimported() {
+    x <shapes.Pt>
+    x
+}
+
+fun make() { 5 }
+
+fun declares_bare_function() {
+    x <make>
+    x
+}
+
+<test>("construct through the namespace") {
+    r := api.Res(201, {}, "made")
+    expect(r.status).eq(201)
+    expect(r.body).eq("made")
+    expect(api.Res(body="b", headers={}, status=200).status).eq(200)
+    p := parse_args.Parser()
+    expect(p.args).eq([])
+}
+
+<test>("brace literal through the namespace") {
+    r := api.Res { status: 404, headers: {}, body: "gone" }
+    expect(r).eq(api.Res(404, {}, "gone"))
+    multi := api.Res { body: "", status: 204, headers: {} }
+    expect(multi.status).eq(204)
+    // Empty braces give the zero value.
+    expect(api.Res {}.status).eq(0)
+}
+
+<test>("namespace construction keeps its checks") {
+    expect(<type<Error> || <Value>>(api.Res(200))).is_error()
+    expect(<type<Error> || <Value>>(api.Res("ok", {}, ""))).is_error()
+    expect(<type<Error> || <Value>>(api.Res { status: 200, nope: 1 })).is_error()
+}
+
+<test>("qualified annotations") {
+    expect(status_of(api.Res(201, {}, ""))).eq(201)
+    expect(<type<Error> || <Value>>(status_of(5))).is_error()
+    expect(status_or_code(7)).eq(7)
+    expect(status_or_code(api.Res(500, {}, ""))).eq(500)
+    r <api.Res> := api.Res(200, {}, "")
+    expect(r.status).eq(200)
+}
+
+<test>("qualified zero value") {
+    p <parse_args.Parser>
+    expect(p).eq(parse_args.Parser())
+    r <api.Res>
+    expect(r.status).eq(0)
+    expect(r.body).eq("")
+}
+
+<test>("zero value refuses anything but a struct") {
+    function := <type<Error> || <Value>>(declares_function())
+    expect(function).is_error()
+    expect(has(function.msg, "random.rand_int is a function, not a struct")).truthy()
+    missing := <type<Error> || <Value>>(declares_missing())
+    expect(has(missing.msg, "has no member 'Nope'")).truthy()
+    unimported := <type<Error> || <Value>>(declares_unimported())
+    expect(has(unimported.msg, "'shapes' in <shapes.Pt> is not an imported module")).truthy()
+    // The bare form used to call make() and bind 5.
+    bare := <type<Error> || <Value>>(declares_bare_function())
+    expect(has(bare.msg, "make is a function, not a struct")).truthy()
+}
+
+<test>("empty loop bodies") {
+    r := api.Res(200, {"a": "1"}, "")
+    items := [1, 2]
+    done := True
+    each x in items {
+    }
+    each k, v in r.headers {
+    }
+    each x in r.headers {
+    }
+    repeat unless done {
+    }
+    repeat unless r.status == 200 {
+    }
+    unless done {
+    }
+    // Literals inside a loop header are still literals.
+    count := 0
+    each res in [api.Res {}, api.Res {}] {
+        count++
+    }
+    expect(count).eq(2)
+}

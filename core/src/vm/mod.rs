@@ -1157,18 +1157,24 @@ impl VM {
         let Value::String(struct_name) = name else {
             return Err(self.runtime_error("expected struct name"));
         };
-        let struct_name_str = struct_name.to_string();
         let field_count = field_count as usize;
         let start = self.stack.len() - field_count * 2;
         let flat: Vec<Value> = self.stack_drain_from(start);
 
-        let def = self.get_struct_def(&struct_name_str).ok_or_else(|| {
-            self.runtime_error(&format!(
-                "struct '{}' is not defined in this scope",
-                struct_name_str
-            ))
-        })?;
-        let layout = self.resolve_field_layout(&struct_name_str)?;
+        let def = self.struct_def_for_literal(struct_name.as_str())?;
+        self.build_struct_literal(def, &flat)
+    }
+
+    /// Builds `def` from a literal's `[name, value, ...]` pairs and pushes it.
+    /// No pairs gives the zero value.
+    fn build_struct_literal(
+        &mut self,
+        def: Rc<crate::vm::value::ObjStructDef>,
+        flat: &[Value],
+    ) -> Result<(), VMError> {
+        // Not the literal's own name, which is `shapes.Pt` for `p <shapes.Pt>`.
+        let struct_name_str = def.name.clone();
+        let layout = self.field_layout_of(&def)?;
         let mut field_vec: Vec<Value> = layout.slots.iter().map(|_| Value::None).collect();
 
         // Inferring from a None-valued slot is wrong: an explicit None is indistinguishable from unsupplied.
@@ -1245,19 +1251,95 @@ impl VM {
         Ok(())
     }
 
-    /// Resolve a struct def's flattened field layout (parent fields first,
-    /// then own). Computed lazily on first call and cached in the def's
-    /// `OnceCell`, so subsequent calls are a single pointer load.
-    pub(crate) fn resolve_field_layout(
+    /// The struct a literal names: `Pt` in scope, or `shapes.Pt` through the
+    /// module bound to `shapes`. `p <Pt>` and `p <shapes.Pt>` compile to an
+    /// empty literal, so this is also what refuses `p <make>`.
+    fn struct_def_for_literal(
         &self,
-        struct_name: &str,
+        name: &str,
+    ) -> Result<Rc<crate::vm::value::ObjStructDef>, VMError> {
+        let Some((module, member)) = name.split_once('.') else {
+            if let Some(def) = self.get_struct_def(name) {
+                return Ok(def);
+            }
+            let bound = self
+                .globals
+                .get(name)
+                .or_else(|| self.active_module_globals().and_then(|mg| mg.get(name)));
+            return Err(match bound {
+                Some(other) => self.not_a_struct(name, other),
+                None => {
+                    self.runtime_error(&format!("struct '{}' is not defined in this scope", name))
+                }
+            });
+        };
+        let bound = self
+            .globals
+            .get(module)
+            .or_else(|| self.active_module_globals().and_then(|mg| mg.get(module)));
+        let Some(m) = bound.and_then(|v| v.as_module()) else {
+            return Err(self.runtime_error_hint(
+                &format!("'{module}' in <{name}> is not an imported module"),
+                &format!("import it first: `introduce {module}`"),
+            ));
+        };
+        self.struct_def_in_module(m, member, name)
+    }
+
+    /// The struct `member` of module `m`; `name` is how the source wrote it.
+    fn struct_def_in_module(
+        &self,
+        m: &crate::vm::value::ObjModule,
+        member: &str,
+        name: &str,
+    ) -> Result<Rc<crate::vm::value::ObjStructDef>, VMError> {
+        if m.hidden.contains(member) {
+            return Err(self.runtime_error_hint(
+                &format!("'{}' is hidden inside module '{}'", member, m.name),
+                "it is declared `hide` — use a type the module exposes",
+            ));
+        }
+        match m.globals.get(member) {
+            Some(Value::StructDef(def)) => Ok(Rc::clone(def)),
+            Some(other) => Err(self.not_a_struct(name, other)),
+            None => Err(self.runtime_error_hint(
+                &format!("module '{}' has no member '{}'", m.name, member),
+                "check the module's public API for available members",
+            )),
+        }
+    }
+
+    /// `name` is bound, but not to a struct, so there's nothing to build.
+    fn not_a_struct(&self, name: &str, value: &Value) -> VMError {
+        match value {
+            Value::EnumDef(_) => self.runtime_error_hint(
+                &format!("{name} is an enum, not a struct"),
+                &format!("an enum value is one of its variants: `{name}.<Variant>`"),
+            ),
+            other => {
+                let kind = other.type_name().to_lowercase();
+                let article = if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                    "an"
+                } else {
+                    "a"
+                };
+                self.runtime_error_hint(
+                    &format!("{name} is {article} {kind}, not a struct"),
+                    "a type annotation names a struct or an enum",
+                )
+            }
+        }
+    }
+
+    /// A struct def's flattened field layout (parent fields first, then own).
+    /// Computed lazily on first call and cached in the def's `OnceCell`, so
+    /// subsequent calls are a single pointer load. It takes the def rather than
+    /// a name: one reached through a module (`shapes.Pt(1, 2)`) isn't in scope
+    /// by name.
+    pub(crate) fn field_layout_of(
+        &self,
+        def: &Rc<crate::vm::value::ObjStructDef>,
     ) -> Result<Rc<crate::vm::value::FieldLayout>, VMError> {
-        let def = self.get_struct_def(struct_name).ok_or_else(|| {
-            self.runtime_error(&format!(
-                "struct '{}' is not defined in this scope",
-                struct_name
-            ))
-        })?;
         if let Some(layout) = def.layout.get() {
             return Ok(Rc::clone(layout));
         }
@@ -1265,7 +1347,7 @@ impl VM {
         // Parent lookups go through parent_struct_def so a child imported without
         // its parent still inherits the parent's fields.
         let mut chain: Vec<Rc<crate::vm::value::ObjStructDef>> = Vec::new();
-        let mut cur = Some(Rc::clone(&def));
+        let mut cur = Some(Rc::clone(def));
         while let Some(d) = cur {
             cur = self.parent_struct_def(&d);
             if cur.is_none()
@@ -3531,6 +3613,14 @@ impl VM {
                                 )));
                             }
                         }
+                    } else if let Some(m) = enum_val.as_module() {
+                        // `shapes.Pt { x: 1 }` parses like an enum variant, since
+                        // the parser can't tell a module from an enum.
+                        let binding = m.name.rsplit('/').next().unwrap_or(&m.name);
+                        let binding = binding.strip_suffix(".oxi").unwrap_or(binding);
+                        let name = format!("{binding}.{vname}");
+                        let def = self.struct_def_in_module(m, &vname, &name)?;
+                        self.build_struct_literal(def, &flat)?;
                     } else {
                         return Err(self.runtime_error(
                             "MakeEnumVariantStruct requires an EnumDef on the stack",
@@ -4067,7 +4157,7 @@ impl VM {
                 self.pop(); // pop the struct def
 
                 let def_name = def.name.clone();
-                let layout = self.resolve_field_layout(&def_name)?;
+                let layout = self.field_layout_of(def)?;
                 // Omitted fields used to take their type's zero, so a half-built struct looked complete.
                 let mut field_vec: Vec<Value> = Vec::with_capacity(layout.slots.len());
                 let mut missing: Vec<String> = Vec::new();

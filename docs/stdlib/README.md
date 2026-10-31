@@ -15,9 +15,10 @@ introduce {sqrt, abs} from math
 println(sqrt(16))
 ```
 
-Structs must be imported by name — `introduce {Parser} from parse_args` — since
-a struct is not constructible through a module namespace. See
-[imports.md](../imports.md) for the full import syntax.
+A struct can be used through its module, `parse_args.Parser()` and
+`p <parse_args.Parser>`, or imported by name, `introduce {Parser} from
+parse_args`, and then written `Parser`. See [imports.md](../imports.md) for the
+full import syntax.
 
 One page per module, each documenting **every** callable function with
 examples:

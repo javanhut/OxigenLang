@@ -1042,6 +1042,9 @@ impl Formatter {
                         }
                         self.push(")");
                     }
+                    crate::ast::EnumConstructKind::Struct(fields) if fields.is_empty() => {
+                        self.push(" {}");
+                    }
                     crate::ast::EnumConstructKind::Struct(fields) => {
                         self.push(" { ");
                         for (i, (fname, fval)) in fields.iter().enumerate() {
@@ -1495,6 +1498,7 @@ fn format_type_annotation(ann: &TypeAnnotation) -> String {
             .collect::<Vec<_>>()
             .join("> || <"),
         TypeAnnotation::Struct(name) => name.clone(),
+        TypeAnnotation::Qualified { module, name } => format!("{module}.{name}"),
         TypeAnnotation::EnumGeneric => "Enum".to_string(),
     }
 }

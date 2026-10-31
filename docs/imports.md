@@ -76,6 +76,10 @@ println(strings.upper("hello"))
 
 Top-level bindings (functions, variables, structs, and patterns) are exported by default — public unless you say otherwise. There is no export list; the exception is marked at the declaration with `hide`.
 
+A struct is built through the module like a function is called, `shapes.Pt(1, 2)` or `shapes.Pt { x: 1, y: 2 }`, and a type annotation can name it the same way: `p <shapes.Pt>`, `fun f(p <shapes.Pt>)`. The same works for a module's enums, `<shapes.Color>`. `introduce {Pt} from .shapes` lets you drop the `shapes.` from all of these.
+
+Types are checked by name, so `<shapes.Pt>` and `<Pt>` accept the same values. A type annotation names a struct or an enum: `x <random.rand_int>` is refused, because `rand_int` is a function.
+
 Use top-level definitions for reusable module APIs, and put script-only work inside `main`. The `main` block is skipped when the file is imported with `introduce`.
 
 ### `hide` — module-private functions

@@ -95,6 +95,9 @@ pub struct Parser {
     /// Set when the annotation ended in `>>`, which also consumed the `>` of
     /// an enclosing `<type<...>>`.
     type_close_extra: bool,
+    /// Set while parsing the expression in front of a block (`each x in items`,
+    /// `repeat when ok`), where `items {}` is the name and an empty body.
+    in_block_header: bool,
 }
 
 /// How deeply statements, blocks and expressions may nest. Generous for any
@@ -139,6 +142,7 @@ impl Parser {
             too_deep: false,
             type_outer_closed: false,
             type_close_extra: false,
+            in_block_header: false,
         };
 
         // Prefix Parse Functions
@@ -301,6 +305,37 @@ impl Parser {
 
         if self.curr_token.token_type == TokenType::Ident && self.curr_token.literal == "Value" {
             return Some(TypeAnnotation::ValueType);
+        }
+
+        if self.curr_token.token_type == TokenType::Ident
+            && self.peek_token.token_type == TokenType::FullStop
+        {
+            let module = self.curr_token.literal.clone();
+            self.next_token(); // move to '.'
+            if self.peek_token.token_type != TokenType::Ident {
+                self.errors.push(diag_hint(
+                    codes::EXPECTED_TYPE_NAME,
+                    self.peek_token.span,
+                    format!(
+                        "expected a type name after `{module}.`, got {:?}",
+                        self.peek_token.literal
+                    ),
+                    "name a struct or enum the module defines, e.g. `<shapes.Point>`",
+                ));
+                return None;
+            }
+            self.next_token();
+            let name = self.curr_token.literal.clone();
+            if TypeAnnotation::from_str(&name).is_some() {
+                self.errors.push(diag_hint(
+                    codes::EXPECTED_TYPE_NAME,
+                    self.curr_token.span,
+                    format!("`{name}` is a built-in type, not part of module `{module}`"),
+                    format!("write `<{name}>`"),
+                ));
+                return None;
+            }
+            return Some(TypeAnnotation::Qualified { module, name });
         }
 
         Some(TypeAnnotation::from_str_or_struct(&self.curr_token.literal))
@@ -1056,6 +1091,9 @@ impl Parser {
                     continue;
                 }
                 if t == TokenType::RBrace {
+                    if self.empty_braces_are_body(lookahead_idx) {
+                        break;
+                    }
                     // Empty struct literal: Name {}
                     self.next_token(); // consume '{'
                     self.next_token(); // consume '}'
@@ -1744,7 +1782,7 @@ impl Parser {
         let var = self.expect_name("a loop variable name")?;
         self.expect_peek(TokenType::In)?;
         self.next_token(); // move to iterable
-        let iterable = self.parse_expression(Precedence::Lowest)?;
+        let iterable = self.parse_block_header()?;
         self.expect_peek(TokenType::LBrace)?;
         let body = self.parse_block()?;
         Some(Expression::DivergeEach {
@@ -2279,7 +2317,7 @@ impl Parser {
                     continue;
                 }
                 if t == TokenType::RBrace {
-                    is_empty = true;
+                    is_empty = !self.empty_braces_are_body(idx);
                     break;
                 }
                 if t == TokenType::Ident {
@@ -2497,7 +2535,7 @@ impl Parser {
         self.expect_peek(TokenType::In)?;
         self.next_token(); // move to iterable
 
-        let iterable = self.parse_expression(Precedence::Lowest)?;
+        let iterable = self.parse_block_header()?;
 
         self.expect_peek(TokenType::LBrace)?;
         let body = self.parse_block()?;
@@ -2523,7 +2561,7 @@ impl Parser {
         }
         self.next_token(); // move to condition
 
-        let raw_condition = self.parse_expression(Precedence::Lowest)?;
+        let raw_condition = self.parse_block_header()?;
 
         let condition = if negate {
             Self::negate_loop_condition(raw_condition)
@@ -2862,7 +2900,7 @@ impl Parser {
         let token = self.curr_token.clone(); // 'unless'
 
         self.next_token(); // move to condition
-        let condition = self.parse_expression(Precedence::Lowest)?;
+        let condition = self.parse_block_header()?;
 
         let negated = Self::negate_expression(condition);
 
@@ -2943,9 +2981,31 @@ impl Parser {
         if !self.enter_nesting() {
             return None;
         }
+        // A block inside a header (a lambda's body) is ordinary code again.
+        let in_header = std::mem::replace(&mut self.in_block_header, false);
         let block = self.parse_block_at_depth();
+        self.in_block_header = in_header;
         self.depth -= 1;
         block
+    }
+
+    /// The expression in front of a block: `each x in <expr> {`.
+    fn parse_block_header(&mut self) -> Option<Expression> {
+        let outer = std::mem::replace(&mut self.in_block_header, true);
+        let expr = self.parse_expression(Precedence::Lowest);
+        self.in_block_header = outer;
+        expr
+    }
+
+    /// Whether the empty braces closing at `peek_nth(close)` are the body of
+    /// the header being parsed rather than a struct literal: `items {}` ends
+    /// the line there, where `[Pt {}]` or `f(Pt {})` carries on.
+    fn empty_braces_are_body(&mut self, close: usize) -> bool {
+        self.in_block_header
+            && matches!(
+                self.peek_nth(close + 1).token_type,
+                TokenType::Newline | TokenType::Eof | TokenType::RBrace
+            )
     }
 
     fn parse_block_at_depth(&mut self) -> Option<Vec<Statement>> {
@@ -3468,6 +3528,13 @@ impl Parser {
                 TokenType::RShift => Some((pos + 4, true)),
                 _ => None,
             };
+        }
+        // `module.Name`
+        if token_type == TokenType::Ident
+            && next_type == TokenType::FullStop
+            && next_next_type == TokenType::Ident
+        {
+            return Some((pos + 3, false));
         }
         pos += 1;
         Some((pos, false))
