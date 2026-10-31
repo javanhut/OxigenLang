@@ -7,10 +7,16 @@ arithmetic, the matrix product and transposition.
 introduce matrix
 ```
 
-Build a matrix with one of the module functions (`matrix.zeros(2, 3)`,
-`matrix.from_array(...)`) rather than `matrix.Matrix(...)`: a struct is not
-constructible through a module namespace, and the module functions check the
-shape for you.
+Make one from its shape, `matrix.Matrix(rows, cols)`, or with a module
+function such as `matrix.zeros(2, 3)` or `matrix.from_array(...)`. A matrix
+made from its shape alone holds zeros until you change it, and its methods
+build others of the same shape:
+
+```oxi
+m := matrix.Matrix(4, 4)
+m.print()              // four rows of [0, 0, 0, 0]
+m.rand_int().print()   // a 4 x 4 of random integers
+```
 
 Every function and method returns a **new** matrix and leaves the ones you
 pass in alone. The one exception is [`m.set`](#msetr-c-value), which changes a
@@ -30,6 +36,7 @@ fails the same way an array index does.
 | [`rand_int`](#rand_introws-cols-min-max) | `rand_int(rows, cols, min, max)` | `Matrix` |
 | [`rand_float`](#rand_floatrows-cols) | `rand_float(rows, cols)` | `Matrix` |
 | [`from_array`](#from_arrayarr) | `from_array(arr)` | `Matrix` |
+| [`m.full` and the rest](#building-from-a-shape) | `m.full(value)`, `m.zeros()`, `m.ones()`, `m.rand_int(min, max)`, `m.rand_float()` | `Matrix` |
 | [`get`](#mgetr-c) | `m.get(r, c)` | one value |
 | [`set`](#msetr-c-value) | `m.set(r, c, value)` | `None` |
 | [`row`](#mrowr) | `m.row(r)` | `array` |
@@ -51,10 +58,12 @@ fails the same way an array index does.
 |-------|------|----------|
 | `rows` | `int` | number of rows |
 | `cols` | `int` | number of columns |
-| `data` | `array` | the values, one array per row |
+| `data` | `array` or `None` | the values, one array per row; `None` reads as all zeros |
 
-Read `rows` and `cols` directly. Change values through `set` rather than
-`data`, so the shape stays consistent.
+`data` may be left off: `Matrix(2, 3)` is a 2 x 3 matrix of zeros, and
+`Matrix(2, 3, [[1, 2, 3], [4, 5, 6]])` gives the values directly (unchecked;
+`from_array` checks the shape). Read `rows` and `cols` directly. Change
+values through `set` rather than `data`, so the shape stays consistent.
 
 Two matrices are `==` when their shapes and values match:
 
@@ -62,6 +71,9 @@ Two matrices are `==` when their shapes and values match:
 a := matrix.from_array([[1, 2], [3, 4]])
 println(a.mul(matrix.identity(2)) == a)   // True
 ```
+
+`==` compares the `data` field as it is, so `Matrix(2, 2)` is not `==` to
+`zeros(2, 2)` even though both read as zeros. Compare `to_array()` instead.
 
 ---
 
@@ -132,6 +144,26 @@ m := matrix.from_array([[1, 2, 3], [4, 5, 6]])
 println(m.rows)   // 2
 println(m.cols)   // 3
 matrix.from_array([[1, 2], [3]])   // fails: rows of a matrix must all have the same length
+```
+
+### Building from a shape
+
+Each of these returns a new matrix with the same `rows` and `cols` as `m`,
+taking its arguments from the module function of the same name. `m` is left
+alone.
+
+| Method | Same as |
+|--------|---------|
+| `m.full(value)` | `full(m.rows, m.cols, value)` |
+| `m.zeros()` | `zeros(m.rows, m.cols)` |
+| `m.ones()` | `ones(m.rows, m.cols)` |
+| `m.rand_int(min, max)` | `rand_int(m.rows, m.cols, min, max)`, `min` 0 and `max` 1000 by default |
+| `m.rand_float()` | `rand_float(m.rows, m.cols)` |
+
+```oxi
+shape := matrix.Matrix(2, 3)
+println(shape.full(7).to_array())          // [[7, 7, 7], [7, 7, 7]]
+println(shape.rand_int(1, 6).to_array())   // [[3, 6, 1], [2, 2, 5]]
 ```
 
 ---

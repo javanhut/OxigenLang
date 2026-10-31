@@ -31,8 +31,10 @@ A new `sets` module does set algebra: `union`, `intersection`, `difference`,
 `matrix` builds 2-D matrices with `full`, `zeros`, `ones`, `identity`,
 `rand_int`, `rand_float` and `from_array`. A `Matrix` has `get`, `set`, `row`,
 `col`, `to_array`, `map`, `add`, `sub`, `scale`, `mul` (the matrix product),
-`transpose` and `print`. A negative size or mismatched shapes fail with
-`<Error<shape>>`.
+`transpose` and `print`. `matrix.Matrix(rows, cols)` makes one from its shape
+alone (its `data` is optional and reads as zeros), and `m.full`, `m.zeros`,
+`m.ones`, `m.rand_int` and `m.rand_float` build a new one of the same shape.
+A negative size or mismatched shapes fail with `<Error<shape>>`.
 
 ### Changed
 
