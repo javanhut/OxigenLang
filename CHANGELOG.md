@@ -28,13 +28,16 @@ A new `sets` module does set algebra: `union`, `intersection`, `difference`,
 
 ### Added: the `matrix` module
 
-`matrix` builds 2-D matrices with `full`, `zeros`, `ones`, `identity`,
-`rand_int`, `rand_float` and `from_array`. A `Matrix` has `get`, `set`, `row`,
-`col`, `to_array`, `map`, `add`, `sub`, `scale`, `mul` (the matrix product),
-`transpose` and `print`. `matrix.Matrix(rows, cols)` makes one from its shape
-alone (its `data` is optional and reads as zeros), and `m.full`, `m.zeros`,
-`m.ones`, `m.rand_int` and `m.rand_float` build a new one of the same shape.
-A negative size or mismatched shapes fail with `<Error<shape>>`.
+`matrix.Matrix(row_size, col_size)` holds a matrix's size, and its methods
+build a new `Matrix` of that size each time, so calls chain: `init(value?)`,
+`zeros_matrix`, `ones_matrix`, `zeros`, `ones`, `random_matrix(value)`,
+`randomized_matrix("int" | "float")` and `rand_int`. `init(arr)` gives a
+`Matrix` holding those values. Every `Matrix` has the transformations
+`to_array`, `shape`, `transpose`, `flatten`, `reshape`, `scale`, `get_row`,
+`get_col`, `diagonal`, `trace`, `determinant` and `inverse`, and the module
+functions are `identity`, `add`, `subtract`, `multiply` (element by element)
+and `dot_product` (the matrix product). `print_matrix` prints an array of
+rows or a `Matrix`, one row per line.
 
 ### Changed
 
