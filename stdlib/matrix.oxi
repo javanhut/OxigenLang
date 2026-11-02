@@ -224,7 +224,7 @@ Matrix includes {
         each value in self.flatten() {
             tolerance = math.max(tolerance, math.abs(value) * 1.0)
         }
-        tolerance = tolerance * size * 1e-12
+        tolerance = tolerance * size * 0.000000000001
         augmented <array>
         each row in range(size) {
             new_row <array>
