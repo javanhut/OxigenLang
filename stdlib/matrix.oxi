@@ -182,24 +182,21 @@ Matrix includes {
         sign := 1
         previous_pivot := 1
         each k in range(size) {
+            // Pivot on the largest value in the column, so a tiny float pivot can't blow up the result.
+            pivot := k
+            each row in range(k + 1, size) {
+                pivot = row when math.abs(values[row][k]) > math.abs(values[pivot][k])
+            }
             option {
-                values[k][k] == 0 -> {
-                    swap_row := -1
-                    each row in range(k + 1, size) {
-                        swap_row = row when swap_row == -1 and values[row][k] != 0
-                    }
-                    // No row to swap in: the determinant is 0.
-                    option {
-                        swap_row == -1 -> {
-                            sign = 0
-                        }
-                        {
-                            tmp := values[k]
-                            values[k] = values[swap_row]
-                            values[swap_row] = tmp
-                            sign = -sign
-                        }
-                    }
+                // The whole column is 0: the determinant is 0.
+                values[pivot][k] == 0 -> {
+                    sign = 0
+                }
+                pivot != k -> {
+                    tmp := values[k]
+                    values[k] = values[pivot]
+                    values[pivot] = tmp
+                    sign = -sign
                 }
             }
             stop when sign == 0
@@ -219,12 +216,15 @@ Matrix includes {
             self.row_size != self.col_size -> {
                 <fail>(<Error<not_square>>("Inverse needs a square matrix: got {self.row_size}x{self.col_size}"))
             }
-            self.determinant() == 0 -> {
-                <fail>(<Error<singular>>("Matrix has no inverse: its determinant is 0"))
-            }
         }
         size := self.row_size
         values := self.to_array()
+        // A pivot this small next to the largest value counts as 0, so float rounding can't hide a singular matrix.
+        tolerance := 0.0
+        each value in self.flatten() {
+            tolerance = math.max(tolerance, math.abs(value) * 1.0)
+        }
+        tolerance = tolerance * size * 1e-12
         augmented <array>
         each row in range(size) {
             new_row <array>
@@ -245,6 +245,11 @@ Matrix includes {
             augmented[col] = augmented[pivot]
             augmented[pivot] = tmp
             pivot_value := augmented[col][col]
+            option {
+                math.abs(pivot_value) <= tolerance -> {
+                    <fail>(<Error<singular>>("Matrix has no inverse: its determinant is 0"))
+                }
+            }
             each j in range(2 * size) {
                 augmented[col][j] = augmented[col][j] / pivot_value
             }
