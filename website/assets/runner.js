@@ -145,7 +145,8 @@ export function run(program, opts = {}) {
         workers.delete(worker);
       } else if (data.type === "done") end(data);
     };
-    worker.onerror = (e) => fail(`The playground worker failed: ${e.message || "unknown error"}`);
+    // A worker the browser refused to load (a network or isolation error) says nothing more.
+    worker.onerror = (e) => fail(e.message ? `The playground worker failed: ${e.message}` : "The browser could not start the playground's worker. Reload the page; if this keeps happening, the browser console says why.");
   };
 
   let threads = null;

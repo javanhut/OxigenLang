@@ -279,6 +279,15 @@ describe("the language server", { skip: !existsSync(LSP) && "build it with `imla
 });
 
 describe("the vendored editor", () => {
+  // CodeMirror's `history` once hid window.history, so share and New threw.
+  test("playground.js's imports do not hide the browser's globals", () => {
+    const source = readFileSync(new URL("playground.js", assets), "utf8");
+    const locals = [...source.matchAll(/import\s*\{([^}]*)\}\s*from/g)].flatMap((m) => m[1].split(",").map((n) => n.trim().split(/\s+as\s+/).pop()).filter(Boolean));
+    for (const name of ["history", "location", "document", "navigator", "window", "console", "fetch", "setTimeout", "confirm", "status", "open", "close", "print"]) {
+      assert.ok(!locals.includes(name), `playground.js imports a name that hides the global ${name}`);
+    }
+  });
+
   // Every bare import playground.js makes must resolve, through the import
   // map the site writes, to a vendored file that exports the names it uses.
   test("playground.js's imports resolve to vendored exports", async () => {
@@ -289,7 +298,7 @@ describe("the vendored editor", () => {
       const file = specifier.slice(1).replace("/", "-") + ".js";
       const vendored = readFileSync(new URL(`vendor/${file}`, assets), "utf8");
       const exported = new Set([...vendored.matchAll(/export\s*\{([^}]*)\}/g)].flatMap((m) => m[1].split(",").map((n) => n.trim().split(/\s+as\s+/).pop())));
-      for (const name of names.split(",").map((n) => n.trim()).filter(Boolean)) assert.ok(exported.has(name), `${specifier} does not export ${name}`);
+      for (const name of names.split(",").map((n) => n.trim().split(/\s+as\s+/)[0]).filter(Boolean)) assert.ok(exported.has(name), `${specifier} does not export ${name}`);
       // And whatever that file imports is vendored too.
       for (const [, dep] of vendored.matchAll(/from\s*['"]([^'"]+)['"]/g)) {
         const depFile = (dep.startsWith("@") ? dep.slice(1).replace("/", "-") : dep) + ".js";

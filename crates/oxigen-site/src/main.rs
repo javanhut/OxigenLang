@@ -114,6 +114,9 @@ fn write_page(out: &Path, base: &str, path: &str, html: &str) -> Result<(), Stri
     write(out, &file, html::rebase(html, base))
 }
 
+/// The scripts that run in Web Workers, served from /playground/ (see `build`).
+const WORKERS: [&str; 2] = ["worker.js", "lsp-worker.js"];
+
 /// Registers the service worker that makes the playground cross-origin
 /// isolated (website/static/playground/sw.js), then reloads once so the page
 /// is served through it. Isolation gives the page shared memory with its
@@ -224,7 +227,21 @@ fn build(out: &Path, wasm: &Wasm, base: &str, offline: bool) -> Result<(), Strin
                 .into_bytes();
         }
         fingerprints.push((name, html::fingerprint(&bytes)));
-        write(out, &format!("/assets/{name}"), bytes)?;
+        // Workers live under /playground/, inside the scope of the service
+        // worker that isolates the playground: a browser picks a worker
+        // script's service worker by the script's own address, and an
+        // isolated page refuses a worker that did not come back isolated.
+        // wasi.js sits beside them for their imports, and in /assets/ for
+        // the page's.
+        if name == "wasi.js" {
+            write(out, "/playground/wasi.js", &bytes)?;
+        }
+        let dir = if WORKERS.contains(&name) {
+            "playground"
+        } else {
+            "assets"
+        };
+        write(out, &format!("/{dir}/{name}"), bytes)?;
     }
     let import_map = vendor(out)?;
     let print = |name: &str| {
@@ -244,13 +261,13 @@ fn build(out: &Path, wasm: &Wasm, base: &str, offline: bool) -> Result<(), Strin
     };
     // site.js loads the runner on demand; it needs the runner's and the module's addresses.
     let runtime_head = format!(
-        "\n<meta name=\"oxigen-wasm\" content=\"{wasm_url}\">\n<meta name=\"oxigen-runner\" content=\"/assets/runner.js?v={}\">\n<meta name=\"oxigen-worker\" content=\"/assets/worker.js?v={}\">",
+        "\n<meta name=\"oxigen-wasm\" content=\"{wasm_url}\">\n<meta name=\"oxigen-runner\" content=\"/assets/runner.js?v={}\">\n<meta name=\"oxigen-worker\" content=\"/playground/worker.js?v={}\">",
         print("runner.js"),
         print("worker.js"),
     );
     // The playground also runs on threads and has the language server.
     let playground_head = format!(
-        "\n<meta name=\"oxigen-wasm-threads\" content=\"{threads_url}\">\n<meta name=\"oxigen-lsp\" content=\"{lsp_url}\">\n<meta name=\"oxigen-lsp-client\" content=\"/assets/lsp.js?v={}\">\n<meta name=\"oxigen-lsp-worker\" content=\"/assets/lsp-worker.js?v={}\">\n{}\n<script type=\"importmap\">{import_map}</script>\n<script type=\"module\" src=\"/assets/playground.js?v={}\"></script>",
+        "\n<meta name=\"oxigen-wasm-threads\" content=\"{threads_url}\">\n<meta name=\"oxigen-lsp\" content=\"{lsp_url}\">\n<meta name=\"oxigen-lsp-client\" content=\"/assets/lsp.js?v={}\">\n<meta name=\"oxigen-lsp-worker\" content=\"/playground/lsp-worker.js?v={}\">\n{}\n<script type=\"importmap\">{import_map}</script>\n<script type=\"module\" src=\"/assets/playground.js?v={}\"></script>",
         print("lsp.js"),
         print("lsp-worker.js"),
         ISOLATE,

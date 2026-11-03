@@ -11,7 +11,7 @@ import {
   Decoration, EditorView, ViewPlugin, crosshairCursor, drawSelection, dropCursor, highlightActiveLine,
   highlightActiveLineGutter, highlightSpecialChars, hoverTooltip, keymap, lineNumbers, rectangularSelection,
 } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import { defaultKeymap, history as undoHistory, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { bracketMatching, indentOnInput, indentService, indentUnit } from "@codemirror/language";
 import { autocompletion, closeBrackets, closeBracketsKeymap, completeAnyWord, completionKeymap } from "@codemirror/autocomplete";
 import { forceLinting, lintGutter, lintKeymap, linter } from "@codemirror/lint";
@@ -247,7 +247,7 @@ const extensions = () => [
   lineNumbers(),
   highlightActiveLineGutter(),
   highlightSpecialChars(),
-  history(),
+  undoHistory(),
   drawSelection(),
   dropCursor(),
   EditorState.allowMultipleSelections.of(true),
