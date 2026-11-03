@@ -25,6 +25,7 @@ const MODULES: &[(&str, &str)] = pages!(
     "io",
     "json",
     "math",
+    "matrix",
     "net",
     "os",
     "parse_args",

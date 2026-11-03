@@ -134,13 +134,19 @@ desc = "Runs a clippy check on the repo"
 run = ["cargo clippy --all-targets --all-features"]
 
 [commands.fix]
+escalate = true
 desc = "Run fix command using clippy"
-run = ["cargo clippy --fix --allow-dirty --allow-staged"]
+run = ["cargo clippy --fix --allow-dirty --allow-staged --allow-no-vcs"]
 
 [commands.test]
 desc = "Runs a cargo test"
 run = ["cargo test"]
 
+
+[commands.oxi-test]
+desc = "Runs the Oxigen test files in tests/ with the freshly built binary and the repo's stdlib (not the installed one)"
+run = ["target/release/oxigen test tests"]
+dep = ["build"]
 
 [commands.test-go]
 desc = "Test the go lsp code"
@@ -169,9 +175,16 @@ run = [
 [commands.site]
 desc = "Build oxigenlang.org into target/site from docs/ and website/"
 dep = ["wasm"]
-run = ["cargo run --release -p oxigen-site -- --wasm target/wasm32-unknown-unknown/wasm/oxigen_playground.opt.wasm"]
+run = [
+  "cargo run --release -p oxigen-site -- --wasm target/wasm32-unknown-unknown/wasm/oxigen_playground.opt.wasm",
+]
 
 [commands.site-serve]
 desc = "Build the website and serve it at http://localhost:8000"
 dep = ["site"]
 run = ["python3 -m http.server 8000 --directory target/site"]
+
+
+[commands.fmt]
+escalate = true
+run = ["oxigen fmt .", "cargo fmt"]

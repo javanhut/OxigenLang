@@ -389,4 +389,6 @@ fun sort_by(arr <array>, key_fn <generic>) {
 // spawn boundary yet (closure transfer is a later step).
 // Prefer the `diverge each` keyword form — these stay as thin wrappers over the
 // internal spawn/join primitives for back-compat.
-fun pmap(arr <array>, f <generic>) { map(map(arr, fun(x <generic>) { __spawn(f, x) }), fun(h <generic>) { __join_task(h) }) }
+fun pmap(arr <array>, f <generic>) {
+    map(map(arr, fun(x <generic>) { __spawn(f, x) }), fun(h <generic>) { __join_task(h) })
+}

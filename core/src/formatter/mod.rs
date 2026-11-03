@@ -3,6 +3,9 @@ use crate::lexer::Comment;
 use crate::token::Span;
 use crate::token::TokenType;
 
+/// Widest line a one-line form (an array, a function body) may produce.
+const MAX_WIDTH: usize = 80;
+
 pub struct Formatter {
     indent: usize,
     output: String,
@@ -41,6 +44,9 @@ pub struct Formatter {
     tail_position: bool,
     /// Set while emitting a statement a postfix guard will follow.
     guarded_statement: bool,
+    /// Function bodies emitted so far; `body_stays_inline` reads it to tell
+    /// whether an expression holds a function literal.
+    function_bodies: usize,
 }
 
 impl Default for Formatter {
@@ -65,6 +71,7 @@ impl Formatter {
             single_line: 0,
             tail_position: false,
             guarded_statement: false,
+            function_bodies: 0,
         }
     }
 
@@ -885,7 +892,6 @@ impl Formatter {
                     return;
                 }
 
-                const MAX_WIDTH: usize = 80;
                 let col = self.current_column();
                 let inline = self.array_inline_width(elements);
 
@@ -1312,12 +1318,13 @@ impl Formatter {
     }
 
     fn format_function_body(&mut self, body: &[Statement]) {
+        self.function_bodies += 1;
         // Inline only for brace style; indent style has no inline block form.
         // A comment inside the body would be pushed out of a one-line form.
         if !self.colon_blocks()
             && body.len() == 1
             && let Statement::Expr(expr) = &body[0]
-            && (!is_multiline_expr(expr) || self.single_line > 0)
+            && (self.single_line > 0 || !is_multiline_expr(expr) && self.body_stays_inline(expr))
             && !self.comment_inside_body(&body[0])
         {
             self.push(" { ");
@@ -1326,6 +1333,22 @@ impl Formatter {
             return;
         }
         self.block(" ", body);
+    }
+
+    /// Whether a body whose only statement is `expr` stays on the opener's
+    /// line. An expression that spans lines never does (`fun f() { [` … `] }`).
+    /// One holding a function literal, such as a call taking a callback, does
+    /// only while `{ expr }` fits the width: the call looks like a single
+    /// expression, but printed inline it nests a body inside a one-liner.
+    /// Other long one-liners are left as they are.
+    fn body_stays_inline(&self, expr: &Expression) -> bool {
+        let mut f = Formatter::new();
+        f.format_expression(expr);
+        if f.output.contains('\n') {
+            return false;
+        }
+        f.function_bodies == 0
+            || self.current_column() + " { ".len() + f.output.len() + " }".len() <= MAX_WIDTH
     }
 
     /// Whether the next pending comment belongs inside a body whose only

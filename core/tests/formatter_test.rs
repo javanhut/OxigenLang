@@ -45,6 +45,34 @@ fn test_format_empty_braces_after_a_dot() {
 }
 
 #[test]
+fn test_format_body_holding_a_callback_wraps_past_the_width() {
+    // A call taking a function literal used to be pulled onto the
+    // signature's line however long that made it.
+    let input = "fun rand_int(rows <int>, cols <int>, min <int> = 0, max <int> = 1000) {\n    __build(rows, cols, fun(r <int>, c <int>) { random.rand_int(min, max) })\n}";
+    let expected = "fun rand_int(rows <int>, cols <int>, min <int> = 0, max <int> = 1000) {\n    __build(rows, cols, fun(r <int>, c <int>) { random.rand_int(min, max) })\n}\n";
+    assert_eq!(format_source(input), expected);
+    // Short enough, it still goes on one line.
+    let input = "fun double(xs) {\n    map(xs, fun(x) { x * 2 })\n}";
+    assert_eq!(
+        format_source(input),
+        "fun double(xs) { map(xs, fun(x) { x * 2 }) }\n"
+    );
+}
+
+#[test]
+fn test_format_long_body_without_a_callback_stays_inline() {
+    let input = "fun post(url <str>, body <str>, headers <map> = {}) { __http_request(\"POST\", url, headers, body) }";
+    assert_eq!(format_source(input), format!("{input}\n"));
+}
+
+#[test]
+fn test_format_body_spanning_lines_is_a_block() {
+    // It used to print as `fun people() { [` … `] }`.
+    let input = "fun people() {\n    [\n        {\"person\": \"john\", \"info\": {\"age\": 32, \"job\": \"unemployed\"}},\n        {\"person\": \"jane\"},\n    ]\n}";
+    assert_eq!(format_source(input), format!("{input}\n"));
+}
+
+#[test]
 fn test_format_struct() {
     let input = "struct Point {\nx <int>\ny <int>\n}";
     let expected = "struct Point {\n    x <int>\n    y <int>\n}\n";

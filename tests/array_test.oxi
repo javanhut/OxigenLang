@@ -61,11 +61,13 @@ introduce array
 // ── Searching an array of records ──
 // The records below are deliberately ragged: one entry has no "person" key at
 // all, which every *_where function must skip rather than error on.
-fun sample_people() { [
-    {"person": "john", "info": {"age": 32, "job": "unemployed"}},
-    {"person": "jane"},
-    {"info": {"age": 28, "job": "engineer"}},
-] }
+fun sample_people() {
+    [
+        {"person": "john", "info": {"age": 32, "job": "unemployed"}},
+        {"person": "jane"},
+        {"info": {"age": 28, "job": "engineer"}},
+    ]
+}
 
 <test>("find_where returns the matching record") {
     people <array> := sample_people()

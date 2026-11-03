@@ -1,0 +1,377 @@
+// Matrix library built off arrays
+introduce random
+introduce math
+
+struct Matrix {
+    row_size <int>
+    col_size <int>
+    data <array> || <None>
+}
+
+Matrix includes {
+    fun init(value? <generic>) {
+        new_matrix <array>
+        option {
+            type(value) == "ARRAY" -> {
+                size_err <Error> = <Error<size_mismatch>>("Array doesn't fit the matrix: expected {self.row_size}x{self.col_size}")
+                option {
+                    len(value) != self.row_size -> {
+                        <fail>(size_err)
+                    }
+                }
+                each row in value {
+                    option {
+                        len(row) != self.col_size -> {
+                            <fail>(size_err)
+                        }
+                    }
+                    push(new_matrix, copy(row))
+                }
+            }
+            {
+                each row in range(self.row_size) {
+                    new_row <array>
+                    each col in range(self.col_size) {
+                        push(new_row, 0) unless value then push(new_row, value)
+                    }
+                    push(new_matrix, new_row)
+                }
+            }
+        }
+        Matrix(self.row_size, self.col_size, new_matrix)
+    }
+
+    fun zeros_matrix() { self.init(0) }
+
+    fun ones_matrix() { self.init(1) }
+
+    fun zeros() { self.zeros_matrix() }
+
+    fun ones() { self.ones_matrix() }
+
+    fun random_matrix(random_value <int> || <float>) { self.init(random_value) }
+
+    fun randomized_matrix(value_type <str> = "int") {
+        new_matrix <array>
+        each row in range(self.row_size) {
+            new_row <array>
+            each col in range(self.col_size) {
+                rand_value := random.rand_int(0, 1000) unless value_type == "float" then random.rand_float()
+                push(new_row, rand_value)
+            }
+            push(new_matrix, new_row)
+        }
+        Matrix(self.row_size, self.col_size, new_matrix)
+    }
+
+    fun rand_int() { self.randomized_matrix("int") }
+
+    fun to_array() {
+        new_matrix <array>
+        option {
+            self.data == None -> {
+                new_matrix = self.init().data
+            }
+            {
+                each row in self.data {
+                    push(new_matrix, copy(row))
+                }
+            }
+        }
+        new_matrix
+    }
+
+    fun shape() { [self.row_size, self.col_size] }
+
+    fun transpose() {
+        values := self.to_array()
+        new_matrix <array>
+        each col in range(self.col_size) {
+            new_row <array>
+            each row in range(self.row_size) {
+                push(new_row, values[row][col])
+            }
+            push(new_matrix, new_row)
+        }
+        Matrix(self.col_size, self.row_size, new_matrix)
+    }
+
+    fun flatten() {
+        flat <array>
+        each row in self.to_array() {
+            each value in row {
+                push(flat, value)
+            }
+        }
+        flat
+    }
+
+    fun reshape(new_row_size <int>, new_col_size <int>) {
+        old_count := self.row_size * self.col_size
+        new_count := new_row_size * new_col_size
+        option {
+            new_count != old_count -> {
+                <fail>(<Error<size_mismatch>>("Can't reshape {self.row_size}x{self.col_size} into {new_row_size}x{new_col_size}: expected {old_count} values, got {new_count}"))
+            }
+        }
+        flat := self.flatten()
+        new_matrix <array>
+        each row in range(new_row_size) {
+            new_row <array>
+            each col in range(new_col_size) {
+                push(new_row, flat[row * new_col_size + col])
+            }
+            push(new_matrix, new_row)
+        }
+        Matrix(new_row_size, new_col_size, new_matrix)
+    }
+
+    fun scale(k <int> || <float>) {
+        new_matrix <array>
+        each row in self.to_array() {
+            new_row <array>
+            each value in row {
+                push(new_row, value * k)
+            }
+            push(new_matrix, new_row)
+        }
+        Matrix(self.row_size, self.col_size, new_matrix)
+    }
+
+    fun get_row(row <int>) { self.to_array()[row] }
+
+    fun get_col(col <int>) {
+        new_col <array>
+        each row in self.to_array() {
+            push(new_col, row[col])
+        }
+        new_col
+    }
+
+    fun diagonal() {
+        values := self.to_array()
+        new_diagonal <array>
+        each i in range(math.min(self.row_size, self.col_size)) {
+            push(new_diagonal, values[i][i])
+        }
+        new_diagonal
+    }
+
+    fun trace() {
+        option {
+            self.row_size != self.col_size -> {
+                <fail>(<Error<not_square>>("Trace needs a square matrix: got {self.row_size}x{self.col_size}"))
+            }
+        }
+        total := 0
+        each value in self.diagonal() {
+            total = total + value
+        }
+        total
+    }
+
+    // Bareiss elimination: an int matrix gives an exact int determinant.
+    fun determinant() {
+        option {
+            self.row_size != self.col_size -> {
+                <fail>(<Error<not_square>>("Determinant needs a square matrix: got {self.row_size}x{self.col_size}"))
+            }
+        }
+        size := self.row_size
+        values := self.to_array()
+        sign := 1
+        previous_pivot := 1
+        each k in range(size) {
+            // Pivot on the largest value in the column, so a tiny float pivot can't blow up the result.
+            pivot := k
+            each row in range(k + 1, size) {
+                pivot = row when math.abs(values[row][k]) > math.abs(values[pivot][k])
+            }
+            option {
+                // The whole column is 0: the determinant is 0.
+                values[pivot][k] == 0 -> {
+                    sign = 0
+                }
+                pivot != k -> {
+                    tmp := values[k]
+                    values[k] = values[pivot]
+                    values[pivot] = tmp
+                    sign = -sign
+                }
+            }
+            stop when sign == 0
+            each row in range(k + 1, size) {
+                each col in range(k + 1, size) {
+                    values[row][col] = (values[row][col] * values[k][k] - values[row][k] * values[k][col]) / previous_pivot
+                }
+            }
+            previous_pivot = values[k][k]
+        }
+        1 unless size > 0 then sign * values[size - 1][size - 1]
+    }
+
+    // Gauss-Jordan elimination, so the values come back as floats.
+    fun inverse() {
+        option {
+            self.row_size != self.col_size -> {
+                <fail>(<Error<not_square>>("Inverse needs a square matrix: got {self.row_size}x{self.col_size}"))
+            }
+        }
+        size := self.row_size
+        values := self.to_array()
+        // A pivot this small next to the largest value counts as 0, so float rounding can't hide a singular matrix.
+        tolerance := 0.0
+        each value in self.flatten() {
+            tolerance = math.max(tolerance, math.abs(value) * 1.0)
+        }
+        tolerance = tolerance * size * 0.000000000001
+        augmented <array>
+        each row in range(size) {
+            new_row <array>
+            each col in range(size) {
+                push(new_row, values[row][col] * 1.0)
+            }
+            each col in range(size) {
+                push(new_row, 1.0 unless row != col then 0.0)
+            }
+            push(augmented, new_row)
+        }
+        each col in range(size) {
+            pivot := col
+            each row in range(col + 1, size) {
+                pivot = row when math.abs(augmented[row][col]) > math.abs(augmented[pivot][col])
+            }
+            tmp := augmented[col]
+            augmented[col] = augmented[pivot]
+            augmented[pivot] = tmp
+            pivot_value := augmented[col][col]
+            option {
+                math.abs(pivot_value) <= tolerance -> {
+                    <fail>(<Error<singular>>("Matrix has no inverse: its determinant is 0"))
+                }
+            }
+            each j in range(2 * size) {
+                augmented[col][j] = augmented[col][j] / pivot_value
+            }
+            each row in range(size) {
+                option {
+                    row != col -> {
+                        factor := augmented[row][col]
+                        each j in range(2 * size) {
+                            augmented[row][j] = augmented[row][j] - factor * augmented[col][j]
+                        }
+                    }
+                }
+            }
+        }
+        new_matrix <array>
+        each row in augmented {
+            new_row <array>
+            each col in range(size, 2 * size) {
+                push(new_row, row[col])
+            }
+            push(new_matrix, new_row)
+        }
+        Matrix(size, size, new_matrix)
+    }
+}
+
+fun identity(size <int>) {
+    new_matrix <array>
+    each row in range(size) {
+        new_row <array>
+        each col in range(size) {
+            push(new_row, 1 unless row != col then 0)
+        }
+        push(new_matrix, new_row)
+    }
+    Matrix(size, size, new_matrix)
+}
+
+fun add(mat1 <Matrix>, mat2 <Matrix>) {
+    option {
+        mat1.row_size != mat2.row_size or mat1.col_size != mat2.col_size -> {
+            <fail>(<Error<size_mismatch>>("Can't add {mat1.row_size}x{mat1.col_size} and {mat2.row_size}x{mat2.col_size}: sizes must match"))
+        }
+    }
+    values1 := mat1.to_array()
+    values2 := mat2.to_array()
+    new_matrix <array>
+    each row in range(mat1.row_size) {
+        new_row <array>
+        each col in range(mat1.col_size) {
+            push(new_row, values1[row][col] + values2[row][col])
+        }
+        push(new_matrix, new_row)
+    }
+    Matrix(mat1.row_size, mat1.col_size, new_matrix)
+}
+
+fun subtract(mat1 <Matrix>, mat2 <Matrix>) {
+    option {
+        mat1.row_size != mat2.row_size or mat1.col_size != mat2.col_size -> {
+            <fail>(<Error<size_mismatch>>("Can't subtract {mat1.row_size}x{mat1.col_size} and {mat2.row_size}x{mat2.col_size}: sizes must match"))
+        }
+    }
+    values1 := mat1.to_array()
+    values2 := mat2.to_array()
+    new_matrix <array>
+    each row in range(mat1.row_size) {
+        new_row <array>
+        each col in range(mat1.col_size) {
+            push(new_row, values1[row][col] - values2[row][col])
+        }
+        push(new_matrix, new_row)
+    }
+    Matrix(mat1.row_size, mat1.col_size, new_matrix)
+}
+
+// Element by element; dot_product is the matrix product.
+fun multiply(mat1 <Matrix>, mat2 <Matrix>) {
+    option {
+        mat1.row_size != mat2.row_size or mat1.col_size != mat2.col_size -> {
+            <fail>(<Error<size_mismatch>>("Can't multiply {mat1.row_size}x{mat1.col_size} and {mat2.row_size}x{mat2.col_size}: sizes must match"))
+        }
+    }
+    values1 := mat1.to_array()
+    values2 := mat2.to_array()
+    new_matrix <array>
+    each row in range(mat1.row_size) {
+        new_row <array>
+        each col in range(mat1.col_size) {
+            push(new_row, values1[row][col] * values2[row][col])
+        }
+        push(new_matrix, new_row)
+    }
+    Matrix(mat1.row_size, mat1.col_size, new_matrix)
+}
+
+fun dot_product(mat1 <Matrix>, mat2 <Matrix>) {
+    option {
+        mat1.col_size != mat2.row_size -> {
+            <fail>(<Error<size_mismatch>>("Can't take the dot product of {mat1.row_size}x{mat1.col_size} and {mat2.row_size}x{mat2.col_size}: expected {mat1.col_size} rows in the second matrix, got {mat2.row_size}"))
+        }
+    }
+    values1 := mat1.to_array()
+    values2 := mat2.to_array()
+    new_matrix <array>
+    each row in range(mat1.row_size) {
+        new_row <array>
+        each col in range(mat2.col_size) {
+            total := 0
+            each k in range(mat1.col_size) {
+                total = total + values1[row][k] * values2[k][col]
+            }
+            push(new_row, total)
+        }
+        push(new_matrix, new_row)
+    }
+    Matrix(mat1.row_size, mat2.col_size, new_matrix)
+}
+
+fun print_matrix(matrix <array> || <Matrix>) {
+    rows := matrix unless type(matrix) == "Matrix" then matrix.to_array()
+    each row in rows {
+        println(row)
+    }
+}

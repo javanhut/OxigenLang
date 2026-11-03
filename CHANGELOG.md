@@ -26,6 +26,19 @@ A new `sets` module does set algebra: `union`, `intersection`, `difference`,
 `symmetric_difference`, `is_subset`, `is_superset`, `is_disjoint`,
 `to_array`, `filter` and `map`.
 
+### Added: the `matrix` module
+
+`matrix.Matrix(row_size, col_size)` holds a matrix's size, and its methods
+build a new `Matrix` of that size each time, so calls chain: `init(value?)`,
+`zeros_matrix`, `ones_matrix`, `zeros`, `ones`, `random_matrix(value)`,
+`randomized_matrix("int" | "float")` and `rand_int`. `init(arr)` gives a
+`Matrix` holding those values. Every `Matrix` has the transformations
+`to_array`, `shape`, `transpose`, `flatten`, `reshape`, `scale`, `get_row`,
+`get_col`, `diagonal`, `trace`, `determinant` and `inverse`, and the module
+functions are `identity`, `add`, `subtract`, `multiply` (element by element)
+and `dot_product` (the matrix product). `print_matrix` prints an array of
+rows or a `Matrix`, one row per line.
+
 ### Changed
 
 - `insert(set, value, extra)` is an error. It used to need the third argument

@@ -1,0 +1,235 @@
+introduce matrix
+introduce math
+
+<test>("Matrix holds only its size") {
+    mat := matrix.Matrix(2, 3)
+    expect(mat.row_size).eq(2)
+    expect(mat.col_size).eq(3)
+    expect(matrix.Matrix(row_size=4, col_size=4).row_size).eq(4)
+}
+
+<test>("init") {
+    mat := matrix.Matrix(2, 3)
+    expect(mat.init().to_array()).eq([[0, 0, 0], [0, 0, 0]])
+    expect(mat.init(7).to_array()).eq([[7, 7, 7], [7, 7, 7]])
+    expect(mat.init(2.5).to_array()).eq([[2.5, 2.5, 2.5], [2.5, 2.5, 2.5]])
+    expect(mat.init(7).shape()).eq([2, 3])
+}
+
+<test>("zeros and ones") {
+    mat := matrix.Matrix(2, 2)
+    expect(mat.zeros_matrix().to_array()).eq([[0, 0], [0, 0]])
+    expect(mat.ones_matrix().to_array()).eq([[1, 1], [1, 1]])
+    expect(mat.zeros().to_array()).eq([[0, 0], [0, 0]])
+    expect(mat.ones().to_array()).eq([[1, 1], [1, 1]])
+}
+
+<test>("every builder returns a Matrix") {
+    mat := matrix.Matrix(2, 3)
+    each built in [
+        mat.init(),
+        mat.init(7),
+        mat.init([[1, 2, 3], [4, 5, 6]]),
+        mat.zeros_matrix(),
+        mat.ones_matrix(),
+        mat.zeros(),
+        mat.ones(),
+        mat.random_matrix(5),
+        mat.randomized_matrix(),
+        mat.randomized_matrix("float"),
+        mat.rand_int(),
+    ] {
+        expect(type(built)).eq("Matrix")
+        expect(built.shape()).eq([2, 3])
+    }
+    expect(type(matrix.identity(2))).eq("Matrix")
+}
+
+<test>("each call is a new matrix") {
+    mat := matrix.Matrix(2, 2)
+    ones := mat.ones()
+    zeros := mat.zeros()
+    ones.data[0][0] = 5
+    expect(zeros.to_array()).eq([[0, 0], [0, 0]])
+    expect(mat.ones().to_array()).eq([[1, 1], [1, 1]])
+    expect(mat.data).eq(None)
+    expect(mat.row_size).eq(2)
+}
+
+<test>("random_matrix") {
+    expect(matrix.Matrix(1, 2).random_matrix(5).to_array()).eq([[5, 5]])
+    expect(matrix.Matrix(1, 2).random_matrix(2.5).to_array()).eq([[2.5, 2.5]])
+}
+
+<test>("randomized_matrix and rand_int") {
+    each m in [
+        matrix.Matrix(3, 4).randomized_matrix(),
+        matrix.Matrix(3, 4).rand_int(),
+    ] {
+        expect(m.shape()).eq([3, 4])
+        each x in m.flatten() {
+            expect(type(x)).eq("INTEGER")
+            expect(x >= 0 and x <= 1000).truthy()
+        }
+    }
+    each x in matrix.Matrix(3, 3).randomized_matrix("float").flatten() {
+        expect(type(x)).eq("FLOAT")
+        expect(x >= 0.0 and x < 1.0).truthy()
+    }
+}
+
+<test>("everything chains") {
+    mat := matrix.Matrix(2, 3)
+    expect(mat.ones().transpose().shape()).eq([3, 2])
+    expect(mat.init(2).scale(3).reshape(3, 2).to_array()).eq([
+        [6, 6],
+        [6, 6],
+        [6, 6],
+    ])
+    expect(matrix.add(mat.ones(), mat.init(5)).to_array()).eq([
+        [6, 6, 6],
+        [6, 6, 6],
+    ])
+    expect(matrix.subtract(mat.init(5), mat.ones()).flatten()).eq([
+        4,
+        4,
+        4,
+        4,
+        4,
+        4,
+    ])
+    expect(matrix.multiply(mat.init(2), mat.init(3)).get_row(0)).eq([6, 6, 6])
+    expect(matrix.dot_product(mat.ones(), mat.ones().transpose()).to_array()).eq([
+        [3, 3],
+        [3, 3],
+    ])
+    expect(matrix.Matrix(3, 3).ones().trace()).eq(3)
+    expect(matrix.Matrix(3, 3).ones().determinant()).eq(0)
+    expect(matrix.Matrix(2, 2).rand_int().transpose().transpose().shape()).eq([
+        2,
+        2,
+    ])
+    expect(len(matrix.Matrix(2, 2).randomized_matrix("float").scale(2).get_col(1))).eq(2)
+}
+
+<test>("print_matrix") {
+    // Empty, so the test prints nothing.
+    expect(matrix.print_matrix(matrix.Matrix(0, 0).zeros())).eq(None)
+    expect(matrix.print_matrix(matrix.Matrix(0, 0).init([]))).eq(None)
+}
+
+<test>("init with an array") {
+    arr := [[0, 2], [2, 3]]
+    mat := matrix.Matrix(2, 2).init(arr)
+    expect(mat.data).eq([[0, 2], [2, 3]])
+    expect(mat.shape()).eq([2, 2])
+    // The rows are copied, so changing arr later leaves mat alone.
+    arr[0][0] = 9
+    expect(mat.get_row(0)).eq([0, 2])
+    expect(<type<Error> || <Value>>(matrix.Matrix(4, 4).init(arr))).is_error()
+    expect(<type<Error> || <Value>>(matrix.Matrix(2, 2).init([[1, 2], [3]]))).is_error()
+}
+
+<test>("a Matrix without data reads as init()") {
+    mat := matrix.Matrix(2, 3)
+    expect(mat.to_array()).eq([[0, 0, 0], [0, 0, 0]])
+    expect(mat.transpose().shape()).eq([3, 2])
+    expect(mat.data).eq(None)
+}
+
+<test>("transpose, flatten and reshape") {
+    mat := matrix.Matrix(2, 3).init([[1, 2, 3], [4, 5, 6]])
+    transposed := mat.transpose()
+    expect(transposed.shape()).eq([3, 2])
+    expect(transposed.to_array()).eq([[1, 4], [2, 5], [3, 6]])
+    expect(mat.flatten()).eq([1, 2, 3, 4, 5, 6])
+    expect(mat.reshape(3, 2).to_array()).eq([[1, 2], [3, 4], [5, 6]])
+    expect(mat.reshape(1, 6).shape()).eq([1, 6])
+    expect(<type<Error> || <Value>>(mat.reshape(4, 2))).is_error()
+    // mat itself is left alone.
+    expect(mat.shape()).eq([2, 3])
+}
+
+<test>("rows, columns and the diagonal") {
+    mat := matrix.Matrix(2, 3).init([[1, 2, 3], [4, 5, 6]])
+    expect(mat.get_row(1)).eq([4, 5, 6])
+    expect(mat.get_col(2)).eq([3, 6])
+    expect(mat.diagonal()).eq([1, 5])
+}
+
+<test>("identity") {
+    expect(matrix.identity(3).to_array()).eq([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+}
+
+<test>("element-wise math") {
+    mat1 := matrix.Matrix(2, 2).init([[1, 2], [3, 4]])
+    mat2 := matrix.Matrix(2, 2).init([[5, 6], [7, 8]])
+    expect(matrix.add(mat1, mat2).to_array()).eq([[6, 8], [10, 12]])
+    expect(matrix.subtract(mat2, mat1).to_array()).eq([[4, 4], [4, 4]])
+    expect(matrix.multiply(mat1, mat2).to_array()).eq([[5, 12], [21, 32]])
+    expect(mat1.scale(2).to_array()).eq([[2, 4], [6, 8]])
+    expect(mat1.scale(0.5).to_array()).eq([[0.5, 1.0], [1.5, 2.0]])
+    wide := matrix.Matrix(2, 3)
+    expect(<type<Error> || <Value>>(matrix.add(mat1, wide))).is_error()
+    expect(<type<Error> || <Value>>(matrix.subtract(mat1, wide))).is_error()
+    expect(<type<Error> || <Value>>(matrix.multiply(mat1, wide))).is_error()
+}
+
+<test>("dot_product") {
+    mat1 := matrix.Matrix(2, 3).init([[1, 2, 3], [4, 5, 6]])
+    mat2 := matrix.Matrix(3, 1).init([[1], [0], [2]])
+    dp := matrix.dot_product(mat1, mat2)
+    expect(dp.shape()).eq([2, 1])
+    expect(dp.to_array()).eq([[7], [16]])
+    square := matrix.Matrix(2, 2).init([[1, 2], [3, 4]])
+    expect(matrix.dot_product(square, matrix.identity(2))).eq(square)
+    expect(<type<Error> || <Value>>(matrix.dot_product(mat1, mat1))).is_error()
+}
+
+<test>("trace, determinant and inverse") {
+    mat := matrix.Matrix(2, 2).init([[0, 2], [2, 3]])
+    expect(mat.trace()).eq(3)
+    expect(mat.determinant()).eq(-4)
+    expect(matrix.Matrix(3, 3).init([[0, 1, 2], [1, 0, 3], [4, -3, 8]]).determinant()).eq(-2)
+    expect(matrix.Matrix(3, 3).init([[2, 0, 1], [1, 3, 2], [1, 1, 1]]).determinant()).eq(0)
+    // A zero pivot: swapped for a lower row when there is one, 0 when there isn't.
+    expect(matrix.Matrix(2, 2).init([[0, 1], [1, 0]]).determinant()).eq(-1)
+    expect(matrix.Matrix(3, 3).init([[0, 1, 2], [0, 3, 4], [0, 5, 6]]).determinant()).eq(0)
+    expect(matrix.Matrix(3, 3).init([[1, 2, 3], [2, 4, 6], [1, 1, 1]]).determinant()).eq(0)
+    expect(mat.inverse().to_array()).eq([[-0.75, 0.5], [0.5, 0.0]])
+    expect(matrix.dot_product(mat, mat.inverse()).to_array()).eq([
+        [1.0, 0.0],
+        [0.0, 1.0],
+    ])
+    singular := matrix.Matrix(2, 2).init([[1, 2], [2, 4]])
+    expect(<type<Error> || <Value>>(singular.inverse()).tag).eq("singular")
+    // A tiny float pivot gets swapped out, so the determinant stays close to -1.
+    tiny_pivot := matrix.Matrix(3, 3).init([
+        [0.000000000000001, 1.0, 2.0],
+        [1.0, 3.0, 4.0],
+        [2.0, 5.0, 7.0],
+    ])
+    expect(math.abs(tiny_pivot.determinant() + 1.0) < 0.000000001).truthy()
+    // Singular, but float rounding leaves its determinant just above 0.
+    float_singular := matrix.Matrix(3, 3).init([
+        [0.1, 0.2, 0.3],
+        [0.4, 0.5, 0.6],
+        [0.7, 0.8, 0.9],
+    ])
+    expect(<type<Error> || <Value>>(float_singular.inverse()).tag).eq("singular")
+    expect(<type<Error> || <Value>>(matrix.Matrix(3, 3).init([
+        [1, 2, 3],
+        [4, 5, 6],
+        [7, 8, 9],
+    ]).inverse()).tag).eq("singular")
+    // Small values aren't singular: the tolerance follows the matrix's own scale.
+    small := matrix.Matrix(2, 2).init([
+        [0.0000000000001, 0.0],
+        [0.0, 0.0000000000001],
+    ])
+    expect(type(small.inverse())).eq("Matrix")
+    wide := matrix.Matrix(2, 3)
+    expect(<type<Error> || <Value>>(wide.trace()).tag).eq("not_square")
+    expect(<type<Error> || <Value>>(wide.determinant()).tag).eq("not_square")
+    expect(<type<Error> || <Value>>(wide.inverse()).tag).eq("not_square")
+}
