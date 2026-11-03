@@ -73,3 +73,26 @@ func TestLocalModuleDotCompletesImportedFunctions(t *testing.T) {
 	items := getCompletions(src, pos, "file://"+mainPath, "", false)
 	wantLabels(t, items, "pad_left", "trim_all")
 }
+
+func TestSignatureDetailShowsReturnType(t *testing.T) {
+	src := "fun area(w <int>, h <int>) <int> {\n    w * h\n}\nfun find(id <int>) <User || Error<missing>> { None }\nfun greet(name <str>) {}\nC includes {\n    fun size() <float> { 1.0 }\n}\n"
+	idx := indexDocument(src, "")
+	got := map[string]string{}
+	for _, f := range idx.funcs {
+		got[f.name] = f.detail
+	}
+	want := map[string]string{
+		"area":  "area(w <int>, h <int>) <int>",
+		"find":  "find(id <int>) <User || Error<missing>>",
+		"greet": "greet(name <str>)",
+	}
+	for name, detail := range want {
+		if got[name] != detail {
+			t.Errorf("%s: got %q, want %q", name, got[name], detail)
+		}
+	}
+	st := idx.getOrAddStruct("C")
+	if len(st.methods) != 1 || st.methods[0].detail != "size() <float>" {
+		t.Errorf("method detail: got %+v", st.methods)
+	}
+}

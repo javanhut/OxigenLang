@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Added: return types on functions
+
+A function can declare what it returns with the same angle form its
+parameters use, written after the parameter list:
+
+```oxi
+fun area(width <int>, height <int>) <int> {
+    width * height
+}
+```
+
+It is optional. When it is there, every value the function returns, from its
+last expression or a `give`, is checked strictly, without conversion. It works
+on named and anonymous functions, struct methods and `#[indent]` blocks, and
+takes the usual unions: `<User || None>`, `<int || Error<parse>>`. A
+propagating `<fail>` passes through. The JIT skips the check where it can prove
+an int return, so an annotated hot function runs as fast as an unannotated
+one.
+
+A plain `Error` member of a union now accepts tagged errors, as `<Error>` on
+its own already did, so `<int || Error>` takes an `Error<parse>` too.
+
 ### Added: a full playground on oxigenlang.org
 
 The playground now runs programs the way `oxigen main.oxi` does, with what a

@@ -145,7 +145,7 @@ func getHoverText(word string) string {
 func keywordHover(word string) string {
 	switch word {
 	case "fun":
-		return "**fun** — Define a function\n\n```oxigen\nfun name(param <type>) {\n    body\n}\n```"
+		return "**fun** — Define a function\n\n```oxigen\nfun name(param <type>) <return_type> {\n    body\n}\n```\n\nThe return type is optional; every returned value is checked against it."
 	case "struct":
 		return "**struct** — Define a composite data type\n\n```oxigen\nstruct Name {\n    field <type>\n}\n```"
 	case "enum":

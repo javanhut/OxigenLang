@@ -223,6 +223,71 @@ fun safe_divide(a, b) {
 }
 ```
 
+### Return Types
+
+Write a type after the parameter list to declare what a function returns. It
+is the same `<type>` angle form parameters use, and like them it is optional:
+
+```oxi
+fun area(width <int>, height <int>) <int> {
+    width * height
+}
+```
+
+Every value the function returns is checked against it, whether it comes from
+the last expression or from a `give`. The check is strict, the same as for
+typed parameters: nothing is converted, so a function declared `<int>` that
+ends with `3.9` is an error, not `3`.
+
+```oxi
+fun half(n <int>) <int> { n / 2.0 }
+half(3)
+// error: return type mismatch in 'half': expected INTEGER, got FLOAT
+```
+
+A function that may have no result says so with a union. `None` is never
+accepted unless the type names it:
+
+```oxi
+fun find_user(id <int>) <User || None> {
+    give None when id < 0
+    lookup(id)
+}
+```
+
+The same goes for error values: a function that can return one declares
+`Error`, or `Error<tag>`. A plain `Error` accepts any tag. A propagating
+failure from `<fail>` isn't a returned value, so it passes through the check
+untouched:
+
+```oxi
+fun parse_port(text <str>) <int || Error<parse>> {
+    port <Error || Value> := <type<Error<parse> || Value>>(int(text))
+    option {
+        is_value(port) -> port.value,
+        port
+    }
+}
+```
+
+Return types work everywhere a function does: anonymous functions, struct
+methods, and indentation blocks.
+
+```oxi
+doubled <array> := array.map(nums, fun(x <int>) <int> { x * 2 })
+
+Circle includes {
+    fun area() <float> { 3.14159 * self.radius * self.radius }
+}
+
+#[indent]
+fun area(width <int>, height <int>) <int>:
+    width * height
+```
+
+There is no `void`. Leave the return type off a function that is only run for
+its effects. `<generic>` accepts any value, the same as writing no type.
+
 ## Functions as Values
 
 Functions are first-class — they can be stored in variables, passed to other functions, and returned:
@@ -349,6 +414,7 @@ println(factorial(5))
 | Typed parameter    | `fun f(x <int>) { ... }`           |
 | Default value      | `fun f(x <int> = 10) { ... }`      |
 | Optional parameter | `fun f(x? <int>) { ... }`          |
+| Return type        | `fun f(x <int>) <int> { ... }`     |
 | Named argument     | `f(name="Alice", age=30)`           |
 | Implicit return    | Last expression in body              |
 | Explicit return    | `give value`                         |

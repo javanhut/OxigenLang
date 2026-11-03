@@ -24,6 +24,7 @@ Whenever you see `<...>` in Oxigen, look at what comes **before** the opening `<
 | What comes before `<` | What `<...>` means | Example |
 |---|---|---|
 | A variable name | Type annotation — declares what type this variable holds | `name <str> = "hello"` |
+| A function's parameter list `)` | Return type — declares what type the function returns | `fun area(w <int>, h <int>) <int>` |
 | The keyword `as` or just `<type>` after a name | Zero-initialize — create an empty value of this type | `count <int>` |
 | Nothing (start of expression) | Constructor or utility — build a value, transform, or log | `<Error>("failed")`, `<log>("msg")` |
 | A completed expression | Effect — recover from an error on that expression | `expr <guard>("fallback")` |
@@ -139,6 +140,21 @@ count = "hello"    // error: type mismatch — count is locked to int
 ```
 
 This is the same type system used across variables, struct fields, and function parameters.
+
+### Return Types
+
+After a function's parameter list, the same angle form declares what the
+function returns:
+
+```oxi
+fun area(width <int>, height <int>) <int> {
+    width * height
+}
+```
+
+Read it as the function's signature followed by its type, just as `count <int>`
+is a name followed by its type. Every returned value is checked strictly,
+without conversion. See [Functions](functions.md#return-types).
 
 ---
 

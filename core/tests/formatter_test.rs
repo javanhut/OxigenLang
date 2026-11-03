@@ -29,6 +29,13 @@ fn test_format_function() {
 }
 
 #[test]
+fn test_format_return_types() {
+    let input = "fun area(w <int>,h <int>)<int> {\nw*h\n}\napply(fun(x <int>)  <int> { x * 2 })\nC includes {\nfun size()<float> { 1.0 }\n}";
+    let expected = "fun area(w <int>, h <int>) <int> { w * h }\napply(fun(x <int>) <int> { x * 2 })\nC includes {\n    fun size() <float> { 1.0 }\n}\n";
+    assert_eq!(format_source(input), expected);
+}
+
+#[test]
 fn test_format_qualified_type_annotations() {
     let input = "p  <shapes.Pt>\nfun f(a <shapes.Pt||int>) {\na\n}";
     let expected = "p <shapes.Pt>\n\nfun f(a <shapes.Pt> || <int>) { a }\n";
