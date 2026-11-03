@@ -3,7 +3,7 @@
 // and threads with the page answering system calls), typed input, files,
 // threads, tests, the editor's tools and the language server.
 //
-// Run: node --test website/tests/   (after `imlazy wasm wasm-lsp`)
+// Run: imlazy site-test, or node --test website/tests/playground.test.mjs
 // The editor itself (CodeMirror, vim keys, tabs) still needs a browser check.
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";

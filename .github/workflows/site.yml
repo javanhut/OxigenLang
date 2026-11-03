@@ -36,17 +36,17 @@ jobs:
       contents: read
       pages: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1, wasm32-wasip1-threads
       - uses: Swatinem/rust-cache@v2
       # Stable rather than go.mod's minimum: WASI support has improved since 1.22.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
           cache-dependency-path: lsp-go/go.mod
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - name: Install wasm-opt
@@ -68,14 +68,14 @@ jobs:
           cd lsp-go && GOOS=wasip1 GOARCH=wasm go build -trimpath -ldflags='-s -w' -o "../$LSP" .
       # Runs, typed input, files, threads and the language server, in Node.
       - name: Test the playground
-        run: node --test website/tests/
+        run: node --test website/tests/playground.test.mjs
       # Where Pages serves the site: "/OxigenLang" at javanhut.github.io until
       # the custom domain is set, then "" at www.oxigenlang.org. Pull requests only
       # check the build, so they skip this and build for the root.
       - name: Find the Pages base path
         id: pages
         if: github.event_name != 'pull_request'
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
       - name: Build the site
         run: >-
           cargo run --release -p oxigen-site --
@@ -86,7 +86,7 @@ jobs:
         env:
           # Reading the latest release from the GitHub API, without its anonymous rate limit.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/upload-pages-artifact@v4
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: target/site
 
@@ -100,7 +100,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-15-intel]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Lint
         if: runner.os == 'Linux'
         run: shellcheck -s sh -S warning website/static/install.sh
@@ -130,4 +130,4 @@ jobs:
       cancel-in-progress: false
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

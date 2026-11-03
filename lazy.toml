@@ -189,7 +189,7 @@ run = [
 [commands.site-test]
 desc = "Run the playground's JavaScript tests (the WASI layer, runs, input, files, threads, the language server) in Node"
 dep = ["wasm", "wasm-lsp"]
-run = ["node --test website/tests/"]
+run = ["node --test website/tests/playground.test.mjs"]
 
 [commands.vendor-editor]
 desc = "Re-fetch the playground editor's pinned JavaScript (CodeMirror, vim keys) into website/assets/vendor"

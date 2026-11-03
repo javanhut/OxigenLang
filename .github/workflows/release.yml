@@ -26,7 +26,7 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       underscored: ${{ steps.meta.outputs.underscored }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -62,7 +62,7 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
@@ -83,7 +83,7 @@ jobs:
           - { name: macos-x86,   os: macos-15-intel,   target: x86_64-apple-darwin,        suffix: macos_x86 }
           - { name: macos-arm64, os: macos-14,         target: aarch64-apple-darwin,       suffix: macos_arm64 }
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # musl-gcc compiles the C in ring and libffi-sys. Do NOT point
       # CARGO_TARGET_*_LINKER at it: rust's musl targets link self-contained
@@ -141,7 +141,7 @@ jobs:
           cp README.md "pkg/$dir/" || true
           tar -czf "dist/${dir}.tar.gz" -C pkg "$dir"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-${{ matrix.suffix }}
           path: dist/*.tar.gz
@@ -154,7 +154,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           path: dist
@@ -165,7 +165,7 @@ jobs:
         run: cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.verify.outputs.tag }}
           name: OxigenLang ${{ needs.verify.outputs.tag }}
@@ -192,9 +192,9 @@ jobs:
     needs: [verify, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           path: dist
@@ -212,15 +212,15 @@ jobs:
           done
           ls -l docker-context/*/oxigen
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
