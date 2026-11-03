@@ -1,0 +1,20 @@
+// Files
+// Writes a CSV file, reads it back and sums a column. The file it writes opens in a new tab.
+introduce io
+introduce os
+introduce strings
+
+main {
+    rows := ["fruit,count", "apples,12", "pears,7", "plums,30"]
+    io.write_file("fruit.csv", strings.join(rows, "\n") + "\n")
+    println("wrote fruit.csv: {io.file_size("fruit.csv")} bytes")
+
+    total := 0
+    each line in strings.split(strings.trim(io.read_file("fruit.csv")), "\n") {
+        fields := strings.split(line, ",")
+        skip when fields[0] == "fruit"
+        total = total + int(fields[1])
+    }
+    println("total fruit: {total}")
+    println("files here: {os.list_dir(".")}")
+}

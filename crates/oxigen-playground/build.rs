@@ -32,4 +32,11 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") {
         println!("cargo:rustc-link-arg-cdylib=-zstack-size=16777216");
     }
+
+    // The playground's threads build: `diverge` and `channel` get real
+    // threads (a Web Worker each). rustc has no cfg for wasm atomics.
+    println!("cargo:rustc-check-cfg=cfg(wasm_threads)");
+    if env::var("TARGET").as_deref() == Ok("wasm32-wasip1-threads") {
+        println!("cargo:rustc-cfg=wasm_threads");
+    }
 }

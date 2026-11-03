@@ -1,6 +1,6 @@
 +++
 title = "OxigenLang Playground: run Oxigen code in your browser"
-description = "Write and run OxigenLang programs in your browser. The real Oxigen interpreter, compiled to WebAssembly, with syntax highlighting, live error checking, formatting and shareable links."
+description = "Write and run OxigenLang programs in your browser: the real Oxigen interpreter and language server, compiled to WebAssembly, with standard input, files, threads, vim keys, completion, live error checking, formatting and shareable links."
 path = "/playground/"
 nav = "playground"
 class = "page-playground"
@@ -8,30 +8,39 @@ class = "page-playground"
 <div class="pg">
   <div class="pg-toolbar">
     <h1>Playground</h1>
-    <label class="visually-hidden" for="pg-example">Example</label>
-    <select id="pg-example" aria-label="Load an example">{{playground_options}}</select>
-    <button class="tbtn run" id="pg-run" type="button" title="Run (Ctrl+Enter)"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg> Run</button>
+    <button class="tbtn" id="pg-new" type="button" title="Start a new, empty program"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New</button>
+    <label class="visually-hidden" for="pg-example">Open an example</label>
+    <select id="pg-example"><option value="" selected>Examples…</option>{{playground_options}}</select>
+    <button class="tbtn run" id="pg-run" type="button" title="Run main.oxi (Ctrl+Enter)"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg> Run</button>
+    <button class="tbtn" id="pg-test" type="button" title="Run the <test> blocks, as oxigen test does (Ctrl+Shift+Enter)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l4 4L19 6"/></svg>Test</button>
     <button class="tbtn" id="pg-format" type="button" title="Format (Ctrl+S)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h14"/></svg>Format</button>
-    <button class="tbtn" id="pg-share" type="button" title="Copy a link to this code"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>Share</button>
-    <button class="tbtn" id="pg-reset" type="button" title="Reload the selected example"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>Reset</button>
+    <button class="tbtn" id="pg-share" type="button" title="Copy a link to these files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>Share</button>
     <span class="spacer"></span>
+    <label class="pg-keys">Keys <select id="pg-keymap"><option value="standard">Standard</option><option value="vim">Vim</option></select></label>
     <span class="pg-status" id="pg-status" data-state="loading" role="status">Loading…</span>
   </div>
   <div class="pg-panes">
     <div class="pg-editor">
-      <div class="pg-editor-surface">
-        <div class="pg-gutter" id="pg-gutter" aria-hidden="true"></div>
-        <div class="pg-code" id="pg-code">
-          <div class="pg-highlight" aria-hidden="true"><pre><code id="pg-hl">{{playground_initial}}</code></pre></div>
-          <textarea id="pg-src" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off" aria-label="OxigenLang source code" aria-describedby="pg-shortcuts">{{playground_initial_raw}}</textarea>
-        </div>
-      </div>
-      <div class="pg-editor-status"><span>Oxigen</span><span id="pg-position">Ln 1, Col 1</span><span>Spaces: 4</span></div>
+      <div class="pg-tabs" id="pg-tabs" role="tablist" aria-label="Files"><button class="pg-tab" type="button" role="tab" aria-selected="true">main.oxi</button></div>
+      <div class="pg-cm" id="pg-cm"><pre class="pg-fallback"><code>{{playground_initial}}</code></pre></div>
+      <div class="pg-editor-status"><span>Oxigen</span><span id="pg-mode"></span><span id="pg-lsp" title="The Oxigen language server">LSP</span><span id="pg-position">Ln 1, Col 1</span><span>Spaces: 4</span></div>
     </div>
     <div class="pg-output">
-      <div class="pg-output-bar"><span>Output</span><button id="pg-clear" type="button">Clear</button></div>
-      <pre id="pg-out" aria-live="polite"><span class="placeholder">Press Run or Ctrl+Enter to run this program.</span></pre>
-      <p class="pg-help" id="pg-shortcuts">Runs the real OxigenLang interpreter, compiled to WebAssembly, in a sandbox: no files, network, processes or threads, and runs stop after 20 seconds. Everything else in the language and the standard library works.<br><kbd>Ctrl</kbd>+<kbd>Enter</kbd> runs, <kbd>Ctrl</kbd>+<kbd>S</kbd> formats, <kbd>Ctrl</kbd>+<kbd>/</kbd> comments lines out, <kbd>Tab</kbd> and <kbd>Shift</kbd>+<kbd>Tab</kbd> indent. <kbd>Esc</kbd> then <kbd>Tab</kbd> leaves the editor. <a href="/docs/syntax/">Syntax reference</a> · <a href="/docs/getting-started/">Install Oxigen</a></p>
+      <div class="pg-output-bar"><span>Output</span><span class="pg-build">{{build}}</span><button id="pg-clear" type="button">Clear</button></div>
+      <pre id="pg-out" aria-live="polite"><span class="placeholder">Write a program and press Run or Ctrl+Enter, or open one of the examples.</span></pre>
+      <form class="pg-stdin" id="pg-stdin" hidden>
+        <label for="pg-stdin-line">stdin</label>
+        <input id="pg-stdin-line" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Type a line and press Enter">
+        <button type="button" id="pg-eof" title="End of input (Ctrl+D)">End</button>
+      </form>
+      <details class="pg-io">
+        <summary>Input and arguments</summary>
+        <label for="pg-input">Standard input, read before anything typed</label>
+        <textarea id="pg-input" rows="3" spellcheck="false" placeholder="Lines for input() and read_line()"></textarea>
+        <label for="pg-args">Arguments, for os.args()</label>
+        <input id="pg-args" spellcheck="false" autocomplete="off" placeholder="--verbose input.txt">
+      </details>
+      <p class="pg-help" id="pg-shortcuts">The real OxigenLang interpreter, compiled to WebAssembly, runs in your browser with files in memory: <code>io</code>, <code>os</code>, <code>input()</code>, <code>time.sleep</code>, <code>&lt;test&gt;</code> blocks, and your own modules in other tabs. <span id="pg-mode-note"></span> Not available in a browser: the network, running programs, and C libraries. Runs stop after 20 seconds of computing.<br><kbd>Ctrl</kbd>+<kbd>Enter</kbd> runs, <kbd>Ctrl</kbd>+<kbd>S</kbd> formats, <kbd>Ctrl</kbd>+<kbd>Space</kbd> completes, <kbd>Ctrl</kbd>+<kbd>/</kbd> comments lines out. In vim keys, <code>:w</code> formats, <code>:run</code> and <code>:test</code> run. <kbd>Esc</kbd> then <kbd>Tab</kbd> leaves the editor. <a href="/docs/syntax/">Syntax reference</a> · <a href="/docs/getting-started/">Install Oxigen</a></p>
     </div>
   </div>
 </div>

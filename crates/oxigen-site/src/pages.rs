@@ -34,48 +34,106 @@ pub struct Context<'a> {
     pub docs: &'a [Doc],
     pub report: &'a Report,
     pub examples: &'a [Example],
+    /// website/examples/playground: only in the playground's menu, as they
+    /// read input, write files or start threads.
+    pub playground_examples: &'a [Example],
+    /// What the playground was built from, such as `main` at a commit.
+    pub build: Option<&'a Build>,
     /// website/snippets: shown, not run (they need threads or the test runner).
     pub snippets: &'a [(String, String)],
     /// The latest GitHub release; none when built with --offline.
     pub release: Option<&'a Release>,
 }
 
-/// website/examples, in file-name order. Each must run in the playground's
-/// sandbox: a showcase that fails is a build error, not a broken page.
-pub fn load_examples(dir: &Path) -> Result<Vec<Example>, String> {
+/// The commit a CI build is made from, for the playground's "built from" note.
+pub struct Build {
+    pub branch: String,
+    pub commit: String,
+}
+
+impl Build {
+    /// From GitHub Actions' environment; none for a local build.
+    pub fn from_env() -> Option<Build> {
+        let commit = std::env::var("GITHUB_SHA").ok().filter(|s| !s.is_empty())?;
+        let branch = std::env::var("GITHUB_REF_NAME").unwrap_or_else(|_| "main".into());
+        Some(Build { branch, commit })
+    }
+}
+
+/// website/examples/playground, in file-name order. They need what only the
+/// browser provides (typed input, files, threads), so the build checks that
+/// each compiles rather than running it.
+pub fn load_playground_examples(dir: &Path) -> Result<Vec<Example>, String> {
+    let mut examples = Vec::new();
+    for path in example_paths(dir)? {
+        let (slug, title, summary, source) = parse_example(&path)?;
+        let diagnostics = oxigen_playground::check(&source);
+        if diagnostics.contains("\"severity\":\"error\"") {
+            return Err(format!(
+                "{}: does not compile: {diagnostics}",
+                path.display()
+            ));
+        }
+        examples.push(Example {
+            slug,
+            title,
+            summary,
+            source,
+            output: String::new(),
+        });
+    }
+    Ok(examples)
+}
+
+fn example_paths(dir: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     let mut paths: Vec<_> = std::fs::read_dir(dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|e| e == "oxi"))
         .collect();
     paths.sort();
-    let mut examples = Vec::new();
-    for path in paths {
-        let source =
-            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let comments: Vec<&str> = source
-            .lines()
-            .filter(|l| !l.starts_with("#["))
-            .take(2)
-            .map(|l| l.trim_start_matches("//").trim())
-            .collect();
-        // The title and summary comments are shown beside the code, so the
-        // code shown (and run) starts after them.
-        let mut lines: Vec<&str> = source.lines().collect();
-        let first_comment = lines.iter().position(|l| l.starts_with("//")).unwrap_or(0);
-        let mut taken = 0;
-        while taken < 2
-            && lines
-                .get(first_comment)
-                .is_some_and(|l| l.starts_with("//"))
-        {
-            lines.remove(first_comment);
-            taken += 1;
-        }
-        let source = lines.join("\n").trim_start_matches('\n').to_string() + "\n";
-        let stem = path.file_stem().unwrap().to_string_lossy();
-        let slug = stem.split_once('-').map_or(&*stem, |(_, s)| s).to_string();
+    Ok(paths)
+}
 
+/// An example file's slug, title and summary comments, and the code after them.
+fn parse_example(path: &Path) -> Result<(String, String, String, String), String> {
+    let source = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let comments: Vec<&str> = source
+        .lines()
+        .filter(|l| !l.starts_with("#["))
+        .take(2)
+        .map(|l| l.trim_start_matches("//").trim())
+        .collect();
+    // The title and summary comments are shown beside the code, so the
+    // code shown (and run) starts after them.
+    let mut lines: Vec<&str> = source.lines().collect();
+    let first_comment = lines.iter().position(|l| l.starts_with("//")).unwrap_or(0);
+    let mut taken = 0;
+    while taken < 2
+        && lines
+            .get(first_comment)
+            .is_some_and(|l| l.starts_with("//"))
+    {
+        lines.remove(first_comment);
+        taken += 1;
+    }
+    let code = lines.join("\n").trim_start_matches('\n').to_string() + "\n";
+    let stem = path.file_stem().unwrap().to_string_lossy();
+    let slug = stem.split_once('-').map_or(&*stem, |(_, s)| s).to_string();
+    Ok((
+        slug,
+        comments.first().copied().unwrap_or("Example").to_string(),
+        comments.get(1).copied().unwrap_or("").to_string(),
+        code,
+    ))
+}
+
+/// website/examples, in file-name order. Each must run in the playground's
+/// sandbox: a showcase that fails is a build error, not a broken page.
+pub fn load_examples(dir: &Path) -> Result<Vec<Example>, String> {
+    let mut examples = Vec::new();
+    for path in example_paths(dir)? {
+        let (slug, title, summary, source) = parse_example(&path)?;
         let printed = Rc::new(RefCell::new(String::new()));
         let into = Rc::clone(&printed);
         oxigen_core::output::set_sink(Some(Box::new(move |t| into.borrow_mut().push_str(t))));
@@ -90,8 +148,8 @@ pub fn load_examples(dir: &Path) -> Result<Vec<Example>, String> {
         let output = printed.borrow().clone();
         examples.push(Example {
             slug,
-            title: comments.first().copied().unwrap_or("Example").to_string(),
-            summary: comments.get(1).copied().unwrap_or("").to_string(),
+            title,
+            summary,
             source,
             output,
         });
@@ -243,22 +301,39 @@ fn placeholder(key: &str, cx: &Context) -> Option<String> {
         "docs_index" => docs_index(cx),
         "example_tabs" => example_tabs(cx),
         "playground_examples" => {
-            let list: Vec<_> = cx.examples.iter().map(|e| json!({ "slug": e.slug, "title": e.title, "summary": e.summary, "source": e.source })).collect();
+            let list: Vec<_> = cx.examples.iter().chain(cx.playground_examples).map(|e| json!({ "slug": e.slug, "title": e.title, "summary": e.summary, "source": e.source })).collect();
             serde_json::to_string(&list).unwrap().replace("</", "<\\/")
         }
         "playground_initial" => oxigen_core::highlight::to_html(&cx.examples.first()?.source),
         "playground_initial_raw" => escape(&cx.examples.first()?.source),
-        "playground_options" => cx
-            .examples
-            .iter()
-            .map(|e| {
-                format!(
-                    "<option value=\"{}\">{}</option>",
-                    escape(&e.slug),
-                    escape(&e.title)
-                )
-            })
-            .collect(),
+        "playground_options" => {
+            let options = |list: &[Example]| -> String {
+                list.iter()
+                    .map(|e| {
+                        format!(
+                            "<option value=\"{}\">{}</option>",
+                            escape(&e.slug),
+                            escape(&e.title)
+                        )
+                    })
+                    .collect()
+            };
+            format!(
+                "<optgroup label=\"The language\">{}</optgroup><optgroup label=\"Input, files and threads\">{}</optgroup>",
+                options(cx.examples),
+                options(cx.playground_examples)
+            )
+        }
+        "build" => match cx.build {
+            Some(b) => format!(
+                "Built from <a href=\"{}/commit/{}\" rel=\"noopener\">{} at {}</a>",
+                escape(&cx.config.repo),
+                escape(&b.commit),
+                escape(&b.branch),
+                escape(&b.commit[..b.commit.len().min(7)])
+            ),
+            None => "Built from a local checkout".to_string(),
+        },
         "bench_chart" => r.chart(|p| cx.config.blob(p)),
         "bench_table" => r.table(),
         "bench_median" => format!("{:.0}", r.median_speedup(false)),

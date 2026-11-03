@@ -1,11 +1,14 @@
 //! Builds oxigenlang.org into a directory of static files.
 //!
-//!     oxigen-site [--out DIR] [--wasm FILE] [--base PATH] [--offline]
+//!     oxigen-site [--out DIR] [--wasm FILE] [--wasm-threads FILE] [--lsp FILE]
+//!                 [--base PATH] [--offline]
 //!
 //! Run from the repository root (`imlazy site` does). The documentation comes
 //! from docs/, the hand-written pages, examples, styles and scripts from
-//! website/, the benchmark figures from benchmark_reports/, and the
-//! playground's interpreter from the WebAssembly build (`imlazy wasm`), and the
+//! website/, the benchmark figures from benchmark_reports/, the playground's
+//! interpreter from its two WebAssembly builds (`imlazy wasm`: single-threaded
+//! for the docs pages and the editor, threads for playground runs) and its
+//! language server from lsp-go built for WASI (`imlazy wasm-lsp`), and the
 //! download page's files from the latest GitHub release (`--offline` skips
 //! that, and the page then links to the releases list instead). `--base` is
 //! the path the site is served under: `/OxigenLang` on a GitHub project page,
@@ -26,18 +29,35 @@ use markdown::{Doc, Renderer};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const DEFAULT_WASM: &str = "target/wasm32-unknown-unknown/wasm/oxigen_playground.wasm";
+const DEFAULT_WASM: &str = "target/wasm32-wasip1/wasm/oxigen_playground.wasm";
+const DEFAULT_WASM_THREADS: &str = "target/wasm32-wasip1-threads/wasm/oxigen_playground.wasm";
+const DEFAULT_LSP: &str = "target/wasm-lsp/oxigen-lsp.wasm";
+
+/// The WebAssembly the site serves.
+struct Wasm {
+    single: PathBuf,
+    threads: PathBuf,
+    lsp: PathBuf,
+}
 
 fn main() {
     let mut out = PathBuf::from("target/site");
-    let mut wasm = PathBuf::from(DEFAULT_WASM);
+    let mut wasm = Wasm {
+        single: PathBuf::from(DEFAULT_WASM),
+        threads: PathBuf::from(DEFAULT_WASM_THREADS),
+        lsp: PathBuf::from(DEFAULT_LSP),
+    };
     let mut offline = false;
     let mut base = String::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--out" => out = args.next().map(PathBuf::from).unwrap_or_else(|| usage()),
-            "--wasm" => wasm = args.next().map(PathBuf::from).unwrap_or_else(|| usage()),
+            "--wasm" => wasm.single = args.next().map(PathBuf::from).unwrap_or_else(|| usage()),
+            "--wasm-threads" => {
+                wasm.threads = args.next().map(PathBuf::from).unwrap_or_else(|| usage())
+            }
+            "--lsp" => wasm.lsp = args.next().map(PathBuf::from).unwrap_or_else(|| usage()),
             "--offline" => offline = true,
             "--base" => {
                 base = args
@@ -65,7 +85,9 @@ fn main() {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: oxigen-site [--out DIR] [--wasm FILE] [--base PATH] [--offline]");
+    eprintln!(
+        "usage: oxigen-site [--out DIR] [--wasm FILE] [--wasm-threads FILE] [--lsp FILE] [--base PATH] [--offline]"
+    );
     std::process::exit(2);
 }
 
@@ -92,7 +114,66 @@ fn write_page(out: &Path, base: &str, path: &str, html: &str) -> Result<(), Stri
     write(out, &file, html::rebase(html, base))
 }
 
-fn build(out: &Path, wasm: &Path, base: &str, offline: bool) -> Result<(), String> {
+/// Registers the service worker that makes the playground cross-origin
+/// isolated (website/static/playground/sw.js), then reloads once so the page
+/// is served through it. Isolation gives the page shared memory with its
+/// workers: typed input, threads and the language server need it. Without a
+/// service worker (a private window, say) the playground still works, with
+/// input given up front and no threads.
+const ISOLATE: &str = r#"<script>
+(() => {
+  if (window.crossOriginIsolated || !("serviceWorker" in navigator) || !window.isSecureContext) return;
+  const base = document.documentElement.dataset.base || "";
+  const once = () => {
+    try {
+      if (sessionStorage.getItem("oxigen-isolate")) return;
+      sessionStorage.setItem("oxigen-isolate", "1");
+    } catch { return; }
+    location.reload();
+  };
+  navigator.serviceWorker.register(base + "/playground/sw.js", { scope: base + "/playground/" }).then((reg) => {
+    if (navigator.serviceWorker.controller) return once();
+    const sw = reg.installing || reg.waiting || reg.active;
+    if (sw && sw.state === "activated") once();
+    else if (sw) sw.addEventListener("statechange", () => sw.state === "activated" && once());
+  }, () => {});
+})();
+</script>"#;
+
+/// Copy the editor's vendored modules (scripts/vendor-editor.sh) to
+/// /assets/vendor/ and return the import map naming them: `@scope/name`
+/// lives in `scope-name.js`. The map's addresses are relative to the
+/// playground page, so they need no `--base`.
+fn vendor(out: &Path) -> Result<String, String> {
+    let dir = Path::new("website/assets/vendor");
+    let mut imports = serde_json::Map::new();
+    let mut entries: Vec<_> = fs::read_dir(dir)
+        .map_err(|e| format!("{}: {e} (run scripts/vendor-editor.sh)", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    entries.sort();
+    for path in entries {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        write(out, &format!("/assets/vendor/{name}"), &bytes)?;
+        let Some(stem) = name.strip_suffix(".js") else {
+            continue;
+        };
+        let url = format!("../assets/vendor/{name}?v={}", html::fingerprint(&bytes));
+        // The packages are @codemirror/*, @lezer/*, @marijn/*, @replit/* and unscoped ones.
+        let specifier = ["codemirror", "lezer", "marijn", "replit"]
+            .iter()
+            .find_map(|scope| {
+                stem.strip_prefix(&format!("{scope}-"))
+                    .map(|rest| format!("@{scope}/{rest}"))
+            })
+            .unwrap_or_else(|| stem.to_string());
+        imports.insert(specifier, url.into());
+    }
+    Ok(serde_json::json!({ "imports": imports }).to_string())
+}
+
+fn build(out: &Path, wasm: &Wasm, base: &str, offline: bool) -> Result<(), String> {
     let config = Config::load(Path::new("website/site.toml"))?;
     let latest = if offline {
         None
@@ -109,23 +190,43 @@ fn build(out: &Path, wasm: &Path, base: &str, offline: bool) -> Result<(), Strin
 
     // ── Static files and assets ──
     copy_dir(Path::new("website/static"), out)?;
-    let wasm_bytes = fs::read(wasm)
-        .map_err(|e| format!("{}: {e} (build it with `imlazy wasm`)", wasm.display()))?;
-    let wasm_url = format!("/assets/oxigen.wasm?v={}", html::fingerprint(&wasm_bytes));
-    write(out, "/assets/oxigen.wasm", &wasm_bytes)?;
+    let binary = |path: &Path, name: &str, task: &str| -> Result<String, String> {
+        let bytes = fs::read(path)
+            .map_err(|e| format!("{}: {e} (build it with `imlazy {task}`)", path.display()))?;
+        write(out, &format!("/assets/{name}"), &bytes)?;
+        Ok(format!("/assets/{name}?v={}", html::fingerprint(&bytes)))
+    };
+    let wasm_url = binary(&wasm.single, "oxigen.wasm", "wasm")?;
+    let threads_url = binary(&wasm.threads, "oxigen-threads.wasm", "wasm")?;
+    let lsp_url = binary(&wasm.lsp, "oxigen-lsp.wasm", "wasm-lsp")?;
     let mut fingerprints = Vec::new();
+    // wasi.js first: the scripts that import it name its fingerprint, so a
+    // cached copy from before a deploy is never mixed with new ones.
     for name in [
+        "wasi.js",
         "site.css",
         "site.js",
         "playground.js",
         "runner.js",
         "worker.js",
+        "lsp.js",
+        "lsp-worker.js",
     ] {
-        let bytes = fs::read(Path::new("website/assets").join(name))
+        let mut bytes = fs::read(Path::new("website/assets").join(name))
             .map_err(|e| format!("website/assets/{name}: {e}"))?;
+        if let Some((_, wasi)) = fingerprints.iter().find(|(n, _)| *n == "wasi.js") {
+            let text = String::from_utf8(bytes).map_err(|e| format!("{name}: {e}"))?;
+            bytes = text
+                .replace(
+                    "from \"./wasi.js\"",
+                    &format!("from \"./wasi.js?v={wasi}\""),
+                )
+                .into_bytes();
+        }
         fingerprints.push((name, html::fingerprint(&bytes)));
         write(out, &format!("/assets/{name}"), bytes)?;
     }
+    let import_map = vendor(out)?;
     let print = |name: &str| {
         fingerprints
             .iter()
@@ -146,6 +247,14 @@ fn build(out: &Path, wasm: &Path, base: &str, offline: bool) -> Result<(), Strin
         "\n<meta name=\"oxigen-wasm\" content=\"{wasm_url}\">\n<meta name=\"oxigen-runner\" content=\"/assets/runner.js?v={}\">\n<meta name=\"oxigen-worker\" content=\"/assets/worker.js?v={}\">",
         print("runner.js"),
         print("worker.js"),
+    );
+    // The playground also runs on threads and has the language server.
+    let playground_head = format!(
+        "\n<meta name=\"oxigen-wasm-threads\" content=\"{threads_url}\">\n<meta name=\"oxigen-lsp\" content=\"{lsp_url}\">\n<meta name=\"oxigen-lsp-client\" content=\"/assets/lsp.js?v={}\">\n<meta name=\"oxigen-lsp-worker\" content=\"/assets/lsp-worker.js?v={}\">\n{}\n<script type=\"importmap\">{import_map}</script>\n<script type=\"module\" src=\"/assets/playground.js?v={}\"></script>",
+        print("lsp.js"),
+        print("lsp-worker.js"),
+        ISOLATE,
+        print("playground.js"),
     );
 
     // ── Documentation ──
@@ -240,12 +349,17 @@ fn build(out: &Path, wasm: &Path, base: &str, offline: bool) -> Result<(), Strin
     // ── Hand-written pages ──
     let report = bench::parse(&read("benchmark_reports/latest-native.md")?)?;
     let examples = pages::load_examples(Path::new("website/examples"))?;
+    let playground_examples =
+        pages::load_playground_examples(Path::new("website/examples/playground"))?;
+    let build_info = pages::Build::from_env();
     let snippets = pages::load_snippets(Path::new("website/snippets"))?;
     let context = pages::Context {
         config: &config,
         docs: &docs,
         report: &report,
         examples: &examples,
+        playground_examples: &playground_examples,
+        build: build_info.as_ref(),
         snippets: &snippets,
         release: latest.as_ref(),
     };
@@ -258,10 +372,7 @@ fn build(out: &Path, wasm: &Path, base: &str, offline: bool) -> Result<(), Strin
         page.head.push_str(&runtime_head);
         if page.path == "/playground/" {
             // A module, so its top-level names stay out of site.js's global scope.
-            page.head.push_str(&format!(
-                "\n<script type=\"module\" src=\"/assets/playground.js?v={}\"></script>",
-                print("playground.js")
-            ));
+            page.head.push_str(&playground_head);
         }
         write_page(
             out,

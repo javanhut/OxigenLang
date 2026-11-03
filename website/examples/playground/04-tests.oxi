@@ -1,0 +1,28 @@
+// Tests
+// <test> blocks sit next to the code they check. Press Test to run them, as oxigen test does.
+fun fizzbuzz(n <int>) {
+    option {
+        n % 15 == 0 -> "FizzBuzz",
+        n % 3 == 0 -> "Fizz",
+        n % 5 == 0 -> "Buzz",
+        "{n}"
+    }
+}
+
+<test>("multiples of three") {
+    expect(fizzbuzz(9)).eq("Fizz")
+}
+
+<test>("multiples of fifteen") {
+    expect(fizzbuzz(30)).eq("FizzBuzz")
+}
+
+<test>("other numbers") {
+    expect(fizzbuzz(7)).eq("7")
+}
+
+main {
+    each n in range(1, 16) {
+        println(fizzbuzz(n))
+    }
+}

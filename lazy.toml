@@ -159,25 +159,41 @@ run = ["cd ./lsp-go/ && go fix ./..."]
 # ── oxigenlang.org ─────────────────────────────────────────────────────
 
 [commands.system-deps]
-desc = "Install what the website build needs (the wasm32 Rust target, wasm-opt) with rvn"
+desc = "Install what the website build needs (the WASI Rust targets, wasm-opt, Go) with rvn"
 alias = ["setup"]
-run = ["scripts/system-deps.sh"]
+run = ["bash scripts/system-deps.sh"]
 
 [commands.wasm]
-desc = "Build the playground's interpreter for the browser (target/site uses it)"
+desc = "Build the playground's interpreter for the browser: single-threaded (docs pages, the editor) and threads (playground runs)"
 dep = ["system-deps"]
 run = [
-  "cargo build -p oxigen-playground --target wasm32-unknown-unknown --profile wasm",
-  # About a third smaller; the features are the ones rustc's wasm32 target enables.
-  "wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-multivalue --enable-reference-types target/wasm32-unknown-unknown/wasm/oxigen_playground.wasm -o target/wasm32-unknown-unknown/wasm/oxigen_playground.opt.wasm",
+  "cargo build -p oxigen-playground --target wasm32-wasip1 --profile wasm",
+  "cargo build -p oxigen-playground --target wasm32-wasip1-threads --profile wasm",
+  # About a third smaller; the features are the ones rustc's wasm32 targets enable.
+  "wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-multivalue --enable-reference-types target/wasm32-wasip1/wasm/oxigen_playground.wasm -o target/wasm32-wasip1/wasm/oxigen_playground.opt.wasm",
+  "wasm-opt -O3 --enable-threads --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-multivalue --enable-reference-types target/wasm32-wasip1-threads/wasm/oxigen_playground.wasm -o target/wasm32-wasip1-threads/wasm/oxigen_playground.opt.wasm",
 ]
+
+[commands.wasm-lsp]
+desc = "Build the language server (lsp-go) for WASI, for the playground's editor"
+dep = ["system-deps"]
+run = ["mkdir -p target/wasm-lsp", "cd lsp-go && GOOS=wasip1 GOARCH=wasm go build -trimpath -ldflags='-s -w' -o ../target/wasm-lsp/oxigen-lsp.wasm ."]
 
 [commands.site]
 desc = "Build oxigenlang.org into target/site from docs/ and website/"
-dep = ["wasm"]
+dep = ["wasm", "wasm-lsp"]
 run = [
-  "cargo run --release -p oxigen-site -- --wasm target/wasm32-unknown-unknown/wasm/oxigen_playground.opt.wasm",
+  "cargo run --release -p oxigen-site -- --wasm target/wasm32-wasip1/wasm/oxigen_playground.opt.wasm --wasm-threads target/wasm32-wasip1-threads/wasm/oxigen_playground.opt.wasm --lsp target/wasm-lsp/oxigen-lsp.wasm",
 ]
+
+[commands.site-test]
+desc = "Run the playground's JavaScript tests (the WASI layer, runs, input, files, threads, the language server) in Node"
+dep = ["wasm", "wasm-lsp"]
+run = ["node --test website/tests/"]
+
+[commands.vendor-editor]
+desc = "Re-fetch the playground editor's pinned JavaScript (CodeMirror, vim keys) into website/assets/vendor"
+run = ["bash scripts/vendor-editor.sh"]
 
 [commands.site-serve]
 desc = "Build the website and serve it at http://localhost:8000"

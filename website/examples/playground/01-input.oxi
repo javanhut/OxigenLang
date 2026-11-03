@@ -1,0 +1,20 @@
+// Reading input
+// Asks for your name and some numbers. Type the answers into the output pane, or give them in Input and arguments.
+introduce io
+introduce strings
+
+main {
+    name := io.input("What is your name? ")
+    println("Hello, {name}!")
+
+    total := 0
+    count := 0
+    println("Enter numbers, one per line. An empty line (or End) finishes.")
+    repeat when True {
+        line := strings.trim(io.read_line())
+        stop when line == ""
+        total = total + int(line)
+        count++
+    }
+    println("{count} numbers, total {total}")
+}

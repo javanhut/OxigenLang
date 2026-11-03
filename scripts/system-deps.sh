@@ -18,10 +18,14 @@ check_only=false
 # package | how to tell it is there
 requirements=(
     "rust|cmd:cargo"
-    # The playground runs the interpreter compiled to WebAssembly.
-    "rust-wasm|target:wasm32-unknown-unknown"
+    # The playground runs the interpreter compiled to WebAssembly for WASI,
+    # single-threaded and with threads.
+    "rust-wasm|target:wasm32-wasip1"
+    "rust-wasm|target:wasm32-wasip1-threads"
     # wasm-opt shrinks the playground module by about a third.
     "binaryen|cmd:wasm-opt"
+    # The playground's language server is lsp-go, built for WASI.
+    "go|cmd:go"
 )
 
 present() {
@@ -45,6 +49,8 @@ done
 if ((${#missing[@]} == 0)); then
     exit 0
 fi
+# Two targets come from one package.
+mapfile -t missing < <(printf '%s\n' "${missing[@]}" | awk '!seen[$0]++')
 
 echo "The OxigenLang website build needs: ${missing[*]}"
 if $check_only; then
@@ -53,7 +59,7 @@ fi
 
 if command -v rustup >/dev/null 2>&1 && [[ " ${missing[*]} " == *" rust-wasm "* ]]; then
     # A rustup toolchain ignores the system package; add the target to it.
-    rustup target add wasm32-unknown-unknown
+    rustup target add wasm32-wasip1 wasm32-wasip1-threads
     rest=()
     for package in "${missing[@]}"; do
         [[ $package == rust-wasm ]] || rest+=("$package")

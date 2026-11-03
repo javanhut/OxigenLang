@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Added: a full playground on oxigenlang.org
+
+The playground now runs programs the way `oxigen main.oxi` does, with what a
+browser can provide:
+
+- **Standard input.** `input()` and `read_line()` pause the program until you
+  type into the output pane (Ctrl+D ends input), or read lines given up front.
+- **Files.** `io` and `os` work on a file system in memory. Files are tabs:
+  add your own modules and data files, and files a program writes open as
+  new tabs.
+- **Threads.** `diverge` and `channel` run tasks on real threads, one Web
+  Worker each.
+- **Tests, arguments and the rest of `os`.** A Test button runs `<test>`
+  blocks as `oxigen test` does; arguments for `os.args()`, the environment,
+  the working directory and `os.exit` all behave as on the command line.
+- **A new editor.** CodeMirror with standard or vim keys (`:w` formats,
+  `:run`, `:test`), and completion and hovers from `oxigen-lsp`, which also
+  runs in the browser.
+- **New starts blank.** The playground opens on an empty program; examples,
+  including new ones for input, files, threads and tests, are a menu away.
+
+The network, running programs and C libraries are still unavailable in a
+browser, and say so. The site, playground included, is rebuilt from `main` on
+every push, and the playground shows the commit it was built from.
+
 ### Added: adding, removing and searching in collections
 
 Arrays, maps and sets now share one set of builtins, all of which change the

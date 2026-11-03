@@ -24,7 +24,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  WASM: target/wasm32-unknown-unknown/wasm/oxigen_playground.wasm
+  WASM: target/wasm32-wasip1/wasm/oxigen_playground.wasm
+  WASM_THREADS: target/wasm32-wasip1-threads/wasm/oxigen_playground.wasm
+  LSP: target/wasm-lsp/oxigen-lsp.wasm
 
 jobs:
   build:
@@ -37,17 +39,36 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32-wasip1, wasm32-wasip1-threads
       - uses: Swatinem/rust-cache@v2
+      # Stable rather than go.mod's minimum: WASI support has improved since 1.22.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: lsp-go/go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: Install wasm-opt
         run: sudo apt-get update && sudo apt-get install -y binaryen
+      # The playground's interpreter, from this commit: the site always runs
+      # what is on main, released or not.
       - name: Build the playground's WebAssembly
-        run: cargo build -p oxigen-playground --target wasm32-unknown-unknown --profile wasm
+        run: |
+          cargo build -p oxigen-playground --target wasm32-wasip1 --profile wasm
+          cargo build -p oxigen-playground --target wasm32-wasip1-threads --profile wasm
       - name: Shrink it
-        run: >-
-          wasm-opt -O3 --enable-bulk-memory --enable-nontrapping-float-to-int
-          --enable-sign-ext --enable-mutable-globals --enable-multivalue
-          --enable-reference-types "$WASM" -o "${WASM%.wasm}.opt.wasm"
+        run: |
+          features="--enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-multivalue --enable-reference-types"
+          wasm-opt -O3 $features "$WASM" -o "${WASM%.wasm}.opt.wasm"
+          wasm-opt -O3 --enable-threads $features "$WASM_THREADS" -o "${WASM_THREADS%.wasm}.opt.wasm"
+      - name: Build the language server for WASI
+        run: |
+          mkdir -p target/wasm-lsp
+          cd lsp-go && GOOS=wasip1 GOARCH=wasm go build -trimpath -ldflags='-s -w' -o "../$LSP" .
+      # Runs, typed input, files, threads and the language server, in Node.
+      - name: Test the playground
+        run: node --test website/tests/
       # Where Pages serves the site: "/OxigenLang" at javanhut.github.io until
       # the custom domain is set, then "" at www.oxigenlang.org. Pull requests only
       # check the build, so they skip this and build for the root.
@@ -59,6 +80,8 @@ jobs:
         run: >-
           cargo run --release -p oxigen-site --
           --wasm "${WASM%.wasm}.opt.wasm"
+          --wasm-threads "${WASM_THREADS%.wasm}.opt.wasm"
+          --lsp "$LSP"
           --base "${{ steps.pages.outputs.base_path }}"
         env:
           # Reading the latest release from the GitHub API, without its anonymous rate limit.
