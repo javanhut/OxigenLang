@@ -255,6 +255,13 @@ pub enum OpCode {
     /// `i + step < end` without computing `i + step`, so the counter's
     /// increment can never wrap.
     RangeLimit,
+
+    // --- Declared return types ---
+    /// Check the value on top of the stack (left in place) against the
+    /// function's declared return type, `fun f() <int> { ... }`. Operand:
+    /// u16 type_name constant. Emitted right before each `Return` of a
+    /// function that declares one.
+    CheckReturn,
 }
 
 /// Canonical byte layout of an instruction's operands.
@@ -332,7 +339,7 @@ pub(crate) struct OpInfo {
 impl OpCode {
     /// Convert a raw byte to an OpCode. Returns None for invalid bytes.
     pub fn from_byte(byte: u8) -> Option<OpCode> {
-        if byte <= OpCode::RangeLimit as u8 {
+        if byte <= OpCode::CheckReturn as u8 {
             // SAFETY: OpCode is repr(u8) and we verified the range.
             Some(unsafe { std::mem::transmute::<u8, OpCode>(byte) })
         } else {
@@ -436,7 +443,8 @@ impl OpCode {
             | OpCode::PushHandler
             | OpCode::CheckType
             | OpCode::SetLocalLocked
-            | OpCode::RangeLimit => OperandLayout::U16,
+            | OpCode::RangeLimit
+            | OpCode::CheckReturn => OperandLayout::U16,
 
             // Opcode + u16 + u8.
             OpCode::StructLiteral
@@ -494,11 +502,13 @@ impl OpCode {
                 pushes: 1,
                 peeks: 0,
             },
-            SetLocal | SetGlobal | SetUpvalue | SetLocalLocked | CheckType => StackEffect::Fixed {
-                pops: 0,
-                pushes: 0,
-                peeks: 1,
-            },
+            SetLocal | SetGlobal | SetUpvalue | SetLocalLocked | CheckType | CheckReturn => {
+                StackEffect::Fixed {
+                    pops: 0,
+                    pushes: 0,
+                    peeks: 1,
+                }
+            }
             CloseUpvalueAt | Increment | Decrement | Jump | Loop | Main | PopHandler => {
                 StackEffect::Fixed {
                     pops: 0,
@@ -675,6 +685,7 @@ impl OpCode {
                 | CheckType
                 | SetLocalLocked
                 | RangeLimit
+                | CheckReturn
         );
         OpProperties {
             may_allocate,
@@ -744,6 +755,7 @@ impl OpCode {
                 | DefineMethod
                 | MethodCall
                 | RangeLimit
+                | CheckReturn
         ) {
             JitSupport::Native
         } else {

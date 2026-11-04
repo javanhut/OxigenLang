@@ -349,6 +349,9 @@ pub enum Expression {
     FunctionLiteral {
         token: Token,
         parameters: Vec<TypedParam>,
+        /// `fun area(w <int>, h <int>) <int> { ... }`: the declared return
+        /// type, checked against every value the function returns.
+        return_type: Option<TypeAnnotation>,
         body: Vec<Statement>,
     },
     StructLiteral {
@@ -475,6 +478,7 @@ fn syn_thunk(tok: &Token, body: Vec<Statement>) -> Expression {
     Expression::FunctionLiteral {
         token: tok.clone(),
         parameters: Vec::new(),
+        return_type: None,
         body,
     }
 }

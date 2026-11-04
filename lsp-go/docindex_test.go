@@ -73,3 +73,64 @@ func TestLocalModuleDotCompletesImportedFunctions(t *testing.T) {
 	items := getCompletions(src, pos, "file://"+mainPath, "", false)
 	wantLabels(t, items, "pad_left", "trim_all")
 }
+
+func TestSignatureDetailShowsReturnType(t *testing.T) {
+	src := "fun area(w <int>, h <int>) <int> {\n    w * h\n}\nfun find(id <int>) <User || Error<missing>> { None }\nfun greet(name <str>) {}\nC includes {\n    fun size() <float> { 1.0 }\n}\n"
+	idx := indexDocument(src, "")
+	got := map[string]string{}
+	for _, f := range idx.funcs {
+		got[f.name] = f.detail
+	}
+	want := map[string]string{
+		"area":  "area(w <int>, h <int>) <int>",
+		"find":  "find(id <int>) <User || Error<missing>>",
+		"greet": "greet(name <str>)",
+	}
+	for name, detail := range want {
+		if got[name] != detail {
+			t.Errorf("%s: got %q, want %q", name, got[name], detail)
+		}
+	}
+	st := idx.getOrAddStruct("C")
+	if len(st.methods) != 1 || st.methods[0].detail != "size() <float>" {
+		t.Errorf("method detail: got %+v", st.methods)
+	}
+}
+
+func TestSignatureDetailWithNestedParenDefault(t *testing.T) {
+	src := "fun clamp(x <int> = max(1, 2)) <int> { x }\nC includes {\n    fun pad(n <int> = len(\"ab\")) <str> { \"\" }\n}\n"
+	idx := indexDocument(src, "")
+	if len(idx.funcs) != 1 || idx.funcs[0].detail != "clamp(x <int> = max(1, 2)) <int>" {
+		t.Errorf("func detail: got %+v", idx.funcs)
+	}
+	st := idx.getOrAddStruct("C")
+	if len(st.methods) != 1 || st.methods[0].detail != `pad(n <int> = len("ab")) <str>` {
+		t.Errorf("method detail: got %+v", st.methods)
+	}
+}
+
+func TestReturnTypeAfterLegacyUnion(t *testing.T) {
+	cases := map[string]string{
+		" <int> {":                       " <int>",
+		" <User || Error<missing>> {":    " <User || Error<missing>>",
+		" <int> || <str> {":              " <int> || <str>",
+		" <int> || Error<parse> {":       " <int> || Error<parse>",
+		" <int> || str {":                " <int> || str",
+		" <int> || <str> || Error<io> {": " <int> || <str> || Error<io>",
+		" <int> || {":                    " <int>",
+		" <int> || <str {":               " <int>",
+		" {":                             "",
+	}
+	for in, want := range cases {
+		if got := returnTypeAfter(in); got != want {
+			t.Errorf("returnTypeAfter(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestFunDeclReNestedParenDefault(t *testing.T) {
+	m := funDeclRe.FindStringSubmatch("fun clamp(x <int> = max(1, 2)) <int> {")
+	if m == nil || m[2] != "x <int> = max(1, 2)" {
+		t.Fatalf("funDeclRe params: got %q", m)
+	}
+}

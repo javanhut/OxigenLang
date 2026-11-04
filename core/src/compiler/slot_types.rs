@@ -230,6 +230,12 @@ pub struct FunctionSlotTypes {
     /// dispatch path would otherwise force.
     pub noop_type_wrap_ips: std::collections::HashSet<usize>,
 
+    /// IPs of `OpCode::CheckReturn` that provably pass: the abstract stack
+    /// top is `Int64` and the declared return type accepts an int. The JIT
+    /// skips the `jit_check_return` FFI call there, so `fun f(n <int>) <int>`
+    /// costs nothing over the unannotated form.
+    pub noop_check_return_ips: std::collections::HashSet<usize>,
+
     /// True iff this chunk contains a `GetGlobal` naming this very function.
     ///
     /// Purely a performance hint for the JIT's direct self-recursion path, whose
@@ -747,6 +753,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
     let specialized_entry_eligible = specialized_entry_outcome.is_eligible();
 
     // A TypeWrap to INTEGER whose stack top is already Int64 is identity, so the JIT can skip the FFI.
+    // As with CheckReturn below, a captured local may be rewritten by a closure, so keep the FFI then.
     let mut noop_type_wrap_ips: HashSet<usize> = HashSet::new();
     for (&ip, st) in eligibility_states.iter() {
         if ip + 2 >= code.len() {
@@ -769,8 +776,24 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
             continue;
         }
         let top = st.stack.last().copied().unwrap_or(SlotType::Value);
-        if top == SlotType::Int64 {
+        if captured_slots.is_empty() && top == SlotType::Int64 {
             noop_type_wrap_ips.insert(ip);
+        }
+    }
+
+    // A CheckReturn whose stack top is already Int64 passes whenever the declared type accepts an int.
+    // A closure can rewrite a captured local behind the analysis, so keep the runtime check then.
+    let mut noop_check_return_ips: HashSet<usize> = HashSet::new();
+    for (&ip, st) in eligibility_states.iter() {
+        if ip + 2 >= code.len() || OpCode::from_byte(code[ip]) != Some(OpCode::CheckReturn) {
+            continue;
+        }
+        let top = st.stack.last().copied().unwrap_or(SlotType::Value);
+        if captured_slots.is_empty()
+            && top == SlotType::Int64
+            && check_return_accepts_int(chunk, read_u16(code, ip + 1))
+        {
+            noop_check_return_ips.insert(ip);
         }
     }
 
@@ -795,6 +818,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         specialized_param_slots,
         wants_closure_arg,
         noop_type_wrap_ips,
+        noop_check_return_ips,
         self_reachable_by_global_name,
         lean_entry_eligible,
     }
@@ -1701,6 +1725,8 @@ fn transfer(
         }
         // No operand-stack effect; unreachable since scan rejects these functions.
         OpCode::PushHandler | OpCode::PopHandler | OpCode::CheckType | OpCode::SetLocalLocked => {}
+        // Peeks the return value and leaves it, and its type, as they were.
+        OpCode::CheckReturn => {}
     }
 
     (next, terminates, targets)
@@ -1786,6 +1812,13 @@ fn compute_lean_entry_eligible(
             | OpCode::JumpIfTrue
             | OpCode::Pop
             | OpCode::Return => {}
+            // Every lean return is an Int (`lean_value_kinds_ok` refuses any
+            // other), so the check passes whenever the declared type takes one.
+            OpCode::CheckReturn => {
+                if !check_return_accepts_int(chunk, read_u16(code, ip + 1)) {
+                    return false;
+                }
+            }
             // No `Loop`: a lean entry has no VM pointer, so its back-edges
             // could not check the host's loop budget or interrupt
             // (`vm::limits`), and such a loop could never be stopped. Loops
@@ -1823,6 +1856,15 @@ fn compute_lean_entry_eligible(
         ip += len.max(1);
     }
     lean_value_kinds_ok(func)
+}
+
+/// Whether a `CheckReturn` whose type-name constant is at `idx` accepts an int.
+fn check_return_accepts_int(chunk: &crate::compiler::opcode::Chunk, idx: u16) -> bool {
+    chunk
+        .constants
+        .get(idx as usize)
+        .and_then(|v| v.as_string())
+        .is_some_and(|s| s.split(" || ").any(|t| t == "INTEGER" || t == "GENERIC"))
 }
 
 /// What a lean entry's raw `i64` stands for at one stack position.
@@ -1948,6 +1990,11 @@ fn lean_value_kinds_ok(func: &Function) -> bool {
                     return false;
                 }
                 continue;
+            }
+            OpCode::CheckReturn => {
+                if st.last() != Some(&LeanKind::Int) {
+                    return false;
+                }
             }
             OpCode::Jump => {
                 let target = ip + 3 + read_u16(code, ip + 1) as usize;

@@ -218,13 +218,20 @@ doubled <array> := array.map([1, 2, 3], fun(x <int>) { x * 2 })
 calculate_area := fun(width, height) { width * height }
 ```
 
-### Type Your Parameters
+### Type Your Signature
 
 Always annotate parameter types — the signature should communicate what's
-expected. Use union types (`<a> || <b>`) for genuine flexibility.
+expected. Use union types (`<a> || <b>`) for genuine flexibility. Declare the
+return type too whenever the function produces a value; leave it off only for
+functions run for their effects.
 
 ```oxi
-// Good — typed parameters
+// Good — typed parameters and return type
+fun calculate_area(width <int>, height <int>) <int> {
+    width * height
+}
+
+// Good — run for its effect, so no return type
 fun greet(name <str>) {
     println("Hello, {name}!")
 }

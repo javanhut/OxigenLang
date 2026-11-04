@@ -251,6 +251,11 @@ struct CompilerFrame {
     /// re-declaration UPDATES the global). `repeat` therefore does NOT bump this;
     /// only `each` bodies do, and the V1-typed update-vs-shadow choice keys off it.
     each_body_depth: usize,
+    /// Constant index of the declared return type's name, for
+    /// `fun f() <int> { ... }`. Every `Return` in the frame is preceded by
+    /// a `CheckReturn` against it. `None` when no return type was written
+    /// (or it was `<generic>`, which accepts anything).
+    return_type: Option<u16>,
     /// Every `SetLocal` emitted: `(offset, slot, lock of the binding written)`.
     /// A slot's runtime lock is dropped when bindings of different types share
     /// it, so `finalize_local_locks` re-attaches each typed binding's lock to
@@ -290,6 +295,7 @@ impl CompilerFrame {
             handler_depth: 0,
             loop_handler_depths: Vec::new(),
             each_body_depth: 0,
+            return_type: None,
             local_writes: Vec::new(),
             temps: 0,
         }
@@ -1515,10 +1521,19 @@ impl Compiler {
                 }
                 // Pass the name so a function literal's closure carries it instead of showing as anonymous.
                 if let Expression::FunctionLiteral {
-                    parameters, body, ..
+                    parameters,
+                    return_type,
+                    body,
+                    ..
                 } = value
                 {
-                    self.compile_function(Some(&name.value), parameters, body, line);
+                    self.compile_function(
+                        Some(&name.value),
+                        parameters,
+                        return_type.as_ref(),
+                        body,
+                        line,
+                    );
                 } else if let Some(folded) = fold_constant_expression(value) {
                     // Pure-literal init folds to one Constant so the JIT can virtualize cleanly.
                     self.emit_constant(folded, line);
@@ -2133,7 +2148,7 @@ impl Compiler {
 
             Statement::Give { value, .. } => {
                 self.compile_expression(value);
-                self.emit_op(OpCode::Return, line);
+                self.emit_return(line);
             }
 
             Statement::Unpack {
@@ -2370,7 +2385,10 @@ impl Compiler {
                 // Compile each method with an implicit `self` first parameter
                 for (method_name, method_expr) in methods {
                     if let Expression::FunctionLiteral {
-                        parameters, body, ..
+                        parameters,
+                        return_type,
+                        body,
+                        ..
                     } = method_expr
                     {
                         let mut method_params = vec![TypedParam {
@@ -2387,7 +2405,13 @@ impl Compiler {
                             optional: false,
                         }];
                         method_params.extend(parameters.iter().cloned());
-                        self.compile_function(Some(&method_name.value), &method_params, body, line);
+                        self.compile_function(
+                            Some(&method_name.value),
+                            &method_params,
+                            return_type.as_ref(),
+                            body,
+                            line,
+                        );
                     } else {
                         self.compile_expression(method_expr);
                     }
@@ -2981,9 +3005,12 @@ impl Compiler {
             }
 
             Expression::FunctionLiteral {
-                parameters, body, ..
+                parameters,
+                return_type,
+                body,
+                ..
             } => {
-                self.compile_function(None, parameters, body, line);
+                self.compile_function(None, parameters, return_type.as_ref(), body, line);
             }
 
             Expression::StructLiteral {
@@ -3692,6 +3719,7 @@ impl Compiler {
         &mut self,
         name: Option<&str>,
         parameters: &[TypedParam],
+        return_type: Option<&TypeAnnotation>,
         body: &[Statement],
         line: u32,
     ) {
@@ -3720,6 +3748,14 @@ impl Compiler {
             })
             .collect();
         self.current_frame_mut().function.params = params;
+
+        // `<generic>` accepts any value, so it needs no check at all.
+        if let Some(rt) = return_type
+            && !matches!(rt, TypeAnnotation::Generic)
+        {
+            let tc = self.make_constant(Value::String(rc_str(rt.type_name().as_str())), line);
+            self.current_frame_mut().return_type = Some(tc);
+        }
 
         for param in parameters {
             self.add_local(
@@ -3751,14 +3787,14 @@ impl Compiler {
         // Compile body — last expression/statement is implicit return
         if body.is_empty() {
             self.emit_op(OpCode::None, line);
-            self.emit_op(OpCode::Return, line);
+            self.emit_return(line);
         } else {
             for (i, stmt) in body.iter().enumerate() {
                 let is_last = i == body.len() - 1;
                 if is_last {
                     // A function's tail value is consumed by the caller, so a bare skip/stop tail is a value error.
                     self.compile_last_statement_as_value(stmt, line, true);
-                    self.emit_op(OpCode::Return, line);
+                    self.emit_return(line);
                 } else {
                     self.compile_statement(stmt);
                 }
@@ -3802,6 +3838,15 @@ impl Compiler {
         }
     }
 
+    /// Return the value on top of the stack, first checking it against the
+    /// frame's declared return type when there is one.
+    fn emit_return(&mut self, line: u32) {
+        if let Some(tc) = self.current_frame().return_type {
+            self.emit_op_u16(OpCode::CheckReturn, tc, line);
+        }
+        self.emit_op(OpCode::Return, line);
+    }
+
     fn compile_pattern_function(
         &mut self,
         param_names: &[String],
@@ -3834,7 +3879,7 @@ impl Compiler {
             value: condition.clone(),
         }];
 
-        self.compile_function(Some("__pattern__"), &params, &body, line);
+        self.compile_function(Some("__pattern__"), &params, None, &body, line);
     }
 }
 

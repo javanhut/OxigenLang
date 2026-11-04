@@ -1046,6 +1046,68 @@ fn test_parse_anonymous_function() {
     }
 }
 
+/// The return type of the one function in `src`, named or anonymous.
+fn return_type_of(src: &str) -> Option<TypeAnnotation> {
+    let program = parse_ok(src);
+    match &program.statements[0] {
+        Statement::Let {
+            value: Expression::FunctionLiteral { return_type, .. },
+            ..
+        }
+        | Statement::Expr(Expression::FunctionLiteral { return_type, .. }) => return_type.clone(),
+        other => panic!("Expected a function, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_return_types() {
+    assert_eq!(return_type_of("fun f(a <int>) { a }"), None);
+    assert_eq!(
+        return_type_of("fun f(a <int>) <int> { a }"),
+        Some(TypeAnnotation::Int)
+    );
+    assert_eq!(
+        return_type_of("fun(a) <str> { a }"),
+        Some(TypeAnnotation::Str)
+    );
+    assert_eq!(
+        return_type_of("fun find(id <int>) <User || None> { None }"),
+        Some(TypeAnnotation::Union(vec![
+            TypeAnnotation::Struct("User".to_string()),
+            TypeAnnotation::NoneType,
+        ]))
+    );
+    assert_eq!(
+        return_type_of("fun p(s <str>) <int || Error<parse>> { 0 }"),
+        Some(TypeAnnotation::Union(vec![
+            TypeAnnotation::Int,
+            TypeAnnotation::ErrorType(Some("parse".to_string())),
+        ]))
+    );
+    assert_eq!(
+        return_type_of("#[indent]\nfun f(a <int>) <int>:\n    a\n"),
+        Some(TypeAnnotation::Int)
+    );
+}
+
+#[test]
+fn test_parse_method_return_type() {
+    let program = parse_ok("C includes {\n    fun area() <float> { 1.0 }\n}");
+    let Statement::IncludesDef { methods, .. } = &program.statements[0] else {
+        panic!("Expected includes, got {:?}", program.statements[0]);
+    };
+    let Expression::FunctionLiteral { return_type, .. } = &methods[0].1 else {
+        panic!("Expected a method, got {:?}", methods[0].1);
+    };
+    assert_eq!(*return_type, Some(TypeAnnotation::Float));
+}
+
+#[test]
+fn test_unclosed_return_type_is_an_error() {
+    let (_, errors) = parse("fun f() <int { 1 }");
+    assert!(!errors.is_empty(), "expected a parse error");
+}
+
 #[test]
 fn test_parse_named_function() {
     let program = parse_ok("fun add(a, b) { a + b }");
