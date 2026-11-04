@@ -51,7 +51,7 @@ type docIndex struct {
 
 var (
 	structParentRe = regexp.MustCompile(`^\s*struct\s+(\w+)\s*\(\s*(\w+)\s*\)`)
-	funSigRe       = regexp.MustCompile(`^\s*fun\s+(\w+)\s*\(([^)]*)\)`)
+	funSigRe       = regexp.MustCompile(`^\s*fun\s+(\w+)\s*\(((?:[^()]|\([^()]*\))*)\)`) // one nesting level, e.g. `x = max(1, 2)`
 	ctorVarRe      = regexp.MustCompile(`^\s*(\w+)\s*:?=\s*(\w+)\s*[({]`)
 )
 
@@ -261,26 +261,66 @@ func resolveLocalImport(docPath, spec string) (base, fsPath string, ok bool) {
 }
 
 // returnTypeAfter returns " <type>" when rest, the text after a function's
-// parameter list, starts with a declared return type such as `<int>` or
-// `<int || Error<parse>>`, and "" otherwise.
+// parameter list, starts with a declared return type such as `<int>`,
+// `<int || Error<parse>>`, or the legacy `<int> || <str>` / `<int> || Error<parse>`,
+// and "" otherwise.
 func returnTypeAfter(rest string) string {
 	rest = strings.TrimLeft(rest, " \t")
 	if !strings.HasPrefix(rest, "<") {
 		return ""
 	}
+	end := angleGroupEnd(rest, 0)
+	if end < 0 {
+		return ""
+	}
+	// A closed member followed by `||` continues the union with another
+	// member: a `<...>` group, or a bare name with an optional `<...>` tag.
+	for {
+		pos := skipBlanks(rest, end)
+		if !strings.HasPrefix(rest[pos:], "||") {
+			break
+		}
+		start := skipBlanks(rest, pos+2)
+		m := start
+		for m < len(rest) && isIdentChar(rest[m]) {
+			m++
+		}
+		if m < len(rest) && rest[m] == '<' {
+			if m = angleGroupEnd(rest, m); m < 0 {
+				break
+			}
+		}
+		if m == start {
+			break
+		}
+		end = m
+	}
+	return " " + rest[:end]
+}
+
+// angleGroupEnd returns the index just past the `>` that balances the `<` at
+// s[i], or -1 when it never closes.
+func angleGroupEnd(s string, i int) int {
 	depth := 0
-	for i, r := range rest {
-		switch r {
+	for j := i; j < len(s); j++ {
+		switch s[j] {
 		case '<':
 			depth++
 		case '>':
 			depth--
 			if depth == 0 {
-				return " " + rest[:i+1]
+				return j + 1
 			}
 		}
 	}
-	return ""
+	return -1
+}
+
+func skipBlanks(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	return i
 }
 
 // parseModuleFuncs extracts the exported function signatures from an `.oxi` file.

@@ -753,6 +753,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
     let specialized_entry_eligible = specialized_entry_outcome.is_eligible();
 
     // A TypeWrap to INTEGER whose stack top is already Int64 is identity, so the JIT can skip the FFI.
+    // As with CheckReturn below, a captured local may be rewritten by a closure, so keep the FFI then.
     let mut noop_type_wrap_ips: HashSet<usize> = HashSet::new();
     for (&ip, st) in eligibility_states.iter() {
         if ip + 2 >= code.len() {
@@ -775,19 +776,23 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
             continue;
         }
         let top = st.stack.last().copied().unwrap_or(SlotType::Value);
-        if top == SlotType::Int64 {
+        if captured_slots.is_empty() && top == SlotType::Int64 {
             noop_type_wrap_ips.insert(ip);
         }
     }
 
     // A CheckReturn whose stack top is already Int64 passes whenever the declared type accepts an int.
+    // A closure can rewrite a captured local behind the analysis, so keep the runtime check then.
     let mut noop_check_return_ips: HashSet<usize> = HashSet::new();
     for (&ip, st) in eligibility_states.iter() {
         if ip + 2 >= code.len() || OpCode::from_byte(code[ip]) != Some(OpCode::CheckReturn) {
             continue;
         }
         let top = st.stack.last().copied().unwrap_or(SlotType::Value);
-        if top == SlotType::Int64 && check_return_accepts_int(chunk, read_u16(code, ip + 1)) {
+        if captured_slots.is_empty()
+            && top == SlotType::Int64
+            && check_return_accepts_int(chunk, read_u16(code, ip + 1))
+        {
             noop_check_return_ips.insert(ip);
         }
     }
