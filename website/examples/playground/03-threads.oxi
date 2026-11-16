@@ -26,7 +26,6 @@ main {
         count_primes(start, start + 25000)
     }
     println("primes below 100000, by quarter: {counts}")
-
     // A worker that takes jobs off a channel until it is closed.
     jobs := channel.new()
     worker := diverge {

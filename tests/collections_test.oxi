@@ -109,7 +109,7 @@
     expect(has({"a": 1}, "a")).truthy()
     expect(has(set(1), 1)).truthy()
     expect(has("hello", "ell")).truthy()
-    expect(has("hello", `z`)).falsy()
+    expect(has("hello", "z")).falsy()
 }
 
 <test>("set(array) takes the array's elements") {

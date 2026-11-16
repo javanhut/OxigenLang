@@ -6,7 +6,6 @@ introduce strings
 main {
     name := io.input("What is your name? ")
     println("Hello, {name}!")
-
     total := 0
     count := 0
     println("Enter numbers, one per line. An empty line (or End) finishes.")

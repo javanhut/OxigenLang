@@ -2,10 +2,18 @@
 // <test> blocks sit next to the code they check. Press Test to run them, as oxigen test does.
 fun fizzbuzz(n <int>) {
     option {
-        n % 15 == 0 -> "FizzBuzz",
-        n % 3 == 0 -> "Fizz",
-        n % 5 == 0 -> "Buzz",
-        "{n}"
+        n % 15 == 0 -> {
+            "FizzBuzz"
+        }
+        n % 3 == 0 -> {
+            "Fizz"
+        }
+        n % 5 == 0 -> {
+            "Buzz"
+        }
+        {
+            "{n}"
+        }
     }
 }
 
