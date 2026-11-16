@@ -70,9 +70,10 @@ pub(crate) fn type_matches(expected: &str, actual: &str) -> bool {
         return true;
     }
     if expected.contains(" || ") {
+        // A plain `Error` member accepts tagged errors too, as `<Error>` does alone.
         expected
             .split(" || ")
-            .any(|t| t == "GENERIC" || t == actual)
+            .any(|t| t == "GENERIC" || t == actual || (t == "ERROR" && actual.starts_with("ERROR")))
     } else {
         expected == actual
     }
@@ -2848,6 +2849,13 @@ impl VM {
                         self.check_type_lock(expected)?;
                     }
                 }
+                OpCode::CheckReturn => {
+                    let idx = self.frames[frame_idx].read_u16();
+                    let expected = self.frames[frame_idx].read_constant(idx).clone();
+                    if let Some(expected) = expected.as_string() {
+                        self.check_return_type(expected)?;
+                    }
+                }
                 OpCode::GetGlobal => {
                     let idx = self.frames[frame_idx].read_u16();
                     self.handle_get_global(idx)?;
@@ -3674,6 +3682,42 @@ impl VM {
             &format!("type mismatch: expected {}, got {}", expected, actual),
             &format!("variable is locked to type {}", expected),
         ))
+    }
+
+    /// `CheckReturn`: the value on top of the stack (left in place) against
+    /// the running function's declared return type. Matches the way
+    /// parameters are checked, so `<Enum>` accepts any enum value. Shared by
+    /// the interpreter and the JIT.
+    pub(crate) fn check_return_type(&self, expected: &str) -> Result<(), VMError> {
+        let value = self.peek(0);
+        if value.effective_type_is(expected) || type_matches(expected, value.type_name()) {
+            return Ok(());
+        }
+        let actual = value.effective_type_name();
+        let name = self.current_function_name();
+        let subject = match name.as_deref() {
+            Some(name) => format!("'{}'", name),
+            None => "anonymous function".to_string(),
+        };
+        Err(self.runtime_error_hint(
+            &format!(
+                "return type mismatch in {}: expected {}, got {}",
+                subject, expected, actual
+            ),
+            &format!("{} declares return type {}", subject, expected),
+        ))
+    }
+
+    /// Name of the function running right now, under the interpreter or the
+    /// JIT. `None` for an anonymous function or the top-level script.
+    fn current_function_name(&self) -> Option<String> {
+        if self.jit_executing.get()
+            && let Some(frame) = self.jit_frame_top()
+        {
+            let closure = unsafe { &*frame.closure_raw };
+            return closure.function.name.clone();
+        }
+        self.frames.last()?.closure.function.name.clone()
     }
 
     /// Unary `-`, shared by the interpreter and the JIT.

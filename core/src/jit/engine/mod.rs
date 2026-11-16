@@ -998,6 +998,27 @@ impl JitInner {
                             emit_early_exit_on_err(&mut builder, exit_block, status);
                             ip += 3;
                         }
+                        OpCode::CheckReturn => {
+                            // slot_types proved an Int64 return meets the declared type; no FFI.
+                            if slot_types.noop_check_return_ips.contains(&ip) {
+                                ip += 3;
+                                continue;
+                            }
+                            // The value was flushed above; the helper peeks it on vm.stack.
+                            maybe_emit_current_line(
+                                &mut builder,
+                                own_frame_ptr,
+                                line,
+                                col,
+                                &mut last_emitted_loc,
+                            );
+                            let idx = read_u16(code, ip + 1);
+                            let idx_val = builder.ins().iconst(types::I32, idx as i64);
+                            let call = builder.ins().call(refs.check_return, &[vm_val, idx_val]);
+                            let status = builder.inst_results(call)[0];
+                            emit_early_exit_on_err(&mut builder, exit_block, status);
+                            ip += 3;
+                        }
                         OpCode::RangeLimit => {
                             let idx = read_u16(code, ip + 1);
                             let step = match chunk.constants.get(idx as usize) {
@@ -5008,7 +5029,9 @@ fn opcode_always_needs_line(op: OpCode) -> bool {
         // Conditionally-faulting — slow path emits its own line store.
         | Add | Subtract | Multiply | Divide | Modulo
         | Less | LessEqual | Greater | GreaterEqual
-        | Equal | NotEqual => false,
+        | Equal | NotEqual
+        // Skipped when slot_types proves it; the slow path stores its own line.
+        | CheckReturn => false,
         // Always-faulting / always re-enter user code.
         Negate
         | Index | TypeWrap

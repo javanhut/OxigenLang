@@ -384,6 +384,26 @@ pub unsafe extern "C" fn jit_type_wrap(vm: *mut VM, type_idx: u32) -> u32 {
     }
 }
 
+/// `CheckReturn`: the VM stack's top against the declared return type. The
+/// value stays on the stack for the `Return` that follows.
+pub unsafe extern "C" fn jit_check_return(vm: *mut VM, type_idx: u32) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.sync_stack_from_view();
+    let type_name = vm.current_constant(type_idx as u16);
+    let Some(expected) = type_name.as_string() else {
+        vm.jit
+            .stash_error(vm.runtime_error("invalid type name in CheckReturn"));
+        return 1;
+    };
+    match vm.check_return_type(expected) {
+        Ok(()) => 0,
+        Err(err) => {
+            vm.jit.stash_error(err);
+            1
+        }
+    }
+}
+
 /// `RangeLimit` when its bounds aren't both staged as ints: [start, end] ->
 /// [limit] on the VM stack, or the `range` builtin's error.
 pub unsafe extern "C" fn jit_range_limit(vm: *mut VM, step_idx: u32) -> u32 {

@@ -51,7 +51,7 @@ type docIndex struct {
 
 var (
 	structParentRe = regexp.MustCompile(`^\s*struct\s+(\w+)\s*\(\s*(\w+)\s*\)`)
-	funSigRe       = regexp.MustCompile(`^\s*fun\s+(\w+)\s*\(([^)]*)\)`)
+	funSigRe       = regexp.MustCompile(`^\s*fun\s+(\w+)\s*\(((?:[^()]|\([^()]*\))*)\)`) // one nesting level, e.g. `x = max(1, 2)`
 	ctorVarRe      = regexp.MustCompile(`^\s*(\w+)\s*:?=\s*(\w+)\s*[({]`)
 )
 
@@ -105,7 +105,7 @@ func indexDocument(source, uri string) *docIndex {
 				if fm := funSigRe.FindStringSubmatch(lines[j]); fm != nil {
 					st.methods = append(st.methods, docMember{
 						name:   fm[1],
-						detail: fm[1] + "(" + strings.TrimSpace(fm[2]) + ")",
+						detail: fm[1] + "(" + strings.TrimSpace(fm[2]) + ")" + returnTypeAfter(lines[j][len(fm[0]):]),
 					})
 				}
 				depth += braceDelta(lines[j])
@@ -119,7 +119,7 @@ func indexDocument(source, uri string) *docIndex {
 			if m := funSigRe.FindStringSubmatch(line); m != nil {
 				idx.funcs = append(idx.funcs, docMember{
 					name:   m[1],
-					detail: m[1] + "(" + strings.TrimSpace(m[2]) + ")",
+					detail: m[1] + "(" + strings.TrimSpace(m[2]) + ")" + returnTypeAfter(line[len(m[0]):]),
 				})
 				continue
 			}
@@ -260,6 +260,69 @@ func resolveLocalImport(docPath, spec string) (base, fsPath string, ok bool) {
 	return segs[len(segs)-1], filepath.Join(parts...) + ".oxi", true
 }
 
+// returnTypeAfter returns " <type>" when rest, the text after a function's
+// parameter list, starts with a declared return type such as `<int>`,
+// `<int || Error<parse>>`, or the legacy `<int> || <str>` / `<int> || Error<parse>`,
+// and "" otherwise.
+func returnTypeAfter(rest string) string {
+	rest = strings.TrimLeft(rest, " \t")
+	if !strings.HasPrefix(rest, "<") {
+		return ""
+	}
+	end := angleGroupEnd(rest, 0)
+	if end < 0 {
+		return ""
+	}
+	// A closed member followed by `||` continues the union with another
+	// member: a `<...>` group, or a bare name with an optional `<...>` tag.
+	for {
+		pos := skipBlanks(rest, end)
+		if !strings.HasPrefix(rest[pos:], "||") {
+			break
+		}
+		start := skipBlanks(rest, pos+2)
+		m := start
+		for m < len(rest) && isIdentChar(rest[m]) {
+			m++
+		}
+		if m < len(rest) && rest[m] == '<' {
+			if m = angleGroupEnd(rest, m); m < 0 {
+				break
+			}
+		}
+		if m == start {
+			break
+		}
+		end = m
+	}
+	return " " + rest[:end]
+}
+
+// angleGroupEnd returns the index just past the `>` that balances the `<` at
+// s[i], or -1 when it never closes.
+func angleGroupEnd(s string, i int) int {
+	depth := 0
+	for j := i; j < len(s); j++ {
+		switch s[j] {
+		case '<':
+			depth++
+		case '>':
+			depth--
+			if depth == 0 {
+				return j + 1
+			}
+		}
+	}
+	return -1
+}
+
+func skipBlanks(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	return i
+}
+
 // parseModuleFuncs extracts the exported function signatures from an `.oxi` file.
 func parseModuleFuncs(path string) []functionInfo {
 	source, err := os.ReadFile(path)
@@ -269,7 +332,7 @@ func parseModuleFuncs(path string) []functionInfo {
 	var functions []functionInfo
 	for _, line := range strings.Split(string(source), "\n") {
 		if m := funDeclRe.FindStringSubmatch(line); m != nil {
-			functions = append(functions, functionInfo{name: m[1], signature: m[1] + "(" + m[2] + ")"})
+			functions = append(functions, functionInfo{name: m[1], signature: m[1] + "(" + m[2] + ")" + returnTypeAfter(line[len(m[0]):])})
 		}
 	}
 	return functions

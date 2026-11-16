@@ -395,6 +395,7 @@ impl Formatter {
                 if let Expression::FunctionLiteral {
                     token,
                     parameters,
+                    return_type,
                     body,
                 } = value
                     && token.token_type == TokenType::Function
@@ -404,6 +405,7 @@ impl Formatter {
                     self.push("(");
                     self.format_params(parameters);
                     self.push(")");
+                    self.format_return_type(return_type.as_ref());
                     self.format_function_body(body);
                     return;
                 }
@@ -700,12 +702,16 @@ impl Formatter {
                     self.push(&method_name.value);
                     // The method_expr should be a FunctionLiteral
                     if let Expression::FunctionLiteral {
-                        parameters, body, ..
+                        parameters,
+                        return_type,
+                        body,
+                        ..
                     } = method_expr
                     {
                         self.push("(");
                         self.format_params(parameters);
                         self.push(")");
+                        self.format_return_type(return_type.as_ref());
                         self.format_function_body(body);
                     }
                     self.after_item(span, saved);
@@ -985,11 +991,15 @@ impl Formatter {
                 self.push(")");
             }
             Expression::FunctionLiteral {
-                parameters, body, ..
+                parameters,
+                return_type,
+                body,
+                ..
             } => {
                 self.push("fun(");
                 self.format_params(parameters);
                 self.push(")");
+                self.format_return_type(return_type.as_ref());
                 self.format_function_body(body);
             }
             Expression::StructLiteral {
@@ -1314,6 +1324,15 @@ impl Formatter {
                 self.push(" = ");
                 self.format_expression(default);
             }
+        }
+    }
+
+    /// ` <int>` after a parameter list, when the function declares one.
+    fn format_return_type(&mut self, return_type: Option<&TypeAnnotation>) {
+        if let Some(rt) = return_type {
+            self.push(" <");
+            self.push(&format_type_annotation(rt));
+            self.push(">");
         }
     }
 

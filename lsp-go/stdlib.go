@@ -31,7 +31,7 @@ var (
 	stdlibFuncMap map[string][]functionInfo
 )
 
-var funDeclRe = regexp.MustCompile(`^fun\s+(\w+)\s*\(([^)]*)\)`)
+var funDeclRe = regexp.MustCompile(`^fun\s+(\w+)\s*\(((?:[^()]|\([^()]*\))*)\)`) // one nesting level, e.g. `x = max(1, 2)`
 
 func findOxigenBinary() string {
 	if exe, err := os.Executable(); err == nil {

@@ -1753,6 +1753,7 @@ impl Parser {
 
         self.expect_peek(TokenType::LParen)?;
         let parameters = self.parse_function_parameters()?;
+        let return_type = self.parse_return_type()?;
 
         self.expect_peek(TokenType::LBrace)?;
         let body = self.parse_block()?;
@@ -1760,6 +1761,7 @@ impl Parser {
         Some(Expression::FunctionLiteral {
             token,
             parameters,
+            return_type,
             body,
         })
     }
@@ -1844,6 +1846,17 @@ impl Parser {
         Some(params)
     }
 
+    /// The optional return type after a parameter list:
+    /// `fun area(w <int>, h <int>) <int> { ... }`. The outer `None` is a
+    /// parse error; `Some(None)` means no return type was written.
+    fn parse_return_type(&mut self) -> Option<Option<TypeAnnotation>> {
+        if self.peek_token.token_type != TokenType::Lt {
+            return Some(None);
+        }
+        self.next_token(); // move to '<'
+        Some(Some(self.parse_type_annotation()?))
+    }
+
     /// Parse a single function parameter: name, name? <type>, name <type> = default
     fn parse_single_param(&mut self, seen_optional: &mut bool) -> Option<TypedParam> {
         let ident = Identifier {
@@ -1913,6 +1926,7 @@ impl Parser {
 
         self.expect_peek(TokenType::LParen)?;
         let parameters = self.parse_function_parameters()?;
+        let return_type = self.parse_return_type()?;
 
         self.expect_peek(TokenType::LBrace)?;
         let body = self.parse_block()?;
@@ -1922,6 +1936,7 @@ impl Parser {
             value: Expression::FunctionLiteral {
                 token: fun_token,
                 parameters,
+                return_type,
                 body,
             },
         })
@@ -3347,6 +3362,7 @@ impl Parser {
 
             self.expect_peek(TokenType::LParen)?;
             let parameters = self.parse_function_parameters()?;
+            let return_type = self.parse_return_type()?;
 
             self.expect_peek(TokenType::LBrace)?;
             let body = self.parse_block()?;
@@ -3354,6 +3370,7 @@ impl Parser {
             let func_expr = Expression::FunctionLiteral {
                 token: fun_token,
                 parameters,
+                return_type,
                 body,
             };
 

@@ -405,6 +405,8 @@ fn translate_lean_body(
                 b.ins().return_(&[v]);
                 terminated = true;
             }
+            // Eligibility admitted it only where an Int return always passes.
+            OpCode::CheckReturn => {}
             _ => return false,
         }
         ip += len.max(1);
