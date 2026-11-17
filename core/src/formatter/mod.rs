@@ -743,6 +743,32 @@ impl Formatter {
                 self.push("] = ");
                 self.format_tail_expression(value);
             }
+            Statement::Lock {
+                name,
+                type_ann,
+                value,
+                ..
+            } => {
+                self.push("lock ");
+                self.push(&name.value);
+                if let Some(type_ann) = type_ann {
+                    self.push(" <");
+                    self.push(&format_type_annotation(type_ann));
+                    self.push(">");
+                }
+                self.push(" = ");
+                self.format_tail_expression(value);
+            }
+            Statement::CompoundAssign {
+                target,
+                operator,
+                value,
+                ..
+            } => {
+                self.format_expression(target);
+                self.push(&format!(" {operator}= "));
+                self.format_tail_expression(value);
+            }
             Statement::Introduce {
                 path, selective, ..
             } => {
@@ -1463,6 +1489,8 @@ fn stmt_span(stmt: &Statement) -> Option<Span> {
         // The statement starts at the target, not the `=` the token points to.
         Statement::DotAssign { token, object, .. } => expr_span(object).or(Some(token.span)),
         Statement::IndexAssign { token, object, .. } => expr_span(object).or(Some(token.span)),
+        Statement::CompoundAssign { token, target, .. } => expr_span(target).or(Some(token.span)),
+        Statement::Lock { token, .. } => Some(token.span),
     }
 }
 
@@ -1572,7 +1600,9 @@ fn top_level_section(stmt: &Statement) -> TopLevelSection {
             }
             _ => TopLevelSection::Variable,
         },
-        Statement::TypedDeclare { .. } | Statement::Assign { .. } => TopLevelSection::Variable,
+        Statement::TypedDeclare { .. } | Statement::Assign { .. } | Statement::Lock { .. } => {
+            TopLevelSection::Variable
+        }
         Statement::Pattern { .. }
         | Statement::StructDef { .. }
         | Statement::EnumDef { .. }
@@ -1619,6 +1649,7 @@ fn postfix_guardable(stmt: &Statement) -> bool {
             | Statement::Assign { .. }
             | Statement::DotAssign { .. }
             | Statement::IndexAssign { .. }
+            | Statement::CompoundAssign { .. }
     )
 }
 

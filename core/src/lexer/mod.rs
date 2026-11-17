@@ -378,6 +378,15 @@ impl Lexer {
                         span,
                     }
                 }
+                '=' => {
+                    self.read_char();
+                    self.read_char();
+                    Token {
+                        token_type: TokenType::MinusAssign,
+                        literal: "-=".into(),
+                        span,
+                    }
+                }
                 _ => self.single_with_span(TokenType::Minus, span),
             },
             '+' => match self.peek_char() {
@@ -387,6 +396,15 @@ impl Lexer {
                     Token {
                         token_type: TokenType::Increment,
                         literal: "++".into(),
+                        span,
+                    }
+                }
+                '=' => {
+                    self.read_char();
+                    self.read_char();
+                    Token {
+                        token_type: TokenType::PlusAssign,
+                        literal: "+=".into(),
                         span,
                     }
                 }
@@ -484,7 +502,18 @@ impl Lexer {
                 };
                 self.single_with_span(tt, span)
             }
-            '*' => self.single_with_span(TokenType::Asterisk, span),
+            '*' => match self.peek_char() {
+                '=' => {
+                    self.read_char();
+                    self.read_char();
+                    Token {
+                        token_type: TokenType::AsteriskAssign,
+                        literal: "*=".into(),
+                        span,
+                    }
+                }
+                _ => self.single_with_span(TokenType::Asterisk, span),
+            },
             '/' => match self.peek_char() {
                 '/' => {
                     self.skip_line_comment();
@@ -493,6 +522,15 @@ impl Lexer {
                 '*' => {
                     self.skip_block_comment();
                     self.next_token()
+                }
+                '=' => {
+                    self.read_char();
+                    self.read_char();
+                    Token {
+                        token_type: TokenType::SlashAssign,
+                        literal: "/=".into(),
+                        span,
+                    }
                 }
                 _ => self.single_with_span(TokenType::FSlash, span),
             },

@@ -206,6 +206,8 @@ func keywordHover(word string) string {
 		return "**as** — Type conversion\n\n```oxigen\nvalue as <type>\n```"
 	case "hide", "hidden":
 		return "**hidden** — Mark a struct field as private\n\n```oxigen\nstruct Account {\n    name <str>\n    hidden balance <int>\n}\n```"
+	case "lock":
+		return "**lock** — Declare a variable that can never change\n\nThe value is copied and locked all the way down: no reassignment, no `:=` override, and no `push`, index or field writes. The original stays changeable; `copy(name)` gives a changeable copy.\n\n```oxigen\narr := [1, 2, 3]\nlock static_arr = arr\npush(arr, 4)          // ok\npush(static_arr, 4)   // error: cannot change a locked array\n```"
 	case "self":
 		return "**self** — Reference to the current struct instance in methods"
 	case "True":

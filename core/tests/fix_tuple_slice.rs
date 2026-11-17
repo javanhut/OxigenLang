@@ -138,19 +138,29 @@ fn incr_immut_vm_errors() {
     );
     let msg = interp.unwrap_err();
     assert!(
-        msg.contains("immutable variable 'x'"),
+        msg.contains("immutable variable `x`"),
         "VM message should mention the immutable variable, got: {msg}"
     );
 }
 
 #[test]
 fn incr_immut_wording() {
-    // The VM's `handle_set_global` path is shared with plain `=` reassignment,
-    // so the increment-on-immutable error reads `cannot reassign immutable
-    // variable '...'`.
-    let vm_msg = run_vm(INCR_IMMUT_SRC, None).unwrap_err();
+    // At top level the write is caught at compile time, with the same wording
+    // as inside a function.
+    let msg = run_vm(INCR_IMMUT_SRC, None).unwrap_err();
     assert!(
-        vm_msg.contains("cannot reassign immutable variable 'x'"),
-        "VM wording drifted, got: {vm_msg}"
+        msg.contains("cannot mutate immutable variable `x` with `++`"),
+        "compile-time wording drifted, got: {msg}"
+    );
+}
+
+#[test]
+fn incr_immut_runtime_wording() {
+    // A write compiled before the declaration can only be caught when it runs.
+    let src = "fun f() {\n    x++\n}\nx <int> = 5\nf()\n";
+    let msg = run_vm(src, None).unwrap_err();
+    assert!(
+        msg.contains("cannot assign to immutable variable `x`"),
+        "VM wording drifted, got: {msg}"
     );
 }

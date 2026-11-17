@@ -2,6 +2,68 @@
 
 ## Unreleased
 
+### Added: `lock`
+
+`lock name = value` declares a variable that can never change, holding a value
+that can never change:
+
+```oxi
+arr := [1, 2, 3]
+lock static_arr = arr
+push(arr, 4)          // fine: arr is [1, 2, 3, 4], static_arr is still [1, 2, 3]
+push(static_arr, 4)   // error: push() cannot change a locked array
+```
+
+`lock` copies the value and locks the copy all the way down, so the original
+stays changeable and nested arrays, maps, sets and structs are locked too. The
+lock travels with the value: index and field writes and the in-place builtins
+(`push`, `pop`, `insert`, `remove`, `extend`, `clear`) refuse it under any
+name, including inside a function it was passed to. The variable itself
+rejects `=`, `:=`, `++` and the compound operators at compile time. `copy()`
+gives a changeable copy. `lock name <type> = value` takes a type. `lock` is
+only a keyword in this position, so it still works as a variable name.
+
+### Changed: writes to immutable top-level variables are compile errors
+
+`x <int> = 1` followed by `x = 2`, `x++` or `x += 1` at the top level, or in a
+function compiled after the declaration, is now reported at compile time with
+the same message, source labels and help as inside a function. It used to be a
+plainer runtime error. A function that runs only after `x <int> := ...` has
+made the variable mutable again is not affected.
+
+### Fixed: docs on `=` and `:=`
+
+The variables and type system guides said `=` cannot reassign an untyped
+variable and that `:=` is blocked on `x <type> = v`. Both work: `=` reassigns
+an untyped variable (changing its type if needed), and `:=` replaces the value
+of an immutable one, which stays immutable. The guides also now say that
+immutability applies to the variable, not to a collection it holds.
+
+### Added: compound assignment
+
+`+=`, `-=`, `*=` and `/=` update a variable, an index or a field in place:
+
+```oxi
+total += price
+counts[letter] += 1
+player.health -= damage
+```
+
+`x += e` follows the same rules as `x = x + e`, so it is blocked on `<type> =`
+bindings and keeps a typed variable's type. On an index or a field the
+collection and index are evaluated once.
+
+### Fixed: `++` and `--` on an index or a field
+
+`counts[letter]++`, `grid[i][j]--`, `obj.count++` and a bare field name inside
+a method (`n++`) used to fail with "postfix operator requires identifier". They
+now work, and return the old value like `x++`. The collection and index are
+evaluated once.
+
+A missing map key is an error for `++`, `--` and the compound operators, since
+there is no value to update: `key "x" not found in map`, with a hint to assign
+it first. Reading a missing key with `m["x"]` still returns `None`.
+
 ### Added: return types on functions
 
 A function can declare what it returns with the same angle form its

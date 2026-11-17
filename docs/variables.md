@@ -13,19 +13,12 @@ is_active := True
 pi := 3.14
 ```
 
-Reassign untyped variables with `:=`:
+Reassign untyped variables with `:=` or `=`. Either one can change the type:
 
 ```oxi
 x := 10
 x := "hello"
-x := [1, 2, 3]
-```
-
-Untyped variables cannot use `=` for reassignment — `=` is reserved for typed variables:
-
-```oxi
-x := 10
-x = 20
+x = [1, 2, 3]
 ```
 
 ## Typed Variables
@@ -42,7 +35,9 @@ y <str> = "hello"
 ```
 
 - Type is locked — cannot hold a different type.
-- Value is immutable — `=`, `:=`, `++`, and `--` are all blocked after declaration.
+- Value is immutable — `=`, `++`, `--`, and compound assignment (`+=`, `-=`, `*=`, `/=`) are all blocked after declaration.
+- `:=` can still replace the value with another of the same type, as an explicit override. The variable stays immutable afterwards.
+- Immutability applies to the variable, not to the value: if the value is an array, map, set or struct, its contents can still change (`x[0] = 5`, `push(x, 6)`). Use [`lock`](#lock-a-value-that-can-never-change) for a value that can never change.
 
 ### Typed Walrus: `x <type> := value`
 
@@ -58,7 +53,7 @@ z <bool> := 0
 - `y` becomes `"42"` (int displayed as string).
 - `z` becomes `False` (0 is falsy).
 
-The type is locked — subsequent reassignments must match the type. The value is mutable — `=`, `:=`, `++`/`--` all work (with type checking).
+The type is locked — subsequent reassignments must match the type. The value is mutable — `=`, `:=`, `++`/`--`, and `+=`/`-=`/`*=`/`/=` all work (with type checking).
 
 ### Zero-Init: `x <type>` or `x as <type>`
 
@@ -88,27 +83,23 @@ p <Person>
 
 ## Reassignment Rules
 
-### `=` (strict assign)
+### `=` (assign)
 
-Only works on **typed mutable** variables. The value must already be the correct type — no conversion:
+Works on untyped variables and on typed mutable variables. On a typed variable the value must already be the correct type — no conversion:
 
 ```oxi
 x <int> := 10
 x = 20
+
+y := 10
+y = "twenty"
 ```
 
-Blocked on immutable variables:
+Blocked on immutable and locked variables:
 
 ```oxi
 x <int> = 10
 x = 20
-```
-
-Blocked on untyped variables:
-
-```oxi
-y := 10
-y = 20
 ```
 
 ### `:=` (walrus reassign)
@@ -129,7 +120,7 @@ x := "hello"
 
 ### `++` / `--` (postfix)
 
-Works on mutable integer variables. Blocked on immutable bindings:
+Adds or subtracts 1 and returns the old value. Works on mutable numeric variables, and also on an index (`m[k]++`) or a field (`p.count++`). Blocked on immutable bindings:
 
 ```oxi
 x <int> := 5
@@ -139,6 +130,60 @@ x--
 y <int> = 5
 y++
 ```
+
+### `+=` / `-=` / `*=` / `/=` (compound assignment)
+
+`x += e` updates `x` like `x = x + e`, and the same holds for `-=`, `*=` and `/=`. Blocked on immutable bindings, and a typed variable keeps its type:
+
+```oxi
+x <int> := 5
+x += 2
+x *= 3
+
+y <int> = 5
+y += 1
+```
+
+Both forms also work on an index or a field (`counts[key] += 1`, `player.health -= 10`); the key must already exist in a map. See [Operators](operators.md#compound-assignment) for details.
+
+## `lock`: a Value That Can Never Change
+
+`x <int> = 10` makes the *variable* immutable, but collections are shared by reference, so another name for the same array can still change it. `lock` makes both the variable and its value permanently read-only:
+
+```oxi
+arr := [1, 2, 3]
+lock static_arr = arr
+
+push(arr, 4)            // fine: arr is [1, 2, 3, 4]
+println(static_arr)     // [1, 2, 3]
+push(static_arr, 4)     // error: push() cannot change a locked array
+```
+
+- **The value is copied, then locked.** `lock` takes its own copy, so the original (`arr`) stays changeable and later changes to it don't show up in `static_arr`.
+- **The lock is deep.** Arrays, maps, sets and structs inside the value are locked too: `lock grid = [[1, 2], [3, 4]]` refuses `grid[0][1] = 9` and `push(grid[0], 5)`.
+- **The lock travels with the value.** Passing it to a function or giving it another name (`ys := static_arr`) doesn't unlock it.
+- **The variable can never change.** `=`, `:=`, `++`, `--`, `+=`, `-=`, `*=` and `/=` on it are all compile errors, and `lock x = ...` can't redeclare an existing name.
+- **Reading is unaffected.** Indexing, `len`, `has`, `each` and other reads work as normal.
+
+To get a changeable version, use `copy`:
+
+```oxi
+lock defaults = {"width": 80, "height": 24}
+settings := copy(defaults)
+settings["width"] = 120
+```
+
+`copy` is shallow, so collections nested inside a locked value stay locked in the copy.
+
+A lock can carry a type, which converts the value like a typed declaration:
+
+```oxi
+lock limit <int> = 10
+```
+
+`lock` is only a keyword at the start of `lock name = ...`, so `lock` still works as an ordinary variable name.
+
+Use `lock` for constants and lookup tables (`lock DIRECTIONS = [(0, 1), (1, 0), (0, -1), (-1, 0)]`), and for data you hand to code that must not change it.
 
 ## Unpacking
 
@@ -198,13 +243,16 @@ user_input := "hello"
 
 ## Summary Table
 
-| Declaration     | Value Mutable | Type Locked | `=` allowed | `++`/`--` allowed |
-|-----------------|---------------|-------------|-------------|--------------------|
-| `x := 10`       | yes           | no          | no          | yes                |
-| `x <int> = 10`  | no            | yes         | no          | no                 |
-| `x <int> := 10` | yes           | yes         | yes         | yes                |
-| `x <int>`       | yes           | yes         | yes         | yes                |
-| `x as <int>`    | yes           | yes         | yes         | yes                |
+| Declaration        | `=`, `++`, `+=` | `:=` override | Type Locked | Contents changeable |
+|--------------------|-----------------|---------------|-------------|---------------------|
+| `x := 10`          | yes             | yes           | no          | yes                 |
+| `x <int> = 10`     | no              | yes           | yes         | yes                 |
+| `x <int> := 10`    | yes             | yes           | yes         | yes                 |
+| `x <int>`          | yes             | yes           | yes         | yes                 |
+| `x as <int>`       | yes             | yes           | yes         | yes                 |
+| `lock x = v`       | no              | no            | if typed    | no                  |
+
+"Contents changeable" is about arrays, maps, sets and structs: whether `x[0] = 5`, `push(x, 6)` or `x.field = 1` can change the value.
 
 ## Introspection
 
@@ -222,6 +270,12 @@ is_type_mut(b)
 c <int> = 10
 is_mut(c)
 is_type_mut(c)
+
+lock d = [1, 2]
+is_mut(d)
+is_type_mut(d)
 ```
+
+`is_mut` is `False` for both `c` and `d`.
 
 See the [Type System](type_system.md) guide for full details on type annotations, conversions, and mutability semantics. See [Built-in Functions](builtins.md) for the full list of introspection functions.

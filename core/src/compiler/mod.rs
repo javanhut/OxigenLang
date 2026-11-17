@@ -178,6 +178,10 @@ enum BindingKind {
     ImmutableTypeName {
         decl: Span,
     },
+    /// `lock name = v`: never written again, not even with `:=`.
+    Locked {
+        decl: Span,
+    },
 }
 
 impl BindingKind {
@@ -194,6 +198,16 @@ const LOOP_RANGE_END: &str = "\u{0}range_end";
 const LOOP_RANGE_LIMIT: &str = "\u{0}range_limit";
 const LOOP_ITERABLE: &str = "\u{0}iterable";
 const CHOOSE_SUBJECT: &str = "\u{0}choose";
+const POSTFIX_OBJECT: &str = "\u{0}postfix_object";
+const POSTFIX_INDEX: &str = "\u{0}postfix_index";
+const POSTFIX_OLD: &str = "\u{0}postfix_old";
+
+/// What a non-identifier `++`/`--` writes back to.
+#[derive(Clone, Copy)]
+enum PostfixPlace<'a> {
+    Index(&'a Expression),
+    Field(&'a str),
+}
 
 /// Tracks a local variable during compilation.
 #[derive(Debug, Clone)]
@@ -360,6 +374,18 @@ pub struct Compiler {
     /// matching the tree-walker, where `each` introduces a fresh per-iteration
     /// environment that `set_typed` writes the shadow into.
     typed_globals: std::collections::HashSet<String>,
+    /// Globals declared with `lock`, with where. Writes to them are compile
+    /// errors once the declaration has been seen; the VM checks the rest.
+    locked_globals: std::collections::HashMap<String, Span>,
+    /// Globals currently declared immutable (`x <T> = v`), with where.
+    immutable_globals: std::collections::HashMap<String, Span>,
+    /// Globals some typed declaration makes mutable (`x <T> := v`, `x <T>`).
+    /// A write to an immutable global is only reported once the whole
+    /// program is compiled and the name never became mutable: a function
+    /// compiled before `x <T> := v` may legitimately run after it.
+    made_mutable_globals: std::collections::HashSet<String>,
+    /// Writes to immutable globals: (name, declaration, write, verb, suffix).
+    pending_immutable_writes: Vec<(String, Span, Span, String, String)>,
     /// Id stamped onto the next `Function` finalized: this compilation's
     /// unit number in the high 32 bits, compile order in the low 32. Every
     /// compilation in the process gets its own unit, so no two compiled
@@ -434,6 +460,10 @@ impl Compiler {
             method_field_stack: Vec::new(),
             method_struct_stack: Vec::new(),
             declared_globals: std::collections::HashSet::new(),
+            locked_globals: std::collections::HashMap::new(),
+            immutable_globals: std::collections::HashMap::new(),
+            made_mutable_globals: std::collections::HashSet::new(),
+            pending_immutable_writes: Vec::new(),
             typed_globals: std::collections::HashSet::new(),
             fn_counter: (unit as u64) << 32,
             lint: None,
@@ -532,6 +562,7 @@ impl Compiler {
             }
         }
 
+        self.report_immutable_global_writes();
         if !self.errors.is_empty() {
             return Err(std::mem::take(&mut self.errors));
         }
@@ -840,6 +871,21 @@ impl Compiler {
             .label(format!("cannot {verb}{suffix}"))
             .secondary(decl, format!("`{name}` is declared here as a type"))
             .help("choose a different name for the value"),
+
+            BindingKind::Locked { decl } => Diagnostic::error(
+                codes::IMMUTABLE_ASSIGN,
+                write,
+                format!("cannot {verb} locked variable `{name}`{suffix}"),
+            )
+            .label(format!("cannot {verb}{suffix}"))
+            .secondary(decl, format!("`{name}` is locked here"))
+            .note(
+                "`lock` makes a variable and its value permanently read-only: it can't be \
+                 reassigned or overridden with `:=`",
+            )
+            .help(format!(
+                "make a changeable copy with `new_name := copy({name})`"
+            )),
 
             BindingKind::Mutable => return,
         };
@@ -1279,7 +1325,9 @@ impl Compiler {
         let forbidden = match kind {
             BindingKind::Mutable => false,
             BindingKind::ImmutableConstant { .. } => !walrus,
-            BindingKind::ImmutableLoopVar { .. } | BindingKind::ImmutableTypeName { .. } => true,
+            BindingKind::ImmutableLoopVar { .. }
+            | BindingKind::ImmutableTypeName { .. }
+            | BindingKind::Locked { .. } => true,
         };
         if forbidden {
             self.report_immutable_write(name, kind, span, verb, suffix);
@@ -1287,6 +1335,62 @@ impl Compiler {
         if let Some(ty) = constraint.filter(|t| t != "GENERIC") {
             let tc = self.make_constant(Value::String(rc_str(ty.as_str())), line);
             self.emit_op_u16(OpCode::CheckType, tc, line);
+        }
+    }
+
+    /// Checks a write to `name` when it means a global (no local or captured
+    /// variable of that name is in the way). A `lock`ed global is reported
+    /// now. An immutable one (`x <T> = v`) is queued for the end of the
+    /// program, unless `rebind` (`:=` may override an immutable binding).
+    fn check_global_write(&mut self, name: &Identifier, verb: &str, suffix: &str, rebind: bool) {
+        if self.resolve_local(&name.value).is_some() || self.upvalue_binding(&name.value).is_some()
+        {
+            return;
+        }
+        if let Some(&decl) = self.locked_globals.get(&name.value) {
+            self.report_immutable_write(
+                &name.value,
+                BindingKind::Locked { decl },
+                name.token.span,
+                verb,
+                suffix,
+            );
+        } else if !rebind && let Some(&decl) = self.immutable_globals.get(&name.value) {
+            self.pending_immutable_writes.push((
+                name.value.clone(),
+                decl,
+                name.token.span,
+                verb.to_string(),
+                suffix.to_string(),
+            ));
+        }
+    }
+
+    /// A typed declaration of global `name` was compiled.
+    fn note_global_typed_decl(&mut self, name: &Identifier, mutable: bool) {
+        if mutable {
+            self.immutable_globals.remove(&name.value);
+            self.made_mutable_globals.insert(name.value.clone());
+        } else {
+            self.immutable_globals
+                .insert(name.value.clone(), name.token.span);
+        }
+    }
+
+    /// Reports the queued writes to globals that stayed immutable.
+    fn report_immutable_global_writes(&mut self) {
+        for (name, decl, write, verb, suffix) in std::mem::take(&mut self.pending_immutable_writes)
+        {
+            if self.made_mutable_globals.contains(&name) {
+                continue;
+            }
+            self.report_immutable_write(
+                &name,
+                BindingKind::ImmutableConstant { decl },
+                write,
+                &verb,
+                &suffix,
+            );
         }
     }
 
@@ -1358,6 +1462,8 @@ impl Compiler {
             | Statement::DotAssign { token, .. }
             | Statement::Introduce { token, .. }
             | Statement::IndexAssign { token, .. }
+            | Statement::CompoundAssign { token, .. }
+            | Statement::Lock { token, .. }
             | Statement::Main { token, .. }
             | Statement::Test { token, .. } => token.span.line() as u32,
             Statement::TypedLet { name, .. }
@@ -1427,6 +1533,8 @@ impl Compiler {
             | Statement::DotAssign { token, .. }
             | Statement::Introduce { token, .. }
             | Statement::IndexAssign { token, .. }
+            | Statement::CompoundAssign { token, .. }
+            | Statement::Lock { token, .. }
             | Statement::Main { token, .. }
             | Statement::Test { token, .. } => token.span.column() as u32,
             Statement::TypedLet { name, .. }
@@ -1501,8 +1609,19 @@ impl Compiler {
                                 .help("choose a different name for the value"),
                             );
                         }
+                        kind @ BindingKind::Locked { .. } => {
+                            self.report_immutable_write(
+                                &name.value,
+                                kind,
+                                name.token.span,
+                                "rebind",
+                                "",
+                            );
+                        }
                         BindingKind::Mutable | BindingKind::ImmutableConstant { .. } => {}
                     }
+                } else {
+                    self.check_global_write(name, "rebind", "", true);
                 }
 
                 // A named fn must bind its own name before its body compiles so a self-call captures itself.
@@ -1627,6 +1746,7 @@ impl Compiler {
                         && self.current_frame().each_body_depth == 0
                     {
                         // A typed re-declaration of an untyped global from a nested block re-binds the global with the new type.
+                        self.note_global_typed_decl(name, mutable);
                         self.typed_globals.insert(name.value.clone());
                         let name_const =
                             self.make_constant(Value::String(rc_str(name.value.as_str())), line);
@@ -1647,6 +1767,8 @@ impl Compiler {
                         self.add_local(&name.value, kind, Some(type_name));
                     }
                 } else {
+                    self.check_global_write(name, "rebind", "", true);
+                    self.note_global_typed_decl(name, mutable);
                     self.declared_globals.insert(name.value.clone());
                     self.typed_globals.insert(name.value.clone());
                     let name_const =
@@ -1689,6 +1811,7 @@ impl Compiler {
                         && self.current_frame().each_body_depth == 0
                     {
                         // Zero-init form of the same rule; see the note on TypedLet.
+                        self.note_global_typed_decl(name, true);
                         self.typed_globals.insert(name.value.clone());
                         let name_const =
                             self.make_constant(Value::String(rc_str(name.value.as_str())), line);
@@ -1702,6 +1825,8 @@ impl Compiler {
                         self.add_local(&name.value, BindingKind::Mutable, Some(type_name));
                     }
                 } else {
+                    self.check_global_write(name, "rebind", "", true);
+                    self.note_global_typed_decl(name, true);
                     self.declared_globals.insert(name.value.clone());
                     self.typed_globals.insert(name.value.clone());
                     let name_const =
@@ -1757,6 +1882,7 @@ impl Compiler {
                         );
                         self.emit_op_u16(OpCode::SetUpvalue, uv_idx, line);
                     } else {
+                        self.check_global_write(name, "assign to", "", false);
                         let name_const =
                             self.make_constant(Value::String(rc_str(name.value.as_str())), line);
                         self.emit_op_u16(OpCode::SetGlobal, name_const, line);
@@ -2242,6 +2368,78 @@ impl Compiler {
                 self.compile_expression(value);
                 self.release_temps(2);
                 self.emit_op(OpCode::IndexAssign, line);
+            }
+
+            Statement::Lock {
+                name,
+                type_ann,
+                value,
+                ..
+            } => self.compile_lock(name, type_ann.as_ref(), value, line),
+
+            Statement::CompoundAssign {
+                token,
+                target,
+                operator,
+                value,
+            } => {
+                let step = match operator.as_str() {
+                    "+" => OpCode::Add,
+                    "-" => OpCode::Subtract,
+                    "*" => OpCode::Multiply,
+                    "/" => OpCode::Divide,
+                    _ => {
+                        self.error_coded(
+                            codes::UNKNOWN_OPERATOR,
+                            &format!("unknown compound operator: {}=", operator),
+                            line,
+                        );
+                        return;
+                    }
+                };
+                match target {
+                    // `x += e` is `x = x + e`, so it shares every rule `=` has
+                    // (immutability, implicit self fields, upvalues, typed locals).
+                    Expression::Ident(name) => {
+                        let assign = Statement::Assign {
+                            name: name.clone(),
+                            value: Expression::Infix {
+                                token: token.clone(),
+                                left: Box::new(target.clone()),
+                                operator: operator.clone(),
+                                right: Box::new(value.clone()),
+                            },
+                        };
+                        self.compile_statement(&assign);
+                    }
+                    Expression::Index {
+                        left: object,
+                        index,
+                        ..
+                    } => self.compile_place_update(
+                        object,
+                        PostfixPlace::Index(index),
+                        step,
+                        Some(value),
+                        line,
+                    ),
+                    Expression::DotAccess {
+                        left: object,
+                        field,
+                        ..
+                    } => self.compile_place_update(
+                        object,
+                        PostfixPlace::Field(&field.value),
+                        step,
+                        Some(value),
+                        line,
+                    ),
+                    _ => self.error_coded(
+                        codes::UNKNOWN_OPERATOR,
+                        &format!("`{operator}=` needs a variable, index or field on its left"),
+                        line,
+                    ),
+                }
             }
 
             Statement::Main { body, .. } => {
@@ -2771,8 +2969,22 @@ impl Compiler {
             }
 
             Expression::Postfix { operator, left, .. } => {
-                // Postfix requires an identifier
-                if let Expression::Ident(ident) = left.as_ref() {
+                // A bare field name inside a method means `self.field`, as it does for reads and `=`.
+                if let Expression::Ident(ident) = left.as_ref()
+                    && self.resolve_local(&ident.value).is_none()
+                    && self.implicit_self_for(&ident.value).is_some()
+                {
+                    let self_expr = Expression::Ident(Identifier {
+                        token: ident.token.clone(),
+                        value: "self".to_string(),
+                    });
+                    self.compile_postfix_place(
+                        &self_expr,
+                        PostfixPlace::Field(&ident.value),
+                        operator,
+                        line,
+                    );
+                } else if let Expression::Ident(ident) = left.as_ref() {
                     if let Some(slot) = self.resolve_local(&ident.value)
                         && !self.current_frame().locals[slot as usize].kind.is_mutable()
                     {
@@ -2814,16 +3026,41 @@ impl Compiler {
                             );
                             self.emit_op_u16(OpCode::SetUpvalue, uv_idx, line);
                         } else {
+                            self.check_global_write(
+                                ident,
+                                "mutate",
+                                &format!(" with `{operator}`"),
+                                false,
+                            );
                             let name_const = self
                                 .make_constant(Value::String(rc_str(ident.value.as_str())), line);
                             self.emit_op_u16(OpCode::SetGlobal, name_const, line);
                         }
                     }
                     self.emit_op(OpCode::Pop, line); // pop the stored (new) value, leaving pre-inc
+                } else if let Expression::Index {
+                    left: object,
+                    index,
+                    ..
+                } = left.as_ref()
+                {
+                    self.compile_postfix_place(object, PostfixPlace::Index(index), operator, line);
+                } else if let Expression::DotAccess {
+                    left: object,
+                    field,
+                    ..
+                } = left.as_ref()
+                {
+                    self.compile_postfix_place(
+                        object,
+                        PostfixPlace::Field(&field.value),
+                        operator,
+                        line,
+                    );
                 } else {
                     self.error_coded(
                         codes::UNKNOWN_OPERATOR,
-                        "postfix operator requires identifier",
+                        "postfix operator requires a variable, index or field",
                         line,
                     );
                 }
@@ -3331,6 +3568,7 @@ impl Compiler {
         } else if name.value == "_" {
             self.emit_op(OpCode::Pop, line);
         } else {
+            self.check_global_write(name, "rebind", "", true);
             let name_const = self.make_constant(Value::String(rc_str(name.value.as_str())), line);
             self.emit_op_u16(OpCode::DefineGlobal, name_const, line);
         }
@@ -3348,9 +3586,9 @@ impl Compiler {
             let forbidden = match kind {
                 BindingKind::Mutable => false,
                 BindingKind::ImmutableConstant { .. } => !walrus,
-                BindingKind::ImmutableLoopVar { .. } | BindingKind::ImmutableTypeName { .. } => {
-                    true
-                }
+                BindingKind::ImmutableLoopVar { .. }
+                | BindingKind::ImmutableTypeName { .. }
+                | BindingKind::Locked { .. } => true,
             };
             if forbidden {
                 self.report_immutable_write(&name.value, kind, name.token.span, "assign to", "");
@@ -3369,6 +3607,7 @@ impl Compiler {
                 );
                 self.emit_op_u16(OpCode::SetUpvalue, uv_idx, line);
             } else {
+                self.check_global_write(name, "assign to", "", false);
                 let name_const =
                     self.make_constant(Value::String(rc_str(name.value.as_str())), line);
                 self.emit_op_u16(OpCode::SetGlobal, name_const, line);
@@ -3403,6 +3642,191 @@ impl Compiler {
         // block's cleanup leaves them alone, and a `skip`/`stop` out of here pops
         // them with everything else above the loop's floor.
         self.with_held_as_locals(|c| c.compile_block_body_as_expression(stmts, line, consumed));
+    }
+
+    /// `lock name = value` / `lock name <type> = value`. The value becomes a
+    /// deep read-only copy (`OpCode::Lock`) and the name a binding nothing can
+    /// write: not `=`, `:=`, `++` or a compound assignment.
+    fn compile_lock(
+        &mut self,
+        name: &Identifier,
+        type_ann: Option<&TypeAnnotation>,
+        value: &Expression,
+        line: u32,
+    ) {
+        let decl = name.token.span;
+        // `lock` always declares, so an existing variable of that name in the
+        // same scope would be silently replaced; say so instead.
+        let depth = self.current_frame().scope_depth;
+        let clashes = if depth > 0 {
+            self.current_frame()
+                .locals
+                .iter()
+                .rev()
+                .take_while(|l| l.depth >= depth)
+                .any(|l| l.name == name.value)
+        } else {
+            self.declared_globals.contains(&name.value)
+        };
+        if clashes {
+            match self.locked_globals.get(&name.value).copied() {
+                Some(prev) if depth == 0 => self.report_immutable_write(
+                    &name.value,
+                    BindingKind::Locked { decl: prev },
+                    decl,
+                    "re-lock",
+                    "",
+                ),
+                _ => self.report(
+                    Diagnostic::error(
+                        codes::IMMUTABLE_ASSIGN,
+                        decl,
+                        format!("`{}` already exists here", name.value),
+                    )
+                    .label("`lock` declares a new variable")
+                    .help(format!(
+                        "lock a copy under a new name: `lock {}_locked = {}`",
+                        name.value, name.value
+                    )),
+                ),
+            }
+        }
+
+        self.compile_expression(value);
+        let type_name = type_ann.map(|t| t.type_name());
+        if let Some(t) = type_ann
+            && !matches!(t, TypeAnnotation::Generic | TypeAnnotation::NoneType)
+        {
+            let tc = self.make_constant(Value::String(rc_str(t.type_name().as_str())), line);
+            self.emit_op_u16(OpCode::TypeWrap, tc, line);
+        }
+        self.emit_op(OpCode::Lock, line);
+        if self.dup_next_define {
+            self.emit_op(OpCode::Dup, line);
+        }
+
+        if depth > 0 {
+            self.add_local(&name.value, BindingKind::Locked { decl }, type_name);
+        } else {
+            self.declared_globals.insert(name.value.clone());
+            if type_name.is_some() {
+                self.typed_globals.insert(name.value.clone());
+            }
+            self.locked_globals.insert(name.value.clone(), decl);
+            let name_const = self.make_constant(Value::String(rc_str(name.value.as_str())), line);
+            let type_const = self.make_constant(
+                Value::String(rc_str(type_name.as_deref().unwrap_or("GENERIC"))),
+                line,
+            );
+            self.emit_op_u16(OpCode::DefineGlobalTyped, name_const, line);
+            self.emit_byte(2, line); // 2 = locked; see VM::handle_define_global_typed
+            self.current_chunk().write_u16(type_const, line);
+        }
+    }
+
+    /// `object[index]++` / `object.field++` (and `--`). The expression's value
+    /// is the old one, as for `x++`.
+    fn compile_postfix_place(
+        &mut self,
+        object: &Expression,
+        place: PostfixPlace<'_>,
+        operator: &str,
+        line: u32,
+    ) {
+        let step = match operator {
+            "++" => OpCode::Add,
+            "--" => OpCode::Subtract,
+            _ => {
+                self.error_coded(
+                    codes::UNKNOWN_OPERATOR,
+                    &format!("unknown postfix operator: {}", operator),
+                    line,
+                );
+                return;
+            }
+        };
+        self.compile_place_update(object, place, step, None, line);
+    }
+
+    /// Rewrite `object[index]` or `object.field` to `old <step> rhs`, where
+    /// `rhs` is `1` for `++`/`--` (which leave the old value as the
+    /// expression's result) and the right-hand side for `+=` and friends
+    /// (which leave nothing). The object and index are evaluated once, into
+    /// hidden locals; a missing map key is an error, since there is no old
+    /// value to update.
+    fn compile_place_update(
+        &mut self,
+        object: &Expression,
+        place: PostfixPlace<'_>,
+        step: OpCode,
+        rhs: Option<&Expression>,
+        line: u32,
+    ) {
+        let field_const = match place {
+            PostfixPlace::Field(name) => {
+                Some(self.make_constant(Value::String(rc_str(name)), line))
+            }
+            PostfixPlace::Index(_) => None,
+        };
+
+        self.with_held_as_locals(|c| {
+            c.begin_scope();
+
+            c.compile_expression(object);
+            let object_slot = c.current_frame().locals.len() as u16;
+            c.add_local(POSTFIX_OBJECT, BindingKind::Mutable, None);
+
+            let index_slot = if let PostfixPlace::Index(index) = place {
+                c.compile_expression(index);
+                let slot = c.current_frame().locals.len() as u16;
+                c.add_local(POSTFIX_INDEX, BindingKind::Mutable, None);
+                Some(slot)
+            } else {
+                None
+            };
+
+            // Read the current value: object[index] or object.field.
+            c.emit_op_u16(OpCode::GetLocal, object_slot, line);
+            match (index_slot, field_const) {
+                (Some(slot), _) => {
+                    c.emit_op_u16(OpCode::GetLocal, slot, line);
+                    c.emit_op(OpCode::IndexExisting, line);
+                }
+                (None, Some(field)) => c.emit_op_u16(OpCode::GetField, field, line),
+                (None, None) => unreachable!("place is an index or a field"),
+            }
+            let old_slot = c.current_frame().locals.len() as u16;
+            c.add_local(POSTFIX_OLD, BindingKind::Mutable, None);
+
+            // Write back `old <step> rhs`. IndexAssign and SetField leave nothing on the stack.
+            c.emit_op_u16(OpCode::GetLocal, object_slot, line);
+            if let Some(slot) = index_slot {
+                c.emit_op_u16(OpCode::GetLocal, slot, line);
+            }
+            c.emit_op_u16(OpCode::GetLocal, old_slot, line);
+            match rhs {
+                Some(value) => {
+                    let held = 2 + index_slot.is_some() as usize;
+                    c.hold_temps(held);
+                    c.compile_expression(value);
+                    c.release_temps(held);
+                }
+                None => c.emit_constant(Value::Integer(1), line),
+            }
+            c.emit_op(step, line);
+            match field_const {
+                Some(field) => c.emit_op_u16(OpCode::SetField, field, line),
+                None => c.emit_op(OpCode::IndexAssign, line),
+            }
+
+            if rhs.is_some() {
+                c.end_scope(line);
+            } else {
+                // `place++` evaluates to the old value.
+                c.emit_op_u16(OpCode::GetLocal, old_slot, line);
+                c.end_scope_keeping_value(line);
+            }
+        });
     }
 
     /// Run `body` with the held temporaries standing in as unnamed locals, so

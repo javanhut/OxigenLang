@@ -680,6 +680,17 @@ impl Parser {
             if self.peek_token.token_type == TokenType::Assign {
                 return self.parse_assign_statement();
             }
+            // `lock` is contextual: only `lock name =`, `lock name <type> =` (or a
+            // mistaken `lock name :=`) start a lock, so `lock` stays a usable name.
+            if self.curr_token.literal == "lock"
+                && self.peek_token.token_type == TokenType::Ident
+                && matches!(
+                    self.peek_nth(1).token_type,
+                    TokenType::Assign | TokenType::Lt | TokenType::Walrus
+                )
+            {
+                return self.parse_lock_statement();
+            }
             // `includes` is contextual: it opens a method block only when immediately followed by `{`.
             if self.peek_token.token_type == TokenType::Ident
                 && self.peek_token.literal == "includes"
@@ -932,6 +943,47 @@ impl Parser {
         })
     }
 
+    fn parse_lock_statement(&mut self) -> Option<Statement> {
+        let token = self.curr_token.clone();
+        self.next_token();
+        let name = Identifier {
+            token: self.curr_token.clone(),
+            value: self.curr_token.literal.clone(),
+        };
+
+        let type_ann = if self.peek_token.token_type == TokenType::Lt {
+            self.next_token();
+            Some(self.parse_type_annotation()?)
+        } else {
+            None
+        };
+
+        if self.peek_token.token_type == TokenType::Walrus {
+            self.errors.push(
+                diag(
+                    codes::UNEXPECTED_TOKEN,
+                    self.peek_token.span,
+                    format!(
+                        "`lock` binds with `=`, not `:=`: `lock {} = ...`",
+                        name.value
+                    ),
+                )
+                .help("a locked variable can never change, so it has no mutable `:=` form"),
+            );
+            return None;
+        }
+        self.expect_peek(TokenType::Assign)?;
+        self.next_token();
+        let value = self.parse_expression(Precedence::Lowest)?;
+
+        Some(Statement::Lock {
+            token,
+            name,
+            type_ann,
+            value,
+        })
+    }
+
     fn parse_typed_declare_statement(&mut self) -> Option<Statement> {
         let name_token = self.curr_token.clone();
         let name = Identifier {
@@ -1014,6 +1066,34 @@ impl Parser {
                 token: tok,
                 object: obj,
                 index: idx,
+                value,
+            });
+        }
+
+        // Compound assignment: target += value (also -=, *=, /=)
+        if let Some(operator) = compound_operator(&self.peek_token.token_type) {
+            if !matches!(
+                expr,
+                Expression::Ident(_) | Expression::Index { .. } | Expression::DotAccess { .. }
+            ) {
+                self.errors.push(diag(
+                    codes::EXPECTED_IDENTIFIER,
+                    self.peek_token.span,
+                    format!(
+                        "`{}` needs a variable, index or field on its left",
+                        self.peek_token.literal
+                    ),
+                ));
+                return None;
+            }
+            self.next_token(); // consume the compound operator
+            let token = self.curr_token.clone();
+            self.next_token(); // move to value expression
+            let value = self.parse_expression(Precedence::Lowest)?;
+            return Some(Statement::CompoundAssign {
+                token,
+                target: expr,
+                operator: operator.to_string(),
                 value,
             });
         }
@@ -2941,6 +3021,7 @@ impl Parser {
                 | Statement::Assign { .. }
                 | Statement::DotAssign { .. }
                 | Statement::IndexAssign { .. }
+                | Statement::CompoundAssign { .. }
         );
 
         if !eligible {
@@ -3725,4 +3806,15 @@ fn foreign_keyword(word: &str) -> Option<&'static str> {
         "throw" | "raise" => "raise an error with `fail \"message\"`",
         _ => return None,
     })
+}
+
+/// The arithmetic operator a compound-assignment token applies (`+=` -> `+`).
+fn compound_operator(token_type: &TokenType) -> Option<&'static str> {
+    match token_type {
+        TokenType::PlusAssign => Some("+"),
+        TokenType::MinusAssign => Some("-"),
+        TokenType::AsteriskAssign => Some("*"),
+        TokenType::SlashAssign => Some("/"),
+        _ => None,
+    }
 }

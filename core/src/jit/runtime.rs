@@ -302,6 +302,35 @@ pub unsafe extern "C" fn jit_op_iter_len(vm: *mut VM) -> u32 {
     }
 }
 
+/// `lock`: `[value] -> [locked copy]`. Mirrors the `Lock` interpreter arm.
+pub unsafe extern "C" fn jit_op_lock(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.sync_stack_from_view();
+    let value = vm.pop();
+    let locked = vm.lock_value(&value);
+    vm.push(locked);
+    0
+}
+
+/// `m[k]` read for `m[k]++`: like `Index`, but a missing map key is an error.
+/// `[coll, idx] -> [value]`. Mirrors the `IndexExisting` interpreter arm.
+pub unsafe extern "C" fn jit_op_index_existing(vm: *mut VM) -> u32 {
+    let vm = unsafe { &mut *vm };
+    vm.sync_stack_from_view();
+    let index = vm.pop();
+    let collection = vm.pop();
+    match vm.eval_index_existing(collection, index) {
+        Ok(value) => {
+            vm.push(value);
+            0
+        }
+        Err(err) => {
+            vm.jit.stash_error(err);
+            1
+        }
+    }
+}
+
 /// `arr[i] = v` / `map[k] = v`: pops value+index+collection, assigns in
 /// place, pushes nothing. `[coll, idx, val] -> []`. Mirrors the
 /// `IndexAssign` interpreter arm via the shared `VM::eval_index_assign`.
@@ -526,6 +555,8 @@ pub unsafe extern "C" fn jit_struct_field_add_const(
             && let Some(&idx) = inst.layout.indices.get(fname.as_ref())
             // A hidden field is only writable from its struct's methods; the slow path raises the error.
             && (!inst.layout.slots[idx].2 || vm.hidden_field_access_allowed(inst))
+            // A locked instance can't be written; the slow path raises the error.
+            && !inst.locked.get()
         {
             // SAFETY: single-threaded, nothing else borrows fields. Integer->Integer needs no Drop.
             unsafe {
@@ -616,6 +647,7 @@ pub unsafe extern "C" fn jit_struct_field_add_local(
         if let Some(fname) = field_name.as_string()
             && let Some(&idx) = inst.layout.indices.get(fname.as_ref())
             && (!inst.layout.slots[idx].2 || vm.hidden_field_access_allowed(inst))
+            && !inst.locked.get()
         {
             // SAFETY: same as jit_struct_field_add_const.
             unsafe {
@@ -986,7 +1018,7 @@ pub unsafe extern "C" fn jit_define_global_typed(
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::DefineGlobalTyped);
     vm.sync_stack_from_view();
-    match vm.handle_define_global_typed(name_idx as u16, mutable != 0, type_idx as u16) {
+    match vm.handle_define_global_typed(name_idx as u16, mutable as u8, type_idx as u16) {
         Ok(()) => 0,
         Err(e) => {
             vm.jit.stash_error(e);

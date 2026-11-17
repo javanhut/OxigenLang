@@ -10,6 +10,7 @@ x <int> = 10               // typed, immutable value
 x <int> := 10              // typed, mutable value
 x <int>                    // typed, zero-value init
 x as <int>                 // alternative form (optional `as`)
+lock x = [1, 2]            // read-only variable and value (deep copy)
 a, b := [1, 2]             // array/tuple unpacking
 ```
 
@@ -38,7 +39,8 @@ x == y   x != y   x < y    x > y    x <= y  x >= y  // comparison
 x and y  x or y                                  // logical
 (x or y) == val                                  // distributed comparison
 !x       not x    -x                             // prefix
-x++      x--                                     // postfix
+x++      x--                                     // postfix (also m[k]++, obj.n--)
+x += 1   x -= 1   x *= 2   x /= 2                // compound assignment
 arr[0]   arr[1:3]   obj.field                    // access
 m[key] = val   arr[0] = val                      // index assignment
 ```

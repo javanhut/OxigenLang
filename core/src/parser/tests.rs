@@ -1553,3 +1553,75 @@ fn test_fun_followed_by_keyword_does_not_hang() {
     let (_program, errors) = parse("fun struct {\n}");
     assert!(!errors.is_empty(), "expected a parse error, got none");
 }
+
+#[test]
+fn test_parse_compound_assignment() {
+    let tests = [
+        ("x += 1", "+"),
+        ("x -= 1", "-"),
+        ("m[k] *= 2", "*"),
+        ("p.v /= 2", "/"),
+    ];
+    for (input, expected_op) in tests {
+        let program = parse_ok(input);
+        match &program.statements[0] {
+            Statement::CompoundAssign {
+                operator, target, ..
+            } => {
+                assert_eq!(operator, expected_op, "Failed for input '{}'", input);
+                assert!(
+                    matches!(
+                        target,
+                        Expression::Ident(_)
+                            | Expression::Index { .. }
+                            | Expression::DotAccess { .. }
+                    ),
+                    "unexpected target for '{input}': {target:?}"
+                );
+            }
+            other => panic!(
+                "Expected compound assignment for '{}', got {other:?}",
+                input
+            ),
+        }
+    }
+}
+
+#[test]
+fn test_compound_assignment_rejects_non_place_target() {
+    let (_, errors) = parse("f() += 1");
+    assert!(!errors.is_empty(), "`f() += 1` should not parse");
+}
+
+#[test]
+fn test_parse_lock_statement() {
+    let program = parse_ok("lock xs = [1, 2]\nlock limit <int> = 10");
+    match &program.statements[0] {
+        Statement::Lock { name, type_ann, .. } => {
+            assert_eq!(name.value, "xs");
+            assert!(type_ann.is_none());
+        }
+        other => panic!("expected lock, got {other:?}"),
+    }
+    match &program.statements[1] {
+        Statement::Lock { name, type_ann, .. } => {
+            assert_eq!(name.value, "limit");
+            assert!(type_ann.is_some());
+        }
+        other => panic!("expected typed lock, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_lock_with_walrus_is_an_error() {
+    let (_, errors) = parse("lock x := 1");
+    assert!(!errors.is_empty(), "`lock x := 1` should not parse");
+}
+
+#[test]
+fn test_lock_stays_usable_as_a_name() {
+    let program = parse_ok("lock := 1\nlock = 2\nlock(3)");
+    assert!(matches!(program.statements[0], Statement::Let { .. }));
+    assert!(matches!(program.statements[1], Statement::Assign { .. }));
+    assert!(matches!(program.statements[2], Statement::Expr(_)));
+}

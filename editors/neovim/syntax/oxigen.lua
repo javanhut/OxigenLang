@@ -134,6 +134,7 @@ syn keyword oxigenKeyword each repeat if option unless choose pattern when
 syn keyword oxigenKeyword diverge converge within
 syn keyword oxigenKeyword guard fail give skip stop
 syn keyword oxigenKeyword in not and or then as hide self
+syn match oxigenKeyword /^\s*\zslock\ze\s\+\h/
 
 syn keyword oxigenBoolean True False
 syn keyword oxigenNone None
@@ -216,6 +217,7 @@ syn match oxigenOperator /==/
 syn match oxigenOperator /!=/
 syn match oxigenOperator /+\+/
 syn match oxigenOperator /--/
+syn match oxigenOperator /[-+*\/]=/
 syn match oxigenOperator /\->/
 syn match oxigenOperator /||/
 syn match oxigenOperator /<<\|>>/

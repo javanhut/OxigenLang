@@ -25,8 +25,8 @@ use crate::vm::VM;
 use crate::vm::VMError;
 use crate::vm::value::{
     Function, RC_VALUE_OFFSET, STRUCT_INSTANCE_DEF_OFFSET, STRUCT_INSTANCE_FIELDS_PTR_OFFSET,
-    VALUE_INT_PAYLOAD_OFFSET, VALUE_SIZE, VALUE_TAG_CLOSURE, VALUE_TAG_FLOAT, VALUE_TAG_INTEGER,
-    VALUE_TAG_NONE, VALUE_TAG_STRUCT_INSTANCE,
+    STRUCT_INSTANCE_LOCKED_OFFSET, VALUE_INT_PAYLOAD_OFFSET, VALUE_SIZE, VALUE_TAG_CLOSURE,
+    VALUE_TAG_FLOAT, VALUE_TAG_INTEGER, VALUE_TAG_NONE, VALUE_TAG_STRUCT_INSTANCE,
 };
 
 use super::scan;
@@ -956,12 +956,25 @@ impl JitInner {
                             emit_early_exit_on_err(&mut builder, exit_block, status);
                             ip += 1;
                         }
-                        OpCode::IndexAssign => {
+                        OpCode::Lock => {
                             // The helper pops from vm.stack, so flush staged temps first.
                             if !virt_stack.is_empty() {
                                 virt_stack.flush_to_memory(&mut builder, vm_val);
                             }
-                            let call = builder.ins().call(refs.index_assign, &[vm_val]);
+                            builder.ins().call(refs.lock, &[vm_val]);
+                            ip += 1;
+                        }
+                        OpCode::IndexAssign | OpCode::IndexExisting => {
+                            // The helpers pop from vm.stack, so flush staged temps first.
+                            if !virt_stack.is_empty() {
+                                virt_stack.flush_to_memory(&mut builder, vm_val);
+                            }
+                            let func = if op == OpCode::IndexAssign {
+                                refs.index_assign
+                            } else {
+                                refs.index_existing
+                            };
+                            let call = builder.ins().call(func, &[vm_val]);
                             let status = builder.inst_results(call)[0];
                             emit_early_exit_on_err(&mut builder, exit_block, status);
                             ip += 1;
@@ -3413,6 +3426,23 @@ impl JitInner {
                                 );
                                 builder.switch_to_block(after_strong_block);
 
+                                // A locked instance takes the full path, whose SetField raises the error.
+                                let locked_byte = builder.ins().load(
+                                    types::I8,
+                                    flags,
+                                    inst_ptr,
+                                    STRUCT_INSTANCE_LOCKED_OFFSET as i32,
+                                );
+                                let after_locked_block = builder.create_block();
+                                builder.ins().brif(
+                                    locked_byte,
+                                    miss_block,
+                                    &[],
+                                    after_locked_block,
+                                    &[],
+                                );
+                                builder.switch_to_block(after_locked_block);
+
                                 let fields_ptr = builder.ins().load(
                                     ptr_ty,
                                     flags,
@@ -5034,7 +5064,7 @@ fn opcode_always_needs_line(op: OpCode) -> bool {
         | CheckReturn => false,
         // Always-faulting / always re-enter user code.
         Negate
-        | Index | TypeWrap
+        | Index | IndexExisting | TypeWrap
         | BuildArray
         | GetGlobal | SetGlobal | DefineGlobal | DefineGlobalTyped
         | Closure
@@ -5351,9 +5381,23 @@ fn emit_inline_struct_field_add(
     let def_matches = builder
         .ins()
         .icmp(IntCC::Equal, inst_def_raw, cached_def_raw);
+    let check_locked_block = builder.create_block();
     builder
         .ins()
-        .brif(def_matches, check_rhs_block, &[], miss_block, &[]);
+        .brif(def_matches, check_locked_block, &[], miss_block, &[]);
+
+    // The cache is per struct type, so `lock` has to be checked per instance;
+    // the helper on the miss path raises the error.
+    builder.switch_to_block(check_locked_block);
+    let locked_byte = builder.ins().load(
+        types::I8,
+        flags,
+        inst_ptr,
+        STRUCT_INSTANCE_LOCKED_OFFSET as i32,
+    );
+    builder
+        .ins()
+        .brif(locked_byte, miss_block, &[], check_rhs_block, &[]);
 
     // The Const variant jumps straight through this rhs tag guard.
     builder.switch_to_block(check_rhs_block);

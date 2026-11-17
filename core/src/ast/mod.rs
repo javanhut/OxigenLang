@@ -209,6 +209,23 @@ pub enum Statement {
         index: Expression,
         value: Expression,
     },
+    /// `lock name = value` / `lock name <type> = value`: a binding that can
+    /// never change, to a deep read-only copy of `value`.
+    Lock {
+        token: Token,
+        name: Identifier,
+        type_ann: Option<TypeAnnotation>,
+        value: Expression,
+    },
+    /// `target += value` (also `-=`, `*=`, `/=`). `target` is a variable, an
+    /// index or a field; `operator` is the arithmetic operator (`+`, `-`, ...)
+    /// and `token` the compound operator token.
+    CompoundAssign {
+        token: Token,
+        target: Expression,
+        operator: String,
+        value: Expression,
+    },
     Main {
         token: Token,
         body: Vec<Statement>,

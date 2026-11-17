@@ -45,6 +45,9 @@ pub const REF_CELL_VALUE_OFFSET: usize = 8;
 pub const VALUE_SIZE: usize = core::mem::size_of::<Value>();
 
 pub const STRUCT_INSTANCE_DEF_OFFSET: usize = core::mem::offset_of!(ObjStructInstance, def);
+/// Offset of the `lock` flag (one byte) in a struct instance; the JIT's
+/// inlined field update reads it to leave locked instances to the slow path.
+pub const STRUCT_INSTANCE_LOCKED_OFFSET: usize = core::mem::offset_of!(ObjStructInstance, locked);
 /// Byte offset of the field-storage raw pointer inside `ObjStructInstance`.
 /// The JIT loads this as `ptr_ty` to reach the start of the `Value` buffer
 /// owned by the instance without going through a `RefCell`/`Vec`
@@ -354,10 +357,40 @@ mod layout_tests {
 /// per level, so a few hundred thousand levels overflow the stack. `Value`
 /// itself can't implement `Drop` without forbidding hosts from moving out of
 /// it in a `match`, so the containers do: see [`drop_values`].
-/// `repr(transparent)` keeps the layout the JIT reads identical to the `Vec`.
+///
+/// The second field marks an array made by `lock`. The JIT never reads this
+/// type's memory directly; it goes through the runtime helpers.
 #[derive(Clone, Default, PartialEq)]
-#[repr(transparent)]
-pub struct ValueVec(pub Vec<Value>);
+pub struct ValueVec(pub Vec<Value>, pub LockFlag);
+
+/// Set on a collection that `lock` made read-only. Cloning the contents (as
+/// `copy`, slicing and concatenation do) gives an unlocked copy, and the flag
+/// never affects equality.
+#[derive(Default, Debug)]
+pub struct LockFlag(bool);
+
+impl LockFlag {
+    #[inline(always)]
+    pub fn is_set(&self) -> bool {
+        self.0
+    }
+
+    pub fn set(&mut self) {
+        self.0 = true;
+    }
+}
+
+impl Clone for LockFlag {
+    fn clone(&self) -> Self {
+        LockFlag(false)
+    }
+}
+
+impl PartialEq for LockFlag {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
 
 impl ValueVec {
     /// The elements, leaving this empty.
@@ -384,13 +417,13 @@ impl std::ops::DerefMut for ValueVec {
 impl From<Vec<Value>> for ValueVec {
     #[inline(always)]
     fn from(v: Vec<Value>) -> Self {
-        ValueVec(v)
+        ValueVec(v, LockFlag::default())
     }
 }
 
 impl FromIterator<Value> for ValueVec {
     fn from_iter<I: IntoIterator<Item = Value>>(iter: I) -> Self {
-        ValueVec(iter.into_iter().collect())
+        ValueVec(iter.into_iter().collect(), LockFlag::default())
     }
 }
 
@@ -1071,6 +1104,9 @@ pub struct ObjStructInstance {
     /// to look up `globals[struct_name]` on every dispatch. Stored as an
     /// `Rc` so identity compares match the def's stable allocation.
     pub def: std::rc::Rc<ObjStructDef>,
+    /// Set by `lock`: every field write is refused. Kept last so the offsets
+    /// the JIT pins above stay put.
+    pub locked: std::cell::Cell<bool>,
 }
 
 impl ObjStructInstance {
@@ -1092,6 +1128,7 @@ impl ObjStructInstance {
             struct_name,
             layout,
             def,
+            locked: std::cell::Cell::new(false),
         }
     }
 
@@ -1317,6 +1354,31 @@ impl Value {
             None
         }
     }
+    /// Whether `lock` made this value read-only. Only arrays, maps, sets and
+    /// struct instances carry the mark; everything else is already immutable
+    /// or not lockable.
+    pub fn is_locked(&self) -> bool {
+        match self {
+            Value::Array(a) => a.borrow().1.is_set(),
+            Value::Map(m) => m.borrow().is_locked(),
+            Value::Set(s) => s.borrow().is_locked(),
+            Value::StructInstance(inst) => inst.locked.get(),
+            _ => false,
+        }
+    }
+
+    /// "a locked array", "a locked `Point`", ... when `lock` made this value
+    /// read-only; `None` when it can be changed.
+    pub fn locked_description(&self) -> Option<String> {
+        if !self.is_locked() {
+            return None;
+        }
+        Some(match self {
+            Value::StructInstance(inst) => format!("a locked `{}`", inst.struct_name),
+            other => format!("a locked {}", other.type_name().to_lowercase()),
+        })
+    }
+
     #[inline]
     pub fn as_array(&self) -> Option<&Rc<RefCell<ValueVec>>> {
         if let Value::Array(a) = self {

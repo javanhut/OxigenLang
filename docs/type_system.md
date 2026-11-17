@@ -95,9 +95,9 @@ p <Person>
 
 ## Reassignment Rules
 
-### `=` (strict assign)
+### `=` (assign)
 
-Only works on typed variables. Performs a strict type check — the value must already be the correct type.
+On a typed variable, `=` performs a strict type check — the value must already be the correct type. On an untyped variable it reassigns freely, like `:=`.
 
 ```oxi
 x <int> := 10
@@ -134,7 +134,7 @@ x := "hello"
 
 ### `++` / `--` (postfix)
 
-Works on mutable integer variables. Blocked on immutable bindings.
+Works on mutable numeric variables, and on an index or a field (`m[k]++`, `p.count++`). Blocked on immutable and locked bindings. Compound assignment (`+=`, `-=`, `*=`, `/=`) follows the same rules as `=`.
 
 ```oxi
 x <int> := 5

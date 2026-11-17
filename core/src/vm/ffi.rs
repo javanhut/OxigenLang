@@ -574,6 +574,11 @@ mod imp {
         }
 
         for wb in temps.back {
+            // A locked value is read-only: C saw the data, but what it wrote
+            // stays in the temporary copy.
+            if wb.target.is_locked() {
+                continue;
+            }
             let base = wb.buf.as_ptr() as *const u8;
             match wb.target.repr() {
                 ValueRepr::Array(a) => {

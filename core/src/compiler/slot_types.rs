@@ -1141,7 +1141,9 @@ fn collect_int_mirror_param_slots(
                         | OpCode::MethodCall
                         | OpCode::MethodCallNamed
                         | OpCode::Index
+                        | OpCode::IndexExisting
                         | OpCode::IndexAssign
+                        | OpCode::Lock
                         | OpCode::BuildArray
                         | OpCode::BuildTuple
                         | OpCode::BuildMap
@@ -1559,7 +1561,7 @@ fn transfer(
             }
             next.stack.push(SlotType::Value);
         }
-        OpCode::Index => {
+        OpCode::Index | OpCode::IndexExisting => {
             next.stack.pop();
             next.stack.pop();
             next.stack.push(SlotType::Value);
@@ -1694,6 +1696,10 @@ fn transfer(
             if matches!(op, OpCode::IterEntry) {
                 next.stack.push(SlotType::Value);
             }
+        }
+        OpCode::Lock => {
+            next.stack.pop();
+            next.stack.push(SlotType::Value);
         }
         OpCode::TypeWrap => {
             // TypeWrap to INTEGER is identity, so preserve Int64 and keep typed-int locals virtualizable.

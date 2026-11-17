@@ -15,26 +15,30 @@ pub enum TokenType {
     Char,
 
     //Operators
-    Assign,     // =
-    Walrus,     // :=
-    Plus,       // +
-    Minus,      // -
-    Asterisk,   // *
-    Ampersand,  // &
-    At,         // @
-    Mod,        // %
-    Eq,         // ==
-    NotEq,      // !=
-    Shebang,    // !
-    DollarSign, // $
-    Hash,       // #
-    Increment,  // ++
-    Decrement,  // --
-    Gt,         // >
-    Lt,         // <
-    Gte,        // >=
-    Lte,        // <=
-    Arrow,      // ->
+    Assign,         // =
+    Walrus,         // :=
+    Plus,           // +
+    Minus,          // -
+    Asterisk,       // *
+    Ampersand,      // &
+    At,             // @
+    Mod,            // %
+    Eq,             // ==
+    NotEq,          // !=
+    Shebang,        // !
+    DollarSign,     // $
+    Hash,           // #
+    Increment,      // ++
+    Decrement,      // --
+    PlusAssign,     // +=
+    MinusAssign,    // -=
+    AsteriskAssign, // *=
+    SlashAssign,    // /=
+    Gt,             // >
+    Lt,             // <
+    Gte,            // >=
+    Lte,            // <=
+    Arrow,          // ->
     // Delimiters
     Comma,    // ,
     Colon,    // :

@@ -120,6 +120,12 @@ pub enum OpCode {
     Index,
     /// Assign to index. Stack: [collection, index, value] -> [].
     IndexAssign,
+    /// `Index` for a read that is written back (`m[k]++`): a missing map
+    /// key is an error instead of `None`. Stack: [collection, index] -> [value].
+    IndexExisting,
+    /// `lock`: replace the value with a deep, read-only copy (see
+    /// `VM::lock_value`). Stack: [value] -> [locked].
+    Lock,
     /// Slice collection. Operand: u8 flags (bit0=has_start, bit1=has_end).
     Slice,
 
@@ -387,6 +393,8 @@ impl OpCode {
             | OpCode::CloseUpvalue
             | OpCode::Return
             | OpCode::Index
+            | OpCode::IndexExisting
+            | OpCode::Lock
             | OpCode::IndexAssign
             | OpCode::IterLen
             | OpCode::IterGet
@@ -491,13 +499,13 @@ impl OpCode {
             },
             Add | Subtract | Multiply | Divide | Modulo | Equal | NotEqual | Greater
             | GreaterEqual | Less | LessEqual | BitAnd | BitOr | BitXor | ShiftLeft
-            | ShiftRight | Index | IterGet | RangeLimit => StackEffect::Fixed {
+            | ShiftRight | Index | IndexExisting | IterGet | RangeLimit => StackEffect::Fixed {
                 pops: 2,
                 pushes: 1,
                 peeks: 0,
             },
             Not | BitNot | Negate | TypeWrap | IsType | GetField | GetModuleField
-            | ValueConstruct => StackEffect::Fixed {
+            | ValueConstruct | Lock => StackEffect::Fixed {
                 pops: 1,
                 pushes: 1,
                 peeks: 0,
@@ -624,6 +632,8 @@ impl OpCode {
                 | BuildSet
                 | StringInterp
                 | Index
+                | IndexExisting
+                | Lock
                 | IndexAssign
                 | Slice
                 | GetField
@@ -674,6 +684,7 @@ impl OpCode {
                 | MethodCall
                 | MethodCallNamed
                 | Index
+                | IndexExisting
                 | IndexAssign
                 | Slice
                 | GetField
@@ -707,6 +718,8 @@ impl OpCode {
                 | Dup
                 | BuildArray
                 | Index
+                | IndexExisting
+                | Lock
                 | IndexAssign
                 | IterLen
                 | IterGet

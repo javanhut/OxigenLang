@@ -469,3 +469,27 @@ fn test_well_terminated_strings_still_lex() {
         "a well-formed interpolated string must not emit Illegal"
     );
 }
+
+#[test]
+fn test_compound_assignment_tokens() {
+    let tokens = collect_tokens("a += 1 b -= 2 c *= 3 d /= 4 e ++ f -- g + h / i");
+    let ops: Vec<(TokenType, &str)> = tokens
+        .iter()
+        .filter(|t| t.token_type != TokenType::Ident && t.token_type != TokenType::Integer)
+        .map(|t| (t.token_type.clone(), t.literal.as_str()))
+        .collect();
+    assert_eq!(
+        ops,
+        vec![
+            (TokenType::PlusAssign, "+="),
+            (TokenType::MinusAssign, "-="),
+            (TokenType::AsteriskAssign, "*="),
+            (TokenType::SlashAssign, "/="),
+            (TokenType::Increment, "++"),
+            (TokenType::Decrement, "--"),
+            (TokenType::Plus, "+"),
+            (TokenType::FSlash, "/"),
+            (TokenType::Eof, ""),
+        ]
+    );
+}

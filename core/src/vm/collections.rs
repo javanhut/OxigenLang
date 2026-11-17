@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::value::Value;
+use super::value::{LockFlag, Value};
 
 /// Hashable projection of a `Value` usable as a map/set key.
 ///
@@ -75,11 +75,21 @@ impl Value {
 pub struct OxMap {
     entries: Vec<(Value, Value)>,
     index: HashMap<HashKey, usize>,
+    locked: LockFlag,
 }
 
 impl OxMap {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether `lock` made this map read-only.
+    pub fn is_locked(&self) -> bool {
+        self.locked.is_set()
+    }
+
+    pub fn lock(&mut self) {
+        self.locked.set();
     }
 
     /// Move every key and value into `out`, leaving the map empty.
@@ -192,6 +202,7 @@ impl PartialEq for OxMap {
 pub struct OxSet {
     items: Vec<Value>,
     index: HashMap<HashKey, usize>,
+    locked: LockFlag,
 }
 
 impl Drop for OxMap {
@@ -212,6 +223,15 @@ impl Drop for OxMap {
 impl OxSet {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether `lock` made this set read-only.
+    pub fn is_locked(&self) -> bool {
+        self.locked.is_set()
+    }
+
+    pub fn lock(&mut self) {
+        self.locked.set();
     }
 
     /// Move every element into `out`, leaving the set empty.

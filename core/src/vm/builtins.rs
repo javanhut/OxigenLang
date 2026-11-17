@@ -407,9 +407,22 @@ fn builtin_len(args: &[Value]) -> Value {
     }
 }
 
+/// The error an in-place builtin returns for a collection `lock` made read-only.
+fn locked_error(target: &Value, func: &str) -> Option<Value> {
+    target.locked_description().map(|what| {
+        Value::Error(rc_str(format!(
+            "{func}() cannot change {what}: `lock` makes a value permanently read-only; \
+             use copy(...) for a changeable copy"
+        )))
+    })
+}
+
 fn builtin_push(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("push() takes exactly 2 arguments"));
+    }
+    if let Some(e) = locked_error(&args[0], "push") {
+        return e;
     }
     match args[0].repr() {
         ValueRepr::Array(arr) => {
@@ -465,6 +478,9 @@ fn builtin_pop(args: &[Value]) -> Value {
     let Some(target) = args.first() else {
         return Value::Error(rc_str("pop() takes 1 or 2 arguments"));
     };
+    if let Some(e) = locked_error(target, "pop") {
+        return e;
+    }
     match (target.repr(), args.len()) {
         (ValueRepr::Array(arr), 1 | 2) => {
             let len = arr.borrow().len();
@@ -508,6 +524,9 @@ fn builtin_clear(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("clear() takes exactly 1 argument"));
     }
+    if let Some(e) = locked_error(&args[0], "clear") {
+        return e;
+    }
     // Take the contents out first so they drop after the borrow ends.
     match args[0].repr() {
         ValueRepr::Array(arr) => drop(std::mem::take(&mut *arr.borrow_mut())),
@@ -547,6 +566,9 @@ fn builtin_copy(args: &[Value]) -> Value {
 fn builtin_extend(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("extend() takes exactly 2 arguments"));
+    }
+    if let Some(e) = locked_error(&args[0], "extend") {
+        return e;
     }
     match args[0].repr() {
         ValueRepr::Array(arr) => {
@@ -832,6 +854,9 @@ fn builtin_insert(args: &[Value]) -> Value {
     let Some(target) = args.first() else {
         return Value::Error(rc_str("insert() takes 2 or 3 arguments"));
     };
+    if let Some(e) = locked_error(target, "insert") {
+        return e;
+    }
     match (target.repr(), args.len()) {
         (ValueRepr::Map(m), 3) => {
             if let Some(e) = non_hashable_key_error(&args[1], "map key") {
@@ -887,6 +912,9 @@ fn non_hashable_key_error(v: &Value, what: &str) -> Option<Value> {
 fn builtin_remove(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str("remove() takes exactly 2 arguments"));
+    }
+    if let Some(e) = locked_error(&args[0], "remove") {
+        return e;
     }
     match args[0].repr() {
         ValueRepr::Map(m) => {

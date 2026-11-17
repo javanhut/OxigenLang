@@ -398,6 +398,8 @@ pub struct VM {
     // Global variable metadata for is_mut/is_type_mut
     global_mutability: HashMap<String, bool>,
     global_type_constraints: HashMap<String, Option<String>>,
+    /// Globals declared with `lock`: never reassigned or re-declared.
+    locked_globals: std::collections::HashSet<String>,
 
     /// Active error handlers (innermost last). `PushHandler`/`PopHandler` manage
     /// this; on a runtime error the interpreter loop unwinds to the top handler
@@ -504,6 +506,7 @@ impl VM {
             script_args: Vec::new(),
             global_mutability: HashMap::new(),
             global_type_constraints: HashMap::new(),
+            locked_globals: std::collections::HashSet::new(),
             error_handlers: Vec::new(),
             jit: JitEngine::new(),
             execution_mode: mode,
@@ -983,10 +986,11 @@ impl VM {
                 "use `:=` to declare new variables, or `=` to reassign an existing typed variable",
             ));
         }
+        self.reject_locked_global(&name, "change")?;
         if let Some(false) = self.global_mutability.get(name.as_ref()) {
             return Err(self.runtime_error_hint(
-                &format!("cannot reassign immutable variable '{}'", name),
-                "use `:=` to override an immutable binding",
+                &format!("cannot assign to immutable variable `{}`", name),
+                "`=` binds immutably; declare it with `:=` to allow reassignment",
             ));
         }
         // A mutable typed variable keeps its type across reassignment.
@@ -1009,8 +1013,21 @@ impl VM {
         Ok(())
     }
 
+    /// A locked global can never be reassigned or declared again.
+    fn reject_locked_global(&self, name: &str, verb: &str) -> Result<(), VMError> {
+        if self.locked_globals.contains(name) {
+            return Err(self.runtime_error_hint(
+                &format!("cannot {verb} locked variable `{name}`"),
+                "`lock` makes a variable permanently read-only: it can't be reassigned or \
+                 overridden with `:=`; use a new name",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn handle_define_global(&mut self, name_idx: u16) -> Result<(), VMError> {
         let name = self.name_constant(name_idx)?;
+        self.reject_locked_global(&name, "declare")?;
         // A bare walrus keeps an existing type lock; explicit `x <T> := ...` retyping goes elsewhere.
         let constraint = self
             .global_type_constraints
@@ -1034,17 +1051,23 @@ impl VM {
         Ok(())
     }
 
+    /// `mode` is the `DefineGlobalTyped` operand: 0 for `x <T> = v`
+    /// (immutable), 1 for `x <T> := v` / `x <T>` (mutable), 2 for `lock`.
     pub(crate) fn handle_define_global_typed(
         &mut self,
         name_idx: u16,
-        mutable: bool,
+        mode: u8,
         type_idx: u16,
     ) -> Result<(), VMError> {
         let name = self.name_constant(name_idx)?;
+        self.reject_locked_global(&name, "declare")?;
         let type_name = self.current_constant(type_idx);
         let val = self.pop();
         self.globals.insert(name.to_string(), val);
-        self.global_mutability.insert(name.to_string(), mutable);
+        self.global_mutability.insert(name.to_string(), mode == 1);
+        if mode == 2 {
+            self.locked_globals.insert(name.to_string());
+        }
         if let Some(tn) = type_name.as_string() {
             self.global_type_constraints
                 .insert(name.to_string(), Some(tn.to_string()));
@@ -1669,6 +1692,9 @@ impl VM {
             )),
             ValueRepr::StructInstance(inst) => {
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
+                    if inst.locked.get() {
+                        return Err(self.locked_value_error(&object));
+                    }
                     if inst.layout.slots[idx].2 && !self.hidden_field_access_allowed(inst) {
                         return Err(self.hidden_field_error(fname, &inst.struct_name));
                     }
@@ -1688,6 +1714,9 @@ impl VM {
                 }
             }
             ValueRepr::Map(entries) => {
+                if entries.borrow().is_locked() {
+                    return Err(self.locked_value_error(&object));
+                }
                 let key = Value::String(Rc::clone(fname));
                 entries.borrow_mut().insert(key, value);
                 Ok(())
@@ -2870,9 +2899,9 @@ impl VM {
                 }
                 OpCode::DefineGlobalTyped => {
                     let name_idx = self.frames[frame_idx].read_u16();
-                    let mutable = self.frames[frame_idx].read_byte() == 1;
+                    let mode = self.frames[frame_idx].read_byte();
                     let type_idx = self.frames[frame_idx].read_u16();
-                    self.handle_define_global_typed(name_idx, mutable, type_idx)?;
+                    self.handle_define_global_typed(name_idx, mode, type_idx)?;
                 }
 
                 // ── Upvalues ────────────────────────────────────────
@@ -3029,6 +3058,19 @@ impl VM {
                     let index = self.pop();
                     let collection = self.pop();
                     let result = self.eval_index(collection, index)?;
+                    self.push(result);
+                }
+
+                OpCode::Lock => {
+                    let value = self.pop();
+                    let locked = self.lock_value(&value);
+                    self.push(locked);
+                }
+
+                OpCode::IndexExisting => {
+                    let index = self.pop();
+                    let collection = self.pop();
+                    let result = self.eval_index_existing(collection, index)?;
                     self.push(result);
                 }
 
@@ -5160,12 +5202,61 @@ impl VM {
         }
     }
 
+    /// The error for writing into a value `lock` made read-only.
+    pub(crate) fn locked_value_error(&self, value: &Value) -> VMError {
+        let what = value
+            .locked_description()
+            .unwrap_or_else(|| "a locked value".to_string());
+        let hint = if matches!(value, Value::StructInstance(_)) {
+            "`lock` makes a value permanently read-only; build a new one instead"
+        } else {
+            "`lock` makes a value permanently read-only; use `copy(...)` for a changeable copy"
+        };
+        self.runtime_error_hint(&format!("cannot change {what}"), hint)
+    }
+
+    /// Deep, locked copy of `value` for `lock`: arrays, maps, sets and struct
+    /// instances inside it are copied and marked read-only, so no other name
+    /// for the original can change the locked one. Already-locked values are
+    /// shared as they are. Shared and cyclic structure is preserved.
+    pub(crate) fn lock_value(&self, value: &Value) -> Value {
+        let mut seen: HashMap<usize, Value> = HashMap::new();
+        lock_rec(value, &mut seen)
+    }
+
+    /// `eval_index` for a read that will be written back (`m[k]++`): a missing
+    /// map key is an error, since there is no value to update.
+    pub(crate) fn eval_index_existing(
+        &self,
+        collection: Value,
+        index: Value,
+    ) -> Result<Value, VMError> {
+        let (collection, index) = (self.force(collection), self.force(index));
+        if let Value::Map(m) = &collection {
+            if let Some(value) = m.borrow().get(&index) {
+                return Ok(value.clone());
+            }
+            let key = match &index {
+                Value::String(s) => format!("\"{s}\""),
+                other => other.to_string(),
+            };
+            return Err(self.runtime_error_hint(
+                &format!("key {key} not found in map"),
+                &format!("assign it first, e.g. `map[{key}] = 0`, or check with `has(map, {key})`"),
+            ));
+        }
+        self.eval_index(collection, index)
+    }
+
     pub(crate) fn eval_index_assign(
         &self,
         collection: Value,
         index: Value,
         value: Value,
     ) -> Result<(), VMError> {
+        if collection.is_locked() {
+            return Err(self.locked_value_error(&collection));
+        }
         match (&collection, &index) {
             (Value::Array(arr), Value::Integer(i)) => {
                 let mut borrowed = arr.borrow_mut();
@@ -5762,6 +5853,111 @@ impl VM {
                 }
             }
         }
+    }
+}
+
+/// Worker for [`VM::lock_value`]. `seen` maps an original container's address
+/// to its locked copy, so a value reachable twice is copied once and a cycle
+/// ends at the copy already being built.
+fn lock_rec(value: &Value, seen: &mut HashMap<usize, Value>) -> Value {
+    if value.is_locked() {
+        return value.clone();
+    }
+    match value {
+        Value::Array(arr) => {
+            let key = Rc::as_ptr(arr) as *const () as usize;
+            if let Some(done) = seen.get(&key) {
+                return done.clone();
+            }
+            let copy = Rc::new(RefCell::new(ValueVec::default()));
+            seen.insert(key, Value::Array(Rc::clone(&copy)));
+            let items: Vec<Value> = arr.borrow().iter().map(|v| lock_rec(v, seen)).collect();
+            let mut locked = copy.borrow_mut();
+            locked.0 = items;
+            locked.1.set();
+            drop(locked);
+            Value::Array(copy)
+        }
+        Value::Map(m) => {
+            let key = Rc::as_ptr(m) as *const () as usize;
+            if let Some(done) = seen.get(&key) {
+                return done.clone();
+            }
+            let copy = Rc::new(RefCell::new(crate::vm::collections::OxMap::new()));
+            seen.insert(key, Value::Map(Rc::clone(&copy)));
+            // Keys are hashable, which already makes them immutable.
+            let entries: Vec<(Value, Value)> = m
+                .borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), lock_rec(v, seen)))
+                .collect();
+            let mut locked = copy.borrow_mut();
+            for (k, v) in entries {
+                locked.insert(k, v);
+            }
+            locked.lock();
+            drop(locked);
+            Value::Map(copy)
+        }
+        Value::Set(s) => {
+            // Elements are hashable, so only the set itself needs copying.
+            let mut copy = s.borrow().clone();
+            copy.lock();
+            Value::Set(Rc::new(RefCell::new(copy)))
+        }
+        Value::Tuple(t) => {
+            let key = Rc::as_ptr(t) as *const () as usize;
+            if let Some(done) = seen.get(&key) {
+                return done.clone();
+            }
+            let items: ValueVec = t.iter().map(|v| lock_rec(v, seen)).collect();
+            let locked = Value::Tuple(Rc::new(items));
+            seen.insert(key, locked.clone());
+            locked
+        }
+        Value::StructInstance(inst) => {
+            let key = Rc::as_ptr(inst) as *const () as usize;
+            if let Some(done) = seen.get(&key) {
+                return done.clone();
+            }
+            // Record the copy before filling it, so a field that leads back
+            // here finds it instead of recursing forever.
+            let copy = Rc::new(ObjStructInstance::new(
+                inst.struct_name.clone(),
+                vec![Value::None; inst.field_slice().len()],
+                Rc::clone(&inst.layout),
+                Rc::clone(&inst.def),
+            ));
+            seen.insert(key, Value::StructInstance(Rc::clone(&copy)));
+            let fields: Vec<Value> = inst.field_slice().to_vec();
+            for (idx, field) in fields.iter().enumerate() {
+                copy.set_field(idx, lock_rec(field, seen));
+            }
+            copy.locked.set(true);
+            Value::StructInstance(copy)
+        }
+        Value::EnumInstance(e) => {
+            let payload = match &e.payload {
+                VmEnumPayload::Unit(v) => {
+                    VmEnumPayload::Unit(v.as_ref().map(|v| lock_rec(v, seen)))
+                }
+                VmEnumPayload::Tuple(vs) => {
+                    VmEnumPayload::Tuple(vs.iter().map(|v| lock_rec(v, seen)).collect())
+                }
+                VmEnumPayload::Struct(fs) => VmEnumPayload::Struct(
+                    fs.iter()
+                        .map(|(n, v)| (n.clone(), lock_rec(v, seen)))
+                        .collect(),
+                ),
+            };
+            Value::EnumInstance(Rc::new(ObjEnumInstance {
+                enum_name: e.enum_name.clone(),
+                variant_name: e.variant_name.clone(),
+                payload,
+            }))
+        }
+        Value::Wrapped(inner) => Value::Wrapped(Rc::new(lock_rec(inner, seen))),
+        other => other.clone(),
     }
 }
 

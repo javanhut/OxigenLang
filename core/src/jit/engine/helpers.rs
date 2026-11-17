@@ -37,6 +37,8 @@ pub(super) struct HelperIds {
     pub iter_get: FuncId,                  // (vm) -> u32
     pub iter_entry: FuncId,                // (vm) -> u32
     pub index_assign: FuncId,              // (vm) -> u32
+    pub index_existing: FuncId,            // (vm) -> u32
+    pub lock: FuncId,                      // (vm) -> u32
     pub type_wrap: FuncId,                 // (vm, u32) -> u32
     pub range_limit: FuncId,               // (vm, u32) -> u32
     pub check_return: FuncId,              // (vm, u32) -> u32
@@ -148,6 +150,8 @@ pub(super) struct HelperRefs {
     pub iter_get: FuncRef,
     pub iter_entry: FuncRef,
     pub index_assign: FuncRef,
+    pub index_existing: FuncRef,
+    pub lock: FuncRef,
     pub type_wrap: FuncRef,
     pub range_limit: FuncRef,
     pub check_return: FuncRef,
@@ -253,6 +257,8 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_op_iter_get", runtime::jit_op_iter_get);
     reg!("jit_op_iter_entry", runtime::jit_op_iter_entry);
     reg!("jit_op_index_assign", runtime::jit_op_index_assign);
+    reg!("jit_op_index_existing", runtime::jit_op_index_existing);
+    reg!("jit_op_lock", runtime::jit_op_lock);
     reg!("jit_type_wrap", runtime::jit_type_wrap);
     reg!("jit_range_limit", runtime::jit_range_limit);
     reg!("jit_check_return", runtime::jit_check_return);
@@ -519,6 +525,8 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         iter_get: decl(module, "jit_op_iter_get", &sig_vm_to_u32),
         iter_entry: decl(module, "jit_op_iter_entry", &sig_vm_to_u32),
         index_assign: decl(module, "jit_op_index_assign", &sig_vm_to_u32),
+        index_existing: decl(module, "jit_op_index_existing", &sig_vm_to_u32),
+        lock: decl(module, "jit_op_lock", &sig_vm_to_u32),
         type_wrap: decl(module, "jit_type_wrap", sig_vm_u32_fallible),
         range_limit: decl(module, "jit_range_limit", sig_vm_u32_fallible),
         check_return: decl(module, "jit_check_return", sig_vm_u32_fallible),
@@ -615,6 +623,8 @@ pub(super) fn declare_helper_refs(
         iter_get: r(ids.iter_get),
         iter_entry: r(ids.iter_entry),
         index_assign: r(ids.index_assign),
+        index_existing: r(ids.index_existing),
+        lock: r(ids.lock),
         type_wrap: r(ids.type_wrap),
         range_limit: r(ids.range_limit),
         check_return: r(ids.check_return),
