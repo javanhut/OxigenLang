@@ -1,31 +1,9 @@
-//! Builtins that a script — or the client of a script's server — could
-//! crash, hang, or turn against the host.
-//!
-//! - `__json_parse` recursed once per nesting level with no limit, so a
-//!   request body of a few million `[` overflowed the stack of an `api`
-//!   worker and killed the whole server. `__json_stringify` recursed the same
-//!   way and never terminated on a cyclic array.
-//! - The JSON parser also dropped surrogate pairs (`"😀"` parsed to
-//!   `""`), accepted `"\u+041"`, `01`, `1.` and unknown escapes, failed on
-//!   integers past i64 instead of reading them as floats, and `stringify`
-//!   wrote `{1:2}`, which is not JSON.
-//! - `__sort` compared values of different types as equal. That is not a
-//!   total order, Rust's sort panics when it notices, and ints mixed with
-//!   floats came back unsorted.
-//! - `__dt_format` with a bad format and `__env_set` with a key containing
-//!   `=` panicked inside std.
-//! - `range(i64::MAX)` tried to allocate the whole range, `__time_sleep(-1)`
-//!   slept forever, and `__walk_dir` followed symlinked directories, so two
-//!   `-> .` links made it explode exponentially.
-//! - `__rand_int(min, max)` is documented as inclusive but never returned
-//!   `max` (so `random.rand_bool()` was always False), and overflowed on a
-//!   wide range.
-//! - A VM restricted to `Network` could still read and write any file through
-//!   `__net_download`/`__net_upload`, which take a local path.
-//! - Network handles were small sequential integers in one process-wide
-//!   table, so any VM in the process could guess another's sockets.
-//! - `__net_http_read_line` buffered without bound while a server sent a
-//!   line with no newline.
+//! Tests that builtins stay well-behaved on hostile input: deeply nested or
+//! cyclic JSON, malformed JSON, mixed-type sorts, bad `__dt_format` and
+//! `__env_set` arguments, huge `range` and negative sleep, symlink loops in
+//! `__walk_dir`, `__rand_int` bounds, network-capability restrictions on
+//! `__net_download`/`__net_upload`, network handle isolation, and unbounded
+//! `__net_http_read_line`.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -82,8 +60,7 @@ fn assert_fails_with(source: &str, needle: &str) {
     }
 }
 
-/// Runs `f` on a thread and fails the test if it has not finished in time,
-/// so a hang reports instead of wedging the suite.
+/// Runs `f` on a thread and fails the test if it has not finished in time.
 fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> T {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -98,8 +75,6 @@ fn json_literal(s: &str) -> String {
         .replace('"', "\\\"")
         .replace('{', "\\{")
 }
-
-// ── JSON ────────────────────────────────────────────────────────────────────
 
 #[test]
 fn json_parse_refuses_deep_nesting_instead_of_overflowing_the_stack() {
@@ -127,12 +102,10 @@ fn json_stringify_reports_a_cycle_instead_of_recursing_forever() {
 
 #[test]
 fn json_stringify_refuses_nesting_it_could_not_parse_back() {
-    // Built in a loop, not a literal: deep but acyclic.
     assert_fails_with(
         "x := [1]\neach i in range(1000) { x = [x] }\n__json_stringify(x)",
         "nest",
     );
-    // A shared, acyclic sub-array is not a cycle.
     assert_yields("s := [1]\n__json_stringify([s, s])", "[[1],[1]]");
 }
 
@@ -177,12 +150,9 @@ fn json_stringify_writes_non_string_keys_as_strings() {
 
 #[test]
 fn json_stringify_escapes_a_quote_char() {
-    // A Char holding `"` used to be written bare, breaking the document.
     assert_yields("__json_stringify([chr(34)])", "[\"\\\"\"]");
     assert_yields("__json_parse(__json_stringify([chr(34)]))[0]", "\"");
 }
-
-// ── sort ────────────────────────────────────────────────────────────────────
 
 #[test]
 fn sort_orders_ints_and_floats_numerically() {
@@ -199,8 +169,6 @@ fn sort_of_mixed_types_does_not_panic_and_groups_by_type() {
         "__sort([\"b\", 3, None, \"a\", 1.5, True, False])",
         "[None, False, True, 1.5, 3, a, b]",
     );
-    // Large enough that Rust's sort checks its comparator for a total order,
-    // which panicked on the old one.
     let mut items = Vec::new();
     let mut seed: u64 = 3;
     for _ in 0..400 {
@@ -221,8 +189,6 @@ fn sort_of_mixed_types_does_not_panic_and_groups_by_type() {
     );
     assert_yields(&src, "True");
 }
-
-// ── datetime / env / time / range ───────────────────────────────────────────
 
 #[test]
 fn dt_format_with_a_bad_format_is_an_error_not_a_panic() {
@@ -260,13 +226,10 @@ fn walk_dir_does_not_descend_into_symlinked_directories() {
     std::os::unix::fs::symlink(".", dir.join("a")).unwrap();
     std::os::unix::fs::symlink(".", dir.join("b")).unwrap();
     let src = format!("len(__walk_dir(\"{}\"))", dir.display());
-    // sub, sub/f.txt, a, b — the links are listed but not followed.
     let got = within(20, move || run_all(&src));
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(got, Ok("4".to_string()));
 }
-
-// ── random ──────────────────────────────────────────────────────────────────
 
 #[test]
 fn rand_int_includes_its_upper_bound() {
@@ -287,8 +250,6 @@ fn rand_int_over_the_full_i64_range_does_not_overflow() {
         "True",
     );
 }
-
-// ── capabilities ────────────────────────────────────────────────────────────
 
 fn run_restricted(source: &str, allowed: &[Capability]) -> Result<String, String> {
     let mut vm = VM::new();
@@ -312,7 +273,6 @@ fn net_download_and_upload_need_the_filesystem_capability_too() {
         );
         let got = run_restricted(src, &[Capability::FileSystem]).unwrap_err();
         assert!(got.contains("needs the 'network' capability"), "got: {got}");
-        // With both, the call is attempted (and fails to connect).
         let got = run_restricted(src, &[Capability::Network, Capability::FileSystem]);
         assert!(
             !format!("{got:?}").contains("capability"),
@@ -332,8 +292,6 @@ fn network_handles_are_not_sequential() {
     );
     assert_eq!(got, Ok("0".to_string()));
 }
-
-// ── streaming HTTP ──────────────────────────────────────────────────────────
 
 /// Serves one HTTP response whose body is `body`, then closes.
 fn one_shot_server(body: Vec<u8>) -> u16 {

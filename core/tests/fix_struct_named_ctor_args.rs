@@ -1,10 +1,5 @@
-//! Regression: struct constructors must bind NAMED (field=value) arguments,
-//! not silently discard them.
-//!
-//! Before the fix, `S(x="hello")` accepted the syntax but dropped the value —
-//! the field kept its zero value with no error. Positional args bound fine and
-//! named args worked for ordinary function calls; only struct constructors
-//! ignored them. The bar is VM(interp) == VM(JIT) == expected.
+//! Struct constructors bind named (field=value) arguments. The expectation is
+//! VM(interp) == VM(JIT) == expected.
 
 #![cfg(feature = "jit")]
 
@@ -45,7 +40,6 @@ fn assert_parity(source: &str, expected: &str) {
 
 #[test]
 fn named_ctor_arg_binds_value() {
-    // The minimal repro: a single named argument must reach the field.
     let src = r#"
 struct S { x <str> }
 s := S(x="hello")
@@ -56,7 +50,6 @@ s.x
 
 #[test]
 fn all_named_ctor_args_bind() {
-    // Every field supplied by name, in declaration order.
     let src = r#"
 struct ChatMessage { model <str>  messages <array> }
 m := ChatMessage(model="gemma4:latest", messages=[])
@@ -67,7 +60,6 @@ m.model
 
 #[test]
 fn named_ctor_args_bind_out_of_order() {
-    // Named args bind by name regardless of the order they appear in the call.
     let src = r#"
 struct ChatMessage { model <str>  messages <array> }
 m := ChatMessage(messages=[], model="gemma4:latest")
@@ -78,7 +70,6 @@ m.model
 
 #[test]
 fn mixed_positional_then_named_ctor_args() {
-    // Positional args fill leading fields; a named arg fills the rest.
     let src = r#"
 struct ChatMessage { model <str>  messages <array> }
 m := ChatMessage("gemma4:latest", messages=[])

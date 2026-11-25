@@ -1,5 +1,3 @@
-// Errors as values
-// Errors propagate by default; <Error>, <guard> and the result module make failure explicit.
 introduce result
 
 fun parse_port(text <str>) {
@@ -28,9 +26,7 @@ fun describe(raw <str>) {
 main {
     println(describe("3000"))
     println(describe(""))
-    // result.unwrap_or turns an error value into a default.
     println("port:", result.unwrap_or(parse_port(""), 8080))
-    // <guard> recovers from a runtime error, such as an index out of range.
     items := [1, 2, 3]
     println("items[10] guarded:", items[10] <guard>(-1))
 }

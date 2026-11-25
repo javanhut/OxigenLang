@@ -1,6 +1,6 @@
 # OxigenLang Operators
 
-OxigenLang provides arithmetic, comparison, logical, and postfix operators for building expressions.
+OxigenLang provides arithmetic, comparison, logical, and postfix operators for building expressions, plus compound assignment (`+=`, `-=`, `*=`, `/=`) for updating a value in place.
 
 ## Operator Precedence
 
@@ -398,27 +398,55 @@ Works on integers and floats.
 
 ### `++` (Increment)
 
-Increments an integer variable by 1 and returns the **new** value:
+Adds 1 to a number and returns the **old** value:
 
 ```oxi
 x := 5
-x++
+y := x++
 ```
+
+`y` is `5` and `x` is `6`.
 
 ### `--` (Decrement)
 
-Decrements an integer variable by 1 and returns the **new** value:
+Subtracts 1 from a number and returns the **old** value:
 
 ```oxi
 x := 10
 x--
 ```
 
+### Targets
+
+`++` and `--` work on a variable, an index, or a field:
+
+```oxi
+counts <map>
+counts["a"] = 1
+counts["a"]++
+
+grid := [[1, 2], [3, 4]]
+grid[1][0]--
+
+struct Counter {
+    n <int>
+}
+Counter includes {
+    fun inc() { n++ }
+}
+c := Counter { n: 0 }
+c.n++
+```
+
+Inside a method, a bare field name (`n++`) means `self.n++`, as it does for reads and `=`.
+
+The collection and the index are evaluated once, so `m[next_key()]++` calls `next_key()` a single time.
+
 ### Restrictions
 
-Postfix operators only work on:
-- **Integer variables** — applying `++`/`--` to non-integers produces an error.
+- **Numbers only** — applying `++`/`--` to a non-number produces a type mismatch error.
 - **Mutable bindings** — blocked on variables declared with `<type> =` (strict typed immutable).
+- **The key must exist** — a map has no default value, so `++`/`--` on a missing key is an error. Assign the key first:
 
 ```oxi
 x <int> := 5
@@ -426,7 +454,55 @@ x++
 
 y <int> = 5
 y++
+
+m <map>
+m["new"]++
 ```
+
+The last line fails with `key "new" not found in map`. Use `m["new"] = 1`, or check with `has(m, "new")` first. Reading a missing key with `m["new"]` still returns `None`.
+
+## Compound Assignment
+
+| Operator | Meaning       | Example  | Same as      |
+|----------|---------------|----------|--------------|
+| `+=`     | Add to        | `x += 2` | `x = x + 2`  |
+| `-=`     | Subtract from | `x -= 2` | `x = x - 2`  |
+| `*=`     | Multiply by   | `x *= 2` | `x = x * 2`  |
+| `/=`     | Divide by     | `x /= 2` | `x = x / 2`  |
+
+```oxi
+total := 10
+total += 5
+total *= 2
+total -= 4
+total /= 2
+
+name := "Oxi"
+name += "gen"
+```
+
+`total` ends as `13`. The operator behaves exactly like its arithmetic form, so `+=` also joins strings, and `/=` on two integers truncates (`7 / 2` is `3`).
+
+Compound assignment is a statement, not an expression: it has no value, so `y := (x += 1)` is not valid. It can take a postfix guard: `x += 1 when ready`.
+
+### Targets
+
+Like `++`/`--`, the target can be a variable, an index, or a field:
+
+```oxi
+scores <map>
+scores[(1, 2)] = 10
+scores[(1, 2)] -= 4
+
+items := [1, 2, 3]
+items[2] *= 5
+
+player.health -= damage
+```
+
+- On a variable, `x += e` follows the same rules as `x = x + e`: it is blocked on `<type> =` bindings, keeps a typed variable's type, and works on a captured variable inside a closure or a bare field name inside a method.
+- On an index or field, the collection and index are evaluated once, and the right-hand side is evaluated after the current value is read.
+- A missing map key is an error, as with `++`: `m["new"] += 1` fails with `key "new" not found in map`.
 
 ## Indexing and Dot Access
 

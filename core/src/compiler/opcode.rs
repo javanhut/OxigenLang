@@ -5,7 +5,6 @@
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpCode {
-    // --- Constants & Literals ---
     /// Push constant from pool. Operand: u16 constant index.
     Constant,
     /// Push None.
@@ -15,20 +14,17 @@ pub enum OpCode {
     /// Push False.
     False,
 
-    // --- Stack Manipulation ---
     /// Discard top of stack.
     Pop,
     /// Duplicate top of stack.
     Dup,
 
-    // --- Arithmetic ---
     Add,
     Subtract,
     Multiply,
     Divide,
     Modulo,
 
-    // --- Comparison ---
     Equal,
     NotEqual,
     Greater,
@@ -36,10 +32,8 @@ pub enum OpCode {
     Less,
     LessEqual,
 
-    // --- Logical ---
     Not,
 
-    // --- Bitwise ---
     BitAnd,
     BitOr,
     BitXor,
@@ -47,17 +41,14 @@ pub enum OpCode {
     ShiftLeft,
     ShiftRight,
 
-    // --- Unary ---
     /// Unary minus.
     Negate,
 
-    // --- Postfix ---
     /// Increment local. Operand: u16 stack slot.
     Increment,
     /// Decrement local. Operand: u16 stack slot.
     Decrement,
 
-    // --- Variables ---
     /// Get local variable. Operand: u16 stack slot.
     GetLocal,
     /// Set local variable. Operand: u16 stack slot.
@@ -75,17 +66,10 @@ pub enum OpCode {
     /// Close the topmost open upvalue.
     CloseUpvalue,
     /// Close any open upvalue captured at a specific stack slot, snapshotting
-    /// its live value from that slot. Unlike `CloseUpvalue`, this does NOT
-    /// require the captured value on top of the stack and does NOT pop — it
-    /// operates on the buried slot in place. Operand: u16 stack slot.
-    ///
-    /// Used by block-as-expression cleanup when the block's FLOOR local is
-    /// itself captured by a surviving closure: the block's result sits ABOVE
-    /// the floor local, so the floor's upvalue must be closed (snapshotted)
-    /// before the result is stashed into that slot.
+    /// its live value from that slot. Unlike `CloseUpvalue`, it does not require the
+    /// captured value on top of the stack and does not pop. Operand: u16 stack slot.
     CloseUpvalueAt,
 
-    // --- Control Flow ---
     /// Unconditional forward jump. Operand: u16 offset.
     Jump,
     /// Jump if top of stack is falsy (does NOT pop). Operand: u16 offset.
@@ -95,7 +79,6 @@ pub enum OpCode {
     /// Backward jump (for loops). Operand: u16 offset.
     Loop,
 
-    // --- Functions ---
     /// Create closure from function constant. Operand: u16 constant index.
     /// Followed by upvalue descriptors: (u8 is_local, u16 index) per upvalue.
     Closure,
@@ -107,7 +90,6 @@ pub enum OpCode {
     /// Return value from top of stack.
     Return,
 
-    // --- Collections ---
     /// Build array from N elements on stack. Operand: u16 element count.
     BuildArray,
     /// Build tuple from N elements on stack. Operand: u16 element count.
@@ -116,14 +98,19 @@ pub enum OpCode {
     BuildMap,
     /// Build set from N elements on stack. Operand: u16 element count.
     BuildSet,
-    /// Index into collection. Stack: [collection, index] -> [value].
+    /// Index into collection. Stack: `[collection, index] -> [value]`.
     Index,
-    /// Assign to index. Stack: [collection, index, value] -> [].
+    /// Assign to index. Stack: `[collection, index, value] -> []`.
     IndexAssign,
+    /// `Index` for a read that is written back (`m[k]++`): a missing map
+    /// key is an error instead of `None`. Stack: `[collection, index] -> [value]`.
+    IndexExisting,
+    /// `lock`: replace the value with a deep, read-only copy (see
+    /// `VM::lock_value`). Stack: `[value] -> [locked]`.
+    Lock,
     /// Slice collection. Operand: u8 flags (bit0=has_start, bit1=has_end).
     Slice,
 
-    // --- Structs ---
     /// Define struct. Operand: u16 constant index (struct def info).
     StructDef,
     /// Create struct instance with named fields. Operands: u16 name constant, u8 field count.
@@ -137,27 +124,24 @@ pub enum OpCode {
     /// Stack has method name-closure pairs.
     DefineMethod,
 
-    // --- Enums ---
     /// Define an enum. Operand: u16 constant index (ObjEnumDef value).
     EnumDef,
     /// Construct a unit enum variant. Operand: u16 variant name constant.
     /// Stack has the EnumDef value.
     MakeEnumVariantUnit,
     /// Construct a tuple enum variant. Operands: u16 variant name constant, u8 arg count.
-    /// Stack: [EnumDef, arg1, ..., argN] -> [EnumInstance].
+    /// Stack: `[EnumDef, arg1, ..., argN] -> [EnumInstance]`.
     MakeEnumVariantTuple,
     /// Construct a struct enum variant. Operands: u16 variant name constant, u8 field count.
-    /// Stack: [EnumDef, name1, val1, ..., nameN, valN] -> [EnumInstance].
+    /// Stack: `[EnumDef, name1, val1, ..., nameN, valN] -> [EnumInstance]`.
     MakeEnumVariantStruct,
 
-    // --- Pattern Matching ---
     /// Define a pattern. Operand: u16 constant index (pattern info).
     DefinePattern,
     /// Test pattern against value. Operands: u16 pattern name, u16 jump offset if no match.
     TestPattern,
 
-    // --- Error Handling ---
-    /// Construct ErrorValue. Operand: u8 has_tag. Stack: [tag?, value] -> [ErrorValue].
+    /// Construct ErrorValue. Operand: u8 has_tag. Stack: `[tag?, value] -> [ErrorValue]`.
     ErrorConstruct,
     /// Wrap top of stack in Value wrapper.
     ValueConstruct,
@@ -166,17 +150,14 @@ pub enum OpCode {
     /// Fail: convert ErrorValue to Error.
     Fail,
 
-    // --- Modules ---
     /// Import module. Operands: u16 path constant, u8 has_selective.
     Import,
     /// Get field from module on stack. Operand: u16 field name constant.
     GetModuleField,
 
-    // --- String Interpolation ---
     /// Concatenate N string parts. Operand: u16 part count.
     StringInterp,
 
-    // --- Misc ---
     /// Log expression. Operand: u8 flags (bit0=has_tag, bit1=has_sub_tag, bit2=has_msg).
     Log,
     /// Unpack iterable into N variables. Operand: u8 name count.
@@ -190,24 +171,23 @@ pub enum OpCode {
     /// Operand: u16 jump offset.
     PopJumpIfFalse,
     /// Get iterator length / iteration support.
-    /// Operand: none. Stack: [iterable] -> [length].
+    /// Operand: none. Stack: `[iterable] -> [length]`.
     IterLen,
     /// Get element at iteration index.
-    /// Stack: [iterable, index] -> [element].
+    /// Stack: `[iterable, index] -> [element]`.
     IterGet,
     /// Get both halves of an iteration step, for `each k, v in coll`.
-    /// Operand: none. Stack: [iterable, index] -> [key, value].
+    /// Operand: none. Stack: `[iterable, index] -> [key, value]`.
     /// Maps yield the entry's key; every other iterable yields the ordinal
-    /// index. `IterGet` on a map yields the whole `(k, v)` tuple instead, which
-    /// is what the one-name form still binds.
+    /// index. `IterGet` on a map yields the whole `(k, v)` tuple.
     IterEntry,
     /// Type wrap / convert. Operand: u16 type name constant.
-    /// Stack: [value] -> [converted_value].
+    /// Stack: `[value] -> [converted_value]`.
     /// Handles Error/Value union wrapping, type conversion, etc.
     TypeWrap,
     /// Call a method on a struct instance.
     /// Operands: u16 method_name constant, u8 arg_count.
-    /// Stack: [instance, arg1, ..., argN] -> [result].
+    /// Stack: `[instance, arg1, ..., argN] -> [result]`.
     MethodCall,
     /// Call a method with named arguments.
     /// Operands: u16 method_name constant, u8 positional_count, u8 named_count.
@@ -217,7 +197,7 @@ pub enum OpCode {
     /// Push bool result. For locals, resolved at compile time.
     IsMut,
     /// Check if a value matches a type. Operand: u16 type_name constant.
-    /// Stack: [value] -> [bool].
+    /// Stack: `[value] -> [bool]`.
     IsType,
     /// Check if a variable's type is mutable (no type constraint).
     /// Operand: u16 name constant. Push bool result.
@@ -226,7 +206,6 @@ pub enum OpCode {
     /// Operands: u16 name constant, u8 mutable flag, u16 type_name constant (0xFFFF = no type).
     DefineGlobalTyped,
 
-    // --- Recoverable errors ---
     /// Install an error handler covering the following protected region.
     /// Operand: u16 forward offset to the catch target. On a runtime error
     /// (or `<fail>`) raised within the region, the VM unwinds to this handler,
@@ -235,28 +214,22 @@ pub enum OpCode {
     /// Remove the innermost error handler (normal-path exit of a region).
     PopHandler,
 
-    // --- Per-binding type locks ---
     /// Check the value on top of the stack (left in place) against a type.
     /// Operand: u16 type_name constant. Emitted before a write through an
-    /// upvalue whose binding is typed — the upvalue cell carries no lock.
+    /// upvalue whose binding is typed.
     CheckType,
     /// `SetLocal` for a typed binding whose physical slot is shared with a
-    /// binding of another type, so the slot's own lock had to be cleared.
-    /// Operand: u16 slot. The lock is looked up by this instruction's
-    /// offset in [`Chunk::local_locks`].
+    /// binding of another type. Operand: u16 slot. The lock is looked up by this
+    /// instruction's offset in [`Chunk::local_locks`].
     SetLocalLocked,
 
-    // --- Lowered `each i in range(...)` ---
     /// Entry check and bound of a lowered range loop. Operand: u16 step
-    /// constant (a nonzero Integer). Stack: [start, end] -> [limit].
+    /// constant (a nonzero Integer). Stack: `[start, end] -> [limit]`.
     /// Raises the `range` builtin's error unless both are Integers, then
-    /// pushes `end - step` saturated to i64: the loop continues after `i`
-    /// while `i < limit` (`i > limit` counting down), which is exactly
-    /// `i + step < end` without computing `i + step`, so the counter's
-    /// increment can never wrap.
+    /// pushes `end - step` saturated to i64. The loop continues after `i`
+    /// while `i < limit` (`i > limit` counting down).
     RangeLimit,
 
-    // --- Declared return types ---
     /// Check the value on top of the stack (left in place) against the
     /// function's declared return type, `fun f() <int> { ... }`. Operand:
     /// u16 type_name constant. Emitted right before each `Return` of a
@@ -340,7 +313,6 @@ impl OpCode {
     /// Convert a raw byte to an OpCode. Returns None for invalid bytes.
     pub fn from_byte(byte: u8) -> Option<OpCode> {
         if byte <= OpCode::CheckReturn as u8 {
-            // SAFETY: OpCode is repr(u8) and we verified the range.
             Some(unsafe { std::mem::transmute::<u8, OpCode>(byte) })
         } else {
             None
@@ -359,7 +331,6 @@ impl OpCode {
 
     const fn operand_layout(self) -> OperandLayout {
         match self {
-            // Opcode only.
             OpCode::None
             | OpCode::True
             | OpCode::False
@@ -387,6 +358,8 @@ impl OpCode {
             | OpCode::CloseUpvalue
             | OpCode::Return
             | OpCode::Index
+            | OpCode::IndexExisting
+            | OpCode::Lock
             | OpCode::IndexAssign
             | OpCode::IterLen
             | OpCode::IterGet
@@ -395,17 +368,14 @@ impl OpCode {
             | OpCode::PopHandler
             | OpCode::Fail => OperandLayout::None,
 
-            // Opcode + u8.
             OpCode::Call
             | OpCode::ErrorConstruct
             | OpCode::Slice
             | OpCode::Log
             | OpCode::Unpack => OperandLayout::U8,
 
-            // Opcode + two u8 operands.
             OpCode::CallNamed => OperandLayout::U8U8,
 
-            // Opcode + u16.
             OpCode::Constant
             | OpCode::Increment
             | OpCode::Decrement
@@ -446,7 +416,6 @@ impl OpCode {
             | OpCode::RangeLimit
             | OpCode::CheckReturn => OperandLayout::U16,
 
-            // Opcode + u16 + u8.
             OpCode::StructLiteral
             | OpCode::DefineMethod
             | OpCode::MakeEnumVariantTuple
@@ -454,16 +423,12 @@ impl OpCode {
             | OpCode::MethodCall
             | OpCode::Import => OperandLayout::U16U8,
 
-            // Opcode + two u16 operands.
             OpCode::TestPattern => OperandLayout::U16U16,
 
-            // Opcode + three u16 operands.
             OpCode::Guard => OperandLayout::U16U16U16,
 
-            // Opcode + u16 + two u8 operands.
             OpCode::MethodCallNamed => OperandLayout::U16U8U8,
 
-            // Opcode + u16 + u8 + u16.
             OpCode::DefineGlobalTyped => OperandLayout::U16U8U16,
 
             OpCode::Closure => OperandLayout::Closure,
@@ -491,13 +456,13 @@ impl OpCode {
             },
             Add | Subtract | Multiply | Divide | Modulo | Equal | NotEqual | Greater
             | GreaterEqual | Less | LessEqual | BitAnd | BitOr | BitXor | ShiftLeft
-            | ShiftRight | Index | IterGet | RangeLimit => StackEffect::Fixed {
+            | ShiftRight | Index | IndexExisting | IterGet | RangeLimit => StackEffect::Fixed {
                 pops: 2,
                 pushes: 1,
                 peeks: 0,
             },
             Not | BitNot | Negate | TypeWrap | IsType | GetField | GetModuleField
-            | ValueConstruct => StackEffect::Fixed {
+            | ValueConstruct | Lock => StackEffect::Fixed {
                 pops: 1,
                 pushes: 1,
                 peeks: 0,
@@ -624,6 +589,8 @@ impl OpCode {
                 | BuildSet
                 | StringInterp
                 | Index
+                | IndexExisting
+                | Lock
                 | IndexAssign
                 | Slice
                 | GetField
@@ -674,6 +641,7 @@ impl OpCode {
                 | MethodCall
                 | MethodCallNamed
                 | Index
+                | IndexExisting
                 | IndexAssign
                 | Slice
                 | GetField
@@ -707,6 +675,8 @@ impl OpCode {
                 | Dup
                 | BuildArray
                 | Index
+                | IndexExisting
+                | Lock
                 | IndexAssign
                 | IterLen
                 | IterGet
@@ -791,13 +761,9 @@ pub struct Chunk {
     /// Column for each byte of code, paired with `lines`. 0 means unknown
     /// (the writer never set a column before emitting).
     pub columns: Vec<u32>,
-    /// The column to attach to the next byte written. Set by the compiler
-    /// before each emit batch via `set_loc_column`. Lives on the chunk
-    /// (rather than threaded through every `emit_*` signature) so the
-    /// existing line-only emit API stays unchanged.
+    /// The column to attach to the next byte written. Set via `set_loc_column`.
     cur_column: u32,
-    /// Cache for [`Chunk::stack_bound`], filled on first use (after
-    /// compilation has finished writing `code`).
+    /// Cache for [`Chunk::stack_bound`], filled on first use.
     stack_bound: std::cell::OnceCell<usize>,
     /// `(offset of a SetLocalLocked, type_name constant)`, sorted by offset.
     pub local_locks: Vec<(usize, u16)>,
@@ -826,27 +792,17 @@ impl Chunk {
     }
 
     /// An upper bound on how many operand-stack slots this code can occupy
-    /// above its frame's callee slot.
-    ///
-    /// Compiled code has one stack height per instruction, and a loop body
-    /// leaves the height where it found it, so the peak height is at most
-    /// the pushes along one pass through the code: the sum of every
-    /// instruction's pushes. That over-counts branches but never
-    /// under-counts, which is the direction that matters: calls are refused
-    /// unless this much room is left, so no push can run off the end of the
-    /// stack.
+    /// above its frame's callee slot. Computed as the sum of every instruction's
+    /// pushes, so it may over-count branches but never under-counts.
     pub fn stack_bound(&self) -> usize {
         *self.stack_bound.get_or_init(|| self.compute_stack_bound())
     }
 
     fn compute_stack_bound(&self) -> usize {
-        // One spare slot for the error value a handler pushes on recovery.
         let mut bound = 1usize;
         let mut ip = 0usize;
         while ip < self.code.len() {
             let Some(op) = OpCode::from_byte(self.code[ip]) else {
-                // Undecodable code fails when it runs; count the byte so the
-                // bound stays an over-estimate until then.
                 bound += 2;
                 ip += 1;
                 continue;
@@ -855,8 +811,6 @@ impl Chunk {
                 StackEffect::Fixed { pushes, .. } => pushes as usize,
                 StackEffect::OperandDependent => match op {
                     OpCode::Unpack => self.code.get(ip + 1).copied().unwrap_or(u8::MAX) as usize,
-                    // The others push their single result. Two leaves room
-                    // for any that briefly hold one more.
                     _ => 2,
                 },
             };

@@ -1,12 +1,11 @@
-//! VM regression tests for lane-`eval` items (the VM is the reference impl):
+//! VM tests for:
 //!
-//!   TW1 — `=` reassignment of an UNTYPED binding (`s := 0; s = s + 1`) must
-//!         succeed and mutate it (handle_set_global). Type-lock and
-//!         immutability violations must STILL error.
-//!   TW2 — negative index READ (`arr[-1]`, `"s"[-1]`) must index from the end
-//!         (eval_index). Out-of-range still yields None.
-//!   TW4 — String `<` lexicographic comparison must return a bool
-//!         (compare_less). (The VM only implements `<` for strings.)
+//!   TW1 — `=` reassignment of an untyped binding (`s := 0; s = s + 1`)
+//!         succeeds and mutates it; type-lock and immutability violations
+//!         still error.
+//!   TW2 — negative index read (`arr[-1]`, `"s"[-1]`) indexes from the end;
+//!         out-of-range yields None.
+//!   TW4 — String `<` lexicographic comparison returns a bool.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -50,11 +49,8 @@ fn assert_both_error(source: &str) {
     );
 }
 
-// ── TW1: `=` on untyped bindings ────────────────────────────────────────────
-
 #[test]
 fn tw1_eq_on_untyped_accumulator() {
-    // The canonical repro: bare `=` reassigns an untyped binding.
     let src = "s := 0\ns = s + 1\ns";
     assert_parity(src, "1");
 }
@@ -67,38 +63,31 @@ fn tw1_eq_on_untyped_loop_accumulator() {
 
 #[test]
 fn tw1_eq_on_untyped_string_rebind() {
-    // Untyped binding has no type lock, so `=` may even change the value type.
     let src = "x := 1\nx = \"hi\"\nx";
     assert_parity(src, "hi");
 }
 
 #[test]
 fn tw1_walras_retype_untyped() {
-    // `:=` retype of an untyped var, then `=` on the new (still untyped) value.
     let src = "x := 1\nx := \"a\"\nx = \"b\"\nx";
     assert_parity(src, "b");
 }
 
 #[test]
 fn tw1_typed_strict_eq_in_range() {
-    // A mutable typed binding (`:=`) accepts `=` of a matching type.
     let src = "x <int> := 10\nx = 20\nx";
     assert_parity(src, "20");
 }
 
 #[test]
 fn tw1_type_mismatch_assign_errors() {
-    // Type-lock violation must STILL error in both engines.
     assert_both_error("x <int> := 10\nx = \"hi\"\nx");
 }
 
 #[test]
 fn tw1_immutable_reassign_errors() {
-    // `x <int> = 10` is an immutable typed declaration; `x = 20` must error.
     assert_both_error("x <int> = 10\nx = 20\nx");
 }
-
-// ── TW2: negative index reads ───────────────────────────────────────────────
 
 #[test]
 fn tw2_array_negative_last() {
@@ -132,18 +121,12 @@ fn tw2_array_positive_still_works() {
 
 #[test]
 fn tw2_array_out_of_range_is_an_error() {
-    // Was: out-of-range yielded `None` in both engines. That turned a bad
-    // index into a value that blew up somewhere else (or silently read as a
-    // legitimately-absent map entry), so it is now a runtime error. Negative
-    // in-range indexing — the point of TW2 — is unchanged, see the tests above.
     let err = run_vm("a := [10, 20, 30]\na[5]").expect_err("out-of-range read should fail");
     assert!(err.contains("out of range"), "{err}");
 
     let under = run_vm("a := [10, 20, 30]\na[-4]").expect_err("under-range read should fail");
     assert!(under.contains("out of range"), "{under}");
 }
-
-// ── TW4: String `<` lexicographic ───────────────────────────────────────────
 
 #[test]
 fn tw4_string_less_true() {
@@ -157,7 +140,6 @@ fn tw4_string_less_false() {
 
 #[test]
 fn tw4_string_less_equal_prefix() {
-    // "ab" < "abc": shorter prefix is lexicographically smaller.
     assert_parity("\"ab\" < \"abc\"", "True");
 }
 

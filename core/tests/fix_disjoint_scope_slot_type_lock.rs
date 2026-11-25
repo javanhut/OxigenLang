@@ -1,6 +1,5 @@
-//! Regression: type metadata belongs to a physical local slot, which may be
-//! reused by bindings in disjoint scopes. A typed binding in one `option` arm
-//! must not impose its lock on an `each` loop's hidden integer index in another.
+//! Tests that a typed binding in one `option` arm does not impose its lock on
+//! an `each` loop's hidden integer index in a disjoint scope.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;

@@ -1,5 +1,3 @@
-// Closure hot loop — `add5` captures `x` as an upvalue, then we call it
-// many times. Exercises Closure/GetUpvalue ops inside the JIT.
 fun make_adder(x) {
     fun(y) { x + y }
 }

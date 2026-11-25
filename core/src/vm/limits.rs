@@ -1,21 +1,14 @@
 //! Limits a host puts on a running script: a loop budget and an interrupt.
 //!
-//! Both are checked on loop back-edges, the only place a script can run
-//! forever (unbounded recursion already ends in a `stack overflow` error).
-//!
-//! The check has to be nearly free when neither limit is in use, because
-//! every loop iteration pays it. So the common path reads one byte, the
-//! armed byte, which is non-zero only while an interrupt is pending or a
-//! budget is set. Only then does a back-edge do more: it stops on an
-//! interrupt, and otherwise counts the iteration against
+//! Both are checked on loop back-edges. The armed byte is non-zero only while
+//! an interrupt is pending or a budget is set. When it is set, a back-edge
+//! stops on an interrupt, and otherwise counts the iteration against
 //! `VM::loop_countdown`, the remaining budget, stopping when it is spent.
 //! The byte lives in an `Arc` shared with every [`InterruptHandle`], so
 //! another thread can set it.
 //!
 //! JIT-compiled back-edges keep the counting inline and call out only on
-//! the way to stopping. A call that could return into the loop would make
-//! the register allocator keep the loop's values safe across it, spilling
-//! them, which doubled the cost of a tight loop.
+//! the way to stopping.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};

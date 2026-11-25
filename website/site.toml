@@ -35,9 +35,9 @@ pages = [
 [[section]]
 title = "Language guide"
 pages = [
-    { file = "variables.md", slug = "variables", title = "Variables", description = "The four ways to declare a variable in OxigenLang, and what each says about mutability and type." },
+    { file = "variables.md", slug = "variables", title = "Variables", description = "The ways to declare a variable in OxigenLang, what each says about mutability and type, and lock for values that can never change." },
     { file = "data_types.md", slug = "data-types", title = "Data types", description = "Integers, floats, strings, chars, booleans, arrays, tuples, maps, sets, bytes and None in OxigenLang." },
-    { file = "operators.md", slug = "operators", title = "Operators", description = "Arithmetic, comparison, logical and postfix operators in OxigenLang, and the order they bind in." },
+    { file = "operators.md", slug = "operators", title = "Operators", description = "Arithmetic, comparison, logical, postfix and compound assignment operators in OxigenLang, and the order they bind in." },
     { file = "control_flow.md", slug = "control-flow", title = "Control flow", description = "Decisions with option and unless, guards with when, and loops with each and repeat in OxigenLang." },
     { file = "functions.md", slug = "functions", title = "Functions", description = "Named and anonymous functions in OxigenLang: typed, default, optional and named parameters, closures and recursion." },
     { file = "structs.md", slug = "structs", title = "Structs", description = "Structs in OxigenLang: typed fields, methods with includes, inheritance, hidden fields and self." },

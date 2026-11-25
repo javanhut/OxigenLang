@@ -1,10 +1,6 @@
-//! Regression: `<str>` must not stringify `None`.
-//!
-//! `t <str> := os.env_get("UNSET")` used to bind the 4-char string "None"
-//! (`convert_to_type` STRING was a blanket `format!("{}", value)`). That
-//! string is truthy and never `== None`, so every absence guard silently
-//! fell through. Every other conversion target already rejects None; STRING
-//! now does too. Scalar coercions into `<str>` are unaffected.
+//! Tests that `<str>` does not stringify `None`
+//! (`t <str> := os.env_get("UNSET")` is an error); scalar coercions into `<str>`
+//! still work.
 
 #![cfg(feature = "jit")]
 
@@ -66,10 +62,8 @@ fn str_annotation_still_coerces_scalars() {
 
 #[test]
 fn none_guard_fires_on_untyped_binding() {
-    // The idiom the bug broke: bind an absent lookup, compare against None.
     both_ok("t := None\nt == (None or \"\")", "True");
     both_ok("t := \"x\"\nt == (None or \"\")", "False");
-    // ...and the value must still be None, not the 4-char string "None".
     both_ok("t := None\nt", "None");
     both_ok("t := None\nlen(str(t))", "4");
 }

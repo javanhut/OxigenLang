@@ -4,7 +4,6 @@ introduce strings
 struct Parser {
     args <array>
     args_map <map>
-    // alias -> verbose name, so `-u x` also fills `url`.
     aliases <map>
 }
 
@@ -12,10 +11,8 @@ pattern double_dash(s) when strings.contains_str(s, "--")
 
 pattern single_dash(s) when strings.contains_str(s, "-")
 
-// "-5" or "-2.5" after a flag is its value, not another flag.
 fun is_negative_number(s <str>) { __regex_match("^-[0-9]+(\\.[0-9]+)?$", s) }
 
-// The next argument is a flag, so the current one takes no value from it.
 fun is_flag(s <str>) { strings.starts_with(s, "-") and not is_negative_number(s) }
 
 fun normalize_array(arr <array>) {
@@ -49,7 +46,6 @@ fun normalize_array(arr <array>) {
     new_arr
 }
 
-// Split at the first `=` only: a value like "http://x/?a=b" keeps its own.
 fun k_v_pair(s <str>) {
     parts := strings.split(s, "=")
     (parts[0], strings.join(rest(parts), "="))
@@ -90,7 +86,6 @@ Parser includes {
         }
     }
 
-    // Store a flag's value under both of its names.
     fun store(name <str>, v <generic>) {
         self.args_map[name] = v
         option {

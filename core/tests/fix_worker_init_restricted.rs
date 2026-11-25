@@ -1,10 +1,5 @@
-//! A worker builds its VM by running the program's declarations, imports
-//! included, and only then applied the spawner's restriction. A module's top
-//! level therefore ran with every capability on each worker: a restricted
-//! script could import a local module whose top level writes a file (the
-//! write fails quietly on the restricted main VM) and have it succeed the
-//! moment anything was spawned. The restriction now applies before the
-//! worker runs any of the program.
+//! Tests that a spawned worker applies the spawner's restriction before
+//! running any of the program, including imported modules' top levels.
 //!
 //! A separate test binary because the worker pool and its source are
 //! process-global.

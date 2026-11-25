@@ -1,5 +1,3 @@
-// Threads
-// diverge runs tasks on threads, one Web Worker each; a channel passes messages between them.
 introduce channel
 
 fun is_prime(n <int>) {
@@ -21,12 +19,10 @@ fun count_primes(lo <int>, hi <int>) {
 }
 
 main {
-    // Four tasks at once; the results come back in order.
     counts := diverge each start in [0, 25000, 50000, 75000] {
         count_primes(start, start + 25000)
     }
     println("primes below 100000, by quarter: {counts}")
-    // A worker that takes jobs off a channel until it is closed.
     jobs := channel.new()
     worker := diverge {
         done := 0

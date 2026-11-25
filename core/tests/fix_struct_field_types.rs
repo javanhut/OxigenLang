@@ -1,9 +1,5 @@
-//! Regression: struct field annotations are enforced, as `docs/structs.md`
-//! documents ("Field mutation is type-checked").
-//!
-//! Neither the constructor nor `SetField` looked at the field's declared
-//! type: `P("x")` built a `P` whose `n <int>` held a STRING, `P { n: 2.5 }`
-//! was accepted, and `p.n = "x"` / `self.n = "x"` succeeded.
+//! Tests that struct field annotations are enforced by the constructor and by
+//! `SetField`, as `docs/structs.md` documents ("Field mutation is type-checked").
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -96,13 +92,11 @@ fn well_typed_construction_and_mutation_still_work() {
         "[5, b]",
     );
     assert_all_ok(&format!("{P}p := P {{ n: 3, label: \"z\" }}\np.n"), "3");
-    // Zero-valued construction keeps working.
     assert_all_ok(&format!("{P}p <P>\n[p.n, p.label]"), "[0, ]");
 }
 
 #[test]
 fn hot_field_writes_stay_checked_after_tier_up() {
-    // The JIT's SetField path must agree with the interpreter.
     let src = format!(
         "{P}p := P(0, \"a\")\nfun bump(p, v) {{ p.n = v }}\neach i in range(200) {{ bump(p, i) }}\nbump(p, \"x\")\np.n"
     );

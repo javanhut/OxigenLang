@@ -1,10 +1,7 @@
-//! B8 / decision D1 regression: cross-type numeric equality COERCES.
-//!
-//! `2 == 2.0` -> True, `2 == 3.0` -> False; the same for byte==int and
-//! uint==int, mirroring the coercion the ordering operators already do.
-//! Non-numeric cross-kind pairs stay unequal (`1 == "1"` -> False), enum
-//! equality is unaffected, and map int-keys still resolve (Value::eq stays
-//! strict so hashing is unchanged).
+//! Tests cross-type numeric equality: `2 == 2.0` is True, `2 == 3.0` is False,
+//! and likewise for byte==int and uint==int. Non-numeric cross-kind pairs stay
+//! unequal (`1 == "1"` is False), enum equality is unaffected, and map int-keys
+//! still resolve.
 
 #![cfg(feature = "jit")]
 
@@ -105,7 +102,6 @@ Sig.Red == Dir.North
 
 #[test]
 fn map_int_keys_still_resolve() {
-    // Value::eq stays strict, so int keys hash/resolve unchanged.
     let src = r#"
 m := {1: "a", 2: "b"}
 m[2]

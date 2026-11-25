@@ -1,12 +1,6 @@
-//! Regression: a block that declares locals may appear anywhere an
-//! expression may, including after values already pushed for the enclosing
-//! expression (call arguments, array elements, operands).
-//!
-//! The compiler numbered locals as if the operand stack held nothing but
-//! locals, so a local declared in an `option` arm inside a call's argument
-//! list was assigned the slot of the callee or of an earlier argument:
-//! `println(1, 2, option { True -> { y := 5  y + a } })` read the builtin
-//! `println` as `y` ("type mismatch: BUILTIN + INTEGER").
+//! Tests that a block declaring locals works anywhere an expression may
+//! appear, including after values already pushed for the enclosing expression
+//! (call arguments, array elements, operands).
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -63,10 +57,6 @@ fn block_local_as_right_operand() {
     assert_eq!(got, "16");
 }
 
-/// The eager JIT returned 15: after the block's result is stashed into `y`'s
-/// slot (`SetLocal`, `Pop`), the `Add` read the slot's stale memory copy (5)
-/// instead of the register value (6). `slot_types` now refuses to keep such a
-/// local in a register.
 #[test]
 fn block_local_as_right_operand_jit() {
     assert_all_ok(RIGHT_OPERAND, "16");

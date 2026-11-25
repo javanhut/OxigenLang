@@ -1,22 +1,9 @@
-//! `hide` is a rule, not a comment.
-//!
-//! The keyword parsed, the flag rode all the way into `ObjStructDef.fields` as
-//! the third tuple element — and nothing ever read it. A field marked `hide`
-//! could be read, written, and supplied to a constructor from anywhere, while
-//! docs/structs.md promised it was "accessible inside methods but not from
-//! outside the struct" and docs/conventions.md used it to guard a bank balance
-//! and a PIN. Encapsulation that only holds in code review is worse than none,
-//! because it reads as enforced.
+//! Tests that `hide` fields are enforced.
 //!
 //! Access is permitted from code compiled as part of the instance's own struct
 //! chain: a method of the struct, a method it inherited, or a closure nested in
-//! one of those. Everything else — top-level code, a plain function, another
-//! struct's method — is refused.
-//!
-//! Every case runs on both backends. The interpreter reads the executing frame
-//! from `frames.last()`, but a method that tiers up executes from a JIT frame,
-//! where that answers for the *caller* — so a hot method was refused its own
-//! `self.field` until the check moved to `active_closure()`.
+//! one of those. Top-level code, a plain function and another struct's method are
+//! refused. Every case runs on both backends.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -101,8 +88,6 @@ make().richer_than(b)"
 
 #[test]
 fn a_closure_nested_in_a_method_still_counts_as_the_struct() {
-    // The lambda is a separate function; it inherits `method_of` from the
-    // method it was written inside, or `self.balance` would be refused here.
     let src = format!(
         "{ACCOUNT}
 Account includes {{
@@ -134,9 +119,6 @@ s.projected()"
 
 #[test]
 fn a_hot_method_keeps_its_access_after_tiering_up() {
-    // The regression the JIT frame lookup fixes: the loop makes `grind` a JIT
-    // candidate, and reading the executing frame from `frames.last()` there
-    // answers for the caller — top-level code, which owns no struct.
     let src = format!(
         "{ACCOUNT}
 Account includes {{
@@ -179,7 +161,6 @@ poke(make())"
 
 #[test]
 fn an_unrelated_structs_method_is_refused() {
-    // Being *a* method is not enough — it has to be a method of this struct.
     let msg = eval_err(&format!(
         "{ACCOUNT}
 struct Intruder {{ x <int> }}
@@ -197,7 +178,6 @@ i.peek(make())"
 
 #[test]
 fn construction_from_outside_cannot_supply_a_hidden_field() {
-    // Blocking reads while leaving the initial value open would be half a rule.
     let msg = eval_err(&format!("{ACCOUNT}\nAccount(balance=1, owner=\"x\").owner"));
     assert!(
         msg.contains("hidden on Account"),
@@ -207,7 +187,6 @@ fn construction_from_outside_cannot_supply_a_hidden_field() {
 
 #[test]
 fn a_factory_inside_the_struct_may_still_build_one() {
-    // Otherwise a struct with a hidden field could never be built with a value.
     assert_eq!(
         eval(&format!("{ACCOUNT}\nmake().clone_with(7).total()")),
         "7"

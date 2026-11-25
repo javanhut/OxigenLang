@@ -1,5 +1,3 @@
-// Files
-// Writes a CSV file, reads it back and sums a column. The file it writes opens in a new tab.
 introduce io
 introduce os
 introduce strings

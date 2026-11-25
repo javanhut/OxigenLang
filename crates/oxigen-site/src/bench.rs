@@ -1,6 +1,5 @@
-//! The benchmarks page, from benchmark_reports/latest-native.md, which
-//! `scripts/bench.sh` writes. Re-running the benchmarks and rebuilding the
-//! site updates the page.
+//! The benchmarks page, built from benchmark_reports/latest-native.md, which
+//! `scripts/bench.sh` writes.
 
 use crate::html::escape;
 
@@ -44,7 +43,6 @@ pub fn parse(text: &str) -> Result<Report, String> {
         .split("## Min times (ms)")
         .nth(1)
         .ok_or("benchmark report: no `## Min times (ms)` table")?;
-    // Only this section: the next table's rows also start with `| bench_`.
     let table = table.split("\n## ").next().unwrap_or(table);
     let mut rows = Vec::new();
     for line in table.lines().filter(|l| l.starts_with("| bench_")) {
@@ -153,8 +151,8 @@ impl Report {
             .fold(0.0, f64::max)
     }
 
-    /// The bar chart: Oxigen's speed-up over CPython per benchmark, for the
-    /// default build and for `--jit`. Rows are sorted by the default build.
+    /// The bar chart: Oxigen's speed-up over CPython per benchmark, for the default
+    /// build and for `--jit`. Rows are sorted by the default build.
     pub fn chart(&self, repo_blob: impl Fn(&str) -> String) -> String {
         let mut rows: Vec<&Row> = self.rows.iter().collect();
         rows.sort_by(|a, b| {
@@ -166,7 +164,6 @@ impl Report {
             .iter()
             .map(|r| ratio(r.python, r.default).max(ratio(r.python, r.jit)))
             .fold(1.0, f64::max);
-        // Round the scale up to a clean tick.
         let step = if max > 40.0 {
             20.0
         } else if max > 20.0 {

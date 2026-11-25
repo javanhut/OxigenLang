@@ -78,6 +78,10 @@ Each one also returns the collection (except `pop`, which returns what it
 removed), so `arr := push(arr, x)` still works. Use `copy` when you need a
 separate collection.
 
+A collection made with [`lock`](variables.md#lock-a-value-that-can-never-change)
+can't be changed: `push`, `pop`, `insert`, `remove`, `extend` and `clear` on it
+fail with `cannot change a locked array` (or map, set). Every read works.
+
 | Builtin | Array | Map | Set |
 |---------|-------|-----|-----|
 | `push(c, x)` | append `x` | — | add `x` |
@@ -219,6 +223,9 @@ println(len(arr))      // 0
 Returns a new collection with the same entries, so changing one doesn't
 change the other. The copy is shallow: an array inside an array is still
 shared.
+
+The copy of a [locked](variables.md#lock-a-value-that-can-never-change) value
+is changeable, but collections nested inside it stay locked.
 
 ```oxi
 a := [1, 2]

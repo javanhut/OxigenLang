@@ -1,11 +1,5 @@
-//! Regression: a two-armed `x unless cond then y` produces a value when it is
+//! Tests that a two-armed `x unless cond then y` produces a value when it is
 //! the last statement of a function or block.
-//!
-//! The statement parses to an `If` with an alternative, which the tail-value
-//! path marked as value-producing, but each arm was compiled as a plain
-//! statement whose value was popped. Nothing was left for the `Return`, so
-//! `fun g() { a unless True then -a }` returned the function itself
-//! (`fun g()`), and the same tail inside an `option` arm block gave `None`.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;

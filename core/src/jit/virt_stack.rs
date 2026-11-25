@@ -1,36 +1,21 @@
 //! Virtual operand-stack layer for the Cranelift-backed JIT.
 //!
-//! Replaces direct memory writes-then-reads of `vm.stack` with a
-//! compile-time stack of pending Cranelift SSA values and constants.
+//! Holds a compile-time stack of pending Cranelift SSA values and constants.
 //! Each entry represents one operand-stack position **above** the
 //! materialised tail of `vm.stack` (whose authoritative depth is
 //! `vm.stack_view.len`). Pushing extends the virt stack without any
 //! IR. The next opcode that pops can either consume the virt slot
-//! directly (no memory load) or call `flush_to_memory` to spill
-//! everything to `vm.stack` before reading.
+//! directly or call `flush_to_memory` to spill everything to `vm.stack`
+//! before reading.
 //!
 //! Invariants:
 //!   * The virt stack only ever holds **pending** values. After
 //!     `flush_to_memory` it is empty and `vm.stack_view.len`
 //!     matches the logical depth.
 //!   * Memory-resident slots (everything below the virt stack) are
-//!     not tracked here — the outer JIT manages `stack_view.len`
-//!     directly.
+//!     not tracked here.
 //!   * Any opcode that lets runtime code observe `vm.stack` (helper
-//!     calls, the interpreter, GC) MUST flush first. That contract
-//!     is enforced one level up in `engine.rs`'s opcode dispatch
-//!     loop, not here.
-//!
-//! Why this matters with Cranelift: Cranelift is an SSA codegen, so
-//! it optimizes by tracking `Value`s flowing through pure operations
-//! and degrades when values get round-tripped through memory. Pushing
-//! a `Constant(5)` straight to `vm.stack` and immediately reloading
-//! it from memory at the next `Add` is a pessimization Cranelift's
-//! alias analysis cannot always see through; even when it can, you
-//! pay for a tag-byte write that no consumer needs. Staging values as
-//! SSA lets Cranelift constant-fold across opcodes, allocate
-//! registers, drop dead pushes entirely, and fuse `iconst+iadd` into
-//! `iadd_imm`.
+//!     calls, the interpreter, GC) must flush first.
 
 #![cfg(feature = "jit")]
 
@@ -43,7 +28,7 @@ use crate::vm::value::{
     VALUE_INT_PAYLOAD_OFFSET, VALUE_SIZE, VALUE_TAG_FLOAT, VALUE_TAG_INTEGER, VALUE_TAG_NONE,
 };
 
-/// One pending operand-stack position. All variants are virt-only —
+/// One pending operand-stack position. All variants are virt-only;
 /// memory-resident slots are not tracked by this stack.
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum VirtSlot {
@@ -56,10 +41,7 @@ pub(crate) enum VirtSlot {
     Const(VirtConst),
 }
 
-/// Zero-payload virt constants. Tracked separately from `IntSsa` so
-/// future folding (e.g. `if true`) can recognise them statically and
-/// so each variant's tag byte is known at codegen time without
-/// emitting a runtime tag check.
+/// Zero-payload virt constants, each with a tag byte known at codegen time.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum VirtConst {
     None,
@@ -69,13 +51,11 @@ pub(crate) enum VirtConst {
 
 /// Compile-time stack of pending virt-only operand-stack positions.
 ///
-/// `slots[len-1]` is the current top. Pushing a Mem-resident value to
-/// `vm.stack` (e.g. via a runtime helper) does NOT add an entry here;
-/// memory-resident slots are tracked implicitly by `vm.stack_view.len`.
+/// `slots[len-1]` is the current top. Memory-resident slots are tracked
+/// implicitly by `vm.stack_view.len`.
 ///
 /// To consume a value from `vm.stack` while the virt stack is
-/// non-empty, you must `flush_to_memory` first — otherwise the
-/// memory and virt depths disagree on which slot is at which depth.
+/// non-empty, `flush_to_memory` must be called first.
 pub(crate) struct VirtStack {
     slots: Vec<VirtSlot>,
 }
@@ -87,7 +67,7 @@ impl VirtStack {
         }
     }
 
-    /// True iff there are no pending virt slots — safe to consume
+    /// True iff there are no pending virt slots, so values can be consumed
     /// from `vm.stack` directly.
     #[inline]
     pub(crate) fn is_empty(&self) -> bool {
@@ -95,8 +75,6 @@ impl VirtStack {
     }
 
     /// Number of pending virt slots above the memory-resident region.
-    /// Existing call sites that compare `expr_stack.len() >= N` map
-    /// to `virt_stack.pending_depth() >= N`.
     #[inline]
     pub(crate) fn pending_depth(&self) -> usize {
         self.slots.len()
@@ -120,18 +98,14 @@ impl VirtStack {
         self.slots.push(VirtSlot::Const(k));
     }
 
-    /// Pop the top virt slot. Returns `None` if the stack is empty
-    /// (in which case the caller should consume from `vm.stack`
-    /// instead).
+    /// Pop the top virt slot. Returns `None` if the stack is empty.
     #[inline]
     pub(crate) fn pop(&mut self) -> Option<VirtSlot> {
         self.slots.pop()
     }
 
     /// Pop the top virt slot iff it is `IntSsa`. Returns `None` if
-    /// the stack is empty or the top is not an `IntSsa` (caller must
-    /// then flush + consume from memory). Convenience for arith fast
-    /// paths that only care about the int case.
+    /// the stack is empty or the top is not an `IntSsa`.
     #[inline]
     pub(crate) fn pop_int_ssa(&mut self) -> Option<ir::Value> {
         match self.slots.last() {
@@ -143,8 +117,7 @@ impl VirtStack {
         }
     }
 
-    /// Peek at slot at depth `from_top` (0 = top). Mirrors the
-    /// existing `expr_stack[len - 1 - from_top]` indexing pattern.
+    /// Peek at slot at depth `from_top` (0 = top).
     #[inline]
     pub(crate) fn peek_at(&self, from_top: usize) -> Option<VirtSlot> {
         let len = self.slots.len();
@@ -155,7 +128,7 @@ impl VirtStack {
         }
     }
 
-    /// Convenience: peek at the top iff it is `IntSsa`.
+    /// Peek at the top iff it is `IntSsa`.
     #[inline]
     pub(crate) fn peek_int_ssa(&self) -> Option<ir::Value> {
         match self.slots.last() {
@@ -164,9 +137,7 @@ impl VirtStack {
         }
     }
 
-    /// Convenience: peek at slot at `from_top` iff it is `IntSsa`.
-    /// Mirrors the existing `expr_stack[len - 1 - from_top]` access
-    /// pattern that assumed every slot was an int SSA value.
+    /// Peek at slot at `from_top` iff it is `IntSsa`.
     #[inline]
     pub(crate) fn peek_int_ssa_at(&self, from_top: usize) -> Option<ir::Value> {
         match self.peek_at(from_top) {
@@ -175,12 +146,7 @@ impl VirtStack {
         }
     }
 
-    /// True iff the top `n` slots are all `IntSsa`. Replaces the
-    /// previous `expr_stack.len() >= n` check, which trivially held
-    /// because the legacy `expr_stack` only ever stored ints.
-    /// Now that the stack can hold non-int variants, callers that
-    /// want to take an int-only fast path must verify the relevant
-    /// slots are `IntSsa` before popping.
+    /// True iff the top `n` slots are all `IntSsa`.
     #[inline]
     pub(crate) fn top_n_are_int_ssa(&self, n: usize) -> bool {
         let len = self.slots.len();
@@ -192,26 +158,16 @@ impl VirtStack {
             .all(|s| matches!(s, VirtSlot::IntSsa(_)))
     }
 
-    /// B2.2.f: capture the current virt-stack contents so a sibling
-    /// emission can mutate them (e.g. pop args for a fast-path call)
-    /// without disturbing what later code expects to see. Restoring
-    /// only rewinds the compile-time tracking — Cranelift IR already
-    /// emitted is untouched, so SSA values that were popped remain
-    /// valid (they were registered with the function and live as long
-    /// as they have downstream uses).
+    /// Capture the current virt-stack contents so a sibling emission can mutate
+    /// them without disturbing what later code expects to see. Restoring only
+    /// rewinds the compile-time tracking; Cranelift IR already emitted is
+    /// untouched.
     #[inline]
     pub(crate) fn snapshot(&self) -> Vec<VirtSlot> {
         self.slots.clone()
     }
 
-    /// B2.2.f: pair to `snapshot`. Resets the compile-time tracking to
-    /// `snap`, so a subsequent emission sees the same set of pending
-    /// virt slots as before the bracketed mutation. Caller's
-    /// responsibility to ensure the runtime branch that this restore
-    /// "feeds" cannot observe IR emitted between the snapshot and the
-    /// restore — i.e. the bracketed emission must end on a block that
-    /// is reached only via paths where the popped values are
-    /// inaccessible (or have been re-pushed).
+    /// Pair to `snapshot`. Resets the compile-time tracking to `snap`.
     #[inline]
     pub(crate) fn restore(&mut self, snap: Vec<VirtSlot>) {
         self.slots = snap;
@@ -220,12 +176,11 @@ impl VirtStack {
     /// Materialise every pending virt slot into `vm.stack[]` and bump
     /// `stack_view.len` accordingly. After this call the virt stack
     /// is empty and `vm.stack` reflects the full logical depth.
-    /// Idempotent — safe to call when already empty.
+    /// Idempotent.
     pub(crate) fn flush_to_memory(&mut self, builder: &mut FunctionBuilder<'_>, vm_val: ir::Value) {
         if self.slots.is_empty() {
             return;
         }
-        // Processed in stack order so writes land at increasing stack_view.len.
         for slot in self.slots.drain(..) {
             match slot {
                 VirtSlot::IntSsa(payload) => {
@@ -242,10 +197,7 @@ impl VirtStack {
     }
 }
 
-/// Inline `jit_push_integer_inline` — copy of the engine.rs helper,
-/// duplicated here so the virt-stack module doesn't reach into engine
-/// private functions. Layout pinned by `value_size_is_pinned_at_16`
-/// and `value_integer_layout_is_pinned` tests in `vm/value.rs`.
+/// Inline `jit_push_integer_inline`: pushes an integer value onto `vm.stack`.
 fn emit_inline_push_integer(
     builder: &mut FunctionBuilder<'_>,
     vm_val: ir::Value,
@@ -289,9 +241,7 @@ fn emit_inline_push_float(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value, 
         .store(flags, new_top, vm_val, vm_stack_view_len_offset());
 }
 
-/// Inline push of a zero-payload constant. Layout invariants pinned
-/// by `value_bool_tag_and_payload_are_pinned` and
-/// `value_none_layout_is_pinned` tests in `vm/value.rs`.
+/// Inline push of a zero-payload constant.
 fn emit_inline_push_const(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value, k: VirtConst) {
     let flags = ir::MemFlagsData::trusted();
     let stack_ptr = load_stack_ptr(builder, vm_val);
@@ -304,14 +254,12 @@ fn emit_inline_push_const(builder: &mut FunctionBuilder<'_>, vm_val: ir::Value, 
         VirtConst::None => {
             let tag = builder.ins().iconst(types::I8, VALUE_TAG_NONE as i64);
             builder.ins().store(flags, tag, slot_ptr, 0);
-            // Zero the payload for a clean bit pattern matching a freshly constructed Value::None.
             let zero64 = builder.ins().iconst(types::I64, 0);
             builder
                 .ins()
                 .store(flags, zero64, slot_ptr, VALUE_INT_PAYLOAD_OFFSET as i32);
         }
         VirtConst::True | VirtConst::False => {
-            // Boolean tag is 3, payload at offset 1; pinned by value_bool_tag_and_payload_are_pinned.
             const VALUE_TAG_BOOLEAN: u8 = 3;
             let tag = builder.ins().iconst(types::I8, VALUE_TAG_BOOLEAN as i64);
             builder.ins().store(flags, tag, slot_ptr, 0);
@@ -362,6 +310,4 @@ mod tests {
         assert!(s.is_empty());
         assert_eq!(s.pending_depth(), 0);
     }
-
-    // Exercised end-to-end by core/tests/jit_fallback.rs and the bench suite.
 }

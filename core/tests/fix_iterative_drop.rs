@@ -1,15 +1,7 @@
-//! Regression: freeing a deeply nested value doesn't overflow the native stack.
+//! Tests that freeing a deeply nested value (nested arrays, linked struct
+//! nodes, enum `Cons` chains) does not overflow the native stack.
 //!
-//! Dropping `[[[...]]]` ran the compiler-generated drop glue: the outer array
-//! dropped its element, which dropped its element, one Rust frame per level.
-//! A script that built a few hundred thousand levels (`x = [x]` in a loop,
-//! a long linked list of struct nodes, an enum `Cons` chain) aborted the
-//! whole process with a stack overflow the moment the value was released —
-//! on reassignment, at scope exit, or when the VM itself was dropped. With
-//! `panic = "abort"` or a host's small thread stack there is nothing to catch.
-//!
-//! Each case runs on a thread with a fixed 1 MiB stack, so a recursive drop
-//! fails deterministically instead of depending on the default stack size.
+//! Each case runs on a thread with a fixed 1 MiB stack.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -38,7 +30,6 @@ fn run_small_stack(source: String, make: fn() -> VM) -> Result<String, String> {
                 .run(function)
                 .map(|v| format!("{v}"))
                 .map_err(|e| e.message);
-            // Dropping the VM frees whatever the script still holds.
             drop(vm);
             out
         })
@@ -124,7 +115,6 @@ fn a_deep_local_frees_when_its_function_returns() {
 
 #[test]
 fn shared_children_outlive_their_containers() {
-    // Only containers whose last owner is the dropped value may be emptied.
     assert_frees(
         "a := [7]\nm := {\"k\": a}\nx := [a, (a, m), [[a]]]\nx = 0\nm = 0\na[0]",
         "7",

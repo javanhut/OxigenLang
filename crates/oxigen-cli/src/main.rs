@@ -6,8 +6,8 @@ use std::path::PathBuf;
 mod doc;
 mod repl;
 
-/// Single source of truth for the version banner — `--version`, `--help` and
-/// the REPL's `version` command all route here so they can't drift apart.
+/// The version banner shown by `--version`, `--help` and the REPL's `version`
+/// command.
 pub fn print_version() {
     println!("Oxigen Version: {}", env!("CARGO_PKG_VERSION"));
 }
@@ -30,10 +30,7 @@ fn read_source(file_path: &str) -> String {
 }
 
 /// Puts the shebang and directives the lexer stripped back in front of the
-/// formatted body. Asking the lexer which lines those are keeps `fmt` from
-/// disagreeing with it: a `#[location=...]` with trailing space used to be
-/// dropped, and an `#[indent]` after a blank line removed while the body was
-/// reprinted in brace style.
+/// formatted body.
 fn restore_header(directives: &[String], body: String) -> String {
     if directives.is_empty() {
         body
@@ -42,9 +39,8 @@ fn restore_header(directives: &[String], body: String) -> String {
     }
 }
 
-/// Stack for the thread that parses, compiles or runs user code, so deep but
-/// legal nesting is handled rather than overflowing the main thread's 8 MB.
-const STACK_SIZE: usize = 256 << 20; // 256 MB
+/// Stack for the thread that parses, compiles or runs user code.
+const STACK_SIZE: usize = 256 << 20;
 
 fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     let handle = std::thread::Builder::new()
@@ -53,9 +49,6 @@ fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T 
         .expect("failed to spawn execution thread");
     match handle.join() {
         Ok(value) => value,
-        // The panic hook has already printed the message. Re-panicking here
-        // exited 101, outside the documented 0/1/2 contract: an internal
-        // error running the code is still "the code failed".
         Err(_) => std::process::exit(1),
     }
 }
@@ -76,7 +69,6 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
         .canonicalize()
         .expect("Could not resolve file path");
 
-    // Large stack so all 16384 JIT frames fit natively and the V7 guard is the graceful limit.
     let run = {
         let script_args: Vec<String> = script_args.to_vec();
         move || {
@@ -97,7 +89,6 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
             let function = match compiler.compile(&program) {
                 Ok(f) => f,
                 Err(errors) => {
-                    // Render through the shared renderer so a compile error looks like every other diagnostic.
                     let source =
                         SourceFile::named(file_path_buf.display().to_string(), contents.clone());
                     for err in errors {
@@ -135,20 +126,18 @@ fn run_file_vm(file_path: &str, script_args: &[String], jit_mode: JitMode) {
                 }
             }
 
-            // Let any fire-and-forget spawned tasks finish before exit.
             oxigen_core::concurrent::drain();
         }
     };
     on_big_stack(run);
 }
 
-// ── Terminal colors for `oxigen test` output ──
 const C_GREEN: &str = "\x1b[32m";
 const C_RED: &str = "\x1b[31m";
 const C_RESET: &str = "\x1b[0m";
 
 /// Emit ANSI colors only when stdout is a terminal and the conventional
-/// `NO_COLOR` variable is unset, so piped/redirected output stays clean.
+/// `NO_COLOR` variable is unset.
 fn color_enabled() -> bool {
     std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
 }
@@ -163,8 +152,7 @@ fn paint(text: &str, code: &str, color: bool) -> String {
 }
 
 /// A `[ok]` (green) / `[fail]` (red) status marker, padded so test names line
-/// up regardless of marker width. Color codes are zero-width, so padding is
-/// applied to the plain text length.
+/// up regardless of marker width.
 fn status_marker(passed: bool, color: bool) -> String {
     let (text, code) = if passed {
         ("[ok]", C_GREEN)
@@ -176,16 +164,14 @@ fn status_marker(passed: bool, color: bool) -> String {
 }
 
 /// Recursively collect files ending in `suffix` under `dir`, skipping hidden
-/// directories and common build/vendor folders. Results are sorted for
-/// deterministic ordering. `test` passes `_test.oxi`; `fmt` passes `.oxi`.
+/// directories and common build/vendor folders. Results are sorted.
+/// `test` passes `_test.oxi`; `fmt` passes `.oxi`.
 fn discover_files(dir: &std::path::Path, suffix: &str, out: &mut Vec<PathBuf>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
     };
 
-    // Symlinks are skipped: following them ran a `sub/up -> ..` loop's tests
-    // dozens of times, and let `fmt` rewrite files outside the tree it was given.
     let mut paths: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_ok_and(|t| !t.is_symlink()))
@@ -223,7 +209,7 @@ struct FileResult {
 }
 
 /// Run every `<test>` block in a single file. The per-file output is returned
-/// in `output` rather than printed, so the caller controls separators.
+/// in `output`.
 fn run_test_file(path: &std::path::Path, color: bool) -> FileResult {
     use std::fmt::Write as _;
 
@@ -262,7 +248,6 @@ fn run_test_file(path: &std::path::Path, color: bool) -> FileResult {
         }
     };
 
-    // `oxigen test` runs on the bytecode VM so tests see the same semantics as running the file.
     let outcomes = oxigen_core::test_runner::run_vm_tests(&program, &contents, Some(file_path_buf));
 
     if outcomes.is_empty() {
@@ -305,7 +290,7 @@ fn run_test_file(path: &std::path::Path, color: bool) -> FileResult {
     }
 }
 
-/// `oxigen test [path ...]` — discover and run test files.
+/// `oxigen test [path ...]`: discover and run test files.
 fn run_tests_command(paths: &[String]) {
     let mut files: Vec<PathBuf> = Vec::new();
 
@@ -337,7 +322,6 @@ fn run_tests_command(paths: &[String]) {
     for file in &files {
         let result = run_test_file(file, color);
         if !result.output.is_empty() {
-            // Blank line between consecutive files that produced output.
             if any_printed {
                 println!();
             }
@@ -386,12 +370,9 @@ fn check_file(file_path: &str, json: bool) {
     let mut sink = DiagnosticSink::new();
     sink.extend(parser.errors().iter().cloned());
 
-    // check used to parse and stop, so a compile error never reached an editor.
-    // Past that, it also finds names nothing defines, and suspicious logic.
     if !sink.has_errors() {
         let mut builtins = std::collections::HashMap::new();
         oxigen_core::vm::builtins::register_builtins(&mut builtins);
-        // `__args` is set for every script; `expect` is imported into tests.
         let known = |name: &str| builtins.contains_key(name) || matches!(name, "__args" | "expect");
         sink.extend(Compiler::new().check(&program, &known));
     }
@@ -421,17 +402,13 @@ fn check_file(file_path: &str, json: bool) {
         }
     }
 
-    // Non-zero only on real failure, so check works as a CI gate; warnings still exit 0.
     if sink.has_errors() {
         std::process::exit(1);
     }
 }
 
-/// `check` reports what would change and exits 1 without writing, so CI can
-/// gate on formatting. Without it a formatted tree silently drifts back out.
+/// `check` reports what would change and exits 1 without writing.
 fn fmt_files(args: &[String], check: bool) {
-    // A directory used to fall into the non-.oxi branch below, print "Skipping"
-    // and exit 0 — so `oxigen fmt .` formatted nothing and reported success.
     let mut paths: Vec<PathBuf> = Vec::new();
     for arg in args {
         let p = PathBuf::from(arg);
@@ -471,8 +448,6 @@ fn fmt_files(args: &[String], check: bool) {
             }
         };
 
-        // A file that does not parse is reported and left alone; the rest of
-        // the batch is still formatted rather than stopping half-way.
         let formatted = {
             let contents = contents.clone();
             on_big_stack(move || {
@@ -520,8 +495,6 @@ fn fmt_files(args: &[String], check: bool) {
         std::process::exit(1);
     }
 
-    // Say how many files were considered: silence after walking a tree is
-    // ambiguous between "already formatted" and "found nothing".
     if changed == 0 {
         println!("{} file(s) already formatted.", paths.len());
         return;
@@ -536,8 +509,7 @@ fn fmt_files(args: &[String], check: bool) {
     }
 }
 
-/// Replaces `path` with `contents` via a temporary file and a rename, so an
-/// interrupted write cannot leave a half-written source file behind.
+/// Replaces `path` with `contents` via a temporary file and a rename.
 fn write_atomically(path: &str, contents: &str) -> std::io::Result<()> {
     let target = std::path::Path::new(path);
     let tmp = target.with_file_name(format!(
@@ -552,15 +524,13 @@ fn write_atomically(path: &str, contents: &str) -> std::io::Result<()> {
         .and_then(|meta| fs::set_permissions(&tmp, meta.permissions()))
         .and_then(|()| fs::rename(&tmp, target));
     if result.is_err() {
-        // Best-effort cleanup: the write error above is what gets reported,
-        // and a stray temp file is harmless next to it.
         let _ = fs::remove_file(&tmp);
     }
     result
 }
 
-/// Exit code for a malformed command line, kept distinct from `1` (which means
-/// the tool ran and the *code* was bad) so scripts can tell the two apart.
+/// Exit code for a malformed command line, distinct from `1` (the tool ran and
+/// the *code* was bad).
 const EXIT_USAGE: i32 = 2;
 
 const SUBCOMMANDS: [&str; 5] = ["check", "fmt", "test", "explain", "doc"];
@@ -602,14 +572,11 @@ fn usage_error(message: &str, hint: Option<&str>) -> ! {
     std::process::exit(EXIT_USAGE);
 }
 
-/// Rejects a leading argument that is neither a subcommand nor a `.oxi` script,
-/// instead of silently falling through to the REPL.
+/// Rejects a leading argument that is neither a subcommand nor a `.oxi` script.
 fn reject_leading_arg(arg: &str) -> ! {
-    // A .oxi path is handled by the caller, so any other extension is the wrong kind of file.
     let looks_like_path = arg.contains('/') || arg.contains('.');
 
     if !looks_like_path {
-        // There is no `run` subcommand; scripts are passed directly.
         let hint = if arg == "run" {
             "run a script with `oxigen <file.oxi>` — there is no `run` subcommand".to_string()
         } else {
@@ -628,7 +595,6 @@ fn reject_leading_arg(arg: &str) -> ! {
 }
 
 fn main() {
-    // `env::args` panics on an argument that is not UTF-8.
     let args: Vec<String> = env::args_os()
         .map(|arg| {
             arg.into_string().unwrap_or_else(|bad| {
@@ -640,7 +606,6 @@ fn main() {
         })
         .collect();
 
-    // Recognised only before the subcommand or script path, or a script's own --no-jit is swallowed.
     let mut no_jit = false;
     let mut want_eager = false;
     let mut cursor = 1;
@@ -671,7 +636,6 @@ fn main() {
         Some("--version" | "-v") => print_version(),
         Some("--help" | "-h") => print_usage(),
         Some("check") => {
-            // JSON for editors and other tools; text for a person at a terminal.
             let json = tail.iter().any(|a| a == "--json") || !std::io::stdout().is_terminal();
             match tail.iter().find(|a| *a != "--json") {
                 Some(path) => {
@@ -685,7 +649,6 @@ fn main() {
             }
         }
         Some("fmt") => {
-            // Accepted anywhere after `fmt`, not only straight after it.
             let check = tail.iter().any(|a| a == "--check");
             let paths: Vec<String> = tail.iter().filter(|a| *a != "--check").cloned().collect();
             if paths.is_empty() {

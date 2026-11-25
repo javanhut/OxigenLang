@@ -1,10 +1,6 @@
-//! Regression: printing, comparing or dropping a cyclic or very deep value
-//! must not overflow the native stack.
+//! Printing, comparing or dropping a cyclic or very deep value does not overflow the native stack.
 //!
-//! `Display` and `PartialEq` recursed with no limit, so
-//! `a := [1]; a.push(a); str(a)` (or `a == b`, or `println(m)` with
-//! `m["self"] = m`) overflowed the stack and aborted the process. Dropping a
-//! list nested millions deep still recurses (see the ignored test).
+//! Covers `Display` and `PartialEq` on self-referencing lists and maps, and deeply nested values (see the ignored test).
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -47,7 +43,6 @@ fn printing_a_self_containing_map_terminates() {
 
 #[test]
 fn comparing_cyclic_arrays_terminates() {
-    // Either answer is acceptable; aborting the process is not.
     let _ = interp("a := [1]\na.push(a)\nb := [1]\nb.push(b)\na == b");
     assert_eq!(interp("a := [1]\na.push(a)\na == a").as_deref(), Ok("True"));
 }

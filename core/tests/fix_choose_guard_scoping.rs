@@ -1,14 +1,4 @@
-//! Regression: `choose` subjects, inline patterns and `guard` bindings are
-//! scoped to their construct instead of living in the VM's globals.
-//!
-//! - The `choose` subject was stored in the global `__choose_tmp__`, so a
-//!   pattern condition that ran another `choose` overwrote the outer subject
-//!   and the remaining arms tested the wrong value.
-//! - An inline `pattern big(n) ...` arm was a `DefineGlobal`, so calling a
-//!   function that used one redefined a top-level pattern of the same name.
-//! - `guard err -> ...` inserted the error into the globals: it clobbered a
-//!   user global named `err` (even an immutable typed one), and inside a
-//!   function a local of the same name won, so the fallback saw the local.
+//! `choose` subjects, inline patterns and `guard` bindings are scoped to their construct and do not touch the VM's globals.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;

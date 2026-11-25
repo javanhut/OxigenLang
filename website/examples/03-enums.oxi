@@ -1,5 +1,3 @@
-// Enums and pattern matching
-// Rust-style enums with payloads, and named patterns matched with `choose`.
 introduce math
 
 enum Shape {

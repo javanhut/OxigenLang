@@ -1,8 +1,6 @@
 //! Closure transfer: `spawn`/`pmap` accept lambdas, including ones that capture
 //! an enclosing variable. A capturing lambda's upvalue is snapshotted at spawn
-//! (the VM closes it over the stack value) and the worker rebuilds the closure
-//! by its compile-order function id. Separate test binary from
-//! `concurrent_pmap` so the process-global worker pool / source aren't shared.
+//! and the worker rebuilds the closure by its compile-order function id.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -31,8 +29,6 @@ fn run(source: &str) -> String {
 
 #[test]
 fn pmap_transfers_capturing_lambda() {
-    // Lambda captures `k`; created in a function scope so the capture is a real
-    // upvalue. pmap spawns it across the pool — the snapshot must carry k=10.
     let out = run(
         "introduce array\nfun work() { k := 10\narray.pmap([1, 2, 3, 4], fun(x) { x * k }) }\nwork()\n",
     );

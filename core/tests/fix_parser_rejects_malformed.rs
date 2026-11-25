@@ -1,19 +1,7 @@
-//! Parser cases that either crashed or accepted code they should have rejected
-//! (or rejected code they should have accepted).
-//!
-//! - Nesting had no limit, so a few thousand `(` overflowed the stack and
-//!   aborted the process instead of producing a diagnostic.
-//! - Anything at all was accepted after `.` as a field name (`m.(`, `m."a"`,
-//!   and even the newline in `p.` at end of line), and any token as a loop,
-//!   pattern or choose-arm name.
-//! - `5 < log` committed to the `<log>` angle form on the name alone.
-//! - `<Error<tag>>` written as a whole type annotation did not parse, because
-//!   the `>>` that closes both brackets was treated as closing only one.
-//! - Two statements could share a line with nothing between them, which is
-//!   how `1.5e3` used to "work" as `1.5` and a separate statement `e3`.
-//! - A float literal too large for f64 became `inf` silently.
-//! - `repeat unless a < b` was rewritten to `repeat when a >= b`, which is not
-//!   the same loop when either side is NaN.
+//! Tests that the parser rejects malformed code and accepts valid code:
+//! nesting limits, field names after `.`, loop/pattern/choose-arm names,
+//! `<log>` angle forms, `<Error<tag>>` type annotations, statements sharing a
+//! line, oversized float literals, and `repeat unless` lowering.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -48,8 +36,7 @@ fn run(source: &str) -> Result<String, String> {
         .map_err(|e| e.message)
 }
 
-/// The parser must bound its own recursion; the stack here is generous, but
-/// far smaller than what 100k levels of unbounded recursion need.
+/// The parser must bound its own recursion.
 fn errors_on_stack(source: String) -> Vec<String> {
     std::thread::Builder::new()
         .stack_size(16 << 20)
@@ -58,8 +45,6 @@ fn errors_on_stack(source: String) -> Vec<String> {
         .join()
         .expect("parser overflowed its stack instead of reporting the nesting")
 }
-
-// ── M4: nesting depth ──
 
 #[test]
 fn deep_parentheses_are_a_diagnostic() {
@@ -121,8 +106,6 @@ fn reasonable_nesting_still_parses() {
     );
 }
 
-// ── M5: field names ──
-
 #[test]
 fn dot_requires_a_field_name() {
     for bad in [
@@ -145,8 +128,6 @@ fn dot_still_accepts_field_names() {
     );
 }
 
-// ── M6: `<` before a name that is also an angle form ──
-
 #[test]
 fn less_than_an_angle_form_name() {
     assert_eq!(run("log := 10\n5 < log\n"), Ok("True".to_string()));
@@ -156,8 +137,6 @@ fn less_than_an_angle_form_name() {
         Ok("True".to_string())
     );
 }
-
-// ── M7: `<Error<tag>>` as a whole annotation ──
 
 #[test]
 fn tagged_error_type_annotation() {
@@ -177,8 +156,6 @@ fn tagged_error_type_annotation() {
     );
 }
 
-// ── M10: statements need a separator ──
-
 #[test]
 fn two_statements_on_one_line_are_rejected() {
     assert_rejected("x := 1 println(\"same line\")\n");
@@ -194,16 +171,12 @@ fn single_line_blocks_still_parse() {
     );
 }
 
-// ── L2: float overflow ──
-
 #[test]
 fn float_literal_out_of_range_is_an_error() {
     let big = format!("x := {}.0\n", "9".repeat(400));
     let errs = errors(&big);
     assert!(errs.iter().any(|m| m.contains("float")), "{errs:?}");
 }
-
-// ── L3: `repeat unless` with NaN ──
 
 #[test]
 fn repeat_unless_negates_rather_than_inverting_the_comparison() {
@@ -214,8 +187,6 @@ fn repeat_unless_negates_rather_than_inverting_the_comparison() {
         Ok("1".to_string())
     );
 }
-
-// ── L4: names must be names ──
 
 #[test]
 fn loop_and_pattern_names_must_be_identifiers() {

@@ -17,7 +17,6 @@ fun count_primes(lo <int>, hi <int>) {
 }
 
 main {
-    // Four tasks, one per core. Results come back in order.
     counts := diverge each start in [0, 250000, 500000, 750000] {
         count_primes(start, start + 250000)
     }

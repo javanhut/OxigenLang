@@ -1,6 +1,4 @@
-//! The latest GitHub release, read when the site is built, for the download
-//! page. release.yml rebuilds the site after publishing one, so the page
-//! lists the new files without anyone editing it.
+//! The latest GitHub release, read when the site is built, for the download page.
 
 use serde_json::Value;
 
@@ -70,7 +68,6 @@ fn parse(body: &str) -> Result<Release, String> {
         .flatten()
     {
         let name = text(asset, "name");
-        // oxigen_lang_v0_1_4_linux_x86.tar.gz -> linux_x86
         let Some(stem) = name.strip_suffix(".tar.gz") else {
             continue;
         };
@@ -89,7 +86,6 @@ fn parse(body: &str) -> Result<Release, String> {
             name,
         });
     }
-    // Linux before macOS, x86-64 before ARM: the order of the table.
     let rank = |p: &str| {
         ["linux_x86", "linux_arm64", "macos_arm64", "macos_x86"]
             .iter()

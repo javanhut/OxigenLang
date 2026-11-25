@@ -1,13 +1,5 @@
-//! JIT instrumentation counters + the IR-side `emit_counter_bump`
-//! helper that consumers use to wire bumps into emitted code.
-//!
-//! Pulled out of the original monolithic `engine.rs`. Two reasons it
-//! lives in its own module:
-//!   1. The `JitCounters` struct + its `dump()` impl is ~200 lines and
-//!      mostly noise from the perspective of the dispatch loop.
-//!   2. `counter_offsets` baking — it relies on `#[repr(C)]` field
-//!      offsets that should be co-located with the struct definition,
-//!      not jammed together with the IR emitters that consume them.
+//! JIT instrumentation counters and the IR-side `emit_counter_bump` helper
+//! used to bump them from emitted code.
 
 #![cfg(feature = "jit")]
 
@@ -15,14 +7,9 @@ use cranelift_codegen::ir::InstBuilder;
 use cranelift_codegen::ir::types;
 use cranelift_frontend::FunctionBuilder;
 
-/// Step 0 attribution: discriminant for the per-helper call counter
-/// array on `JitCounters`. One slot per `extern "C"` runtime helper in
-/// `runtime.rs`. Bumped from the helper's entry so the cost model is
-/// "what fraction of this benchmark's time went into which helper".
-///
-/// `HELPER_NAMES` below must stay in lockstep with this enum order.
-/// Adding a helper: add the variant, add the name, bump the counter
-/// at the helper's entry.
+/// Discriminant for the per-helper call counter array on `JitCounters`. One
+/// slot per `extern "C"` runtime helper in `runtime.rs`, bumped from the
+/// helper's entry. `HELPER_NAMES` follows this enum's order.
 #[repr(usize)]
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum HelperCounter {
@@ -169,15 +156,9 @@ pub(crate) const HELPER_NAMES: [&str; HelperCounter::COUNT] = [
     "run_via_interpreter",
 ];
 
-/// Lightweight JIT instrumentation counters. Each field is a
-/// `Cell<u64>` so increments compile to plain load + inc + store in
-/// the JIT IR. On process exit, `JitInner::drop` dumps the counters
-/// to stderr when the env var `OXIGEN_JIT_STATS` is set. Off by
-/// default — zero text output.
-///
-/// Added in stage A0 ahead of the Plan A calling-convention work so a
-/// weak benchmark result is debuggable ("did the specialized path
-/// never get generated? never get hit? get hit but bail?").
+/// Lightweight JIT instrumentation counters. Each field is a `Cell<u64>`. On
+/// process exit, `JitInner::drop` dumps the counters to stderr when the env
+/// var `OXIGEN_JIT_STATS` is set.
 #[repr(C)]
 pub(crate) struct JitCounters {
     pub specialized_entry_compiled: std::cell::Cell<u64>,
@@ -191,86 +172,48 @@ pub(crate) struct JitCounters {
     pub virt_divmod_fast: std::cell::Cell<u64>,
     pub virt_divmod_slow_zero: std::cell::Cell<u64>,
     pub virt_divmod_slow_overflow: std::cell::Cell<u64>,
-    /// B2.1h: incremented every time the signed-div-by-power-of-two
-    /// peephole replaces a Cranelift `sdiv x, pow2` with the bias-
-    /// and-shift sequence (`sshr_imm + band_imm + iadd + sshr_imm`),
-    /// avoiding the ~20-cycle `idiv` lowering Cranelift emits at
-    /// `opt_level=none`.
+    /// Incremented every time the signed-div-by-power-of-two peephole replaces
+    /// a Cranelift `sdiv x, pow2` with the bias-and-shift sequence.
     pub virt_div_pow2_lowered: std::cell::Cell<u64>,
-    /// B2.1f: incremented every time the fused `Equal` / `NotEqual` +
-    /// `JumpIf*` path fires with both operands staged as virt Ints.
-    /// Measures how often the fast branch-fusion replaces a boxed-Bool
-    /// round trip through `refs.eq`/`refs.ne`.
+    /// Incremented every time the fused `Equal` / `NotEqual` + `JumpIf*` path
+    /// fires with both operands staged as virt Ints.
     pub virt_branch_eq_hit: std::cell::Cell<u64>,
-    /// B2.1g: incremented when the parity branch peephole fires —
-    /// `(x % 2) == 0` / `!= 0` (and the commuted `0 == x % 2` /
-    /// `0 != x % 2`) lowered to `band_imm + icmp_imm + brif`,
-    /// avoiding `srem` entirely. Retained post-Cranelift-0.131
-    /// because the egraph mid-end's `srem`-by-2 lowering still
-    /// emits a comparison sequence longer than this peephole's
-    /// single bit-test.
+    /// Incremented when the parity branch peephole fires: `(x % 2) == 0` /
+    /// `!= 0` (and the commuted forms) lowered to `band_imm + icmp_imm + brif`.
     pub virt_branch_parity_hit: std::cell::Cell<u64>,
-    /// Probe (bench_closure): raw count of `jit_get_upvalue` FFI
-    /// crossings. Bumped from the Rust helper. Nonzero count here with
-    /// zero coverage from a fast path indicates GetUpvalue is a
-    /// candidate for inline lowering.
+    /// Raw count of `jit_get_upvalue` FFI crossings.
     pub get_upvalue_calls: std::cell::Cell<u64>,
-    /// Probe: subset of `get_upvalue_calls` where the upvalue was
-    /// `Closed(Value::Integer(_))`. If this ≈ `get_upvalue_calls` for
-    /// a hot bench, an inline Closed+Integer fast path would cover
-    /// nearly all traffic.
+    /// Subset of `get_upvalue_calls` where the upvalue was
+    /// `Closed(Value::Integer(_))`.
     pub get_upvalue_closed_integer_hit: std::cell::Cell<u64>,
-    /// Probe: subset of `get_upvalue_calls` that were Open, or Closed
-    /// non-Integer. Measures how often a fast path would have to fall
-    /// back to the generic helper.
+    /// Subset of `get_upvalue_calls` that were Open, or Closed non-Integer.
     pub get_upvalue_fallback: std::cell::Cell<u64>,
-    /// Probe: raw count of `jit_set_upvalue` FFI crossings. Mutable
-    /// upvalues disqualify simple caching strategies.
+    /// Raw count of `jit_set_upvalue` FFI crossings.
     pub set_upvalue_calls: std::cell::Cell<u64>,
-    /// Probe: raw count of `jit_op_return` FFI crossings. Large values
-    /// indicate return-path FFI is a significant fixed cost per
-    /// function invocation.
+    /// Raw count of `jit_op_return` FFI crossings.
     pub jit_op_return_calls: std::cell::Cell<u64>,
-    /// Probe: inline Call IC hits (cache matches expected closure).
-    /// Bumped from emitted IR at the hit-block entry.
+    /// Inline Call IC hits (cache matches expected closure). Bumped from
+    /// emitted IR at the hit-block entry.
     pub call_ic_hit: std::cell::Cell<u64>,
-    /// Probe: inline Call IC misses (cache miss or non-closure tag).
-    /// Bumped from emitted IR at the miss-block entry.
+    /// Inline Call IC misses (cache miss or non-closure tag). Bumped from
+    /// emitted IR at the miss-block entry.
     pub call_ic_miss: std::cell::Cell<u64>,
-    /// B2.2: incremented when the inline GetUpvalue closed-integer
-    /// fast path fires — `kinds[idx] == 1` lets the JIT load the
-    /// cached i64 directly from `ObjClosure.upvalue_int_values` and
-    /// push it as a `Value::Integer` without crossing into Rust.
-    /// Bumped from IR at the fast-block entry. The first GetUpvalue
-    /// against any given closure always misses (cache empty) and goes
-    /// through `jit_get_upvalue`, which populates the cache;
-    /// subsequent reads hit. So
-    /// `inline_hit + get_upvalue_calls ≈ total dynamic GetUpvalue
-    /// count`, and the first-call miss counts toward
-    /// `get_upvalue_calls`.
+    /// Incremented when the inline GetUpvalue closed-integer fast path fires:
+    /// the cached i64 is loaded directly from `ObjClosure.upvalue_int_values`
+    /// and pushed as a `Value::Integer`. Bumped from IR at the fast-block
+    /// entry.
     pub get_upvalue_inline_hit: std::cell::Cell<u64>,
-    /// A4.0 probe: subset of `call_ic_hit` where the callee closure
-    /// has `specialized_kind == NATIVE_INT_BODY` (its specialized
-    /// entry exists and would be invocable via direct i64 dispatch).
-    /// Measures the upper bound on how often A4 (Call IC routes to
-    /// specialized entry) would fire if we built that path. Bumped
-    /// from IR inside the IC hit block — does NOT change behavior;
-    /// the call still dispatches to the generic thunk.
+    /// Subset of `call_ic_hit` where the callee closure has
+    /// `specialized_kind == NATIVE_INT_BODY`. Bumped from IR inside the IC hit
+    /// block; does not change behavior.
     pub ic_callee_has_spec_entry: std::cell::Cell<u64>,
-    /// B2.2.f probe: subset of `call_ic_hit` where the callee closure
-    /// has `specialized_kind == NATIVE_INT_BODY_WITH_CLOSURE`.
-    /// Measures the upper bound on closure-aware spec dispatch
-    /// coverage. Bumped at the runtime check site, before the
-    /// dispatch commits — counts callees that *could* be reached via
-    /// the new ABI for this call site.
+    /// Subset of `call_ic_hit` where the callee closure has
+    /// `specialized_kind == NATIVE_INT_BODY_WITH_CLOSURE`. Bumped at the
+    /// runtime check site, before the dispatch commits.
     pub ic_callee_has_closure_aware_spec: std::cell::Cell<u64>,
-    /// B2.2.f: closure-aware specialized call dispatched. Args passed
-    /// in registers, closure pointer in a register, no JitFrame walk
-    /// for upvalue access, inline Return without `jit_op_return` FFI.
-    /// Bumped from emitted IR at the call_indirect site, on the
-    /// success branch (after the all-checks-passed gate). Strict
-    /// subset of `ic_callee_has_closure_aware_spec` — the gap is
-    /// arity / thunk-non-null / RC fail tail.
+    /// Closure-aware specialized calls dispatched: args and closure pointer
+    /// passed in registers. Bumped from emitted IR at the call_indirect site on
+    /// the success branch. Subset of `ic_callee_has_closure_aware_spec`.
     pub closure_aware_call_dispatch: std::cell::Cell<u64>,
 
     /// Phase 1: calls whose callee body was evaluated inline at the call site —
@@ -281,46 +224,36 @@ pub(crate) struct JitCounters {
     /// sent it down the normal path anyway.
     pub closure_inline_guard_miss: std::cell::Cell<u64>,
 
-    /// Step 0 attribution: per-helper FFI call counts. Indexed by
-    /// `HelperCounter`; bumped from each helper's entry. Tells us
-    /// "this benchmark spent N FFI crossings into op_call_hit, M into
-    /// get_local, ..." without re-instrumenting per investigation.
+    /// Per-helper FFI call counts, indexed by `HelperCounter` and bumped from
+    /// each helper's entry.
     pub helper_calls: [std::cell::Cell<u64>; HelperCounter::COUNT],
 
-    /// Step 0 attribution: count of functions that the spec-entry
-    /// eligibility analysis returned `Eligible` for.
+    /// Count of functions the spec-entry eligibility analysis returned
+    /// `Eligible` for.
     pub spec_entry_eligible: std::cell::Cell<u64>,
-    /// Step 0 attribution: rejected because the function takes 0 args.
+    /// Rejected because the function takes 0 args.
     pub spec_entry_rejected_zero_arity: std::cell::Cell<u64>,
-    /// Step 0 attribution: rejected because at least one param wasn't
-    /// Int64-typed and wasn't an int-mirror candidate.
+    /// Rejected because at least one param wasn't Int64-typed and wasn't an
+    /// int-mirror candidate.
     pub spec_entry_rejected_param_not_int: std::cell::Cell<u64>,
-    /// Step 0 attribution: rejected because at least one param was
-    /// captured by an upvalue.
+    /// Rejected because at least one param was captured by an upvalue.
     pub spec_entry_rejected_param_captured: std::cell::Cell<u64>,
-    /// Step 0 attribution: rejected because the body contains a
-    /// `Closure` op (allocates a new closure on the heap).
+    /// Rejected because the body contains a `Closure` op.
     pub spec_entry_rejected_has_closure_op: std::cell::Cell<u64>,
-    /// Step 0 attribution: rejected because the body contains
-    /// `GetUpvalue` / `SetUpvalue` / `CloseUpvalue`. Step 4 will lift
-    /// this restriction (closure-aware specialized ABI); the counter
-    /// is the bound on how much that step can unlock.
+    /// Rejected because the body contains `GetUpvalue` / `SetUpvalue` /
+    /// `CloseUpvalue`.
     pub spec_entry_rejected_has_upvalue_op: std::cell::Cell<u64>,
-    /// Step 0 attribution: rejected because the function has no
-    /// Return.
+    /// Rejected because the function has no Return.
     pub spec_entry_rejected_no_return: std::cell::Cell<u64>,
-    /// Step 0 attribution: rejected because the function has no
-    /// Call — emitting a specialized body would be pure compile-time
-    /// overhead.
+    /// Rejected because the function has no Call.
     pub spec_entry_rejected_no_call: std::cell::Cell<u64>,
-    /// Step 0 attribution: rejected because at least one Return IP was
-    /// unreachable per the abstract interpretation.
+    /// Rejected because at least one Return IP was unreachable per the abstract
+    /// interpretation.
     pub spec_entry_rejected_return_unreachable: std::cell::Cell<u64>,
 }
 
 impl JitCounters {
     pub(super) fn new() -> Self {
-        // [Cell<u64>; N] has no Default on older toolchains, so build it with std::array::from_fn.
         let helper_calls: [std::cell::Cell<u64>; HelperCounter::COUNT] =
             std::array::from_fn(|_| std::cell::Cell::new(0));
         Self {
@@ -364,11 +297,8 @@ impl JitCounters {
         }
     }
 
-    /// Step 0 attribution: per-helper bump. Called from every
-    /// `extern "C"` runtime helper at entry. Branch on whether
-    /// counters are present (None when JIT is built but the run is
-    /// non-JIT) so the helper-side cost is one nullable-load + cmp +
-    /// load + inc + store on the hot path.
+    /// Per-helper bump. Called from every `extern "C"` runtime helper at entry;
+    /// does nothing when counters are absent.
     #[inline]
     pub(crate) fn bump_helper(&self, h: HelperCounter) {
         let cell = &self.helper_calls[h as usize];
@@ -486,7 +416,6 @@ impl JitCounters {
             self.closure_inline_guard_miss.get()
         );
 
-        // Step 0 spec-entry eligibility outcome breakdown.
         eprintln!("[jit stats] spec-entry eligibility");
         eprintln!(
             "  spec_entry_eligible:                       {}",
@@ -525,7 +454,6 @@ impl JitCounters {
             self.spec_entry_rejected_return_unreachable.get()
         );
 
-        // Print only non-zero entries; widths align with the longest name in HELPER_NAMES.
         eprintln!("[jit stats] helper FFI calls (non-zero)");
         for (i, &name) in HELPER_NAMES.iter().enumerate() {
             let n = self.helper_calls[i].get();
@@ -536,10 +464,8 @@ impl JitCounters {
     }
 }
 
-/// Emit IR that increments a `Cell<u64>` counter at a fixed address.
-/// The address is baked in as an immediate; since `JitCounters` lives
-/// in a `Box` owned by `JitInner`, the address is stable for the JIT's
-/// lifetime. Emits load + iadd_imm + store — 3 ops.
+/// Emit IR that increments a `Cell<u64>` counter at a fixed address, baked in
+/// as an immediate. Emits load + iadd_imm + store.
 #[inline]
 pub(super) fn emit_counter_bump(
     builder: &mut FunctionBuilder<'_>,
@@ -554,11 +480,9 @@ pub(super) fn emit_counter_bump(
     builder.ins().store(flags, next, ptr, 0);
 }
 
-/// Byte offset of each `JitCounters` field from the struct base.
-/// The struct is `#[repr(C)]` so these are stable across Rust
-/// versions. Fields are `Cell<u64>` which is 8 bytes and identical
-/// to `u64`.
-#[allow(dead_code)] // consumed by later Plan A stages (A2/A3/A5)
+/// Byte offset of each `JitCounters` field from the struct base. The struct is
+/// `#[repr(C)]` and the fields are `Cell<u64>`.
+#[allow(dead_code)]
 pub(super) mod counter_offsets {
     use super::JitCounters;
     use std::mem::offset_of;

@@ -10,9 +10,7 @@ pub struct Assets {
     pub js: String,
     /// The released version, which the structured data names.
     pub version: String,
-    /// The path the site is served under, such as `/OxigenLang`; empty at a
-    /// domain's root. The scripts read it from `<html data-base>`, which
-    /// `html::rebase` leaves alone.
+    /// The path the site is served under, such as `/OxigenLang`; empty at a domain's root.
     pub base: String,
 }
 
@@ -56,7 +54,6 @@ pub fn render(config: &Config, assets: &Assets, page: &Page, year: i32) -> Strin
         .to_string()
         .replace("</", "<\\/");
     let og_type = if page.article { "article" } else { "website" };
-    // The 404 page is served for every missing URL; it must not be indexed as one.
     let robots = if page.path == "/404.html" {
         "noindex, follow"
     } else {

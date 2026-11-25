@@ -1,17 +1,6 @@
-//! Regression: the lowered `each i in range(...)` loop behaves like the
-//! `range` builtin at the edges, without leaving the JIT.
+//! The lowered `each i in range(...)` loop behaves like the `range` builtin at the edges, without leaving the JIT.
 //!
-//! The compiler turns `each i in range(a, b, step)` into a counter instead of
-//! building an array. That counter was advanced with a wrapping add and tested
-//! against the bound afterwards, so a step past i64::MAX wrapped to a huge
-//! negative number that was still `< end`, and the loop ran on (practically
-//! forever). The builtin stops instead. The lowered loop also never checked
-//! its bounds' types: `range(0.5, 3)` iterated 0.5, 1.5, 2.5 and
-//! `range("a", "c")` ran once, where the builtin reports
-//! `range() requires integer arguments`.
-//!
-//! Both checks have to stay compilable: a check the JIT can't compile would
-//! push every function with a range loop back to the interpreter.
+//! Covers steps past i64::MAX, and non-integer bounds such as `range(0.5, 3)` and `range("a", "c")`, which report `range() requires integer arguments`.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -70,8 +59,7 @@ fn assert_all_err(source: &str, needle: &str) {
     }
 }
 
-/// Collects the loop's values inside a function, so the JIT compiles it. The
-/// cap turns a wrapped counter into a wrong answer instead of a hang.
+/// Collects the loop's values inside a function, so the JIT compiles it.
 fn collected(range_args: &str) -> String {
     format!(
         "fun f() {{\n  out := []\n  each i in range({range_args}) {{\n    out = push(out, i)\n    stop when len(out) == 20\n  }}\n  out\n}}\nf()"
@@ -156,8 +144,6 @@ fn functions_with_range_loops_still_compile() {
 
 #[test]
 fn nested_range_loops_do_not_leak_stack_slots() {
-    // More outer iterations than the operand stack has slots: an inner loop
-    // that left one slot behind per entry overflowed the stack under the JIT.
     let src = "fun f(n) {\n  t := 0\n  each i in range(n) {\n    each j in range(4) {\n      t = t + j\n    }\n    each k in range(i, i - 2, -1) {\n      t = t + 1\n    }\n  }\n  t\n}\nf(300000)";
     assert_all_ok(src, "2400000");
 }

@@ -1,12 +1,9 @@
-//! Regression: multi-name assignment evaluates every right-hand value before
-//! binding any name, and the counts must match.
+//! Multi-name assignment evaluates every right-hand value before binding any
+//! name, and the counts must match.
 //!
-//! - `a, b = b, a` bound `a` before evaluating the second value, so it gave
-//!   `2 2` instead of swapping.
-//! - `a, b := 1, 2, 3` silently dropped the `3` (it was never evaluated) and
-//!   `a, b, c := 1, 2` left `c` undefined.
-//! - `x, y := [1, 2, 3]` truncated and `x, y, z := [1]` padded with `None`,
-//!   where `docs/variables.md` documents "expected 2 values, got 3".
+//! - `a, b = b, a` swaps.
+//! - `a, b := 1, 2, 3` and `a, b, c := 1, 2` are errors.
+//! - `x, y := [1, 2, 3]` and `x, y, z := [1]` report "expected 2 values, got 3".
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;

@@ -1,16 +1,6 @@
-//! Regression: module imports share one cycle stack and one module cache
-//! across the whole import graph.
-//!
-//! Each imported module ran in a child VM with an EMPTY import stack and
-//! module cache, and the main file was never on the stack. So:
-//! - `a` importing `b` importing `a` (or a file importing itself) recursed
-//!   until the native stack overflowed, instead of raising the
-//!   `circular import` error `docs/imports.md` promises;
-//! - a module imported from two places ran twice, with two copies of its
-//!   state (and a diamond-shaped graph re-ran modules exponentially).
-//!
-//! Also: `restrict()` must not leave a module cached from before the
-//! restriction usable with its old, unrestricted builtins.
+//! Tests that module imports share one cycle stack and one module cache across
+//! the import graph: circular imports raise `circular import`, a module imported
+//! from two places runs once, and `restrict()` applies to cached modules.
 
 use std::path::{Path, PathBuf};
 
@@ -124,7 +114,6 @@ fn shared_module_is_evaluated_once_and_its_state_is_shared() {
 #[test]
 fn diamond_import_graph_runs_each_module_once() {
     let dir = temp_dir("diamond");
-    // d is reachable through b and c; it records each evaluation in a file.
     let log = dir.join("evals.log");
     write(
         &dir,

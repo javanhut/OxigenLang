@@ -1,5 +1,4 @@
-//! Arithmetic between different numeric types follows one promotion rule for
-//! every operator, the same one `==` already uses:
+//! Arithmetic between different numeric types follows one promotion rule for every operator, the same one `==` uses:
 //!
 //! - `byte` or `uint` with `int` is done as `int`;
 //! - `byte` with `uint` is done as `uint`;
@@ -8,8 +7,7 @@
 //!
 //! The promoted pair then behaves exactly like that type with itself:
 //! `int` wraps, `uint` subtraction below zero is an error, and `/` and `%`
-//! reject a zero divisor. Before this, `+` and `-` accepted some mixes while
-//! `*`, `/` and `%` rejected most of them as type mismatches.
+//! reject a zero divisor.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;

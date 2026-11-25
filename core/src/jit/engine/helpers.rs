@@ -1,12 +1,6 @@
 //! Cranelift helper-function tables: `HelperIds` (per-module FuncIds),
 //! `HelperRefs` (per-function FuncRefs), and the bootstrap routines
 //! that register and declare them.
-//!
-//! Pulled out of the original monolithic `engine.rs`. Both struct
-//! definitions are large field-by-field listings of every `extern "C"`
-//! runtime helper the JIT might call; co-locating them with their
-//! registration / declaration code makes the helper plumbing a single
-//! browseable file.
 
 #![cfg(feature = "jit")]
 
@@ -22,56 +16,50 @@ use super::super::runtime;
 /// `declare_helpers`; converted to a per-function `HelperRefs` table
 /// inside each `compile_function` invocation via `declare_helper_refs`.
 pub(super) struct HelperIds {
-    // Push
-    pub push_constant: FuncId,       // (vm, u32)
-    pub push_integer_inline: FuncId, // (vm, i64)
-    pub push_float_inline: FuncId,   // (vm, i64 bits-of-f64)
-    // Stack manip
-    pub pop: FuncId, // (vm)
-    pub dup: FuncId, // (vm)
+    pub push_constant: FuncId,
+    pub push_integer_inline: FuncId,
+    pub push_float_inline: FuncId,
+    pub pop: FuncId,
+    pub dup: FuncId,
 
-    // Collections
-    pub build_array: FuncId,               // (vm, u32)
-    pub index_fast_array_int: FuncId,      // (vm) -> u32
-    pub iter_len: FuncId,                  // (vm) -> u32
-    pub iter_get: FuncId,                  // (vm) -> u32
-    pub iter_entry: FuncId,                // (vm) -> u32
-    pub index_assign: FuncId,              // (vm) -> u32
-    pub type_wrap: FuncId,                 // (vm, u32) -> u32
-    pub range_limit: FuncId,               // (vm, u32) -> u32
-    pub check_return: FuncId,              // (vm, u32) -> u32
-    pub local_add_array_mod_index: FuncId, // (vm, u32, u32, u32, i64, u32) -> u32
-    pub struct_field_add_const: FuncId,    // (vm, u32, u32, i64) -> u32
-    pub struct_field_add_local: FuncId,    // (vm, u32, u32, u32) -> u32
+    pub build_array: FuncId,
+    pub index_fast_array_int: FuncId,
+    pub iter_len: FuncId,
+    pub iter_get: FuncId,
+    pub iter_entry: FuncId,
+    pub index_assign: FuncId,
+    pub index_existing: FuncId,
+    pub lock: FuncId,
+    pub type_wrap: FuncId,
+    pub range_limit: FuncId,
+    pub check_return: FuncId,
+    pub local_add_array_mod_index: FuncId,
+    pub struct_field_add_const: FuncId,
+    pub struct_field_add_local: FuncId,
 
-    // Locals
-    pub get_local: FuncId,             // (vm, u32)
-    pub set_local: FuncId,             // (vm, u32)
-    pub set_local_checked: FuncId,     // (vm, u32) -> u32
-    pub check_recursion_depth: FuncId, // (vm) -> u32
-    pub check_param_types: FuncId,     // (vm) -> u32
-    pub loop_stop: FuncId,             // (vm) -> u32
+    pub get_local: FuncId,
+    pub set_local: FuncId,
+    pub set_local_checked: FuncId,
+    pub check_recursion_depth: FuncId,
+    pub check_param_types: FuncId,
+    pub loop_stop: FuncId,
 
-    // Arithmetic (fallible)
     pub add: FuncId,
     pub sub: FuncId,
     pub mul: FuncId,
     pub div: FuncId,
     pub modu: FuncId,
 
-    // Comparison
-    pub eq: FuncId, // infallible
-    pub ne: FuncId, // infallible
+    pub eq: FuncId,
+    pub ne: FuncId,
     pub lt: FuncId,
     pub le: FuncId,
     pub gt: FuncId,
     pub ge: FuncId,
 
-    // Logical / unary
-    pub not: FuncId,    // infallible
-    pub negate: FuncId, // fallible
+    pub not: FuncId,
+    pub negate: FuncId,
 
-    // Bitwise (all fallible: type-error on non-int operands)
     pub op_band: FuncId,
     pub op_bor: FuncId,
     pub op_bxor: FuncId,
@@ -79,57 +67,47 @@ pub(super) struct HelperIds {
     pub op_shl: FuncId,
     pub op_shr: FuncId,
 
-    // Logging
-    pub op_log: FuncId, // (vm, u32 flags) -> u32
+    pub op_log: FuncId,
 
-    // B2.2.f debug invariant helper: (vm, *cache, *closure, phase, slot_offset, jit_frame_len, arg_count) -> u32
     pub dbg_check_spec_call: FuncId,
 
-    // Branching truthy checks
-    pub peek_truthy: FuncId, // (vm) -> u32
-    pub pop_truthy: FuncId,  // (vm) -> u32
+    pub peek_truthy: FuncId,
+    pub pop_truthy: FuncId,
 
-    // Return
-    pub op_return: FuncId, // (vm)
+    pub op_return: FuncId,
 
-    // Call (fallible, takes arg_count)
-    pub op_call: FuncId,      // (vm, u32) -> u32
-    pub op_call_hit: FuncId,  // (vm, *mut CallCacheEntry) -> u32
-    pub op_call_miss: FuncId, // (vm, u32, *mut CallCacheEntry) -> u32
+    pub op_call: FuncId,
+    pub op_call_hit: FuncId,
+    pub op_call_miss: FuncId,
 
-    // Globals
-    pub get_global: FuncId,          // (vm, u32) -> u32
-    pub get_global_ic: FuncId,       // (vm, *mut GlobalCacheEntry, u32) -> u32
-    pub set_global: FuncId,          // (vm, u32) -> u32
-    pub define_global: FuncId,       // (vm, u32) -> u32
-    pub define_global_typed: FuncId, // (vm, u32, u32, u32) -> u32
+    pub get_global: FuncId,
+    pub get_global_ic: FuncId,
+    pub set_global: FuncId,
+    pub define_global: FuncId,
+    pub define_global_typed: FuncId,
 
-    // Upvalues
-    pub get_upvalue: FuncId,   // (vm, u32)
-    pub set_upvalue: FuncId,   // (vm, u32)
-    pub close_upvalue: FuncId, // (vm)
+    pub get_upvalue: FuncId,
+    pub set_upvalue: FuncId,
+    pub close_upvalue: FuncId,
 
-    // Closure
-    pub op_closure: FuncId, // (vm, u32, u32) -> u32
+    pub op_closure: FuncId,
 
-    // Struct ops
-    pub op_struct_def: FuncId,        // (vm, u32)
-    pub op_struct_literal: FuncId,    // (vm, u32, u32) -> u32
-    pub op_get_field_ic_miss: FuncId, // (vm, u32, *mut FieldCacheEntry) -> u32
-    pub op_set_field_ic_miss: FuncId, // (vm, u32, *mut FieldCacheEntry) -> u32
-    pub op_define_method: FuncId,     // (vm, u32, u32) -> u32
-    pub op_method_call: FuncId,       // (vm, u32, u32) -> u32
-    pub op_method_call_ic: FuncId,    // (vm, u32, u32, *mut MethodCacheEntry) -> u32
+    pub op_struct_def: FuncId,
+    pub op_struct_literal: FuncId,
+    pub op_get_field_ic_miss: FuncId,
+    pub op_set_field_ic_miss: FuncId,
+    pub op_define_method: FuncId,
+    pub op_method_call: FuncId,
+    pub op_method_call_ic: FuncId,
 
-    // Inline int fast-path support
-    pub stack_as_mut_ptr: FuncId, // (vm) -> *mut Value (pointer-sized)
-    pub stack_len: FuncId,        // (vm) -> i64
-    pub stack_pop_one: FuncId,    // (vm)
-    pub stack_pop_n: FuncId,      // (vm, u32)
-    pub stack_commit_len: FuncId, // (vm, u64)
-    pub stack_truncate: FuncId,   // (vm, i64)
-    pub replace_top2_with_bool: FuncId, // (vm, u32)
-    pub current_slot_offset: FuncId, // (vm) -> i64
+    pub stack_as_mut_ptr: FuncId,
+    pub stack_len: FuncId,
+    pub stack_pop_one: FuncId,
+    pub stack_pop_n: FuncId,
+    pub stack_commit_len: FuncId,
+    pub stack_truncate: FuncId,
+    pub replace_top2_with_bool: FuncId,
+    pub current_slot_offset: FuncId,
 }
 
 /// FuncRefs for the current function's context — the in-function
@@ -148,6 +126,8 @@ pub(super) struct HelperRefs {
     pub iter_get: FuncRef,
     pub iter_entry: FuncRef,
     pub index_assign: FuncRef,
+    pub index_existing: FuncRef,
+    pub lock: FuncRef,
     pub type_wrap: FuncRef,
     pub range_limit: FuncRef,
     pub check_return: FuncRef,
@@ -208,7 +188,6 @@ pub(super) struct HelperRefs {
     #[allow(dead_code)]
     pub op_method_call: FuncRef,
     pub op_method_call_ic: FuncRef,
-    // Still registered for compatibility, but hot paths read vm.stack_view directly.
     #[allow(dead_code)]
     pub stack_as_mut_ptr: FuncRef,
     #[allow(dead_code)]
@@ -231,8 +210,6 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
         };
     }
 
-    // Phase 2.2: the lean entry's cold exit. Never returns — it longjmps to the
-    // boundary's thread-local unwind target.
     reg!(
         "oxigen_lean_overflow",
         crate::jit::runtime::jit_lean_overflow
@@ -253,6 +230,8 @@ pub(super) fn register_helpers(builder: &mut JITBuilder) {
     reg!("jit_op_iter_get", runtime::jit_op_iter_get);
     reg!("jit_op_iter_entry", runtime::jit_op_iter_entry);
     reg!("jit_op_index_assign", runtime::jit_op_index_assign);
+    reg!("jit_op_index_existing", runtime::jit_op_index_existing);
+    reg!("jit_op_lock", runtime::jit_op_lock);
     reg!("jit_type_wrap", runtime::jit_type_wrap);
     reg!("jit_range_limit", runtime::jit_range_limit);
     reg!("jit_check_return", runtime::jit_check_return);
@@ -351,7 +330,6 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
     sig_vm_u32.params.push(AbiParam::new(ptr_ty));
     sig_vm_u32.params.push(AbiParam::new(types::I32));
 
-    // fn(*mut VM, i64); floats pass as their u64 bit pattern reinterpreted as i64.
     let mut sig_vm_i64 = module.make_signature();
     sig_vm_i64.params.push(AbiParam::new(ptr_ty));
     sig_vm_i64.params.push(AbiParam::new(types::I64));
@@ -365,7 +343,6 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
     sig_vm_u32_to_u32.params.push(AbiParam::new(types::I32));
     sig_vm_u32_to_u32.returns.push(AbiParam::new(types::I32));
 
-    // (vm, cache_ptr, closure_ptr, phase, expected_slot_offset, expected_jit_frame_len, arg_count) -> u32
     let mut sig_dbg_spec_call = module.make_signature();
     sig_dbg_spec_call.params.push(AbiParam::new(ptr_ty));
     sig_dbg_spec_call.params.push(AbiParam::new(ptr_ty));
@@ -391,7 +368,6 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
     sig_vm_3u32_to_u32.params.push(AbiParam::new(types::I32));
     sig_vm_3u32_to_u32.returns.push(AbiParam::new(types::I32));
 
-    // jit_struct_field_add_const: fn(*mut VM, u32, u32, i64, *mut FieldCacheEntry) -> u32
     let mut sig_vm_u32_u32_i64_ptr_to_u32 = module.make_signature();
     sig_vm_u32_u32_i64_ptr_to_u32
         .params
@@ -412,7 +388,6 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         .returns
         .push(AbiParam::new(types::I32));
 
-    // jit_struct_field_add_local: fn(*mut VM, u32, u32, u32, *mut FieldCacheEntry) -> u32
     let mut sig_vm_3u32_ptr_to_u32 = module.make_signature();
     sig_vm_3u32_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
     sig_vm_3u32_ptr_to_u32
@@ -429,7 +404,6 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         .returns
         .push(AbiParam::new(types::I32));
 
-    // jit_op_method_call_ic: fn(*mut VM, u32, u32, *mut MethodCacheEntry) -> u32
     let mut sig_vm_u32_u32_ptr_to_u32 = module.make_signature();
     sig_vm_u32_u32_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
     sig_vm_u32_u32_ptr_to_u32
@@ -443,7 +417,6 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         .returns
         .push(AbiParam::new(types::I32));
 
-    // jit_local_add_array_mod_index: fn(*mut VM, u32, u32, u32, i64, u32) -> u32
     let mut sig_vm_3u32_i64_u32_to_u32 = module.make_signature();
     sig_vm_3u32_i64_u32_to_u32
         .params
@@ -477,13 +450,11 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
     sig_vm_to_i64.params.push(AbiParam::new(ptr_ty));
     sig_vm_to_i64.returns.push(AbiParam::new(types::I64));
 
-    // jit_op_call_hit: fn(*mut VM, *mut CallCacheEntry) -> u32
     let mut sig_vm_ptr_to_u32 = module.make_signature();
     sig_vm_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
     sig_vm_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
     sig_vm_ptr_to_u32.returns.push(AbiParam::new(types::I32));
 
-    // jit_op_call_miss: fn(*mut VM, u32, *mut CallCacheEntry) -> u32
     let mut sig_vm_u32_ptr_to_u32 = module.make_signature();
     sig_vm_u32_ptr_to_u32.params.push(AbiParam::new(ptr_ty));
     sig_vm_u32_ptr_to_u32.params.push(AbiParam::new(types::I32));
@@ -492,7 +463,6 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         .returns
         .push(AbiParam::new(types::I32));
 
-    // jit_get_global_ic: fn(*mut VM, *mut GlobalCacheEntry, u32) -> u32
     let mut sig_vm_ptr_u32_to_u32 = module.make_signature();
     sig_vm_ptr_u32_to_u32.params.push(AbiParam::new(ptr_ty));
     sig_vm_ptr_u32_to_u32.params.push(AbiParam::new(ptr_ty));
@@ -519,6 +489,8 @@ pub(super) fn declare_helpers(module: &mut JITModule) -> HelperIds {
         iter_get: decl(module, "jit_op_iter_get", &sig_vm_to_u32),
         iter_entry: decl(module, "jit_op_iter_entry", &sig_vm_to_u32),
         index_assign: decl(module, "jit_op_index_assign", &sig_vm_to_u32),
+        index_existing: decl(module, "jit_op_index_existing", &sig_vm_to_u32),
+        lock: decl(module, "jit_op_lock", &sig_vm_to_u32),
         type_wrap: decl(module, "jit_type_wrap", sig_vm_u32_fallible),
         range_limit: decl(module, "jit_range_limit", sig_vm_u32_fallible),
         check_return: decl(module, "jit_check_return", sig_vm_u32_fallible),
@@ -615,6 +587,8 @@ pub(super) fn declare_helper_refs(
         iter_get: r(ids.iter_get),
         iter_entry: r(ids.iter_entry),
         index_assign: r(ids.index_assign),
+        index_existing: r(ids.index_existing),
+        lock: r(ids.lock),
         type_wrap: r(ids.type_wrap),
         range_limit: r(ids.range_limit),
         check_return: r(ids.check_return),

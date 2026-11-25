@@ -16,8 +16,6 @@ fun tmp_dir(leaf <str>) {
 }
 
 <test>("args is an array under the test runner") {
-    // __args is defined on every VM, not just the script entry point, so this
-    // is an empty argv here rather than `undefined variable: __args`.
     expect(type(os.args())).eq("ARRAY")
 }
 
@@ -61,7 +59,6 @@ fun tmp_dir(leaf <str>) {
     r := os.exec("echo hi")
     expect(type(r)).eq("MAP")
     expect(r["code"]).eq(0)
-    // .contains() is has()-based and collection-only, so a string needs strings.contains_str.
     expect(strings.contains_str(r["stdout"], "hi")).truthy()
 }
 

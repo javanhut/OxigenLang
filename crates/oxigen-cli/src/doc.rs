@@ -1,10 +1,12 @@
 //! `oxigen doc`: the reference pages in docs/, built into the binary so they
 //! match the version installed.
 //!
-//!     oxigen doc                  every module, and the builtins
-//!     oxigen doc io               the io page
-//!     oxigen doc io.append_file   one function's section
-//!     oxigen doc exec_argv        every function with that name, anywhere
+//! ```text
+//! oxigen doc                  every module, and the builtins
+//! oxigen doc io               the io page
+//! oxigen doc io.append_file   one function's section
+//! oxigen doc exec_argv        every function with that name, anywhere
+//! ```
 
 macro_rules! pages {
     ($($name:literal),* $(,)?) => {
@@ -125,7 +127,6 @@ pub fn lookup(topic: Option<&str>) -> Result<String, String> {
         }
         return Ok(found.join("\n\n"));
     }
-    // A bare name: a builtin, or a function in any module.
     let mut found: Vec<String> = sections(BUILTINS, topic)
         .into_iter()
         .map(|s| format!("[builtin]\n{s}"))

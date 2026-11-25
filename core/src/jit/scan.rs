@@ -2,10 +2,8 @@
 //! allow-list and collects absolute branch-target offsets so the
 //! translator can preallocate one Cranelift block per target.
 //!
-//! The allow-list is intentionally conservative: any opcode outside of it
-//! causes compilation to be refused, so the function keeps running in the
-//! interpreter. This is the "no mid-execution deopt" guarantee from the
-//! plan.
+//! Any opcode outside the allow-list causes compilation to be refused, and
+//! the function keeps running in the interpreter.
 
 use crate::compiler::opcode::{Chunk, ControlFlow, JitSupport, OpCode};
 use crate::vm::value::ValueRepr;
@@ -16,29 +14,22 @@ use crate::vm::value::ValueRepr;
 pub struct ScanInfo {
     /// Absolute bytecode offsets that are branch targets.
     pub branch_targets: Vec<usize>,
-    /// Loop body ranges `[target, loop_op_pos)` — one per `OpCode::Loop`
+    /// Loop body ranges `[target, loop_op_pos)`, one per `OpCode::Loop`
     /// back-edge (`target` is the back-edge destination, `loop_op_pos` is the
     /// `Loop` opcode's own offset). An ip within any range executes inside a
-    /// loop, which the translator uses to disable peephole optimizations whose
-    /// inline memory loads would be hoisted/CSE'd across iterations (e.g. the
-    /// struct-field-add peephole, which otherwise reuses a stale field value).
+    /// loop.
     pub loop_ranges: Vec<(usize, usize)>,
     /// True if the function body contains `OpCode::Closure`, i.e. can
     /// create closures that capture locals of the current frame. When
     /// false, `VM::close_upvalues(frame.slot_offset)` at Return time is
-    /// provably a no-op (only `handle_closure` extends `open_upvalues`
-    /// with entries pointing into the current frame's slots), which
-    /// lets the JIT inline the return path.
+    /// a no-op.
     pub may_capture_upvalues: bool,
     /// True if the function body produces or consumes any heap-backed
     /// (Rc-bearing) Value on its stack. When false, the stack's values
-    /// inside this frame are guaranteed to be primitive tags
-    /// (Integer/Float/Bool/etc.) with no Drop side-effect, so Return
-    /// can skip the stack_truncate drop loop entirely.
+    /// inside this frame are primitive tags with no Drop side-effect.
     ///
-    /// Conservative: set true by any opcode that can place a heap-
-    /// backed Value on the stack or touch one already there (args or
-    /// upvalues we can't track statically).
+    /// Set true by any opcode that can place a heap-backed Value on the
+    /// stack or touch one already there (args or upvalues).
     pub touches_heap_values: bool,
 }
 
@@ -69,7 +60,6 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
             return Err(ScanError::UnsupportedOpcode { offset: ip, byte });
         }
 
-        // Jumps use u16 offsets immediately after the opcode byte.
         match op_info.control_flow {
             ControlFlow::ForwardJump | ControlFlow::ConditionalJump => {
                 let off =
@@ -91,7 +81,6 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
             ControlFlow::Fallthrough | ControlFlow::Return | ControlFlow::ErrorHandler => {}
         }
 
-        // Conservative: any opcode that can put an Rc-bearing Value on the stack sets the flag.
         if op_info.properties.touches_heap {
             info.touches_heap_values = true;
         } else if matches!(op, OpCode::Constant) {
@@ -112,12 +101,10 @@ pub fn scan(chunk: &Chunk) -> Result<ScanInfo, ScanError> {
             }
         }
 
-        // The canonical width decoder also validates fixed operands and Closure descriptors.
         let instruction_len = chunk
             .instruction_len(ip)
             .map_err(|_| ScanError::InvalidBytecode { offset: ip })?;
         if op_info.properties.captures {
-            // A Closure op means Return must call close_upvalues, so op_return cannot be inlined.
             info.may_capture_upvalues = true;
         }
         ip += instruction_len;

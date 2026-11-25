@@ -147,6 +147,8 @@ When a value is passed into a task or returned from one, it is **copied** across
 - Open TCP/UDP sockets (so a server can `diverge` each connection to a handler)
 - Channels, and processes started with [`os.spawn`](stdlib/os.md#background-processes): like sockets, these are handles, so every task that has one uses the same channel or process
 
+A value made read-only with [`lock`](variables.md#lock-a-value-that-can-never-change) stays locked on the other side, in both directions: a task can't change a locked value it was given, and a value locked inside a task comes back locked.
+
 ### Functions do not cross
 
 A function is data everywhere else in Oxigen, but it is the one thing a task

@@ -1,27 +1,19 @@
 //! Inline-cache (IC) entry types — one struct per call-site / lookup-site
 //! cache, all laid out `#[repr(C)]` so the JIT can bake byte offsets
-//! into emitted IR.
-//!
-//! Pulled out of the original monolithic `engine.rs` so the IC layouts
-//! live next to one another without being interleaved with the
-//! orchestration code. The offset constants are pinned by the JIT-side
-//! load/store sites; changing field order requires updating the
-//! `OFFSET_*` constants below in lockstep.
+//! into emitted IR. The `OFFSET_*` constants give the pinned field offsets.
 
 #![cfg(feature = "jit")]
 
 use crate::vm::value::{ObjClosure, ObjStructDef, Value};
 
-/// Per-call-site GetGlobal cache. `version` tracks the *per-name* version
+/// Per-call-site GetGlobal cache. `version` tracks the per-name version
 /// cell (owned by `JitInner::global_version_cells`) at the time the entry
-/// was populated; a mismatch means THIS global has been reassigned and the
-/// cached `value` is stale. Keying on a per-name cell instead of a VM-wide
-/// counter means a hot `total = total + i` loop only invalidates ICs for
-/// `total`, not every global read in the program.
+/// was populated; a mismatch means this global has been reassigned and the
+/// cached `value` is stale.
 ///
-/// `version_cell` starts pointing at `GLOBAL_VERSION_SENTINEL` (never
-/// written, and `version` starts at `u64::MAX`, so the first probe always
-/// misses); the miss path repoints it at the real per-name cell.
+/// `version_cell` starts pointing at `GLOBAL_VERSION_SENTINEL` and `version`
+/// starts at `u64::MAX`, so the first probe always misses; the miss path
+/// repoints it at the real per-name cell.
 #[repr(C)]
 pub(crate) struct GlobalCacheEntry {
     pub version: u64,
@@ -31,7 +23,7 @@ pub(crate) struct GlobalCacheEntry {
 
 impl GlobalCacheEntry {
     /// Byte offset of `version_cell`, loaded from emitted IR. (`version`
-    /// is at 0 and `value` at 8 — both baked into the GetGlobal hit path.)
+    /// is at 0 and `value` at 8.)
     pub(crate) const OFFSET_VERSION_CELL: i32 =
         std::mem::offset_of!(GlobalCacheEntry, version_cell) as i32;
 }
@@ -46,49 +38,36 @@ pub(crate) static GLOBAL_VERSION_SENTINEL: u64 = 0;
 ///   compare. `null` means the cache is empty.
 /// - offset 8: `thunk` — raw function pointer for the cached thunk.
 ///   Valid iff `closure_raw != null`.
-/// - offset 16: `arity` — the callee's arity; used to compute the
-///   stack slot_offset without reading the closure.
+/// - offset 16: `arity` — the callee's arity.
 /// - after that: `_keeper` keeps the `Rc` alive so the raw pointer
-///   stays valid (Rc would be freed without this). Rust-only; never
-///   read from IR.
+///   stays valid. Rust-only; never read from IR.
 #[repr(C)]
 pub(crate) struct CallCacheEntry {
     pub closure_raw: *const ObjClosure,
     pub thunk_raw: *const (),
     pub arity: u8,
-    /// B2.2.f: u8 cache of `closure.specialized_kind` at the time the
-    /// IC was populated. Reading this from the constant cache_ptr is
-    /// faster (and avoids a Cranelift folding issue we hit reading
-    /// `closure.specialized_kind` directly via offset_of!) than going
-    /// through the closure object on every call. Set to 0 when the
-    /// closure has no specialized entry. Stable for the cache's
-    /// lifetime — the closure can't change `specialized_kind` after
-    /// install.
+    /// u8 cache of `closure.specialized_kind` at the time the
+    /// IC was populated. Set to 0 when the closure has no specialized entry.
     pub specialized_kind: u8,
-    /// Phase 1: inline expansion of the *callee's body* at this call site.
+    /// Inline expansion of the callee's body at this call site.
     /// Populated on a normal IC miss once the real callee is known. When set,
-    /// the Call IR evaluates the body directly and never pushes a `JitFrame`,
-    /// materializes an operand-stack argument, or issues a call at all.
+    /// the Call IR evaluates the body directly without pushing a `JitFrame`.
     /// See `ClosureInlineKind`.
     pub inline_kind: ClosureInlineKind,
     /// ABI alignment padding — never read; `pub(crate)` so the struct
     /// can be initialized from outside this module.
     pub(crate) _pad: [u8; 1],
     /// Which upvalue slot `ClosureInlineKind::AddUpvalueArg` reads. Meaningful
-    /// only when `inline_kind` is non-`None`. Occupies former padding, so the
-    /// struct's size and every existing offset are unchanged.
+    /// only when `inline_kind` is non-`None`.
     pub inline_upvalue_index: u32,
-    /// B2.2.f: cache of `closure.specialized_thunk` (or null when
-    /// none). Same rationale as `specialized_kind`.
+    /// Cache of `closure.specialized_thunk` (or null when none).
     pub specialized_thunk: *const (),
     pub _keeper: Option<std::rc::Rc<ObjClosure>>,
 }
 
 impl CallCacheEntry {
     pub(crate) const OFFSET_CLOSURE_RAW: i32 = 0;
-    /// Reserved for a future pass that loads the thunk directly in IR
-    /// and emits an indirect call, skipping the `jit_op_call_hit`
-    /// helper's FFI crossing entirely. Not yet wired.
+    /// Reserved; not yet used.
     #[allow(dead_code)]
     pub(crate) const OFFSET_THUNK_RAW: i32 = 8;
     pub(crate) const OFFSET_SPECIALIZED_KIND: i32 = 17;
@@ -99,10 +78,6 @@ impl CallCacheEntry {
 
 /// Kind tag for inline expansion of a *closure* body at its call site — the
 /// `Call` analogue of `MethodInlineKind`.
-///
-/// Deliberately one shape to start. The guard cost is paid on every call, so a
-/// wide detector that rarely matches is a straight loss; widen only against a
-/// benchmark that demands it.
 ///
 /// `#[repr(u8)]` so the JIT reads a single byte at `OFFSET_INLINE_KIND`.
 #[repr(u8)]
@@ -120,8 +95,7 @@ pub(crate) enum ClosureInlineKind {
 /// Populated by `jit_op_method_call_ic` when the resolved callee's
 /// bytecode matches a whitelisted peephole shape. On subsequent hits
 /// the MethodCall IR reads `inline_kind` and emits the peephole
-/// operation directly instead of pushing a `JitFrame` and calling the
-/// thunk.
+/// operation directly.
 ///
 /// `#[repr(u8)]` so the JIT can read a single byte at the pinned
 /// offset.
@@ -139,14 +113,11 @@ pub(crate) enum MethodInlineKind {
 }
 
 /// Per-MethodCall-site cache. Stores the struct def pointer (identity-
-/// compared, held alive by the `Rc`) and the resolved method closure
-/// so a hit skips `find_struct_method`'s two HashMap lookups entirely.
+/// compared, held alive by the `Rc`) and the resolved method closure.
 ///
 /// Also carries optional inline-expansion info (`inline_kind` and
-/// friends). When set, the JIT's MethodCall hit path bypasses the
-/// JitFrame push + thunk dispatch entirely and emits the peephole
-/// operation (currently just the struct-field-add shape) inline at the
-/// caller. See `MethodInlineKind` above.
+/// friends). When set, the JIT's MethodCall hit path emits the peephole
+/// operation inline at the caller. See `MethodInlineKind` above.
 #[repr(C)]
 pub(crate) struct MethodCacheEntry {
     pub struct_def_raw: *const ObjStructDef,

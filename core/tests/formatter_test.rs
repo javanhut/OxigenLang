@@ -44,8 +44,6 @@ fn test_format_qualified_type_annotations() {
 
 #[test]
 fn test_format_empty_braces_after_a_dot() {
-    // `api.Res {}` (a module's struct, or an enum variant with no fields)
-    // used to come out as `api.Res {  }`.
     let input = "r := api.Res {}\ns := api.Res {status: 1}";
     let expected = "r := api.Res {}\ns := api.Res { status: 1 }\n";
     assert_eq!(format_source(input), expected);
@@ -53,12 +51,9 @@ fn test_format_empty_braces_after_a_dot() {
 
 #[test]
 fn test_format_body_holding_a_callback_wraps_past_the_width() {
-    // A call taking a function literal used to be pulled onto the
-    // signature's line however long that made it.
     let input = "fun rand_int(rows <int>, cols <int>, min <int> = 0, max <int> = 1000) {\n    __build(rows, cols, fun(r <int>, c <int>) { random.rand_int(min, max) })\n}";
     let expected = "fun rand_int(rows <int>, cols <int>, min <int> = 0, max <int> = 1000) {\n    __build(rows, cols, fun(r <int>, c <int>) { random.rand_int(min, max) })\n}\n";
     assert_eq!(format_source(input), expected);
-    // Short enough, it still goes on one line.
     let input = "fun double(xs) {\n    map(xs, fun(x) { x * 2 })\n}";
     assert_eq!(
         format_source(input),
@@ -74,7 +69,6 @@ fn test_format_long_body_without_a_callback_stays_inline() {
 
 #[test]
 fn test_format_body_spanning_lines_is_a_block() {
-    // It used to print as `fun people() { [` … `] }`.
     let input = "fun people() {\n    [\n        {\"person\": \"john\", \"info\": {\"age\": 32, \"job\": \"unemployed\"}},\n        {\"person\": \"jane\"},\n    ]\n}";
     assert_eq!(format_source(input), format!("{input}\n"));
 }
@@ -161,7 +155,6 @@ fn test_format_long_array_idempotent() {
 fn test_format_array_with_prefix_column() {
     let input = "long_variable_name_here := [100000, 200000, 300000, 400000, 500000, 600000]";
     let result = format_source(input);
-    // The array should fold because prefix + inline width > 80
     assert!(
         result.contains('\n'),
         "Array after long prefix should fold to multi-line"
@@ -267,11 +260,6 @@ fn test_format_enum_variant_construct_struct() {
     assert_eq!(format_source(input), expected);
 }
 
-// ── fmt must not corrupt the file it formats ────────────────────────────────
-// Three ways it used to: dropping every comment, emitting brace blocks into an
-// `#[indent]` file, and writing `{:}` for an empty map (which the parser
-// rejects). Each left behind a file that no longer parsed.
-
 /// Formats like `oxigen fmt` does: comments restored, block style preserved.
 fn format_faithful(source: &str) -> String {
     let lexer = Lexer::new(source);
@@ -363,7 +351,6 @@ fn fmt_emits_indent_style_for_nested_blocks() {
 
 #[test]
 fn fmt_writes_reparsable_empty_map() {
-    // `{:}` is rejected by the parser in every position, so fmt must not write it.
     let input = "fun f(h <map> = {}) { len(h) }\n";
     let out = format_faithful(input);
     assert!(!out.contains("{:}"), "{out}");
@@ -377,10 +364,6 @@ fn fmt_leaves_brace_style_files_alone() {
     assert!(out.contains('{') && out.contains('}'), "{out}");
     assert_reparses_and_stable(input, &out);
 }
-
-// A comment after a block's last statement belongs inside that block. There is
-// no span for a `}` in the AST, so placement is decided by the next sibling
-// statement's line plus the comment's own column.
 
 /// Index of the line containing `needle`, for asserting relative order.
 fn line_of(haystack: &str, needle: &str) -> usize {
@@ -401,9 +384,6 @@ fn fmt_keeps_end_of_block_comment_inside_the_block() {
 
 #[test]
 fn fmt_treats_a_margin_comment_at_a_block_boundary_as_outside() {
-    // These two sources differ only in which side of `}` the comment sits on,
-    // and the AST records no position for `}` — so they necessarily format
-    // alike. Attaching to the outer level matches the comment's own column.
     let inside = format_faithful("main {\nx := 1\n// boundary\n}\n\ny := 2\n");
     let outside = format_faithful("main {\nx := 1\n}\n// boundary\n\ny := 2\n");
     assert_eq!(inside, outside);
@@ -415,8 +395,6 @@ fn fmt_treats_a_margin_comment_at_a_block_boundary_as_outside() {
 
 #[test]
 fn fmt_keeps_end_of_block_comment_inside_the_files_last_block() {
-    // Nothing follows the block, so the line bound alone cannot place this —
-    // the comment's indentation is what marks it as inside.
     let out = format_faithful("y := 2\n\nmain {\nx := 1\n  // end of block\n}\n");
     assert!(
         line_of(&out, "// end of block") < line_of(&out, "}"),
@@ -460,11 +438,6 @@ fn fmt_keeps_end_of_block_comment_inside_indent_style_blocks() {
     assert_reparses_and_stable(src, &out);
 }
 
-// Methods, struct fields, enum variants and match arms are not statements, so
-// they need their own comment flush — without it a comment written above one of
-// them was swallowed into the previous item's body, and a second fmt pass then
-// moved it again (formatting was not idempotent).
-
 #[test]
 fn fmt_keeps_comments_above_includes_methods() {
     let src = "struct S {\n    n <int>\n}\n\nS includes {\n    // doubles n\n    fun double() { self.n * 2 }\n\n    // triples n\n    fun triple() { self.n * 3 }\n}\n";
@@ -503,12 +476,6 @@ fn fmt_keeps_comments_above_option_arms() {
     assert!(out.contains("// big"), "{out}");
     assert_reparses_and_stable(src, &out);
 }
-
-// ── string interpolation ────────────────────────────────────────────────────
-// The expression inside `{ ... }` used to be scanned by a hand-written lexer
-// that accepted only identifiers, numbers, strings and `( ) , + - * / . [ ]`,
-// so every comparison, `%`, and logical keyword was a syntax error even though
-// the parser behind it handled them. It now runs the real lexer.
 
 /// Parses a source string, asserting it has no parse errors.
 fn parse_ok_source(source: &str) {
@@ -550,15 +517,12 @@ fn interpolation_accepts_operators_the_parser_supports() {
 
 #[test]
 fn interpolation_handles_nested_braces_and_strings() {
-    // A map literal inside the interpolation must not be mistaken for the
-    // closing brace, and a nested string literal must lex as one.
     parse_ok_source("println(\"{ {\"k\": 7}[\"k\"] }\")");
     parse_ok_source("println(\"{ upper(\"hi\") }\")");
 }
 
 #[test]
 fn interpolated_expressions_survive_formatting() {
-    // The formatter reprints the expression; it must still parse afterwards.
     let src = "println(\"{a == b} {x % 2} {a < b and b > 0} {items[0]} {(a + b) * 2}\")\n";
     let formatted = format_source(src);
     parse_ok_source(&formatted);
@@ -573,9 +537,6 @@ fn interpolated_expressions_survive_formatting() {
 
 #[test]
 fn escaped_braces_are_literal_and_round_trip() {
-    // `\{` is the only way to write a brace that does not open an
-    // interpolation. It must survive fmt: emitting a bare `{` back out would
-    // turn the rest of the string into a live interpolation.
     let src = "println(\"literal \\{x\\} here\")\n";
     let formatted = format_source(src);
     parse_ok_source(&formatted);

@@ -1,16 +1,5 @@
-//! Regression: a function resolves its free names in the module it was
-//! DEFINED in, never the module that happens to be calling it.
-//!
-//! Frames used to inherit the caller's module globals whenever the callee had
-//! none of its own, and `GetGlobal` consults module globals before the script's.
-//! So a handler passed into `api.serve` ran with `stdlib/api.oxi`'s globals, and
-//! the script's own `json.parse(...)` resolved `json` to api's `fun json`
-//! response helper — "cannot call method 'parse' on FUNCTION". The leak was
-//! transitive: everything the callback called inherited it too.
-//!
-//! The module's own scope must still win for module code, or file-local helpers
-//! break — both directions are asserted here, in the interpreter and under the
-//! JIT (the emitted call sequence copied the same caller-frame pointer).
+//! Tests that a function resolves its free names in the module it was defined
+//! in, not the module calling it, in the interpreter and under the JIT.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -57,8 +46,6 @@ fn run_with_helpers(main_src: &str, tag: &str) -> String {
 
 #[test]
 fn callback_resolves_names_in_its_own_file() {
-    // `json` is the stdlib module here, even though the frame underneath belongs
-    // to a module whose globals bind `json` to a function.
     let out = run_with_helpers(
         "introduce json\n\
          introduce .helpers\n\
@@ -74,7 +61,6 @@ fn callback_resolves_names_in_its_own_file() {
 
 #[test]
 fn leak_is_not_transitive_through_nested_calls() {
-    // The original failure surfaced two frames below the module boundary.
     let out = run_with_helpers(
         "introduce json\n\
          introduce .helpers\n\
@@ -88,9 +74,6 @@ fn leak_is_not_transitive_through_nested_calls() {
 
 #[test]
 fn module_function_still_sees_its_own_helpers() {
-    // The other direction: module code keeps module scope even when the script
-    // defines the same name. Without this, imported functions lose their
-    // file-local helpers.
     let out = run_with_helpers(
         "introduce .helpers\n\
          fun local_only() { \"script local\" }\n\
@@ -105,8 +88,6 @@ fn module_function_still_sees_its_own_helpers() {
 
 #[test]
 fn hot_callback_keeps_its_own_module_under_jit() {
-    // Enough iterations to tier up: the JIT emits its own frame push, which
-    // copied the caller frame's module pointer instead of the callee's.
     let out = run_with_helpers(
         "introduce json\n\
          introduce .helpers\n\

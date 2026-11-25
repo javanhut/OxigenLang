@@ -20,8 +20,8 @@ pub enum TypeAnnotation {
     Union(Vec<TypeAnnotation>),
     Struct(String),
     /// `<shapes.Pt>`: a struct or enum named through its module. Types are
-    /// checked by name, so it checks as `Pt`; the module is only needed to
-    /// build the zero value of `p <shapes.Pt>`.
+    /// checked by name, so it checks as `Pt`; the module is used to build the
+    /// zero value of `p <shapes.Pt>`.
     Qualified {
         module: String,
         name: String,
@@ -95,11 +95,9 @@ impl TypeAnnotation {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub statements: Vec<Statement>,
-    /// Top-level names declared with `hide`. Collected by the parser rather
-    /// than carried on each statement so `hide` stays a declaration modifier
-    /// and no existing `Statement` match arm has to change. The compiler
-    /// copies this onto the script `Function`, and `import_module` turns it
-    /// into the module's private set.
+    /// Top-level names declared with `hide`. The compiler copies this onto the
+    /// script `Function`, and `import_module` turns it into the module's private
+    /// set.
     pub hidden: Vec<String>,
 }
 
@@ -143,9 +141,7 @@ pub enum Statement {
         consequence: Vec<Statement>,
         alternative: Option<Vec<Statement>>,
     },
-    /// `skip` / `stop` carry their keyword token purely for the span: without
-    /// one, a diagnostic about them had no location (`--> file:0:0`) and the
-    /// formatter could not place a comment written above them.
+    /// `skip` / `stop` carry their keyword token for the span.
     Skip {
         token: Token,
     },
@@ -209,6 +205,23 @@ pub enum Statement {
         index: Expression,
         value: Expression,
     },
+    /// `lock name = value` / `lock name <type> = value`: a binding that can
+    /// never change, to a deep read-only copy of `value`.
+    Lock {
+        token: Token,
+        name: Identifier,
+        type_ann: Option<TypeAnnotation>,
+        value: Expression,
+    },
+    /// `target += value` (also `-=`, `*=`, `/=`). `target` is a variable, an
+    /// index or a field; `operator` is the arithmetic operator (`+`, `-`, ...)
+    /// and `token` the compound operator token.
+    CompoundAssign {
+        token: Token,
+        target: Expression,
+        operator: String,
+        value: Expression,
+    },
     Main {
         token: Token,
         body: Vec<Statement>,
@@ -235,7 +248,7 @@ pub struct OptionArm {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChooseArm {
-    pub pattern_name: String, // "ten", "eleven", or "else"
+    pub pattern_name: String,
     pub inline_params: Option<Vec<Identifier>>,
     pub inline_condition: Option<Expression>,
     pub body: Vec<Statement>,
@@ -432,7 +445,6 @@ pub enum Expression {
         parts: Vec<StringInterpPart>,
     },
 
-    // First-class nodes so the formatter can round-trip diverge/converge instead of the lowered call.
     Diverge {
         token: Token,
         body: Vec<Statement>,
@@ -455,8 +467,6 @@ pub enum StringInterpPart {
     Literal(String),
     Expr(Expression),
 }
-
-// diverge/converge lower to the __spawn/__join_task builtins.
 
 fn syn_ident(tok: &Token, name: &str) -> Expression {
     Expression::Ident(Identifier {
@@ -502,7 +512,6 @@ pub fn desugar_diverge_each(
         value: n.to_string(),
     };
 
-    // each X in XS { push(__dv_hs, __spawn(fun(){ B })) }
     let spawn_call = syn_call(tok, "__spawn", vec![syn_thunk(tok, body.to_vec())]);
     let spawn_loop = Statement::Each {
         token: tok.clone(),
@@ -516,7 +525,6 @@ pub fn desugar_diverge_each(
         ))],
     };
 
-    // each __dv_h in __dv_hs { push(__dv_rs, __join_task(__dv_h)) }
     let join_call = syn_call(tok, "__join_task", vec![syn_ident(tok, "__dv_h")]);
     let join_loop = Statement::Each {
         token: tok.clone(),
@@ -530,7 +538,6 @@ pub fn desugar_diverge_each(
         ))],
     };
 
-    // (fun() { spawn all, then join all in order; return results })()
     let lowered_body = vec![
         Statement::Let {
             name: id("__dv_hs"),

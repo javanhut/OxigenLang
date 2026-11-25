@@ -94,8 +94,6 @@ fn test_multiline_strings_roundtrip() {
 
 #[test]
 fn test_multiline_string_keeps_triple_quotes_and_raw_newlines() {
-    // A triple-quoted string must format back to triple quotes with its raw
-    // newlines intact — not collapse to a single-line `"...\n..."`.
     let source = "x := \"\"\"\nline one\nline two\n\"\"\"\n";
     let formatted = format_source(source);
 
@@ -120,9 +118,6 @@ fn test_multiline_string_keeps_triple_quotes_and_raw_newlines() {
 
 #[test]
 fn test_single_line_string_is_not_promoted_to_triple() {
-    // Regression guard: a single-line string written with `\n` escapes must
-    // stay single-line and escaped — only triple-quoted sources format as
-    // multi-line strings.
     let source = "x := \"a\\nb\"\n";
     let formatted = format_source(source);
 
@@ -140,8 +135,6 @@ fn test_single_line_string_is_not_promoted_to_triple() {
 
 #[test]
 fn test_diverge_converge_keep_high_level_syntax() {
-    // Regression guard: the formatter must round-trip `diverge`/`converge`
-    // surface syntax, NOT lower it to the `__spawn`/`__join_task` builtins.
     let source = "main {\n    \
         sq := diverge each n in nums {\n        n * n\n    }\n    \
         work := diverge {\n        slow()\n    }\n    \
@@ -168,8 +161,6 @@ fn test_diverge_converge_keep_high_level_syntax() {
 
 #[test]
 fn test_multiline_string_with_interpolation_roundtrip() {
-    // Interpolation inside a triple-quoted string round-trips, keeping the
-    // triple quotes and the literal newlines around the `{...}` expression.
     let source = "msg := \"\"\"\nHello, {name}!\nBye.\n\"\"\"\n";
     let formatted = format_source(source);
 

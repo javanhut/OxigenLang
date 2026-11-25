@@ -1,5 +1,3 @@
-// Nested integer loop — outer×inner iterations, pure locals + arithmetic.
-// Favors the JIT's inline int fast path and SetLocal/GetLocal inlining.
 fun nested_sum(n) {
     total := 0
     i := 1

@@ -1,17 +1,9 @@
 //! Map keys and set elements must be hashable.
 //!
-//! `Value::try_hash_key` returns `None` for arrays, maps, sets, struct instances
-//! and closures, and every `OxMap`/`OxSet` operation quietly fell back to a
-//! linear scan for those. So `{[1, 2]: "v"}` was accepted, and the map it built
-//! had two defects the program was never told about: lookups against it were
-//! O(n) instead of O(1), and the key was mutable, so it could be changed after
-//! insertion and no longer match its own entry.
-//!
-//! The refusal goes at every place a user-controlled key can enter — the
-//! `BuildMap`/`BuildSet` opcodes, index assignment, and the `insert()`,
-//! `push()`, `extend()` and `set()` builtins. The other `from_pairs`/`from_iter_dedup` callers (JSON and TOML
-//! parsing, env vars, process output, HTTP responses, cross-task transfer) build
-//! their keys from strings by construction and cannot carry a bad one.
+//! Arrays, maps, sets, struct instances and closures are refused at every
+//! place a user-controlled key can enter: the `BuildMap`/`BuildSet` opcodes,
+//! index assignment, and the `insert()`, `push()`, `extend()` and `set()`
+//! builtins.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -47,8 +39,6 @@ fn assert_rejected(source: &str, needle: &str) {
         ),
     }
 }
-
-// ── the six entry points a user-controlled key can arrive through ─────────
 
 #[test]
 fn a_map_literal_rejects_a_non_hashable_key() {
@@ -93,8 +83,6 @@ fn the_error_names_the_kind_and_carries_its_code() {
     );
 }
 
-// ── every hashable kind still works ───────────────────────────────────────
-
 #[test]
 fn all_hashable_key_kinds_are_still_accepted() {
     let src = "m := {\"s\": 1, 42: 2, True: 3, 3.5: 4, None: 5, (1, 2): 6}\nlen(m)";
@@ -108,7 +96,6 @@ fn a_tuple_key_round_trips() {
 
 #[test]
 fn a_tuple_holding_a_non_hashable_element_is_itself_not_hashable() {
-    // `try_hash_key` recurses into tuples, so this must be refused too.
     assert_rejected("m := {(1, [2]): \"v\"}", "TUPLE is not hashable");
 }
 

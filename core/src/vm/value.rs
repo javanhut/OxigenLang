@@ -8,47 +8,32 @@ use std::rc::Rc;
 /// Built-in function signature for the VM.
 pub type BuiltinFn = fn(&[Value]) -> Value;
 
-/// Numeric tag of `Value::Integer` under the `#[repr(u8)]` layout. The
-/// JIT's fast path loads this byte from stack memory to decide between
-/// inline arithmetic and the slow-path helper.
+/// Numeric tag of `Value::Integer` under the `#[repr(u8)]` layout.
 pub const VALUE_TAG_INTEGER: u8 = 0;
 
-/// Numeric tag of `Value::Float`. Used by the JIT's inline GetLocal fast
-/// path to skip the generic clone-and-push helper for float locals.
+/// Numeric tag of `Value::Float`.
 pub const VALUE_TAG_FLOAT: u8 = 1;
 
-/// Numeric tag of `Value::Closure`. Used by the JIT's inline Call guard
-/// to verify the callee on the stack is a Closure before loading its
-/// `Rc<ObjClosure>` pointer for identity comparison. Keep in sync with
-/// the variant order in `Value`.
+/// Numeric tag of `Value::Closure`. Keep in sync with the variant order in `Value`.
 pub const VALUE_TAG_CLOSURE: u8 = 12;
 pub const VALUE_TAG_STRUCT_INSTANCE: u8 = 15;
-/// Numeric tag of `Value::None` — the seventh variant under the
-/// `#[repr(u8)]` layout. The JIT's inline MethodCall expansion writes
-/// this tag into the receiver slot after running the inlined body to
-/// leave a "return value of None" on the stack. Pinned by
-/// `value_none_tag_is_pinned`.
+/// Numeric tag of `Value::None`, the seventh variant under the `#[repr(u8)]` layout. Pinned by `value_none_tag_is_pinned`.
 pub const VALUE_TAG_NONE: u8 = 6;
 
-/// Byte offset of the i64 payload inside a `Value::Integer(i64)`. With
-/// `#[repr(u8)]` the discriminant occupies byte 0, and the payload is
-/// aligned to the variant's natural alignment (8 for i64 / Rc). Used by
-/// the JIT fast path.
+/// Byte offset of the i64 payload inside a `Value::Integer(i64)`: the discriminant occupies byte 0 and the payload is aligned to 8.
 pub const VALUE_INT_PAYLOAD_OFFSET: usize = 8;
 /// Current `Rc<T>` payload offset from the raw `RcBox<T>` pointer stored in
 /// `Value` payloads: two usize refcounts before `T`.
 pub const RC_VALUE_OFFSET: usize = 16;
 pub const REF_CELL_VALUE_OFFSET: usize = 8;
 
-/// `size_of::<Value>()` — pinned by `#[repr(u8)]`. Const-evaluated at
-/// build time.
+/// `size_of::<Value>()`, pinned by `#[repr(u8)]`.
 pub const VALUE_SIZE: usize = core::mem::size_of::<Value>();
 
 pub const STRUCT_INSTANCE_DEF_OFFSET: usize = core::mem::offset_of!(ObjStructInstance, def);
-/// Byte offset of the field-storage raw pointer inside `ObjStructInstance`.
-/// The JIT loads this as `ptr_ty` to reach the start of the `Value` buffer
-/// owned by the instance without going through a `RefCell`/`Vec`
-/// indirection. Pinned by `layout_tests::struct_instance_fields_layout_is_pinned`.
+/// Offset of the `lock` flag (one byte) in a struct instance.
+pub const STRUCT_INSTANCE_LOCKED_OFFSET: usize = core::mem::offset_of!(ObjStructInstance, locked);
+/// Byte offset of the field-storage raw pointer inside `ObjStructInstance`. Pinned by `layout_tests::struct_instance_fields_layout_is_pinned`.
 pub const STRUCT_INSTANCE_FIELDS_PTR_OFFSET: usize =
     core::mem::offset_of!(ObjStructInstance, fields) + core::mem::offset_of!(InstanceFields, ptr);
 pub const STRUCT_INSTANCE_FIELDS_LEN_OFFSET: usize =
@@ -58,22 +43,7 @@ pub const STRUCT_INSTANCE_FIELDS_LEN_OFFSET: usize =
 mod layout_tests {
     use super::*;
 
-    /// The JIT's inline int fast path relies on these exact layout
-    /// invariants — if any of them break, disable the fast path until
-    /// the layout is re-verified.
-    /// Pinned at 40 bytes. The JIT emits stack stride arithmetic using
-    /// the `VALUE_SIZE` constant (which is `size_of::<Value>()`), so a
-    /// change here is picked up automatically in emitted IR — but a
-    /// change ALSO shifts the interaction with `VALUE_INT_PAYLOAD_OFFSET`
-    /// (the payload still starts at 8), per-Value cache pressure, and
-    /// the stack-capacity memory footprint (STACK_MAX * VALUE_SIZE).
-    /// Any move off 40 is a perf event worth rebenchmarking.
-    ///
-    /// 16 is the aligned width of an 8-byte Rc pointer plus a 1-byte tag
-    /// and 7-byte alignment padding. A1.1a boxed `ErrorValue`; A1.1b
-    /// converted `Rc<str>` → `Rc<String>` in the two remaining fat-
-    /// pointer variants (`String`, `Error`). Eventual target is 8 via
-    /// NaN-box (A1.2+).
+    /// `Value` is 16 bytes: an 8-byte `Rc` pointer plus a 1-byte tag and alignment padding.
     #[test]
     fn value_size_is_pinned_at_16() {
         assert_eq!(
@@ -84,10 +54,7 @@ mod layout_tests {
         );
     }
 
-    /// The JIT's inline `replace_top2_with_bool` writes a Value::Boolean
-    /// bit pattern directly: tag byte at offset 0, bool payload byte at
-    /// offset 1. If the enum is reordered or Rust's repr(u8) layout for
-    /// Bool changes, every fused int comparison silently corrupts values.
+    /// `Value::Boolean` has its tag byte at offset 0 and its payload byte at offset 1.
     #[test]
     fn value_bool_tag_and_payload_are_pinned() {
         let v_true = Value::Boolean(true);
@@ -108,11 +75,7 @@ mod layout_tests {
         assert_eq!(payload_f, 0, "Boolean(false) payload byte must be 0");
     }
 
-    /// The JIT's inline MethodCall expansion writes a `Value::None` tag
-    /// byte at the receiver slot after running the inlined method body.
-    /// If the variant order in `Value` changes, that write lands on the
-    /// wrong slot semantics and every inline method-call corrupts the
-    /// return value.
+    /// The `Value::None` tag byte matches the pinned constant.
     #[test]
     fn value_none_tag_is_pinned() {
         let v = Value::None;
@@ -128,11 +91,9 @@ mod layout_tests {
     fn value_integer_layout_is_pinned() {
         let v = Value::Integer(0xDEAD_BEEF_CAFE_BABE_u64 as i64);
         let ptr = &v as *const Value as *const u8;
-        // Tag byte at offset 0.
         let tag = unsafe { *ptr };
         assert_eq!(tag, VALUE_TAG_INTEGER, "Integer tag should be 0");
 
-        // i64 payload at VALUE_INT_PAYLOAD_OFFSET, host-endian.
         let payload = unsafe {
             ptr.add(VALUE_INT_PAYLOAD_OFFSET)
                 .cast::<i64>()
@@ -140,7 +101,6 @@ mod layout_tests {
         };
         assert_eq!(payload, 0xDEAD_BEEF_CAFE_BABE_u64 as i64);
 
-        // Value size is a multiple of its alignment (8).
         assert_eq!(VALUE_SIZE % 8, 0);
     }
 
@@ -158,12 +118,7 @@ mod layout_tests {
         assert_eq!(f64::from_bits(payload), std::f64::consts::PI);
     }
 
-    /// The JIT's inline Call guard reads the tag byte at offset 0 and
-    /// the raw `Rc<ObjClosure>` bit pattern at offset 8 of a
-    /// `Value::Closure`. The bit pattern is the `NonNull<RcBox<T>>` the
-    /// `Rc` wraps (NOT `Rc::as_ptr`, which returns a pointer to T inside
-    /// the box, offset past the refcount header). The cache populate
-    /// code must use the same bit pattern so identity compare works.
+    /// A `Value::Closure` has its tag byte at offset 0 and the raw `Rc<ObjClosure>` bit pattern (the `NonNull<RcBox<T>>`, not `Rc::as_ptr`) at offset 8.
     #[test]
     fn value_closure_layout_is_pinned() {
         use std::cell::Cell;
@@ -186,7 +141,6 @@ mod layout_tests {
             upvalue_int_kinds: kinds,
             upvalue_int_values: values,
         });
-        // Read the Rc's raw bit pattern the same way the JIT does.
         let expected_raw: usize = unsafe { *(&obj as *const Rc<ObjClosure> as *const usize) };
         let v = Value::Closure(Rc::clone(&obj));
         let ptr = &v as *const Value as *const u8;
@@ -205,11 +159,7 @@ mod layout_tests {
         drop(obj);
     }
 
-    /// JIT-emitted call sequences read a callee's owning module with a single
-    /// pointer load at `offset_of!(ObjClosure, module_globals)`, so the raw
-    /// mirror must stay the first field of the `#[repr(C)]` `ModuleGlobals`.
-    /// If it moves, every call under a module frame stores a garbage pointer
-    /// into the new `JitFrame` and global lookups read freed memory.
+    /// The raw module-globals mirror is the first field of the `#[repr(C)]` `ModuleGlobals`, at `offset_of!(ObjClosure, module_globals)`.
     #[test]
     fn module_globals_ptr_is_first_field() {
         let dict = Rc::new(HashMap::from([("x".to_string(), Value::Integer(1))]));
@@ -230,12 +180,7 @@ mod layout_tests {
         assert!(mg.get().is_none());
     }
 
-    /// The JIT's inline MethodCall fast path relies on `Rc<T>` being
-    /// `NonNull<RcBox<T>>` with `strong: Cell<usize>` at RcBox offset 0.
-    /// If a future Rust reorders `RcBox` or changes the `Cell<usize>`
-    /// layout, the JIT's inline refcount bump would corrupt the wrong
-    /// field and cause silent memory corruption. Catch that at
-    /// `cargo test` time rather than at user segfault time.
+    /// `Rc<T>` is `NonNull<RcBox<T>>` with `strong: Cell<usize>` at RcBox offset 0.
     #[test]
     fn rc_strong_count_lives_at_rcbox_offset_zero() {
         use std::cell::Cell;
@@ -258,7 +203,6 @@ mod layout_tests {
             upvalue_int_kinds: kinds,
             upvalue_int_values: values,
         });
-        // Read the raw Rc bit pattern the way the JIT does: NonNull<RcBox<T>>.
         let rcbox_ptr: *const usize =
             unsafe { *(&obj as *const Rc<ObjClosure> as *const *const usize) };
         let before = unsafe { *rcbox_ptr };
@@ -276,12 +220,7 @@ mod layout_tests {
         assert_eq!(restored, before, "drop must restore the strong count");
     }
 
-    /// The JIT's inline GetField / SetField / struct-field-add fast paths
-    /// load the field buffer pointer from `ObjStructInstance.fields.ptr`
-    /// at a constant byte offset, then index it directly. If the struct
-    /// layout is reordered or `InstanceFields` changes shape, every
-    /// inline field access would silently read/write the wrong slot.
-    /// Pinned here so a layout change fails at `cargo test` time.
+    /// The field buffer pointer sits at a constant byte offset in `ObjStructInstance.fields.ptr`.
     #[test]
     fn struct_instance_fields_layout_is_pinned() {
         use crate::vm::value::{
@@ -317,7 +256,6 @@ mod layout_tests {
             def,
         );
         let base = &inst as *const ObjStructInstance as *const u8;
-        // Reading through the pinned offset must reach the raw fields ptr.
         let ptr_read = unsafe {
             base.add(STRUCT_INSTANCE_FIELDS_PTR_OFFSET)
                 .cast::<*mut Value>()
@@ -336,7 +274,6 @@ mod layout_tests {
             len_read, inst.fields.len,
             "STRUCT_INSTANCE_FIELDS_LEN_OFFSET must reach ObjStructInstance.fields.len",
         );
-        // Reading a field through raw-ptr arithmetic matches `get_field`.
         let slot_ptr = unsafe { ptr_read.add(1) } as *const u8;
         let tag = unsafe { *slot_ptr };
         let payload = unsafe { slot_ptr.add(VALUE_INT_PAYLOAD_OFFSET).cast::<i64>().read() };
@@ -347,17 +284,40 @@ mod layout_tests {
     }
 }
 
-/// The elements of an array or tuple: a `Vec<Value>` (it derefs to one) that
-/// frees deep nesting without recursing.
+/// The elements of an array or tuple: a `Vec<Value>` (it derefs to one) that frees deep nesting without recursing; see `drop_values`.
 ///
-/// Dropping `[[[...]]]` through the generated drop glue takes one native frame
-/// per level, so a few hundred thousand levels overflow the stack. `Value`
-/// itself can't implement `Drop` without forbidding hosts from moving out of
-/// it in a `match`, so the containers do: see [`drop_values`].
-/// `repr(transparent)` keeps the layout the JIT reads identical to the `Vec`.
+/// The second field marks an array made by `lock`.
 #[derive(Clone, Default, PartialEq)]
-#[repr(transparent)]
-pub struct ValueVec(pub Vec<Value>);
+pub struct ValueVec(pub Vec<Value>, pub LockFlag);
+
+/// Set on a collection that `lock` made read-only. Cloning the contents (as
+/// `copy`, slicing and concatenation do) gives an unlocked copy, and the flag
+/// never affects equality.
+#[derive(Default, Debug)]
+pub struct LockFlag(bool);
+
+impl LockFlag {
+    #[inline(always)]
+    pub fn is_set(&self) -> bool {
+        self.0
+    }
+
+    pub fn set(&mut self) {
+        self.0 = true;
+    }
+}
+
+impl Clone for LockFlag {
+    fn clone(&self) -> Self {
+        LockFlag(false)
+    }
+}
+
+impl PartialEq for LockFlag {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
 
 impl ValueVec {
     /// The elements, leaving this empty.
@@ -384,13 +344,13 @@ impl std::ops::DerefMut for ValueVec {
 impl From<Vec<Value>> for ValueVec {
     #[inline(always)]
     fn from(v: Vec<Value>) -> Self {
-        ValueVec(v)
+        ValueVec(v, LockFlag::default())
     }
 }
 
 impl FromIterator<Value> for ValueVec {
     fn from_iter<I: IntoIterator<Item = Value>>(iter: I) -> Self {
-        ValueVec(iter.into_iter().collect())
+        ValueVec(iter.into_iter().collect(), LockFlag::default())
     }
 }
 
@@ -429,8 +389,7 @@ thread_local! {
     static DROP_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
-/// Nesting the ordinary recursive drop may take before [`drop_values`] takes
-/// over. Shallow values, the common case, keep the plain drop glue.
+/// Nesting the ordinary recursive drop may take before [`drop_values`] takes over.
 const RECURSIVE_DROP_LIMIT: u32 = 64;
 
 /// Drops the contents of a container that holds other containers: by plain
@@ -450,10 +409,7 @@ pub(crate) fn drop_nested(values: Vec<Value>) {
 
 /// Drops `pending` and everything only it keeps alive, without recursing.
 ///
-/// A container whose last reference is being dropped hands its elements back
-/// to the work list before it goes, so it is freed empty; a shared one only
-/// loses a reference. Native stack use stays constant however deep the value
-/// is, and the work list reuses `pending`'s own buffer.
+/// A container whose last reference is being dropped hands its elements back to the work list before it goes; a shared one only loses a reference. Native stack use is constant.
 pub(crate) fn drop_values(mut pending: Vec<Value>) {
     while let Some(value) = pending.pop() {
         match value {
@@ -499,18 +455,10 @@ pub(crate) fn drop_values(mut pending: Vec<Value>) {
 
 /// Runtime value for the OxigenLang VM.
 ///
-/// Unlike the tree-walking interpreter's `Object`, control flow signals
-/// (Return, Skip, Stop) are NOT values — they are handled by VM mechanics.
-///
-/// `#[repr(u8)]` pins the discriminant byte to offset 0 so the JIT's
-/// inline int+int fast path can read the tag directly from memory without
-/// going through Rust enum pattern matching. The variant order below
-/// defines the numeric tag values — do NOT reorder without updating
-/// [`VALUE_TAG_INTEGER`] below.
+/// Control flow signals (Return, Skip, Stop) are not values. The variant order defines the numeric tag values; see [`VALUE_TAG_INTEGER`].
 #[derive(Clone)]
 #[repr(u8)]
 pub enum Value {
-    // Primitives
     Integer(i64),
     Float(f64),
     Char(char),
@@ -519,50 +467,38 @@ pub enum Value {
     Uint(u64),
     None,
 
-    // Rc<String> not Rc<str>, so the pointer stays thin; the fat variant cost 8 B per Value.
     String(Rc<String>),
     Array(Rc<RefCell<ValueVec>>),
     Tuple(Rc<ValueVec>),
     Map(Rc<RefCell<crate::vm::collections::OxMap>>),
     Set(Rc<RefCell<crate::vm::collections::OxSet>>),
 
-    // Functions
     Closure(Rc<ObjClosure>),
     Builtin(BuiltinFn),
 
-    // Structs
     StructDef(Rc<ObjStructDef>),
     StructInstance(Rc<ObjStructInstance>),
 
-    // Enums
     EnumDef(Rc<ObjEnumDef>),
     EnumInstance(Rc<ObjEnumInstance>),
 
-    // Module
     Module(Rc<ObjModule>),
 
-    // Concurrency: a spawned task's handle. Auto-joins when consumed.
     Task(Rc<crate::concurrent::TaskHandle>),
 
-    // Error handling
-    /// Boxed to keep `Value` down to 24 bytes. The inline form would
-    /// carry two `Rc<str>` fat pointers (32 B) which dominated the enum
-    /// size. See `docs/optimization-roadmap.md` A1 for the broader plan.
+    /// An error value, boxed.
     ErrorValue(Rc<ErrorValueData>),
     /// Value(...) wrapper (success side of error handling)
     Wrapped(Rc<Value>),
-    /// Terminal error — stops execution. Thin `Rc<String>` for the same
-    /// reason as `String` above.
+    /// Terminal error — stops execution.
     Error(Rc<String>),
 
-    // Host embedding. Both are `Rc`s: the JIT treats every tag past `None`
-    // except `Builtin` as an `Rc` it may refcount inline.
     /// A Rust closure the host registered (see `VM::register_native`).
     Native(Rc<NativeFunction>),
     /// A Rust value the host handed to the script (see [`Value::host`]).
     Host(Rc<HostValue>),
 
-    /// `vec2`/`vec3`/`vec4` (see `vm::vector`). An `Rc` for the same reason.
+    /// `vec2`/`vec3`/`vec4` (see `vm::vector`).
     Vector(Rc<crate::vm::vector::Vector>),
 }
 
@@ -589,28 +525,9 @@ impl HostValue {
     }
 }
 
-/// "Read-only view" enum that mirrors the variant structure of
-/// [`Value`]. Returned from [`Value::repr`].
+/// Read-only view enum that mirrors the variant structure of [`Value`]. Returned from [`Value::repr`].
 ///
-/// Why this exists: A1.2.5 (NaN-box flag-day) replaces the storage of
-/// `Value` with an 8-byte NaN-boxed payload. Pattern matching directly
-/// on `Value::Variant(...)` will break at that swap. Migrating call
-/// sites from `match &v { Value::X(p) => ... }` to
-/// `match v.repr() { ValueRepr::X(p) => ... }` decouples consumers
-/// from the storage shape — the swap then becomes a localized change
-/// to `Value::repr()` (re-materializing variants from NaN-box accessors)
-/// without touching every call site.
-///
-/// Encoding choices:
-/// - Primitives are by value (no `&` / `*` indirection at the call
-///   site), matching what NanValue's accessors return after the swap.
-/// - Rc-bearing variants borrow the existing `Rc<T>` from the enum
-///   payload during Phase 1, so this view is allocation-free. After
-///   the swap, the impl will reconstruct typed `Rc` references via
-///   `ManuallyDrop` so consumer code stays unchanged.
-///
-/// Variant names match `Value` exactly so the migration is a
-/// sed-friendly rename: `Value::` → `ValueRepr::` inside match arms.
+/// Primitives are by value; `Rc`-bearing variants borrow the existing `Rc<T>`, so the view is allocation-free. Variant names match `Value`.
 pub enum ValueRepr<'a> {
     Integer(i64),
     Float(f64),
@@ -640,28 +557,20 @@ pub enum ValueRepr<'a> {
     Vector(&'a Rc<crate::vm::vector::Vector>),
 }
 
-/// Boxed payload of `Value::ErrorValue`. Kept off the enum so `Value`
-/// stays small; cloned by `Rc::clone` on every enum clone.
+/// Boxed payload of `Value::ErrorValue`.
 #[derive(Debug, Clone)]
 pub struct ErrorValueData {
     pub msg: Rc<String>,
     pub tag: Option<Rc<String>>,
 }
 
-/// Helper to produce `Rc<String>` from anything that can be turned into
-/// a `String`. Replaces the `.into()` → `Rc<str>` idiom that broke when
-/// `String(Rc<str>)` became `String(Rc<String>)` in A1.1b.
+/// Helper to produce `Rc<String>` from anything that can be turned into a `String`.
 #[inline]
 pub fn rc_str(s: impl Into<String>) -> Rc<String> {
     Rc::new(s.into())
 }
 
 /// The file a function's code was compiled from.
-///
-/// A frame's line number only means something alongside the source it indexes
-/// into. Without this, every frame rendered against whichever file the VM
-/// happened to be started with, so an error raised inside an imported function
-/// underlined an unrelated line of the entry script.
 ///
 /// One instance is shared by every function compiled from the same file.
 #[derive(Debug)]
@@ -679,25 +588,13 @@ pub struct Function {
     pub upvalue_count: u16,
     pub params: Vec<ParamInfo>,
     pub locals: Vec<LocalInfo>,
-    /// `(ip, slot)` for every local declaration: `ip` is the code length when
-    /// the compiler bound the name, so the initializer (if any) is the
-    /// instruction ending there. Slot reuse across scopes means one slot can
-    /// appear several times. The JIT's slot-type pass reads it to tell a
-    /// local's initializer from a transient that happens to share its slot.
+    /// `(ip, slot)` for every local declaration: `ip` is the code length when the compiler bound the name, so the initializer (if any) is the instruction ending there. A slot can appear several times.
     pub local_decls: Vec<(usize, u16)>,
-    /// Whether the compiler emitted at least one backward-loop opcode for
-    /// this function. Used by smart JIT tiering to compile loop-heavy
-    /// single-call functions at entry instead of after they finish.
+    /// Whether the compiler emitted at least one backward-loop opcode for this function.
     pub has_loop: bool,
-    /// Unique in the process: the compilation unit in the high 32 bits,
-    /// compile order in the low 32. The concurrency layer uses it to identify
-    /// a closure's code across threads — a worker rebuilds the same
-    /// id→Function table by compiling the same program under the same unit.
+    /// Unique in the process: the compilation unit in the high 32 bits, compile order in the low 32.
     pub id: u64,
-    /// Which file this was compiled from. Stamped after compilation by
-    /// `set_module_origin` — the same post-hoc wiring `module_globals` uses,
-    /// since the compiler itself has no notion of files. `None` means the
-    /// entry script, whose source the VM already holds.
+    /// Which file this was compiled from. `None` means the entry script.
     pub origin: RefCell<Option<Rc<ModuleOrigin>>>,
     /// Top-level names this file declared with `hide`. Only ever non-empty on
     /// a script function (the whole-file body); `import_module` reads it to
@@ -707,9 +604,7 @@ pub struct Function {
     /// `includes` block defined it — nested closures inherit it. Hidden-field
     /// access is permitted only from code carrying the owning struct's name.
     pub method_of: Option<String>,
-    /// Whether any parameter carries a type annotation. Computed on first use
-    /// (after the compiler has filled `params`) so every call path can afford
-    /// to ask before choosing a fast path that skips the parameter check.
+    /// Whether any parameter carries a type annotation. Computed on first use.
     pub(crate) typed_params: std::cell::OnceCell<bool>,
 }
 
@@ -771,15 +666,10 @@ impl Function {
     }
 }
 
-/// Stamp `origin` onto a function and every function nested inside it.
-///
-/// Nested functions live in the constant pool as template closures, so the
-/// walk has to recurse through constants rather than just the top level —
-/// otherwise a helper defined inside an imported function still renders
-/// against the wrong file.
+/// Stamp `origin` onto a function and every function nested inside it, recursing through constants.
 pub fn set_module_origin(function: &Function, origin: &Rc<ModuleOrigin>) {
     if function.origin.borrow().is_some() {
-        return; // already stamped — also stops cycles through shared constants
+        return;
     }
     *function.origin.borrow_mut() = Some(Rc::clone(origin));
     for constant in &function.chunk.constants {
@@ -806,18 +696,9 @@ pub struct LocalInfo {
     pub type_constraint: Option<String>,
 }
 
-/// The globals of the module a closure or struct def was defined in — the
-/// scope its free names resolve against. `None` for definitions in the main
-/// script, which resolve against the VM's own globals.
+/// The globals of the module a closure or struct def was defined in: the scope its free names resolve against. `None` for definitions in the main script, which resolve against the VM's own globals.
 ///
-/// Wired post-hoc: a module runs in a sub-VM, so its definitions are tagged
-/// once it finishes loading (`VM::import_module`).
-///
-/// `ptr` mirrors `rc` so JIT-emitted code can read the dict with one
-/// pointer-sized load at a pinned offset — it cannot walk a
-/// `RefCell<Option<Rc<_>>>`, whose layout is not guaranteed. `#[repr(C)]`
-/// keeps `ptr` at offset 0, and `set` is the only writer, so the two views
-/// cannot drift apart.
+/// Tagged once the module finishes loading (`VM::import_module`). `ptr` mirrors `rc` as a raw pointer at offset 0 (`#[repr(C)]`); `set` is the only writer.
 #[repr(C)]
 #[derive(Debug, Default)]
 pub struct ModuleGlobals {
@@ -860,84 +741,39 @@ impl From<Option<Rc<HashMap<String, Value>>>> for ModuleGlobals {
 pub struct ObjClosure {
     pub function: Rc<Function>,
     pub upvalues: Vec<Rc<RefCell<Upvalue>>>,
-    /// The module this closure was defined in. Inherited at *creation* time
-    /// by nested closures, never at call time — a callback handed to another
-    /// module still resolves its names in the file it was written in.
+    /// The module this closure was defined in. Inherited at creation time by nested closures, never at call time.
     pub module_globals: ModuleGlobals,
-    /// How many times this closure has been called. Used by the JIT engine
-    /// for hot-function detection. Interior mutability keeps closures
-    /// cheaply shareable through `Rc`.
+    /// How many times this closure has been called. Used by the JIT engine for hot-function detection.
     pub call_count: Cell<u32>,
-    /// Number of loop backedges executed by this closure. Used by smart
-    /// JIT tiering so single-call long-running loops can compile.
+    /// Number of loop backedges executed by this closure.
     pub loop_count: Cell<u32>,
-    /// Cached JIT state for this closure: 0 = unknown/cold, 1 = compiled,
-    /// 2 = compile failed. This avoids a compiled-entry HashMap lookup on
-    /// every hot recursive call.
+    /// Cached JIT state for this closure: 0 = unknown/cold, 1 = compiled, 2 = compile failed.
     pub jit_state: Cell<u8>,
-    /// Consecutive JIT entry bailouts (guard failures). Reset to 0 by every
-    /// successful JIT return; once it hits `JIT_BAILOUT_LIMIT` the closure
-    /// deopts permanently (`jit_state = 2`). Without this, a single
-    /// mistyped call (e.g. one Float where Int was specialized) would
-    /// silently drop the closure to interpreter speed for the rest of the
-    /// process.
+    /// Consecutive JIT entry bailouts (guard failures). Reset to 0 by every successful JIT return; once it hits `JIT_BAILOUT_LIMIT` the closure deopts permanently (`jit_state = 2`).
     pub jit_bailouts: Cell<u8>,
     /// Cached native entry point for compiled closures. Present only when
     /// `jit_state == 1`.
     pub jit_thunk: Cell<Option<CompiledThunk>>,
-    /// A2: specialized i64-ABI entry point, populated alongside
-    /// `jit_thunk` when the function qualifies per
-    /// `slot_types.specialized_entry_eligible`. Opaque pointer — only
-    /// invoked via Cranelift `call_indirect` with the specialized
-    /// signature `fn(*mut VM, i64, ..., i64) -> (i64, u32)`. None when
-    /// the function is ineligible or not yet compiled.
+    /// Specialized i64-ABI entry point, populated alongside `jit_thunk` when the function qualifies per `slot_types.specialized_entry_eligible`. Opaque pointer with signature `fn(*mut VM, i64, ..., i64) -> (i64, u32)`. None when the function is ineligible or not yet compiled.
     pub specialized_thunk: Cell<Option<*const ()>>,
-    /// Arity of the specialized entry point. Always equal to
-    /// `function.arity` when `specialized_thunk` is Some, 0 otherwise.
-    /// Callers validate this against the Call opcode's arg_count
-    /// before dispatching to the specialized entry.
+    /// Arity of the specialized entry point. Equal to `function.arity` when `specialized_thunk` is Some, 0 otherwise.
     pub specialized_arity: Cell<u8>,
-    /// Discriminator for `specialized_thunk`: does it point at a
-    /// forward trampoline (A2 adapter) or a native int body?
-    /// Encoded as `u8` so it can sit in a Cell alongside the other
-    /// JIT-state fields without needing Debug/PartialEq on the enum.
+    /// Kind of `specialized_thunk`, as a `u8`:
     /// 0 = None (no specialized entry)
     /// 1 = ForwardTrampoline
     /// 2 = NativeIntBody
-    /// A3 direct-call dispatch gates on `== 2`; trampolines never
-    /// receive direct-call traffic.
     pub specialized_kind: Cell<u8>,
-    /// Phase 2.2: pointer to the lean integer entry
-    /// (`fn(i64 args.., i64 budget) -> i64`), when the function qualified.
-    /// Opaque — only the JIT boundary knows the real signature.
+    /// Pointer to the lean integer entry (`fn(i64 args.., i64 budget) -> i64`), when the function qualified. Opaque.
     pub lean_thunk: Cell<Option<*const ()>>,
-    /// Arity the lean entry expects, so the boundary can read exactly that many
-    /// integer arguments before committing to the call.
+    /// Arity the lean entry expects.
     pub lean_arity: Cell<u8>,
-    /// B2.2: JIT-visible parallel cache for the `Closed(Integer)`
-    /// upvalue shape. `upvalue_int_kinds[i] == 1` means upvalue `i` is
-    /// currently `Upvalue::Closed(Value::Integer(_))` and the i64 is in
-    /// `upvalue_int_values[i]`. Any other state (`Open`, `Closed(non-
-    /// Integer)`, never observed) maps to `kinds[i] == 0`. The JIT's
-    /// inline GetUpvalue path reads `kinds[i]` to gate against
-    /// `jit_get_upvalue` helper dispatch. `Cell<u8>` and `Cell<i64>` are
-    /// `#[repr(transparent)]` so `Box<[Cell<T>]>` matches `Box<[T]>`
-    /// layout — the JIT loads through these at known struct offsets.
-    /// Populated lazily by `jit_get_upvalue` once it observes the
-    /// `Closed(Integer)` shape. `upvalue_int_kinds` has one entry per
-    /// upvalue; `upvalue_int_values` has one more, at the front:
-    /// `values[0]` is the `crate::jit::UPVALUE_WRITE_EPOCH` the cache was
-    /// filled at and `values[i + 1]` caches upvalue `i`. A cache whose epoch
-    /// is not the current one is empty — another closure (or the
-    /// interpreter) may have written a shared cell since.
+    /// JIT-visible parallel cache for the `Closed(Integer)` upvalue shape. `upvalue_int_kinds[i] == 1` means upvalue `i` is currently `Upvalue::Closed(Value::Integer(_))` and the i64 is in `upvalue_int_values[i]`; any other state maps to `kinds[i] == 0`.
+    /// Populated lazily by `jit_get_upvalue`. `upvalue_int_kinds` has one entry per upvalue; `upvalue_int_values` has one more, at the front: `values[0]` is the `crate::jit::UPVALUE_WRITE_EPOCH` the cache was filled at and `values[i + 1]` caches upvalue `i`. A cache whose epoch is not the current one is empty.
     pub upvalue_int_kinds: Box<[Cell<u8>]>,
     pub upvalue_int_values: Box<[Cell<i64>]>,
 }
 
-/// Construct the empty parallel kinds/values arrays for an `ObjClosure`
-/// holding `n` upvalues. All slots start at `kind = 0` (fallback) so the
-/// JIT inline GetUpvalue path defers to `jit_get_upvalue` until the
-/// helper observes `Closed(Integer)` and populates the cache.
+/// Construct the empty parallel kinds/values arrays for an `ObjClosure` holding `n` upvalues. All slots start at `kind = 0`.
 #[inline]
 #[allow(clippy::type_complexity)]
 pub fn make_upvalue_int_caches(n: usize) -> (Box<[Cell<u8>]>, Box<[Cell<i64>]>) {
@@ -945,7 +781,6 @@ pub fn make_upvalue_int_caches(n: usize) -> (Box<[Cell<u8>]>, Box<[Cell<i64>]>) 
         .map(|_| Cell::new(0u8))
         .collect::<Vec<_>>()
         .into_boxed_slice();
-    // values[0] is the fill epoch; -1 never matches, so a new cache starts empty.
     let values = std::iter::once(Cell::new(-1i64))
         .chain((0..n).map(|_| Cell::new(0i64)))
         .collect::<Vec<_>>()
@@ -954,9 +789,7 @@ pub fn make_upvalue_int_caches(n: usize) -> (Box<[Cell<u8>]>, Box<[Cell<i64>]>) 
 }
 
 impl ObjClosure {
-    /// Build a closure whose upvalues are all `Closed` over `upvalue_values`,
-    /// with cold JIT state and no module globals. Used to snapshot a closure
-    /// for cross-thread transfer and to rebuild it on a worker.
+    /// Build a closure whose upvalues are all `Closed` over `upvalue_values`, with cold JIT state and no module globals.
     pub fn closed(function: Rc<Function>, upvalue_values: Vec<Value>) -> ObjClosure {
         let upvalues: Vec<Rc<RefCell<Upvalue>>> = upvalue_values
             .into_iter()
@@ -983,15 +816,10 @@ impl ObjClosure {
     }
 }
 
-/// u8 encoding of `engine::SpecializedEntryKind` stored in
-/// `ObjClosure.specialized_kind`. Callers should treat these as
-/// opaque tags and compare to the constants.
+/// u8 encoding of `engine::SpecializedEntryKind` stored in `ObjClosure.specialized_kind`.
 pub const SPECIALIZED_KIND_NONE: u8 = 0;
 pub const SPECIALIZED_KIND_NATIVE_INT_BODY: u8 = 2;
-/// B2.2: closure-aware specialized body. Differs from
-/// `NATIVE_INT_BODY` only in the ABI: the thunk takes
-/// `(*mut VM, *const ObjClosure, i64...)` so `GetUpvalue` can read
-/// through the closure register instead of walking the JitFrame.
+/// Closure-aware specialized body: the thunk takes `(*mut VM, *const ObjClosure, i64...)`.
 pub const SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE: u8 = 3;
 
 /// An upvalue captures a variable from an enclosing scope.
@@ -1007,26 +835,16 @@ pub enum Upvalue {
 #[derive(Debug)]
 pub struct ObjStructDef {
     pub name: String,
-    pub fields: Vec<(String, String, bool)>, // (name, type, hidden) — own fields only
+    pub fields: Vec<(String, String, bool)>,
     pub methods: RefCell<HashMap<String, Value>>,
     pub parent: Option<String>,
-    /// Cached flattened field layout — built on first instance creation by
-    /// walking the inheritance chain. The Vec preserves insertion order
-    /// (parent fields first, then own) and the HashMap maps name → index.
-    /// OnceCell: each struct def resolves its layout exactly once.
+    /// Cached flattened field layout, built on first instance creation by walking the inheritance chain (parent fields first, then own).
     pub layout: std::cell::OnceCell<std::rc::Rc<FieldLayout>>,
-    /// HashMap<String, Value> of the module that defined this struct. Set after the
-    /// defining module finishes loading (see `VM::import_module`); read
-    /// in `call_method` so methods called from another module still see
-    /// their own module's top-level functions (e.g. `Parser` in
-    /// stdlib/parse_args.oxi calling its file-local `normalize_array`).
-    /// `None` for structs defined in the main script.
+    /// Globals of the module that defined this struct, set after that module finishes loading (see `VM::import_module`); `None` for structs defined in the main script.
     pub module_globals: ModuleGlobals,
 }
 
-/// Flattened field layout for a struct (including inherited fields).
-/// `slots` owns the name+type+hidden tuples in canonical order; `indices`
-/// maps field names to slot indices for O(1) name → offset resolution.
+/// Flattened field layout for a struct (including inherited fields). `slots` owns the name+type+hidden tuples in canonical order; `indices` maps field names to slot indices.
 #[derive(Debug)]
 pub struct FieldLayout {
     pub slots: Vec<(String, String, bool)>,
@@ -1035,14 +853,7 @@ pub struct FieldLayout {
 
 /// JIT-addressable field storage header for an `ObjStructInstance`.
 ///
-/// `#[repr(C)]` so the layout is stable: the JIT can load `ptr` at a
-/// fixed offset from the instance and index directly into the heap
-/// buffer. Owns the buffer; freed when the enclosing `ObjStructInstance`
-/// is dropped.
-///
-/// Field count is fixed at construction and never grows, so `cap == len`
-/// in practice. `cap` is retained because the backing allocation was
-/// produced by `Vec` which may round up capacity.
+/// `#[repr(C)]`; owns the buffer, which is freed when the enclosing `ObjStructInstance` is dropped. The field count is fixed at construction.
 #[repr(C)]
 #[derive(Debug)]
 pub struct InstanceFields {
@@ -1051,15 +862,9 @@ pub struct InstanceFields {
     pub cap: u32,
 }
 
-/// A struct instance at runtime. Fields live in a raw heap buffer indexed
-/// by the struct def's `FieldLayout`. `#[repr(C)]` + hot fields first so
-/// the JIT can reach `fields.ptr` / `def` at pinned offsets.
+/// A struct instance at runtime. Fields live in a raw heap buffer indexed by the struct def's `FieldLayout`.
 ///
-/// Single-threaded by construction (the enclosing `Rc` is `!Sync`), so
-/// field mutations go through `set_field(&self, …)` which writes through
-/// a raw pointer without a `RefCell` runtime borrow check. No caller
-/// holds a `field_slice` borrow across a mutation — all mutation sites
-/// take the value by clone first (audited in plan Phase 1).
+/// Single-threaded (the enclosing `Rc` is `!Sync`); field mutations go through `set_field(&self, …)`.
 #[repr(C)]
 #[derive(Debug)]
 pub struct ObjStructInstance {
@@ -1067,10 +872,10 @@ pub struct ObjStructInstance {
     pub struct_name: String,
     /// Reference to the resolved layout so field indices stay correct.
     pub layout: std::rc::Rc<FieldLayout>,
-    /// Direct reference to the struct def so method-call ICs don't need
-    /// to look up `globals[struct_name]` on every dispatch. Stored as an
-    /// `Rc` so identity compares match the def's stable allocation.
+    /// Direct reference to the struct def.
     pub def: std::rc::Rc<ObjStructDef>,
+    /// Set by `lock`: every field write is refused.
+    pub locked: std::cell::Cell<bool>,
 }
 
 impl ObjStructInstance {
@@ -1092,6 +897,7 @@ impl ObjStructInstance {
             struct_name,
             layout,
             def,
+            locked: std::cell::Cell::new(false),
         }
     }
 
@@ -1132,7 +938,6 @@ impl ObjStructInstance {
         if self.fields.ptr.is_null() {
             return Vec::new();
         }
-        // Reconstitute the Vec `new` leaked, so its allocator frees the buffer.
         let fields = unsafe {
             Vec::from_raw_parts(
                 self.fields.ptr,
@@ -1149,7 +954,6 @@ impl ObjStructInstance {
 impl Drop for ObjStructInstance {
     fn drop(&mut self) {
         let fields = self.take_fields();
-        // A long linked list of nodes would otherwise drop one frame per node.
         if fields.iter().any(Value::may_own_values) {
             drop_nested(fields);
         }
@@ -1205,7 +1009,6 @@ impl ObjEnumInstance {
 
 impl Drop for ObjEnumInstance {
     fn drop(&mut self) {
-        // An enum `Cons` chain would otherwise drop one frame per link.
         let mut payload = Vec::new();
         self.take_payload_into(&mut payload);
         if payload.iter().any(Value::may_own_values) {
@@ -1219,14 +1022,9 @@ impl Drop for ObjEnumInstance {
 pub struct ObjModule {
     pub name: String,
     pub globals: Rc<HashMap<String, Value>>,
-    /// Names the module declared with `hide`. They stay in `globals` so the
-    /// module's own functions can still call them; what they are barred from
-    /// is crossing the module boundary — `mod.name` and
-    /// `introduce {name} from mod` both refuse.
+    /// Names the module declared with `hide`. They stay in `globals` but are refused across the module boundary: `mod.name` and `introduce {name} from mod` both refuse.
     pub hidden: std::collections::HashSet<String>,
 }
-
-// ── Value methods ──────────────────────────────────────────────────────
 
 impl Value {
     /// A new array holding `items`.
@@ -1254,8 +1052,6 @@ impl Value {
                 | Value::Wrapped(_)
         )
     }
-
-    // Mirror NanValue's accessors so call sites stop relying on the enum's pattern shape.
 
     #[inline]
     pub fn as_integer(&self) -> Option<i64> {
@@ -1317,6 +1113,44 @@ impl Value {
             None
         }
     }
+    /// Whether `lock` made this value read-only. Only arrays, maps, sets and
+    /// struct instances carry the mark; everything else is already immutable
+    /// or not lockable.
+    pub fn is_locked(&self) -> bool {
+        match self {
+            Value::Array(a) => a.borrow().1.is_set(),
+            Value::Map(m) => m.borrow().is_locked(),
+            Value::Set(s) => s.borrow().is_locked(),
+            Value::StructInstance(inst) => inst.locked.get(),
+            _ => false,
+        }
+    }
+
+    /// Set the lock flag on this value itself (not its contents). Used when a
+    /// locked value is rebuilt on another thread, whose contents were
+    /// rebuilt locked already.
+    pub fn mark_locked(&self) {
+        match self {
+            Value::Array(a) => a.borrow_mut().1.set(),
+            Value::Map(m) => m.borrow_mut().lock(),
+            Value::Set(s) => s.borrow_mut().lock(),
+            Value::StructInstance(inst) => inst.locked.set(true),
+            _ => {}
+        }
+    }
+
+    /// "a locked array", "a locked `Point`", ... when `lock` made this value
+    /// read-only; `None` when it can be changed.
+    pub fn locked_description(&self) -> Option<String> {
+        if !self.is_locked() {
+            return None;
+        }
+        Some(match self {
+            Value::StructInstance(inst) => format!("a locked `{}`", inst.struct_name),
+            other => format!("a locked {}", other.type_name().to_lowercase()),
+        })
+    }
+
     #[inline]
     pub fn as_array(&self) -> Option<&Rc<RefCell<ValueVec>>> {
         if let Value::Array(a) = self {
@@ -1430,8 +1264,7 @@ impl Value {
         }
     }
 
-    /// Borrow as a [`ValueRepr`] — the migration-friendly view enum.
-    /// See `ValueRepr` doc-comment for rationale (A1.2.5 flag-day prep).
+    /// Borrow as a [`ValueRepr`].
     #[inline]
     pub fn repr(&self) -> ValueRepr<'_> {
         match self {
@@ -1464,21 +1297,7 @@ impl Value {
         }
     }
 
-    /// Produce a value that is independent from `self` for the mutable
-    /// heap-collection variants (Array, Map, Set), recursively deep-copying
-    /// their contents so the result shares no `Rc<RefCell<…>>` backing store
-    /// with the original. All other variants fall back to an ordinary
-    /// `clone()` (a cheap `Rc` refcount bump or a `Copy`), so this is only
-    /// more expensive than `clone()` when a fresh, unaliased collection is
-    /// actually required.
-    ///
-    /// V5 fix: a typed zero-init heap default — `arr <array>` with no
-    /// initializer — is produced once by the compiler and parked in the
-    /// function's constant pool. A plain `clone()` of that constant on every
-    /// call shares the SAME `Rc<RefCell<ValueVec>>`, so mutations from one
-    /// call leak into the next (`b()` called 3× printed `1,2,3` instead of
-    /// `1,1,1`). Materializing the default through `fresh_clone` gives each
-    /// initialization its own empty collection, matching the tree-walker.
+    /// Produce a value independent from `self` for the mutable heap-collection variants (Array, Map, Set), recursively deep-copying their contents so the result shares no backing store with the original. All other variants fall back to an ordinary `clone()`.
     pub fn fresh_clone(&self) -> Value {
         match self {
             Value::Array(arr) => {
@@ -1499,7 +1318,6 @@ impl Value {
                 }
                 Value::Set(Rc::new(RefCell::new(fresh)))
             }
-            // Tuples are immutable, so sharing the Rc is observationally identical to a deep copy.
             other => other.clone(),
         }
     }
@@ -1564,9 +1382,7 @@ impl Value {
         }
     }
 
-    /// `type_matches(expected, &self.effective_type_name())`, without
-    /// building the name. Type locks and typed parameters run this on every
-    /// store and call.
+    /// `type_matches(expected, &self.effective_type_name())`, without building the name.
     pub fn effective_type_is(&self, expected: &str) -> bool {
         use crate::vm::type_matches;
         match self {
@@ -1598,8 +1414,6 @@ impl Value {
         }
     }
 }
-
-// ── Display ────────────────────────────────────────────────────────────
 
 /// How deep `Display` nests before eliding the rest as `...`.
 const MAX_DISPLAY_DEPTH: usize = 256;
@@ -1812,7 +1626,6 @@ impl PartialEq for Value {
             (Value::Integer(a), Value::Integer(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Char(a), Value::Char(b)) => a == b,
-            // Interned constant-pool strings make the common comparison a single pointer check.
             (Value::String(a), Value::String(b)) => Rc::ptr_eq(a, b) || a == b,
             (Value::Boolean(a), Value::Boolean(b)) => a == b,
             (Value::None, Value::None) => true,

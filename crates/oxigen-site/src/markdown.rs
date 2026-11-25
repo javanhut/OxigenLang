@@ -14,8 +14,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// Loop iterations a docs example may take to count as runnable. Far below
-/// the playground's budget: an example is meant to finish at once.
+/// Loop iterations a docs example may take to count as runnable.
 const SNIPPET_BUDGET: u64 = 5_000_000;
 
 pub struct Doc {
@@ -86,7 +85,6 @@ impl<'a> Renderer<'a> {
 
         let mut heading: Option<(HeadingLevel, Vec<Event>)> = None;
         let mut code: Option<(String, String)> = None;
-        // The search entry being filled: the text under the latest heading.
         let mut entry = SearchEntry {
             title: doc.heading.clone(),
             page: doc.title.clone(),
@@ -221,7 +219,6 @@ impl<'a> Renderer<'a> {
             Some((p, a)) => (p, format!("#{a}")),
             None => (dest, String::new()),
         };
-        // Resolve against the linking doc's directory, inside the repository.
         let mut parts: Vec<&str> = std::iter::once("docs")
             .chain(
                 from.rsplit_once('/')
@@ -283,7 +280,6 @@ impl<'a> Renderer<'a> {
         let printed = Rc::new(RefCell::new(String::new()));
         let into = Rc::clone(&printed);
         oxigen_core::output::set_sink(Some(Box::new(move |t| into.borrow_mut().push_str(t))));
-        // An interpreter panic only means the example is not offered; say nothing.
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let outcome = std::panic::catch_unwind(|| oxigen_playground::run(code, SNIPPET_BUDGET));

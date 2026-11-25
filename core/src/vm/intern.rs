@@ -1,21 +1,9 @@
 //! Bounded string interner for symbol-like strings.
 //!
-//! Used ONLY for compile-time constant-pool strings (literals,
-//! identifiers, field/method/global names, map-key literals). Those are
-//! bounded by the program text, so the table cannot grow without bound.
+//! Used for compile-time constant-pool strings (literals, identifiers, field/method/global names, map-key literals).
+//! Every interned literal shares one canonical `Rc<String>`, so comparing two of them is a pointer compare.
 //!
-//! It is deliberately **not** used for arbitrary runtime strings
-//! (concatenation results, user input, formatted output): there is no GC
-//! to evict them, so interning the unbounded set would leak. Runtime
-//! strings continue to use `value::rc_str`.
-//!
-//! Payoff: every interned literal shares one canonical `Rc<String>`, so
-//! comparing two of them is a single pointer compare via the `Rc::ptr_eq`
-//! fast path in `Value`'s `PartialEq` (and they dedup in memory).
-//!
-//! Single-threaded: compilation runs on one thread, so a `thread_local`
-//! `RefCell` needs no locking, and the `!Send` `Rc` values are confined
-//! to that thread.
+//! The table is thread-local and single-threaded.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -27,7 +15,7 @@ thread_local! {
 
 /// Return the canonical `Rc<String>` for `s`, interning it if new.
 ///
-/// Use ONLY for symbol-like / constant-pool strings (see module docs).
+/// Use only for symbol-like / constant-pool strings.
 pub fn intern(s: &str) -> Rc<String> {
     INTERN.with(|t| {
         let mut t = t.borrow_mut();

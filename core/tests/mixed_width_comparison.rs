@@ -5,9 +5,6 @@
 //!   `uint` above the largest `int` is still greater than every `int`;
 //! - anything with a `float` compares as floats;
 //! - strings compare with strings and chars with chars.
-//!
-//! Before, only `int` with `float` mixed, and strings and bytes supported
-//! `<` but none of the other three.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -94,7 +91,6 @@ fn bytes_compare_with_uints_and_bytes() {
 
 #[test]
 fn integers_of_any_width_compare_exactly() {
-    // As an int, umax would wrap to -1.
     assert_ordered("0", "umax");
     assert_ordered("9223372036854775807", "umax");
     assert_ordered("-1", "uint(0)");

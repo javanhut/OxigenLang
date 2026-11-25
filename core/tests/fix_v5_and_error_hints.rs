@@ -1,19 +1,9 @@
-//! V5 regression + runtime-error-hint parity.
+//! Typed zero-init heap defaults are fresh per initialization, and runtime
+//! errors carry hints.
 //!
-//! V5: a typed zero-init heap default — `arr <array>` declared with a type but
-//! NO initializer — used to be produced once by the compiler and parked in the
-//! function's constant pool. A plain `clone()` of that constant on every call
-//! shared the SAME `Rc<RefCell<Vec<Value>>>`, so an `arr = push(arr, 1)` in one
-//! call leaked into the next: `b()` called three times printed `1, 2, 3`
-//! instead of `1, 1, 1`. The fix materializes a FRESH collection per
-//! initialization (`Value::fresh_clone` at the `Constant` opcode and in
-//! `current_constant`, which the JIT's `jit_push_constant` helper routes
-//! through). The correct output is `1, 1, 1`, so VM(interp) == VM(JIT) is the
-//! bar.
-//!
-//! Error-hint parity: the VM used to drop the `  = hint:` line on
-//! divide-by-zero / modulo-by-zero runtime errors. It must now carry the
-//! expected hint text so file-vs-REPL output agrees.
+//! - `arr <array>` declared with a type and no initializer yields a fresh
+//!   collection per initialization, so VM(interp) == VM(JIT).
+//! - Divide-by-zero and modulo-by-zero runtime errors carry the `  = hint:` line.
 
 #![cfg(feature = "jit")]
 
@@ -54,26 +44,8 @@ fn assert_parity(source: &str, expected: &str) {
     assert_eq!(interp, jit, "VM interp != VM JIT");
 }
 
-// ── V5: typed zero-init heap defaults are fresh per initialization ──────────
-//
-// IMPORTANT (test shape): the V5 functions below use a FALL-THROUGH return
-// (the last expression is the result) rather than an early `give`. An early
-// `give` inside a JIT-compiled function trips a SEPARATE, pre-existing JIT
-// codegen abort ("you cannot add an instruction to a block already filled" in
-// `jit::engine::emit_store_current_loc`) that reproduces with a plain `clone()`
-// — i.e. WITHOUT this V5 fix — so it is unrelated to V5 and lives in a JIT
-// engine file this lane does not own. The fall-through shape JIT-compiles and
-// runs cleanly under a forced threshold, so it lets us assert the V5 fix on
-// BOTH the interpreter and the JIT (`current_constant`/`jit_push_constant`
-// fresh-clone) without entangling that JIT bug.
-
 #[test]
 fn typed_array_default_is_fresh_per_call() {
-    // The canonical V5 repro: `arr <array>` declared with no initializer, then
-    // mutated. Each call must start from an EMPTY array. Returning
-    // `b() + b() + b()` is `1 + 1 + 1 = 3` when fresh, `1 + 2 + 3 = 6` when
-    // the heap default is aliased across calls. `assert_parity` runs this on
-    // the interpreter and on a forced-JIT threshold.
     let src = r#"
 fun b(){
   arr <array>
@@ -87,7 +59,6 @@ b() + b() + b()
 
 #[test]
 fn typed_map_default_is_fresh_per_call() {
-    // Same aliasing hazard for a typed `<map>` default.
     let src = r#"
 fun b(){
   m <map>
@@ -101,11 +72,6 @@ b() + b() + b()
 
 #[test]
 fn typed_set_default_is_fresh_per_call() {
-    // Same aliasing hazard for a typed `<set>` default. The tree-walker's
-    // `insert` is map-only, so this is a VM(interp) == VM(JIT) check rather
-    // than a tree-walker parity check. A fresh set per call means each
-    // `len(s)` is 1, so `b() + b() + b() == 3`; an aliased set default would
-    // give `1 + 2 + 3`.
     let src = r#"
 fun b(){
   s <set>
@@ -122,10 +88,6 @@ b() + b() + b()
 
 #[test]
 fn typed_array_default_fresh_under_jit_longer_chain() {
-    // A longer (5-call) chain under a forced JIT threshold so the JIT path's
-    // fresh-clone of the typed-array constant is exercised across several
-    // compiled invocations. Fresh array per call ⇒ `len == 1` ⇒ chain == 5;
-    // an aliased heap default would give `1 + 2 + 3 + 4 + 5 = 15`.
     let src = r#"
 fun b(){
   arr <array>
@@ -141,15 +103,12 @@ b() + b() + b() + b() + b()
     assert_eq!(interp, jit, "VM interp != VM JIT");
 }
 
-// ── Error-hint parity: VM hint text must match the tree-walker ──────────────
-
 #[test]
 fn divide_by_zero_hint_matches_tree_walker() {
     let src = "1 / 0\n";
     let vm_err = run_vm(src, None).expect_err("1/0 must error on the VM");
     let jit_err = run_vm(src, Some(1)).expect_err("1/0 must error under JIT");
 
-    // The VM (interp + JIT) must carry the canonical message and hint text.
     for (label, msg) in [("interp", &vm_err), ("jit", &jit_err)] {
         assert!(
             msg.contains("division by zero"),
@@ -182,8 +141,6 @@ fn modulo_by_zero_hint_matches_tree_walker() {
 
 #[test]
 fn operator_type_mismatch_hint_matches_tree_walker() {
-    // INTEGER + STRING is a type mismatch in both backends. The hint wording
-    // must agree so file vs REPL output is consistent.
     let src = "5 + \"x\"\n";
     let vm_err = run_vm(src, None).expect_err("5 + string must error on the VM");
 

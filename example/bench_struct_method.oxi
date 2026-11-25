@@ -1,5 +1,3 @@
-// Struct with methods in a hot loop — exercises MethodCall / GetField /
-// SetField in the JIT allow-list.
 struct Counter {
     val <int>
 }

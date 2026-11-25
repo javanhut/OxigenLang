@@ -1,12 +1,6 @@
-//! `oxigen test` must never report success for a suite that did not pass.
-//!
-//! - A test (or a test file's top level) calling `os.exit(0)` ended the whole
-//!   run with exit 0 and no output, failures included.
-//! - `<test>` blocks nested in `main { }` or a function were silently
-//!   dropped: "ok. 0 passed".
-//! - A test file with no tests whose top level fails reported ok.
-//! - `diverge` in a test ran against an empty program: `None` for a plain
-//!   block, "function #1 not found" for a named function.
+//! Tests that `oxigen test` never reports success for a suite that did not pass:
+//! `os.exit(0)` in a test, `<test>` blocks nested in `main { }` or a function, a
+//! test file with no tests whose top level fails, and `diverge` inside a test.
 
 use std::fs;
 use std::path::PathBuf;

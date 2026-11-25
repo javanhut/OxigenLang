@@ -1,8 +1,6 @@
-//! Auto-join: a task handle resolves to its value the moment it's consumed by
-//! an operator — no explicit `converge` needed. `force()` is wired into every
-//! value-consuming site, so this covers arithmetic, comparison, equality,
-//! unary, and indexing. Separate test binary from the other concurrent tests
-//! because the worker pool / source are process-global (see concurrent_closure).
+//! Auto-join: a task handle resolves to its value when consumed by an operator,
+//! without an explicit `converge`. Covers arithmetic, comparison, equality,
+//! unary, and indexing.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -29,11 +27,6 @@ fn run(source: &str) -> String {
         .unwrap_or_else(|e| format!("ERR: {}", e.message))
 }
 
-// ONE program / ONE `run()`: the worker pool + source are process-global, and
-// `diverge` thunks transfer by compile-order id — so spreading these across
-// separate programs in one process would resolve thunks against the wrong
-// function table (the pool's first source wins). Every element of the final
-// array consumes its task via a different operator, with no explicit `converge`.
 #[test]
 fn auto_join_resolves_task_at_every_operator_site() {
     let out = run("fun w(x) { x * x }\n\
@@ -44,6 +37,5 @@ fn auto_join_resolves_task_at_every_operator_site() {
          e := diverge { w(2) }\n\
          i := diverge { w(1) }\n\
          [a * 2, b - 5, c == 16, d > 8, -e, [10, 20, 30][i]]\n");
-    // mul, sub, eq, cmp, negate, index-by-task — each auto-joins on use.
     assert_eq!(out, "[72, 20, True, True, -4, 20]");
 }

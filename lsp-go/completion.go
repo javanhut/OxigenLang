@@ -43,6 +43,7 @@ var keywords = []keywordInfo{
 	{"hide", "Mark struct field as private"},
 	{"hidden", "Mark a struct field as private (StructName includes { hidden field })"},
 	{"self", "Reference to current struct instance"},
+	{"lock", "Declare a permanently read-only variable: lock name = value"},
 	{"True", "Boolean true literal"},
 	{"False", "Boolean false literal"},
 	{"None", "Absence of a value"},

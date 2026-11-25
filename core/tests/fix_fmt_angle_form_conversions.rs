@@ -1,13 +1,5 @@
-//! `oxigen fmt` must not turn working source into source that no longer parses.
-//!
-//! `<type<T>>(expr)` came back out as `expr as <T>` — a syntax the language has
-//! never had. The result failed at the *parser* stage, so a single `oxigen fmt`
-//! over a project silently broke every file using the two-tier error model.
-//!
-//! The guard is round-tripping rather than exact output: format, re-parse, and
-//! require the result to still be valid. That is the property that was lost, and
-//! it holds whichever spelling the formatter settles on for a union — both
-//! `<A || B>` and `<A> || <B>` parse, and the stdlib uses the second.
+//! Tests that `oxigen fmt` output still parses, including `<type<T>>(expr)`
+//! conversions and union spellings, by formatting and re-parsing.
 
 use oxigen_core::formatter::Formatter;
 use oxigen_core::lexer::Lexer;
@@ -76,8 +68,6 @@ main {
 }
 "#,
     );
-    // The tag is the whole point of the tagged form — losing it would silently
-    // change which errors a `guard` filters on.
     assert!(
         out.contains("Error<non_integer>"),
         "the error tag was dropped:\n{}",
@@ -109,8 +99,8 @@ main {
     );
 }
 
-/// The stdlib writes unions as `<int> || <float>`; formatting must leave that
-/// spelling alone rather than churn every signature in math.oxi.
+/// The stdlib writes unions as `<int> || <float>`; formatting leaves that
+/// spelling alone.
 #[test]
 fn split_bracket_unions_are_left_alone() {
     let out = reformat_and_reparse("fun abs(x <int> || <float>) { x }\n");

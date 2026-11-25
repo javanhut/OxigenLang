@@ -9,35 +9,22 @@ const MAX_WIDTH: usize = 80;
 pub struct Formatter {
     indent: usize,
     output: String,
-    /// Comments from the source, in line order, and how far we have replayed
-    /// them. The AST has no comment nodes, so they are re-inserted by comparing
-    /// each comment's source line against the line each statement came from.
+    /// Comments from the source, in line order, and how many have been replayed.
     comments: Vec<Comment>,
     next_comment: usize,
-    /// `#[indent]` files delimit blocks with a trailing `:` and indentation
-    /// rather than braces; emitting braces into one produces a file that no
-    /// longer parses.
+    /// Whether the file is `#[indent]` style: blocks are delimited by a trailing `:` and indentation rather than braces.
     indent_style: bool,
-    /// Where the next sibling of the statement/item that opened the current
-    /// block starts. A comment on or after that line, or indented no further
-    /// than it, was written for that sibling rather than inside the block.
+    /// Where the next sibling of the statement/item that opened the current block starts. A comment on or after that line, or indented no further than it, belongs to that sibling.
     next_anchor: Option<Span>,
-    /// Source column of the last statement emitted in the current block, and of
-    /// the statement that opened it. A comment belongs to the block when it is
-    /// indented at least as far as the block's statements *and* strictly past
-    /// the opener — the first test keeps it out of a sibling's block, the second
-    /// keeps an unindented comment at the opener's own margin outside entirely.
+    /// Source column of the last statement emitted in the current block, and of the statement that opened it. A comment belongs to the block when it is indented at least as far as the block's statements and strictly past the opener.
     body_column: usize,
     open_column: usize,
     /// Set when the next statement is a `hide fun` declaration, so the keyword
     /// is re-emitted ahead of it.
     hide_next_fn: bool,
-    /// Nonzero while emitting a block expression that does not end its line.
-    /// In indent style a block closes by dedent, so anything printed after one
-    /// (`+ 5`, `when flag`, a call's `)`) would land on its last body line and
-    /// run inside it; such blocks keep their braces instead.
+    /// Nonzero while emitting a block expression that does not end its line; such blocks keep their braces in indent style.
     force_braces: usize,
-    /// Nonzero inside a string interpolation, which has to stay on one line.
+    /// Nonzero inside a string interpolation, which stays on one line.
     single_line: usize,
     /// Set by `format_tail_expression` for the one expression that ends its
     /// statement's line, and consumed by the next `format_expression`.
@@ -98,11 +85,8 @@ impl Formatter {
         }
     }
 
-    /// Opens a statement block. In brace style this is `<lead>{`; in indent
-    /// style it is `<lead>:` with the body's indentation doing the delimiting —
-    /// the exact inverse of the lexer's colon-at-end-of-line to `{` rule.
+    /// Opens a statement block: `<lead>{` in brace style, `<lead>:` in indent style.
     fn open_block(&mut self, lead: &str) {
-        // Until a statement is emitted in it, the new block admits no comments.
         self.body_column = usize::MAX;
         if self.single_line > 0 {
             self.push(lead);
@@ -135,7 +119,6 @@ impl Formatter {
         self.flush_comments_inside_block();
         self.indent -= 1;
         if self.colon_blocks() {
-            // Dedent closes the block, so drop the body's trailing newline.
             while self.output.ends_with('\n') {
                 self.output.pop();
             }
@@ -145,21 +128,15 @@ impl Formatter {
         }
     }
 
-    /// `open_block` + statements + `close_block`. An empty body has no
-    /// indentable content, so indent style needs an explicit `none` placeholder
-    /// where brace style can just write `{}`.
+    /// `open_block` + statements + `close_block`. An empty body is written `{}` in brace style and with a `none` placeholder in indent style.
     fn block(&mut self, lead: &str, body: &[Statement]) {
         self.open_block(lead);
         if body.is_empty() {
             if self.colon_blocks() {
-                // `None` evaluates to what an empty body does; `none` was an
-                // undefined name.
                 self.push_indent();
                 self.push("None");
                 self.newline();
             }
-            // With no statements to set it, admit comments indented past the
-            // opener, or they are pushed out of the block on every pass.
             self.body_column = self.open_column + 1;
         }
         self.format_block(body);
@@ -224,9 +201,6 @@ impl Formatter {
     fn format_program(&mut self, program: &Program) {
         let stmts = &program.statements;
         for (i, stmt) in stmts.iter().enumerate() {
-            // `hide` lives on the Program, not the statement, so it has to be
-            // replayed here — dropping it would silently publish a private
-            // function on the next `oxigen fmt`.
             if let Statement::Let {
                 name,
                 value: Expression::FunctionLiteral { .. },
@@ -241,13 +215,10 @@ impl Formatter {
                 self.newline();
             }
         }
-        // Trailing comments, or the whole file when it has no statements.
         self.flush_comments_before(usize::MAX);
     }
 
     fn format_block(&mut self, statements: &[Statement]) {
-        // A block nested in an expression starts its own lines; what it holds
-        // is not part of the enclosing expression's line.
         let tail = std::mem::take(&mut self.tail_position);
         for (i, stmt) in statements.iter().enumerate() {
             if self.single_line > 0 {
@@ -265,9 +236,8 @@ impl Formatter {
     /// Emits one statement on its own line, replaying any comments the author
     /// wrote above it and re-attaching a comment that trailed it.
     ///
-    /// `next` is the following statement in the same list. Any block this
-    /// statement opens must end before `next` begins, which is what lets
-    /// `close_block` tell an end-of-block comment from one written after it.
+    /// `next` is the following statement in the same list; any block this statement
+    /// opens ends before `next` begins.
     fn emit_statement_line(&mut self, stmt: &Statement, next: Option<&Statement>) {
         let span = stmt_span(stmt);
         if let Some(span) = span {
@@ -288,7 +258,6 @@ impl Formatter {
 
         self.next_anchor = saved_anchor;
         self.open_column = saved_open;
-        // Set after formatting so an opened block closes on its own column first.
         if let Some(span) = span {
             self.body_column = span.column();
             self.push_trailing_comment(span.line());
@@ -305,7 +274,6 @@ impl Formatter {
             if comment.line >= line {
                 break;
             }
-            // Emit on its own line rather than duplicating the passed statement's position.
             let text = comment.text.clone();
             self.next_comment += 1;
             self.push_indent();
@@ -315,15 +283,9 @@ impl Formatter {
     }
 
     /// Replays comments that trailed a block's last statement, before the block
-    /// is closed.
-    ///
-    /// The AST stores no span for a closing `}`, so "is this comment inside the
-    /// block?" is answered from two sides: it must come before `block_bound`
-    /// (the next sibling of the statement that opened the block), and it must
-    /// be indented past the block's delimiters (see `body_column`). The column
-    /// tests are what keep a comment written after a block's close — including
-    /// after the last block in a file, where no line bound exists — from being
-    /// pulled inside it.
+    /// is closed. A comment is inside the block when it comes before `block_bound`
+    /// (the next sibling of the statement that opened the block) and is indented past
+    /// the block's delimiters (see `body_column`).
     fn flush_comments_inside_block(&mut self) {
         while let Some(comment) = self.comments.get(self.next_comment) {
             let claimed_by_next = self
@@ -343,14 +305,11 @@ impl Formatter {
         }
     }
 
-    /// Comment handling for the items of a block that aren't statements —
-    /// methods, struct fields, enum variants, match arms. They still sit on
-    /// source lines authors write comments above, so without this they would be
-    /// swept into the previous item's body instead.
+    /// Comment handling for the items of a block that aren't statements: methods,
+    /// struct fields, enum variants, match arms.
     ///
-    /// Call around each item: `before` replays what was written above it,
-    /// `after` re-attaches a trailing comment and marks the item as the block's
-    /// latest, so the block closes against the right column.
+    /// Call around each item: `before` replays what was written above it, `after`
+    /// re-attaches a trailing comment and marks the item as the block's latest.
     fn before_item(&mut self, span: Option<Span>, next: Option<Span>) -> (Option<Span>, usize) {
         if let Some(span) = span {
             self.flush_comments_before(span.line());
@@ -391,7 +350,6 @@ impl Formatter {
     fn format_statement(&mut self, stmt: &Statement) {
         match stmt {
             Statement::Let { name, value } => {
-                // Named `fun`s are stored as Let { name, FunctionLiteral }.
                 if let Expression::FunctionLiteral {
                     token,
                     parameters,
@@ -441,18 +399,12 @@ impl Formatter {
                 self.push(" = ");
                 self.format_tail_expression(value);
             }
-            // An `unless ... then` expression only parses as one where a value
-            // is expected (an inline option arm). Printed bare inside a block
-            // body it reads back as a guarded statement, which yields another
-            // value, so it keeps parentheses.
             Statement::Expr(expr @ Expression::Unless { .. }) => {
                 self.guarded_statement = false;
                 self.push("(");
                 self.format_expression(expr);
                 self.push(")");
             }
-            // `b < a > 7` at the start of a statement reads as the typed
-            // declaration `b <a>` followed by a stray `7`.
             Statement::Expr(expr) if starts_with_name_lt(expr) => {
                 self.guarded_statement = false;
                 self.push("(");
@@ -478,13 +430,8 @@ impl Formatter {
                 alternative,
                 ..
             } => {
-                // The postfix forms are only written back for statements the
-                // parser accepts a guard on; `total := 0 unless done` used to
-                // come back unparseable. See `format_guarded_statement` for the
-                // statements whose expression would swallow the guard.
                 let negated = strip_negation(condition);
                 if let Some(alt) = alternative {
-                    // There is no `when ... then`; only `unless` takes a `then`.
                     if let Some(inner) = negated
                         && consequence.len() == 1
                         && alt.len() == 1
@@ -572,7 +519,6 @@ impl Formatter {
                     let saved = self.before_item(span, arms.get(i + 1).and_then(choose_arm_span));
                     self.item_start();
                     if arm.inline_params.is_some() {
-                        // Without the keyword an inline pattern reads as a call.
                         self.push("pattern ");
                     }
                     self.push(&arm.pattern_name);
@@ -700,7 +646,6 @@ impl Formatter {
                     self.push_indent();
                     self.push("fun ");
                     self.push(&method_name.value);
-                    // The method_expr should be a FunctionLiteral
                     if let Expression::FunctionLiteral {
                         parameters,
                         return_type,
@@ -743,10 +688,35 @@ impl Formatter {
                 self.push("] = ");
                 self.format_tail_expression(value);
             }
+            Statement::Lock {
+                name,
+                type_ann,
+                value,
+                ..
+            } => {
+                self.push("lock ");
+                self.push(&name.value);
+                if let Some(type_ann) = type_ann {
+                    self.push(" <");
+                    self.push(&format_type_annotation(type_ann));
+                    self.push(">");
+                }
+                self.push(" = ");
+                self.format_tail_expression(value);
+            }
+            Statement::CompoundAssign {
+                target,
+                operator,
+                value,
+                ..
+            } => {
+                self.format_expression(target);
+                self.push(&format!(" {operator}= "));
+                self.format_tail_expression(value);
+            }
             Statement::Introduce {
                 path, selective, ..
             } => {
-                // Dots are path, not decoration: dropping them resolves `.json` to the stdlib.
                 let rendered = if path.is_relative {
                     format!(
                         "{}{}",
@@ -806,8 +776,7 @@ impl Formatter {
         }
     }
 
-    /// Formats the expression that ends its statement's line — the only place
-    /// a block expression may be written in `#[indent]` colon style.
+    /// Formats the expression that ends its statement's line, the only place a block expression may be written in `#[indent]` colon style.
     fn format_tail_expression(&mut self, expr: &Expression) {
         if std::mem::take(&mut self.guarded_statement) && absorbs_guard(expr) {
             self.push("(");
@@ -820,10 +789,7 @@ impl Formatter {
         self.tail_position = false;
     }
 
-    /// A statement that a postfix guard will follow on the same line. Its
-    /// expression no longer ends the line, so a block in it keeps its braces,
-    /// and one that would swallow the guard is parenthesised — written bare,
-    /// the guard re-associated onto its `then` branch.
+    /// A statement that a postfix guard will follow on the same line. Its blocks keep their braces, and an expression that would absorb the guard is parenthesised.
     fn format_guarded_statement(&mut self, stmt: &Statement) {
         self.force_braces += 1;
         self.guarded_statement = true;
@@ -880,7 +846,6 @@ impl Formatter {
                     self.push("\"");
                 }
             }
-            // Backticks are the char literal; quotes made it a string.
             Expression::Char { value, .. } => {
                 self.push("`");
                 self.output.push(*value);
@@ -934,7 +899,6 @@ impl Formatter {
                 }
                 let start = self.output.len();
                 self.format_expression(right);
-                // `- -x` must not close up into the `--` token.
                 if operator == "-" && self.output[start..].starts_with('-') {
                     self.output.insert(start, ' ');
                 }
@@ -1090,7 +1054,6 @@ impl Formatter {
             }
             Expression::MapLiteral { entries, .. } => {
                 if entries.is_empty() {
-                    // `{}` is the only empty-map form; `{:}` is always rejected.
                     self.push("{}");
                     return;
                 }
@@ -1151,8 +1114,6 @@ impl Formatter {
                 ..
             } => {
                 self.format_expression(value);
-                // `guard e -> x` has no tag or synthetic-binding form; those
-                // only exist as angle forms, and `guard net:_err` never parsed.
                 let filter = match error_tag {
                     Some(t) => format!("<Error<{t}>>"),
                     None => String::new(),
@@ -1224,9 +1185,6 @@ impl Formatter {
                 self.format_expression(value);
                 self.push(")");
             }
-            // `<type<T>>(expr)` is the only form the parser knows. This used to
-            // emit `expr as <T>`, a syntax that has never existed, so formatting
-            // any file using an angle-form conversion left it unparseable.
             Expression::TypeWrap { target, value, .. } => {
                 self.push("<type<");
                 self.push(&format_type_annotation(target));
@@ -1288,7 +1246,6 @@ impl Formatter {
                             }
                         }
                         StringInterpPart::Expr(e) => {
-                            // A single-line string cannot hold a line break.
                             if !multiline {
                                 self.single_line += 1;
                             }
@@ -1338,8 +1295,6 @@ impl Formatter {
 
     fn format_function_body(&mut self, body: &[Statement]) {
         self.function_bodies += 1;
-        // Inline only for brace style; indent style has no inline block form.
-        // A comment inside the body would be pushed out of a one-line form.
         if !self.colon_blocks()
             && body.len() == 1
             && let Statement::Expr(expr) = &body[0]
@@ -1354,12 +1309,9 @@ impl Formatter {
         self.block(" ", body);
     }
 
-    /// Whether a body whose only statement is `expr` stays on the opener's
-    /// line. An expression that spans lines never does (`fun f() { [` … `] }`).
-    /// One holding a function literal, such as a call taking a callback, does
-    /// only while `{ expr }` fits the width: the call looks like a single
-    /// expression, but printed inline it nests a body inside a one-liner.
-    /// Other long one-liners are left as they are.
+    /// Whether a body whose only statement is `expr` stays on the opener's line.
+    /// An expression that spans lines never does. One holding a function literal does
+    /// only while `{ expr }` fits the width.
     fn body_stays_inline(&self, expr: &Expression) -> bool {
         let mut f = Formatter::new();
         f.format_expression(expr);
@@ -1397,7 +1349,6 @@ impl Formatter {
         self.open_block(" ");
         self.push_indent();
         self.format_expression(condition);
-        // Through `block` so indent style gets `->:` like every other arm.
         self.block(" -> ", consequence);
         self.newline();
 
@@ -1416,11 +1367,9 @@ impl Formatter {
 }
 
 /// Source line a statement starts on, used to decide which comments belong
-/// above it. `None` for statements that carry no token at all (`skip`/`stop`);
-/// those simply don't trigger a comment flush, so pending comments land on the
-/// next statement that does have a position.
-/// A choose arm's pattern name is a bare `String` with no token, so the arm is
-/// located by its guard condition or, failing that, its first body statement.
+/// above it. `None` for statements that carry no token (`skip`/`stop`). A choose
+/// arm is located by its guard condition or, failing that, its first body
+/// statement.
 fn choose_arm_span(arm: &ChooseArm) -> Option<Span> {
     arm.inline_params
         .as_ref()
@@ -1433,8 +1382,6 @@ fn choose_arm_span(arm: &ChooseArm) -> Option<Span> {
 fn stmt_span(stmt: &Statement) -> Option<Span> {
     match stmt {
         Statement::Skip { token } | Statement::Stop { token } => Some(token.span),
-        // A named `fun` starts at the keyword, which is the column its body's
-        // comments are measured against.
         Statement::Let {
             value: Expression::FunctionLiteral { token, .. },
             ..
@@ -1460,15 +1407,14 @@ fn stmt_span(stmt: &Statement) -> Option<Span> {
         | Statement::Introduce { token, .. }
         | Statement::Main { token, .. }
         | Statement::Test { token, .. } => Some(token.span),
-        // The statement starts at the target, not the `=` the token points to.
         Statement::DotAssign { token, object, .. } => expr_span(object).or(Some(token.span)),
         Statement::IndexAssign { token, object, .. } => expr_span(object).or(Some(token.span)),
+        Statement::CompoundAssign { token, target, .. } => expr_span(target).or(Some(token.span)),
+        Statement::Lock { token, .. } => Some(token.span),
     }
 }
 
-/// Source line an expression starts on. Infix/postfix/call nodes hold the
-/// operator's token, which sits after the expression begins, so those recurse
-/// into their leftmost child.
+/// Source line an expression starts on. Infix/postfix/call nodes use their leftmost child's line.
 fn expr_span(expr: &Expression) -> Option<Span> {
     match expr {
         Expression::Ident(ident) => Some(ident.token.span),
@@ -1532,8 +1478,6 @@ fn format_type_annotation(ann: &TypeAnnotation) -> String {
             None => "Error".to_string(),
         },
         TypeAnnotation::ValueType => "Value".to_string(),
-        // Every caller wraps this in `<`...`>`, so the join closes and reopens
-        // the brackets: `<int> || <float>`, which is how the stdlib writes it.
         TypeAnnotation::Union(types) => types
             .iter()
             .map(format_type_annotation)
@@ -1572,7 +1516,9 @@ fn top_level_section(stmt: &Statement) -> TopLevelSection {
             }
             _ => TopLevelSection::Variable,
         },
-        Statement::TypedDeclare { .. } | Statement::Assign { .. } => TopLevelSection::Variable,
+        Statement::TypedDeclare { .. } | Statement::Assign { .. } | Statement::Lock { .. } => {
+            TopLevelSection::Variable
+        }
         Statement::Pattern { .. }
         | Statement::StructDef { .. }
         | Statement::EnumDef { .. }
@@ -1619,6 +1565,7 @@ fn postfix_guardable(stmt: &Statement) -> bool {
             | Statement::Assign { .. }
             | Statement::DotAssign { .. }
             | Statement::IndexAssign { .. }
+            | Statement::CompoundAssign { .. }
     )
 }
 
@@ -1677,7 +1624,6 @@ fn escape_string(s: &str) -> String {
             '\n' => result.push_str("\\n"),
             '\t' => result.push_str("\\t"),
             '\r' => result.push_str("\\r"),
-            // A bare `{` would re-open an interpolation on the way back in.
             '{' => result.push_str("\\{"),
             c if c.is_control() => push_control_escape(&mut result, c),
             _ => result.push(c),
@@ -1686,28 +1632,24 @@ fn escape_string(s: &str) -> String {
     result
 }
 
-/// Escapes a control character other than newline/tab/CR. Written raw, a NUL
-/// ended the file for the lexer; any of them is invisible in an editor.
+/// Escapes a control character other than newline/tab/CR.
 fn push_control_escape(result: &mut String, c: char) {
     match c {
         '\0' => result.push_str("\\0"),
         '\x1b' => result.push_str("\\e"),
         c if (c as u32) < 0x80 => result.push_str(&format!("\\x{:02x}", c as u32)),
-        // `\xHH` only reaches ASCII; C1 controls are kept as they are.
         c => result.push(c),
     }
 }
 
-/// Escape the body of a triple-quoted string. Raw newlines are kept verbatim
-/// (that's the point of a multi-line literal); backslashes, tabs and carriage
-/// returns are escaped as usual. A `"` is escaped only when it would otherwise
-/// collide with the closing `"""` fence — when it's the third in a run, or the
-/// final character of this chunk (which would butt up against the fence). This
-/// keeps stray quotes (e.g. `She said "hi"`) unescaped in the common case.
+/// Escape the body of a triple-quoted string. Raw newlines are kept verbatim;
+/// backslashes, tabs and carriage returns are escaped. A `"` is escaped only when
+/// it would collide with the closing `"""` fence: when it is the third in a run,
+/// or the final character of the chunk.
 fn escape_string_triple(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut result = String::new();
-    let mut quote_run = 0; // consecutive unescaped `"` already emitted
+    let mut quote_run = 0;
     for (i, &c) in chars.iter().enumerate() {
         match c {
             '\\' => {
@@ -1734,7 +1676,6 @@ fn escape_string_triple(s: &str) -> String {
                 result.push('"');
                 quote_run += 1;
             }
-            // A bare `{` would re-open an interpolation on the way back in.
             '{' => {
                 result.push_str("\\{");
                 quote_run = 0;

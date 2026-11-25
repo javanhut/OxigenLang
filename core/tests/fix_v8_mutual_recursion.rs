@@ -1,27 +1,9 @@
-//! V8 regression: deep MUTUAL/indirect recursion under `--jit` must end
-//! GRACEFULLY (a "stack overflow" `Err`, rc=1) like the VM — NOT a process
-//! abort (SIGABRT rc=134).
+//! Deep mutual recursion under `--jit` ends with a graceful "stack overflow"
+//! `Err` like the VM, not a process abort.
 //!
-//! Root cause: the JIT indirect-call paths (generic IC / CA dispatch / method
-//! IC) NATIVELY call the cached thunk, so every nested call in a mutually
-//! recursive chain (`a -> b -> a -> …`) consumes one real machine-stack frame.
-//! The default 8 MB native stack overflows at ~11k deep — BELOW `FRAMES_MAX`
-//! (16384) — so the V7 graceful `FRAMES_MAX` heap-buffer guard never gets a
-//! chance to fire, and the process SIGABRTs instead.
-//!
-//! Fix (V8, option (a)): drive program execution on a thread with a LARGE
-//! native stack (256 MB) so that all 16384 `JitFrame`s fit within the native
-//! stack, and the V7 `FRAMES_MAX` heap guard becomes the real, GRACEFUL limit.
-//! The thread spawn lives in the CLI entry (`crates/oxigen-cli/src/main.rs`,
-//! cross-file). The in-crate JIT V7 guard (`jit_check_recursion_depth`, emitted
-//! before every inline `JitFrame` push) is unchanged and is what turns the
-//! native-stack overflow into a graceful `Err` once the native stack is big
-//! enough to reach the heap bound.
-//!
-//! This test mirrors the CLI fix by running the VM on a 256 MB-stack thread, so
-//! it can verify the deep case in-process. It asserts:
+//! Execution runs on a thread with a 256 MB native stack. The test asserts:
 //!   1. deep mutual recursion under JIT returns a graceful `Err` ("stack
-//!      overflow"), NOT a process abort, and that VM(interp) == VM(jit);
+//!      overflow"), and VM(interp) == VM(jit);
 //!   2. shallow mutual recursion still returns the correct value.
 
 #![cfg(feature = "jit")]
@@ -31,10 +13,8 @@ use oxigen_core::lexer::Lexer;
 use oxigen_core::parser::Parser;
 use oxigen_core::vm::VM;
 
-/// Native stack size used to drive execution — matches the CLI's V8 fix so the
-/// V7 `FRAMES_MAX` heap guard (16384 frames) is reached before the native stack
-/// overflows.
-const BIG_STACK: usize = 256 << 20; // 256 MB
+/// Native stack size used to drive execution.
+const BIG_STACK: usize = 256 << 20;
 
 /// Run a program on the bytecode VM. `jit_threshold == Some(1)` forces the JIT
 /// path; `None` keeps it on the interpreter.
@@ -59,11 +39,7 @@ fn run_vm(source: &str, jit_threshold: Option<u32>) -> Result<String, String> {
         .map_err(|e| e.message)
 }
 
-/// Run `run_vm` on a 256 MB-stack thread (the V8 fix), so deep recursion can
-/// reach the graceful `FRAMES_MAX` heap bound instead of overrunning the native
-/// stack. The thread JOINs, so a panic/abort inside would propagate as a join
-/// error rather than crashing the whole test process ungracefully — but with
-/// the fix the deep case returns a normal `Err` via the V7 guard.
+/// Run `run_vm` on a 256 MB-stack thread.
 fn run_vm_big_stack(source: &'static str, jit_threshold: Option<u32>) -> Result<String, String> {
     std::thread::Builder::new()
         .stack_size(BIG_STACK)
@@ -85,11 +61,8 @@ fun b(n){ option { n <= 0 -> 0, a(n - 1) } }
 a(10)
 "#;
 
-/// Deep mutual recursion under JIT must end with a graceful "stack overflow"
-/// `Err` (rc=1 in the CLI), NOT a process abort. Driving it on the big-stack
-/// thread lets the native stack hold all 16384 `JitFrame`s so the V7 heap guard
-/// fires gracefully. A depth (40000) safely beyond `FRAMES_MAX` (16384)
-/// guarantees the bound is hit regardless of tail-call behavior.
+/// Deep mutual recursion under JIT ends with a graceful "stack overflow"
+/// `Err`. The depth (40000) is beyond `FRAMES_MAX` (16384).
 #[test]
 fn deep_mutual_recursion_jit_is_graceful_not_abort() {
     let jit = run_vm_big_stack(MUTUAL_DEEP, Some(1));
@@ -106,8 +79,8 @@ fn deep_mutual_recursion_jit_is_graceful_not_abort() {
     );
 }
 
-/// Parity: the interpreter must ALSO end gracefully on the same deep input,
-/// and the JIT must agree with it (both `Err` "stack overflow") — VM == JIT.
+/// The interpreter also ends gracefully on the same deep input, and the JIT
+/// agrees with it (both `Err` "stack overflow").
 #[test]
 fn deep_mutual_recursion_vm_equals_jit() {
     let interp = run_vm_big_stack(MUTUAL_DEEP, None);
@@ -122,7 +95,6 @@ fn deep_mutual_recursion_vm_equals_jit() {
         "jit deep mutual recursion must be graceful Err, got: {:?}",
         jit
     );
-    // Both must report the same graceful stack-overflow condition.
     let i = interp.unwrap_err().to_lowercase();
     let j = jit.unwrap_err().to_lowercase();
     assert!(
@@ -133,9 +105,7 @@ fn deep_mutual_recursion_vm_equals_jit() {
     );
 }
 
-/// Shallow mutual recursion still computes the right value (the option arms
-/// return 0 at the base case) under interp AND JIT — the fix must not perturb
-/// correct, non-overflowing mutual recursion.
+/// Shallow mutual recursion computes the right value under interp and JIT.
 #[test]
 fn shallow_mutual_recursion_still_correct() {
     let interp = run_vm_big_stack(MUTUAL_SHALLOW, None).expect("interp shallow should succeed");

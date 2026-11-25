@@ -1,12 +1,5 @@
-//! Regression: slicing works in elements, and out-of-range bounds clamp.
-//!
-//! - String slices used BYTE offsets (`&s[start..end]`) while indexing
-//!   counts characters. `"héllo"[0:2]` panicked ("not a char
-//!   boundary") — an abort in release builds — and `"héllo"[1:3]` returned
-//!   `é` instead of `él`.
-//! - A negative bound below `-len` wrapped through `usize` and clamped to the
-//!   wrong end: `[1,2,3,4,5][-100:2]` gave `[]`, `[1:-100]` gave `[2,3,4,5]`.
-//! - Tuple slices ignored negative bounds: `(1,2,3)[-2:]` gave `()`.
+//! Tests that slicing works in elements (strings by character, tuples with
+//! negative bounds) and that out-of-range bounds clamp.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;

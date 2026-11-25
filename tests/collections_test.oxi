@@ -1,5 +1,3 @@
-// The builtins that change arrays, maps and sets in place: push, insert,
-// remove, pop, extend, clear, plus has, copy and set(array).
 <test>("push adds to arrays and sets") {
     a := [1]
     push(a, 2)

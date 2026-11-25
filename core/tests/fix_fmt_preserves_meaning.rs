@@ -1,22 +1,10 @@
-//! `oxigen fmt` rewrites files in place, so it must never change what a
-//! program does, never write a file that no longer parses, and must reach a
-//! fixed point after one pass.
+//! Tests that `oxigen fmt` never changes what a program does, never writes a
+//! file that no longer parses, and reaches a fixed point after one pass.
 //!
-//! Every case here was a real rewrite that broke one of those three rules:
-//!
-//! - A single-statement `unless`/`when` block was folded into a postfix guard
-//!   whatever the statement was. A `:=` (not guard-eligible) no longer parsed,
-//!   and an `unless ... then` inside re-associated so the outer guard landed
-//!   on the `then` branch.
-//! - In `#[indent]` files a block expression in the middle of a line closed by
-//!   dedent, so whatever followed it (`+ 5`, `when flag`) was glued onto the
-//!   block's last line and ran inside it.
-//! - Char literals came back as strings, an empty indent-style body as the
-//!   undefined name `none`, tagged guards as `guard net:_err -> ...` (no such
-//!   syntax), inline choose patterns lost their `pattern` keyword, block
-//!   expressions inside interpolations broke the string across lines, `- -x`
-//!   became the decrement token, and a NUL escape was written out raw.
-//! - A comment inside a one-line function body was moved out of it.
+//! Cases cover single-statement `unless`/`when` blocks, block expressions in
+//! `#[indent]` files, char literals, empty indent-style bodies, tagged guards,
+//! inline choose patterns, block expressions inside interpolations, `- -x`, NUL
+//! escapes, and comments inside one-line function bodies.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::formatter::Formatter;
@@ -67,7 +55,7 @@ fn fmt(source: &str) -> String {
     }
 }
 
-/// Formatting must keep the result, produce parseable output, and be stable.
+/// Formatting keeps the result, produces parseable output, and is stable.
 fn assert_fmt_preserves(source: &str) -> String {
     let before = run(source, "original");
     let once = fmt(source);
@@ -83,8 +71,6 @@ fn assert_fmt_preserves(source: &str) -> String {
     );
     once
 }
-
-// ── C1 / H1: folding a one-statement block into a postfix guard ──
 
 #[test]
 fn unless_block_around_unless_then_keeps_its_meaning() {
@@ -147,8 +133,6 @@ fn plain_postfix_guards_still_fold() {
 
 #[test]
 fn unless_then_expression_in_an_option_arm_stays_an_expression() {
-    // Inline, the arm is an `unless ... then` expression; moved into a block
-    // body it would read as a guarded statement, which yields another value.
     assert_fmt_preserves("a := 1\nx := option { False -> 5, a unless True then -a }\nx\n");
     assert_fmt_preserves("a := 1\nx := option { a > 0 -> a unless False then 9, 0 }\nx\n");
 }
@@ -157,8 +141,6 @@ fn unless_then_expression_in_an_option_arm_stays_an_expression() {
 fn comparison_moved_to_the_start_of_a_line_is_not_a_declaration() {
     assert_fmt_preserves("a := 1\nb := 2\nc := option { False -> 1, b < a > 7 guard e -> 3 }\nc\n");
 }
-
-// ── C2 / H7: block expressions mid-line in #[indent] files ──
 
 #[test]
 fn indent_option_followed_by_an_operator() {
@@ -184,8 +166,6 @@ fn indent_whole_line_block_expressions_keep_colon_style() {
     let out = assert_fmt_preserves("#[indent]\nc := True\nx := option { c -> 1, 2 }\nx\n");
     assert!(out.contains("x := option:"), "{out}");
 }
-
-// ── H2 / H3 / H8 / H9: literals and operators ──
 
 #[test]
 fn char_literal_stays_a_char() {
@@ -221,8 +201,6 @@ fn control_characters_in_strings_are_escaped() {
     );
 }
 
-// ── H4: tagged and synthetic guards ──
-
 #[test]
 fn angle_form_guards_and_fails_round_trip() {
     assert_fmt_preserves(
@@ -238,8 +216,6 @@ fn angle_form_guards_and_fails_round_trip() {
     );
 }
 
-// ── H5: inline choose patterns ──
-
 #[test]
 fn inline_choose_pattern_keeps_its_keyword() {
     assert_fmt_preserves(
@@ -247,16 +223,12 @@ fn inline_choose_pattern_keeps_its_keyword() {
     );
 }
 
-// ── H6: block expressions inside interpolations ──
-
 #[test]
 fn interpolations_stay_on_one_line() {
     assert_fmt_preserves(
         "a := 5\nc := 9\ns := \"v{option { a - 2 -> 7, c }}w\"\nt := \"n={len([1111111111, 2222222222, 3333333333, 4444444444, 5555555555, 6666666666, 7777777777])}\"\n[s, t]\n",
     );
 }
-
-// ── M8: comments inside function bodies ──
 
 #[test]
 fn trailing_comment_stays_inside_a_one_line_body() {

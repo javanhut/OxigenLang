@@ -1,32 +1,20 @@
-//! B2.0 of the optimization roadmap: typed slot analysis.
+//! Typed slot analysis.
 //!
 //! For each JIT-compilable function this pass produces a
 //! `FunctionSlotTypes` map that classifies each local slot as one of:
 //!
 //!   - `Int64` — provably always an `i64` in this function
-//!   - `Value` — generic fallback (anything else, or couldn't prove int)
+//!   - `Value` — generic fallback (anything else, or not provably an int)
 //!
 //! The pass is forward abstract interpretation on the bytecode with a
-//! 3-element lattice (`⊥`, `Int64`, `Value`). It is deliberately
-//! conservative: when in doubt, a slot is `Value`. Downstream codegen
-//! (B2.1 unboxed locals, B2.2 unboxed calling convention) consumes the
-//! output and emits native `i64` SSA for the `Int64` slots while
-//! leaving the `Value` slots on the generic stack path.
+//! 3-element lattice (`⊥`, `Int64`, `Value`). When in doubt, a slot is `Value`.
+//! Codegen consumes the output and emits native `i64` SSA for the `Int64` slots
+//! while leaving the `Value` slots on the generic stack path.
 //!
-//! Scope for v1:
-//!   - Only local slots are classified. Stack positions are tracked
-//!     *internally* during the walk (required to determine `SetLocal`
-//!     types) but not surfaced in the output.
-//!   - Booleans, floats, and other non-`Int64` scalars collapse to
-//!     `Value`. Broadening the lattice to track `Bool`, `Float`, etc.
-//!     is deferred until B2.1 has shown the basic shape pays off.
-//!   - Control flow is handled via a worklist: at each control-flow
-//!     merge the incoming lattices are joined; if the merged state
-//!     changes the merged block's successors are re-queued. This
-//!     converges because the lattice has no infinite chain.
-//!
-//! See `docs/optimization-roadmap.md` section "Phase B (revised)" for
-//! the broader picture.
+//! Only local slots are classified. Booleans, floats, and other non-`Int64`
+//! scalars collapse to `Value`. Control flow is handled via a worklist: at each
+//! control-flow merge the incoming lattices are joined, and if the merged state
+//! changes the block's successors are re-queued.
 
 use std::collections::{HashMap, HashSet};
 
@@ -34,8 +22,6 @@ use crate::compiler::opcode::{Chunk, OpCode};
 use crate::vm::value::Function;
 #[cfg(test)]
 use crate::vm::value::Value;
-
-// ── Lattice ───────────────────────────────────────────────────────────
 
 /// Abstract type for a slot or stack position.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -60,44 +46,28 @@ impl SlotType {
     }
 }
 
-// ── Specialized-entry eligibility outcome ─────────────────────────────
-
 /// Per-function classification of why specialized-entry eligibility
-/// passed or failed. Step 0 attribution: each outcome maps to a
-/// JitCounter so we can attribute "bench_closure has 0 spec dispatches"
-/// to the specific rule that excluded the callee.
-///
-/// Order follows the rejection cascade in
-/// `compute_specialized_entry_eligibility` — each variant corresponds
-/// to the first rule that rejected the function. A function reaching
-/// the end of the cascade is `Eligible`.
+/// passed or failed. Each variant is the first rule that rejected the function
+/// (in the order of `compute_specialized_entry_eligibility`); a function that
+/// passes every rule is `Eligible`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SpecEligibilityOutcome {
     Eligible,
-    /// Function takes no args; specialized entry's reason for existing
-    /// (passing args in registers) doesn't apply.
+    /// Function takes no args.
     RejectedZeroArity,
     /// At least one param is neither Int64-typed nor an int-mirror
-    /// candidate. Cannot pass the arg as raw i64 safely.
+    /// candidate.
     RejectedParamNotInt,
-    /// At least one param is captured by an upvalue. The specialized
-    /// entry would need to materialize a heap slot for the capture,
-    /// which the current ABI doesn't do.
+    /// At least one param is captured by an upvalue.
     RejectedParamCaptured,
     /// Body contains a `Closure` opcode (creates a new closure).
-    /// Heap effect; defer to a later step that handles allocation.
     RejectedHasClosureOp,
     /// Body contains `GetUpvalue` / `SetUpvalue` / `CloseUpvalue`.
-    /// Step 4a will lift this restriction by adding a closure pointer
-    /// to the specialized ABI; until then these are unsafe to run
-    /// without the surrounding generic frame.
     RejectedHasUpvalueOp,
     /// Function has no `Return` opcode (e.g., always errors out or
-    /// loops forever). Specialized return slot would never fire.
+    /// loops forever).
     RejectedNoReturn,
-    /// Function has no `Call` opcode. Without a call there's no
-    /// self-recursion, and the IC never observes this callee — pure
-    /// compile-time overhead to emit a specialized body.
+    /// Function has no `Call` opcode.
     RejectedNoCall,
     /// At least one Return IP is unreachable per the abstract
     /// interpretation (Bottom on top-of-stack at that IP).
@@ -111,22 +81,11 @@ impl SpecEligibilityOutcome {
     }
 }
 
-// ── Per-function result ───────────────────────────────────────────────
-
 /// Per-slot classification for one JIT-compiled function, plus the
-/// bytecode metadata that B2.1 codegen needs.
+/// bytecode metadata that codegen needs.
 ///
 /// Indexed by local slot number. A slot that was never assigned stays
-/// `Bottom` (callers can treat this as `Value` — it means the slot is
-/// unused).
-///
-/// The additional maps beyond `slots` are the product of the same
-/// abstract-interpretation walk and are consumed by B2.1+ codegen
-/// (`core/src/jit/engine.rs`) to decide, per IP, whether a `Constant`
-/// is initializing a virtualizable local, whether a `Pop` is an
-/// expression cleanup / condition cleanup / scope teardown, and
-/// which slots are off-limits because they're captured by a nested
-/// closure.
+/// `Bottom` (callers can treat this as `Value`; the slot is unused).
 #[derive(Debug, Clone)]
 pub struct FunctionSlotTypes {
     /// Per-slot classification. `slots[N]` is the join of every type
@@ -134,154 +93,105 @@ pub struct FunctionSlotTypes {
     pub slots: Vec<SlotType>,
 
     /// IP → slot. "The opcode at this IP first initializes this local
-    /// slot." For v1 B2.1 only recognizes Constant(Integer) initializers
-    /// for virtualization; the map itself is general (the initializer
-    /// may be any expression-producing opcode). Param slots are NOT in
-    /// this map — they're initialized at function entry, before any
-    /// bytecode runs. See `init_sites` for the unified "is slot
-    /// initialized somewhere?" question.
+    /// slot." The map is general (the initializer may be any expression-producing
+    /// opcode). Param slots are not in this map; they are initialized at function
+    /// entry. See `init_sites` for the unified "is slot initialized somewhere?"
+    /// question.
     pub local_init_result_ip: HashMap<usize, u16>,
 
     /// All slots that are known to be initialized somewhere — either at
-    /// function entry (params, slots 1..=arity) or at a specific
-    /// bytecode IP (values of `local_init_result_ip`). B2.1's
-    /// virtualizability test checks this; consumers should not need to
-    /// special-case param vs. local.
+    /// function entry (params, slots 1..=arity) or at a specific bytecode IP
+    /// (values of `local_init_result_ip`).
     pub init_sites: HashSet<u16>,
 
     /// IPs of `Pop` opcodes that exist solely to remove a conditional
     /// branch's condition value from the stack. These are the `Pop`s
-    /// the bytecode compiler emits immediately after a JumpIfFalse /
-    /// JumpIfTrue / Unless fallthrough, AND at the branch target. B2.1e
-    /// suppresses these when a virtual Bool was consumed at the branch.
+    /// emitted immediately after a JumpIfFalse / JumpIfTrue / Unless
+    /// fallthrough, and at the branch target.
     pub condition_cleanup_pop_ips: HashSet<usize>,
 
     /// IP → slot. "The opcode at this IP pops a local slot at end-of-
-    /// scope." B2.1b+ uses this to remove the slot from the live set
-    /// so subsequent `flush_all` calls don't store into a dead slot.
+    /// scope."
     pub scope_pop_slot_ip: HashMap<usize, u16>,
 
     /// Slots referenced as `is_local = 1` in any nested `Closure`
     /// opcode's upvalue descriptors (i.e., captured by a closure
-    /// defined inside this function). Virtualizing a captured slot
-    /// would make the capture see a stale backing slot whenever the
-    /// variable lives in a Cranelift `Variable`. B2.1 never
-    /// virtualizes captured slots.
+    /// defined inside this function).
     pub captured_slots: HashSet<u16>,
 
-    /// Param slots eligible for an Int64 register mirror (B2.2a).
+    /// Param slots eligible for an Int64 register mirror.
     /// Selection criteria:
     ///   - In the param range (1..=arity).
-    ///   - Classified `Value` — already-`Int64` params don't need a
-    ///     mirror since B2.1 virtualizes them directly.
-    ///   - Never written (no `SetLocal` targeting this slot) — a
-    ///     read-only slot's mirror never goes stale, which lets us
-    ///     skip a per-write resync.
-    ///   - Not captured — same reason as other virtualization paths.
-    ///   - Used by at least one `GetLocal` in the function body —
-    ///     otherwise the mirror is pure overhead.
-    ///
-    /// Engine emits a one-shot tag guard at function entry: if the
-    /// param's runtime tag is `Integer`, extract the payload and
-    /// def_var the mirror; if not, bail the thunk out and let the
-    /// interpreter handle this invocation.
+    ///   - Classified `Value`.
+    ///   - Never written (no `SetLocal` targeting this slot).
+    ///   - Not captured.
+    ///   - Used by at least one `GetLocal` in the function body.
     pub int_mirror_param_slots: HashSet<u16>,
 
     /// True iff the function qualifies for a second, specialized
     /// calling-convention entry point `fn(*mut VM, i64, ..., i64) -> (i64, u32)`
     /// with args passed in registers and result returned as raw i64.
     /// See `collect_specialized_entry_eligibility` for the full rule set.
-    /// Not written here — consumers check `specialized_param_slots`
-    /// and the `Return` IPs separately if they need per-IP info.
     pub specialized_entry_eligible: bool,
 
-    /// Step 0 attribution: per-rejection reason for `specialized_entry_eligible`.
+    /// Per-rejection reason for `specialized_entry_eligible`.
     /// `Eligible` when the function qualifies; otherwise the first rule
-    /// that rejected it. Consumed by the JIT to bump per-reason counters
-    /// so we can attribute "why didn't this benchmark take the spec
-    /// dispatch path" without re-running the analysis.
+    /// that rejected it.
     pub specialized_entry_outcome: SpecEligibilityOutcome,
 
-    /// Param slots that the specialized entry would receive as i64
+    /// Param slots that the specialized entry receives as i64
     /// (1..=arity when eligible; empty otherwise). Distinct from
-    /// `int_mirror_param_slots`: specialized slots include BOTH the
-    /// read-only Int-demand Value-typed params AND the Int64-typed
-    /// params (whether writable or not). Used by the codegen stage to
-    /// know the specialized signature arity and which slots to
-    /// materialize from register args.
+    /// `int_mirror_param_slots`: specialized slots include both the
+    /// read-only Int-demand Value-typed params and the Int64-typed
+    /// params (whether writable or not).
     pub specialized_param_slots: Vec<u16>,
 
-    /// B2.2: true iff the function is `specialized_entry_eligible` AND
-    /// its body contains at least one `GetUpvalue`. The JIT engine
-    /// uses this to pick `SpecializedEntryKind::NativeIntBodyWithClosure`
-    /// (closure pointer in a register) over the plain `NativeIntBody`.
-    /// False for functions that don't read upvalues — those continue
-    /// to use the original int-only specialized ABI.
+    /// True iff the function is `specialized_entry_eligible` and
+    /// its body contains at least one `GetUpvalue`, so the specialized entry
+    /// takes a closure pointer in a register
+    /// (`SpecializedEntryKind::NativeIntBodyWithClosure`).
     pub wants_closure_arg: bool,
 
     /// IPs of `OpCode::TypeWrap` whose runtime effect is provably
-    /// identity: target constant is the string `"INTEGER"` AND the
-    /// abstract stack top at entry is `Int64`. The JIT skips the
-    /// `jit_type_wrap` FFI call at these IPs entirely — `convert_to_type`
-    /// for `INTEGER` on a `Value::Integer` is just `value.clone()`,
-    /// which is a bit-copy with no Rc. Eliminates ~50k FFI hops per
-    /// `bench_collatz` run (one per `steps <int> := 0` reinit per
-    /// `collatz_steps` call) plus the auto-flush that the helper-call
-    /// dispatch path would otherwise force.
+    /// identity: target constant is the string `"INTEGER"` and the
+    /// abstract stack top at entry is `Int64`.
     pub noop_type_wrap_ips: std::collections::HashSet<usize>,
 
     /// IPs of `OpCode::CheckReturn` that provably pass: the abstract stack
-    /// top is `Int64` and the declared return type accepts an int. The JIT
-    /// skips the `jit_check_return` FFI call there, so `fun f(n <int>) <int>`
-    /// costs nothing over the unannotated form.
+    /// top is `Int64` and the declared return type accepts an int.
     pub noop_check_return_ips: std::collections::HashSet<usize>,
 
     /// True iff this chunk contains a `GetGlobal` naming this very function.
     ///
-    /// Purely a performance hint for the JIT's direct self-recursion path, whose
-    /// runtime guard is `callee == this frame's own closure`. A top-level named
-    /// function reaches itself only through `GetGlobal` (`GetGlobal` is the sole
-    /// opcode that reads a global), so when this is false that guard can never
-    /// succeed and emitting it costs every call a dead compare plus a virt-stack
-    /// snapshot and re-flush.
-    ///
-    /// False negatives are free: the direct path always falls through to the same
-    /// inline cache that runs when it is not emitted at all, so suppressing it
-    /// costs a fast path and never correctness. Anonymous `f := fun(n){ f(n-1) }`
-    /// and functions reaching themselves through an upvalue land here.
+    /// A top-level named function reaches itself only through `GetGlobal`. When
+    /// this is false the function is anonymous or reaches itself through an
+    /// upvalue.
     pub self_reachable_by_global_name: bool,
 
-    /// Phase 2.1: the function's whole body stays inside the integer world, so
+    /// Whether the function's whole body stays inside the integer world, so
     /// a lean entry could run it without materializing VM state.
     ///
     /// Requires every reachable operation to be an integer constant, a
     /// virtualizable integer local, wrapping integer arithmetic, an integer
-    /// comparison or branch, or a return — plus no captured slot, no upvalue,
-    /// and no heap-bearing constant. Anything that could make the interpreter
-    /// observe live operand-stack state disqualifies the function, because a
-    /// lean entry by definition has not maintained that state.
+    /// comparison or branch, or a return, with no captured slot, no upvalue,
+    /// and no heap-bearing constant.
     ///
     /// `Call` is permitted only where the callee can be the function itself
-    /// (`self_reachable_by_global_name`) with matching arity: a self-recursive
-    /// edge re-enters the same lean entry and so preserves the contract, while
-    /// a generic callee would expect a materialized stack.
+    /// (`self_reachable_by_global_name`) with matching arity.
     ///
-    /// This is the gate, not the implementation — emitting a lean entry also
-    /// needs the per-bailout reconstruction description that Phase 2.4
-    /// describes, and a function without one is not eligible however cleanly it
-    /// passes here.
+    /// This is an eligibility gate only; emitting a lean entry also needs a
+    /// per-bailout reconstruction description.
     pub lean_entry_eligible: bool,
 }
 
 impl FunctionSlotTypes {
     /// Return the inferred type for slot `i`, or `Value` if the index
-    /// is out of range (defensive default).
+    /// is out of range.
     pub fn get(&self, i: usize) -> SlotType {
         self.slots.get(i).copied().unwrap_or(SlotType::Value)
     }
 
-    /// Count of slots classified as `Int64`. Useful for tests and
-    /// quick diagnostics.
+    /// Count of slots classified as `Int64`.
     pub fn int64_count(&self) -> usize {
         self.slots
             .iter()
@@ -296,11 +206,8 @@ impl FunctionSlotTypes {
         self.init_sites.contains(&slot)
     }
 
-    /// Eligibility rule for B2.1 virtualization. See plan §
-    /// "Virtualization eligibility".
-    ///
-    /// This helper is the single source of truth for the codegen pass;
-    /// every Variable-emitting code path should gate on this.
+    /// Whether slot `i` is eligible for virtualization into a native register
+    /// variable.
     pub fn is_virtualizable(&self, slot: u16) -> bool {
         self.get(slot as usize) == SlotType::Int64
             && !self.captured_slots.contains(&slot)
@@ -320,25 +227,15 @@ impl FunctionSlotTypes {
     }
 }
 
-// ── Abstract state during the walk ────────────────────────────────────
-
-/// The analysis state at a program point. Oxigen's locals are just
-/// positions on the VM stack: slot N is `stack[N]`. There's no
-/// separate "locals" array — a `Constant` opcode that initializes a
-/// variable simply pushes at the slot's position. Temporaries (loop
-/// conditions, arithmetic intermediates) live at positions ABOVE
-/// `num_slots`.
+/// The analysis state at a program point. Oxigen's locals are positions on
+/// the VM stack: slot N is `stack[N]`. Temporaries (loop conditions,
+/// arithmetic intermediates) live at positions above `num_slots`.
 ///
-/// We track two things:
-///   - `stack`: the per-position abstract type at this IP (used during
-///     transfer to compute operand types).
-///   - `slot_types`: the slot's classification, updated only on WRITES
+/// Two things are tracked:
+///   - `stack`: the per-position abstract type at this IP.
+///   - `slot_types`: the slot's classification, updated only on writes
 ///     that target a local position (initialization pushes, explicit
-///     `SetLocal`, `Increment`/`Decrement`). Not touched by transients.
-///
-/// Two separate fields avoids the "temporary at stack[slot] poisons
-/// the slot's type" trap: comparisons and intermediate values live on
-/// the stack but never flow into `slot_types`.
+///     `SetLocal`, `Increment`/`Decrement`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AbstractState {
     stack: Vec<SlotType>,
@@ -357,8 +254,8 @@ impl AbstractState {
         }
     }
 
-    /// Pointwise join of both stack AND slot_types. Pads shorter
-    /// sides with `Bottom` (the lattice identity).
+    /// Pointwise join of both stack and slot_types. Pads shorter
+    /// sides with `Bottom`.
     fn join(&mut self, other: &AbstractState) -> bool {
         let mut changed = false;
 
@@ -416,22 +313,16 @@ impl AbstractState {
 }
 
 /// Map each local's initializing `Constant` to its slot, from the compiler's
-/// declaration points rather than from stack shape.
+/// declaration points.
 ///
-/// A slot is several locals over a function's life (disjoint scopes reuse it)
-/// and holds expression transients in between, so "a push at this depth" says
-/// nothing about which value is the local. A declaration is a simple init when
-/// the instruction ending at its declaration point is a `Constant` that left
-/// the value exactly at the slot, and no forward jump also arrives there
-/// (`x := c ? y : 1` lays out the `1` last, but `y` reaches the slot too).
+/// A declaration is a simple init when the instruction ending at its
+/// declaration point is a `Constant` that left the value exactly at the slot,
+/// and no forward jump also arrives there.
 ///
 /// The returned `init_sites` holds the params plus every slot whose
-/// declarations are all simple inits. A slot with any other declaration is
-/// left out, so it is never virtualized: the codegen only re-binds a slot's
-/// register at the IPs listed here, and a declaration it did not see would
-/// leave the register holding the previous occupant. So is a slot whose local
-/// was consumed straight from the stack while still in scope (the result of a
-/// block used as an expression), since that read goes to memory.
+/// declarations are all simple inits. A slot with any other declaration, or
+/// whose local was consumed straight from the stack while still in scope, is
+/// left out.
 fn collect_local_inits(
     func: &Function,
     code: &[u8],
@@ -440,7 +331,6 @@ fn collect_local_inits(
     forward_targets: &HashSet<usize>,
     consumed_live: &HashSet<u16>,
 ) -> (HashMap<usize, u16>, HashSet<u16>) {
-    // IP at which each instruction ends -> where it starts.
     let mut start_of_end: HashMap<usize, usize> = HashMap::new();
     let mut ip = 0;
     while ip < code.len() {
@@ -458,8 +348,6 @@ fn collect_local_inits(
         if (1..=func.arity as u16).contains(&slot) {
             continue;
         }
-        // `n <int> := 0` declares after `Constant 0; TypeWrap INTEGER`, an identity
-        // wrap on an int constant, so the Constant is still what lands in the slot.
         let last = start_of_end.get(&decl_ip).copied();
         let producer = match last {
             Some(p) if OpCode::from_byte(code[p]) == Some(OpCode::TypeWrap) => {
@@ -480,7 +368,6 @@ fn collect_local_inits(
             }
             other => other,
         };
-        // A range loop's limit comes from `RangeLimit`, which yields an Integer or raises.
         let init_ip = producer.filter(|&p| {
             matches!(
                 OpCode::from_byte(code[p]),
@@ -501,7 +388,6 @@ fn collect_local_inits(
         }
     }
 
-    // Params are initialized at entry, not at any bytecode IP.
     let mut init_sites: HashSet<u16> = (1..=func.arity as u16).collect();
     init_sites.extend(
         simple_slots
@@ -512,29 +398,21 @@ fn collect_local_inits(
     (local_init_result_ip, init_sites)
 }
 
-// ── Entry point ───────────────────────────────────────────────────────
-
 /// Run the analysis on one function and return its slot classifications.
 ///
 /// `num_slots` is max(locals_len, arity + 1). Param slots (1..=arity)
 /// are typed from `params[*].type_ann`. Slot 0 is the closure marker.
 /// Additional slots beyond params are populated by the body's
-/// stack-push initializers (`Constant`, arithmetic, `GetLocal`) —
-/// this is Oxigen's calling convention: locals live at stack
-/// positions equal to their slot index.
+/// stack-push initializers (`Constant`, arithmetic, `GetLocal`).
 ///
-/// For each stack position we track the abstract type across all
-/// reachable program points and report the join as the slot's
-/// classification. This works whether the local is initialized via
-/// `Constant+(implicit)SetLocal` (the common path — Oxigen doesn't
-/// emit an explicit `SetLocal` at initialization) or via explicit
-/// `SetLocal` on reassignment.
+/// For each stack position the abstract type is tracked across all
+/// reachable program points and the join is reported as the slot's
+/// classification.
 pub fn analyze(func: &Function) -> FunctionSlotTypes {
     let num_slots = func.locals.len().max(func.arity as usize + 1);
     let chunk = &func.chunk;
     let code = &chunk.code;
 
-    // Closure marker at 0, params at 1..=arity; these are the first slot writes.
     let mut entry = AbstractState::new(num_slots);
     entry.stack.push(SlotType::Value);
     entry.write_slot(0, SlotType::Value);
@@ -547,24 +425,19 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         entry.write_slot(i + 1, ty);
     }
 
-    // Forward-jump targets: a declaration point reached by one also takes a value from another arm.
     let mut forward_targets: HashSet<usize> = HashSet::new();
-    // Declaration point -> slots declared there.
     let mut decls_at: HashMap<usize, Vec<u16>> = HashMap::new();
     for &(ip, slot) in &func.local_decls {
         decls_at.entry(ip).or_default().push(slot);
     }
-    // Slots whose in-scope local was consumed as an operand; see `collect_local_inits`.
     let mut consumed_live: HashSet<u16> = HashSet::new();
     let mut scope_pop_slot_ip: HashMap<usize, u16> = HashMap::new();
 
-    // Worklist of IPs whose on-entry state changed and whose post-state needs recomputing.
     let mut states: HashMap<usize, AbstractState> = HashMap::new();
     states.insert(0, entry.clone());
     let mut worklist: Vec<usize> = vec![0];
 
     while let Some(ip) = worklist.pop() {
-        // Stop at a terminator or an already-recorded IP; the worklist carries the recomputation.
         let mut state = states[&ip].clone();
         let mut cursor = ip;
 
@@ -576,7 +449,6 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                 Some(o) => o,
                 None => break,
             };
-            // A declaration takes effect before the instruction at its point runs.
             if let Some(slots) = decls_at.get(&cursor) {
                 for &slot in slots {
                     if let Some(live) = state.live_locals.get_mut(slot as usize) {
@@ -591,14 +463,8 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                     .instruction_len(cursor)
                     .expect("compiler produced malformed bytecode");
 
-            // A push growing the stack into the local range initializes that slot; Oxigen emits no SetLocal for `total := 0`.
             let depth_after = next_state.stack.len();
 
-            // A block used as an expression ends by storing its result into its first
-            // local's slot and leaving it there (`SetLocal s; Pop`, no teardown), so the
-            // enclosing call or operator then consumes that slot straight from memory.
-            // A Pop ends a local's scope; any other consumer of a live local's position
-            // reads it as a value, so that slot must keep its memory copy current.
             if depth_after < depth_before {
                 for pos in depth_after..depth_before.min(num_slots) {
                     if next_state.live_locals.get(pos).copied().unwrap_or(false) {
@@ -610,8 +476,6 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                 }
             }
 
-            // A Constant landing in the local range joins that slot's type even when it is a
-            // transient: the join only ever widens, so a slot that ever holds a non-int stays Value.
             if matches!(op, OpCode::Constant) && depth_after == depth_before + 1 {
                 let new_pos = depth_after - 1;
                 if new_pos < num_slots {
@@ -620,8 +484,6 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                 }
             }
 
-            // A range loop's limit is declared straight from `RangeLimit`'s result,
-            // so like a Constant it initializes the slot rather than passing through.
             if matches!(op, OpCode::RangeLimit) && depth_after >= 1 {
                 let new_pos = depth_after - 1;
                 if new_pos < num_slots {
@@ -629,11 +491,9 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                 }
             }
 
-            // Any op leaving a value in the local range must join its type, not just Constant.
             if depth_after >= 1 && !matches!(op, OpCode::Constant | OpCode::RangeLimit) {
                 let new_pos = depth_after - 1;
                 if new_pos < num_slots {
-                    // Only join when the slot is already initialized on this path; an earlier push there is a transient.
                     let already_init = state
                         .slot_types
                         .get(new_pos)
@@ -647,11 +507,9 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                 }
             }
 
-            // A Pop whose depth_after lands on a live slot's position destroys that slot.
             if matches!(op, OpCode::Pop) && depth_before > 0 {
                 let popped_pos = depth_before - 1;
                 if popped_pos < num_slots {
-                    // Consult the state before this Pop to see whether the slot was live.
                     let was_init = state
                         .slot_types
                         .get(popped_pos)
@@ -664,7 +522,6 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                 }
             }
 
-            // Merge our post-op state into each branch target and enqueue if the join changed.
             for tgt in &targets {
                 if *tgt > cursor {
                     forward_targets.insert(*tgt);
@@ -685,7 +542,6 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                 break;
             }
 
-            // A known join point merges and breaks; the worklist re-processes if our contribution changed it.
             if let Some(existing) = states.get_mut(&fallthrough) {
                 let changed = existing.join(&next_state);
                 if changed && !worklist.contains(&fallthrough) {
@@ -694,14 +550,12 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
                 break;
             }
 
-            // Fresh IP: record it so future joiners find us, then continue linearly.
             states.insert(fallthrough, next_state.clone());
             state = next_state;
             cursor = fallthrough;
         }
     }
 
-    // Deliberately ignores `stack`: a position in the local range can hold a transient.
     let mut result = vec![SlotType::Bottom; num_slots];
     for state in states.values() {
         for (i, slot) in result.iter_mut().enumerate() {
@@ -713,13 +567,10 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
     let (local_init_result_ip, init_sites) =
         collect_local_inits(func, code, chunk, &states, &forward_targets, &consumed_live);
 
-    // A conditional branch whose fall-through and target both Pop is the cleanup pair to suppress.
     let condition_cleanup_pop_ips = collect_condition_cleanup_pops(code, chunk);
 
-    // A Closure upvalue descriptor with is_local = 1 captures one of this function's slots by reference.
     let captured_slots = collect_captured_slots(code, chunk);
 
-    // Cross-check SetLocal-written and GetLocal-read slots against the param range and captured_slots.
     let int_mirror_param_slots = collect_int_mirror_param_slots(
         code,
         chunk,
@@ -729,7 +580,6 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         &func.params,
     );
 
-    // Re-run with typed params: classifying them as Value would disqualify fib(n) returning n.
     let lifted_states = if int_mirror_param_slots.is_empty() {
         None
     } else {
@@ -752,8 +602,6 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         );
     let specialized_entry_eligible = specialized_entry_outcome.is_eligible();
 
-    // A TypeWrap to INTEGER whose stack top is already Int64 is identity, so the JIT can skip the FFI.
-    // As with CheckReturn below, a captured local may be rewritten by a closure, so keep the FFI then.
     let mut noop_type_wrap_ips: HashSet<usize> = HashSet::new();
     for (&ip, st) in eligibility_states.iter() {
         if ip + 2 >= code.len() {
@@ -781,8 +629,6 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
         }
     }
 
-    // A CheckReturn whose stack top is already Int64 passes whenever the declared type accepts an int.
-    // A closure can rewrite a captured local behind the analysis, so keep the runtime check then.
     let mut noop_check_return_ips: HashSet<usize> = HashSet::new();
     for (&ip, st) in eligibility_states.iter() {
         if ip + 2 >= code.len() || OpCode::from_byte(code[ip]) != Some(OpCode::CheckReturn) {
@@ -825,10 +671,7 @@ pub fn analyze(func: &Function) -> FunctionSlotTypes {
 }
 
 /// Second-pass abstract interpretation with a subset of param slots
-/// lifted from `Value` to `Int64` in the initial entry state. Used only
-/// by A1 eligibility — we don't replace the primary `states` with this
-/// because the rest of the JIT (B2.1, B2.2a) depends on the unlifted
-/// classification.
+/// lifted from `Value` to `Int64` in the initial entry state.
 fn analyze_states_with_lifted_params(
     func: &Function,
     chunk: &Chunk,
@@ -913,9 +756,7 @@ fn analyze_states_with_lifted_params(
 /// Determine whether the function qualifies for a specialized i64-ABI
 /// entry point. Returns `(outcome, param_slots)` — the second value is
 /// empty when ineligible, or the full `(1..=arity)` list otherwise.
-/// `outcome` carries the specific rule that rejected the function so
-/// the JIT can attribute "why didn't this take the spec dispatch path"
-/// without re-running the analysis.
+/// `outcome` carries the specific rule that rejected the function.
 fn compute_specialized_entry_eligibility(
     code: &[u8],
     chunk: &Chunk,
@@ -925,12 +766,10 @@ fn compute_specialized_entry_eligibility(
     int_mirror_param_slots: &HashSet<u16>,
     states: &HashMap<usize, AbstractState>,
 ) -> (SpecEligibilityOutcome, Vec<u16>, bool) {
-    // True iff a GetUpvalue was seen and the function is otherwise eligible; picks the closure-aware ABI.
     if arity == 0 {
         return (SpecEligibilityOutcome::RejectedZeroArity, Vec::new(), false);
     }
 
-    // Every param slot must be Int-stable AND not captured.
     for slot in 1..=arity {
         let is_int_typed = matches!(
             slot_types
@@ -956,7 +795,6 @@ fn compute_specialized_entry_eligibility(
         }
     }
 
-    // Closure and SetUpvalue/CloseUpvalue still bail; GetUpvalue alone is acceptable.
     let mut has_return = false;
     let mut has_call = false;
     let mut has_get_upvalue = false;
@@ -979,7 +817,6 @@ fn compute_specialized_entry_eligibility(
                     false,
                 );
             }
-            // SetUpvalue needs write-through into the live Rc<RefCell<Upvalue>>; CloseUpvalue keeps the helper path.
             OpCode::SetUpvalue | OpCode::CloseUpvalue => {
                 return (
                     SpecEligibilityOutcome::RejectedHasUpvalueOp,
@@ -1006,12 +843,10 @@ fn compute_specialized_entry_eligibility(
     if !has_return {
         return (SpecEligibilityOutcome::RejectedNoReturn, Vec::new(), false);
     }
-    // Relaxed for GetUpvalue closures: without a Call the IC still dispatches through the specialized entry.
     if !has_call && !has_get_upvalue {
         return (SpecEligibilityOutcome::RejectedNoCall, Vec::new(), false);
     }
 
-    // Every Return top must be non-Bottom; Value is fine since the trampoline tag-checks at runtime.
     for &rip in &return_ips {
         let state = match states.get(&rip) {
             Some(s) => s,
@@ -1024,7 +859,6 @@ fn compute_specialized_entry_eligibility(
             }
         };
         let top_ty = state.stack.last().copied().unwrap_or(SlotType::Bottom);
-        // Bottom means unreachable → still reject (can't trust).
         if matches!(top_ty, SlotType::Bottom) {
             return (
                 SpecEligibilityOutcome::RejectedReturnUnreachable,
@@ -1032,7 +866,6 @@ fn compute_specialized_entry_eligibility(
                 false,
             );
         }
-        // Value and Int64 are both fine: the trampoline's runtime tag check handles correctness.
     }
 
     let param_slots: Vec<u16> = (1..=arity).collect();
@@ -1044,8 +877,8 @@ fn compute_specialized_entry_eligibility(
 }
 
 /// Walk the bytecode and pick out param slots that qualify for an
-/// Int64 register mirror (B2.2a). See the field doc on
-/// `FunctionSlotTypes::int_mirror_param_slots` for the full criteria.
+/// Int64 register mirror. See the field doc on
+/// `FunctionSlotTypes::int_mirror_param_slots` for the criteria.
 fn collect_int_mirror_param_slots(
     code: &[u8],
     chunk: &Chunk,
@@ -1059,7 +892,6 @@ fn collect_int_mirror_param_slots(
     }
 
     let mut written: HashSet<u16> = HashSet::new();
-    // A param with any non-int consumer is ineligible; int-consumers are evidence it is Int-shaped.
     let mut has_int_demand: HashSet<u16> = HashSet::new();
     let mut has_non_int_demand: HashSet<u16> = HashSet::new();
 
@@ -1080,7 +912,6 @@ fn collect_int_mirror_param_slots(
             }
             OpCode::GetLocal => {
                 let slot = read_u16(code, ip + 1);
-                // Skip a bounded run of push-one-int opcodes; the param stays at stack[top-1] until a classifier fires.
                 let mut cursor = ip + op_len;
                 let mut skipped = 0;
                 let classifier_op = loop {
@@ -1089,9 +920,7 @@ fn collect_int_mirror_param_slots(
                     }
                     let cop = OpCode::from_byte(code[cursor]);
                     match cop {
-                        // Neutral push: the param is still on the stack, just below the new top.
                         Some(OpCode::Constant) => {
-                            // Only an integer constant is neutral; a float one makes the following arithmetic float.
                             let idx = read_u16(code, cursor + 1) as usize;
                             let is_int_const = chunk
                                 .constants
@@ -1141,7 +970,9 @@ fn collect_int_mirror_param_slots(
                         | OpCode::MethodCall
                         | OpCode::MethodCallNamed
                         | OpCode::Index
+                        | OpCode::IndexExisting
                         | OpCode::IndexAssign
+                        | OpCode::Lock
                         | OpCode::BuildArray
                         | OpCode::BuildTuple
                         | OpCode::BuildMap
@@ -1155,9 +986,7 @@ fn collect_int_mirror_param_slots(
                     ) => {
                         has_non_int_demand.insert(slot);
                     }
-                    _ => {
-                        // Neutral / ambiguous / unknown — no classify.
-                    }
+                    _ => {}
                 }
             }
             _ => {}
@@ -1171,7 +1000,6 @@ fn collect_int_mirror_param_slots(
         if written.contains(&slot) {
             continue;
         }
-        // A <float> param mirrored as int fails the tag guard on every call, and the bail corrupts the caller's locals.
         if params
             .get(slot as usize - 1)
             .and_then(|p| p.type_ann.as_deref())
@@ -1180,17 +1008,14 @@ fn collect_int_mirror_param_slots(
             continue;
         }
         if !has_int_demand.contains(&slot) {
-            // No evidence of int use, so the tag guard would be pure overhead.
             continue;
         }
         if has_non_int_demand.contains(&slot) {
-            // Not always int: the guard would bail every Value-shaped call and permanently un-JIT the function.
             continue;
         }
         if captured_slots.contains(&slot) {
             continue;
         }
-        // Already-Int64 params don't need a mirror — B2.1 covers them.
         if slot_types
             .get(slot as usize)
             .copied()
@@ -1208,9 +1033,7 @@ fn collect_int_mirror_param_slots(
 ///   - a `Pop` at IP `fall = branch_ip + branch_len`
 ///   - a `Pop` at IP `target = branch_ip + branch_len + offset`
 ///
-/// If either IP isn't a `Pop`, the pair isn't recognized and we record
-/// neither (v1: be conservative — B2.1e falls back to the materialized-
-/// Bool path on unrecognized shapes).
+/// If either IP isn't a `Pop`, neither is recorded.
 fn collect_condition_cleanup_pops(code: &[u8], chunk: &Chunk) -> HashSet<usize> {
     let mut out = HashSet::new();
     let mut ip = 0;
@@ -1225,7 +1048,6 @@ fn collect_condition_cleanup_pops(code: &[u8], chunk: &Chunk) -> HashSet<usize> 
 
         match op {
             OpCode::JumpIfFalse | OpCode::JumpIfTrue | OpCode::Unless => {
-                // 1-byte opcode + u16 forward offset.
                 let off = read_u16(code, ip + 1) as usize;
                 let fall_ip = ip + op_len;
                 let target_ip = ip + op_len + off;
@@ -1238,7 +1060,6 @@ fn collect_condition_cleanup_pops(code: &[u8], chunk: &Chunk) -> HashSet<usize> 
                     out.insert(target_ip);
                 }
             }
-            // PopJumpIfFalse consumes its own condition, so there is no cleanup Pop.
             _ => {}
         }
 
@@ -1253,14 +1074,11 @@ fn collect_condition_cleanup_pops(code: &[u8], chunk: &Chunk) -> HashSet<usize> 
 /// Each `Closure` is laid out as:
 ///   - 1 byte opcode
 ///   - u16 constant index (pointing to a `Value::Closure` whose
-///     inner `Function.upvalue_count` tells us how many descriptors
-///     follow)
+///     inner `Function.upvalue_count` gives the number of descriptors)
 ///   - N descriptors of (u8 is_local, u16 index) each
 ///
-/// If we can't parse the constant (not a closure, or the function
-/// reference is missing), we conservatively return an empty set —
-/// that's fine because B2.1's other gates (e.g. slot type == Int64,
-/// known initializer) still apply.
+/// If the constant cannot be parsed (not a closure, or the function
+/// reference is missing), the result is an empty set.
 fn collect_captured_slots(code: &[u8], chunk: &Chunk) -> HashSet<u16> {
     let mut out = HashSet::new();
     let mut ip = 0;
@@ -1277,12 +1095,8 @@ fn collect_captured_slots(code: &[u8], chunk: &Chunk) -> HashSet<u16> {
             let const_idx = read_u16(code, ip + 1) as usize;
             let upvalue_count = match chunk.constants.get(const_idx).and_then(|v| v.as_closure()) {
                 Some(cl) => cl.function.upvalue_count as usize,
-                _ => {
-                    // Malformed — treat as no upvalues and continue.
-                    0
-                }
+                _ => 0,
             };
-            // Parse N descriptors following the opcode + u16.
             let desc_start = ip + 3;
             for d in 0..upvalue_count {
                 let base = desc_start + d * 3;
@@ -1295,7 +1109,6 @@ fn collect_captured_slots(code: &[u8], chunk: &Chunk) -> HashSet<u16> {
                     out.insert(index);
                 }
             }
-            // Advance past the full Closure opcode + descriptors.
             ip = desc_start + upvalue_count * 3;
         } else {
             ip += chunk
@@ -1305,8 +1118,6 @@ fn collect_captured_slots(code: &[u8], chunk: &Chunk) -> HashSet<u16> {
     }
     out
 }
-
-// ── Transfer function ────────────────────────────────────────────────
 
 /// Given an opcode and the state just before it, compute the state just
 /// after (for the fall-through) and the list of non-fall-through branch
@@ -1323,7 +1134,6 @@ fn transfer(
     let mut targets: Vec<usize> = Vec::new();
 
     match op {
-        // Push a constant — type depends on the constant's variant.
         OpCode::Constant => {
             let idx = read_u16(code, ip + 1) as usize;
             let ty = if chunk
@@ -1339,13 +1149,11 @@ fn transfer(
             next.stack.push(ty);
         }
 
-        // None / True / False → Value for v1.
         OpCode::None | OpCode::True | OpCode::False => {
             next.stack.push(SlotType::Value);
         }
 
         OpCode::Pop => {
-            // Clearing on scope-end Pop stops later transients at the same position from being read as the dead slot.
             let pos_before = next.stack.len();
             next.stack.pop();
             if pos_before > 0 {
@@ -1360,15 +1168,12 @@ fn transfer(
             next.stack.push(top);
         }
 
-        // [start, end] -> [limit]: an Integer whenever it completes, since it
-        // raises on anything else.
         OpCode::RangeLimit => {
             next.stack.pop();
             next.stack.pop();
             next.stack.push(SlotType::Int64);
         }
 
-        // Binary int arith — Int × Int → Int, else Value.
         OpCode::Add
         | OpCode::Subtract
         | OpCode::Multiply
@@ -1389,7 +1194,6 @@ fn transfer(
             next.stack.push(result);
         }
 
-        // Comparison yields Bool, tracked as Value for now.
         OpCode::Equal
         | OpCode::NotEqual
         | OpCode::Greater
@@ -1418,7 +1222,6 @@ fn transfer(
 
         OpCode::Increment | OpCode::Decrement => {
             let slot = read_u16(code, ip + 1) as usize;
-            // Stays Int64 only if the slot already is Int64.
             if slot < next.stack.len() {
                 next.stack[slot] = match next.stack[slot] {
                     SlotType::Int64 => SlotType::Int64,
@@ -1436,7 +1239,6 @@ fn transfer(
         }
         OpCode::SetLocal => {
             let slot = read_u16(code, ip + 1) as usize;
-            // SetLocal peeks and copies; the top is not popped (vm/mod.rs uses peek(0).clone()).
             let top = next.stack.last().copied().unwrap_or(SlotType::Value);
             if slot >= next.stack.len() {
                 next.stack.resize(slot + 1, SlotType::Bottom);
@@ -1454,14 +1256,11 @@ fn transfer(
         OpCode::DefineGlobalTyped => {
             next.stack.pop();
         }
-        // Treating CloseUpvalue as stack-neutral makes a captured loop local gain a slot per backedge and never converge.
         OpCode::CloseUpvalue => {
             next.stack.pop();
         }
-        // No stack effect; unreachable in practice since the JIT scan rejects such functions.
         OpCode::CloseUpvalueAt => {}
 
-        // Control flow.
         OpCode::Jump => {
             let off = read_u16(code, ip + 1) as usize;
             targets.push(ip + 3 + off);
@@ -1469,7 +1268,6 @@ fn transfer(
         }
         OpCode::Loop => {
             let off = read_u16(code, ip + 1) as usize;
-            // Backward jump — target is (ip + 3) - off.
             let base = ip + 3;
             if off <= base {
                 targets.push(base - off);
@@ -1477,10 +1275,8 @@ fn transfer(
             terminates = true;
         }
         OpCode::JumpIfFalse | OpCode::JumpIfTrue => {
-            // Peeks top without popping, so both branches share the same stack.
             let off = read_u16(code, ip + 1) as usize;
             targets.push(ip + 3 + off);
-            // Fall-through also possible — caller adds it.
         }
         OpCode::PopJumpIfFalse => {
             let off = read_u16(code, ip + 1) as usize;
@@ -1489,7 +1285,6 @@ fn transfer(
         }
         OpCode::Unless => {
             let off = read_u16(code, ip + 1) as usize;
-            // Truthy condition jumps to the alternative.
             next.stack.pop();
             targets.push(ip + 3 + off);
         }
@@ -1499,7 +1294,6 @@ fn transfer(
             terminates = true;
         }
 
-        // Pops args and callee, pushes Value; callee return types are not tracked.
         OpCode::Call => {
             let argc = code[ip + 1] as usize;
             for _ in 0..=argc {
@@ -1510,7 +1304,6 @@ fn transfer(
         OpCode::CallNamed => {
             let pos = code[ip + 1] as usize;
             let named = code[ip + 2] as usize;
-            // callee + pos args + (name, value) pairs
             for _ in 0..(1 + pos + 2 * named) {
                 next.stack.pop();
             }
@@ -1532,12 +1325,10 @@ fn transfer(
             next.stack.push(SlotType::Value);
         }
 
-        // The operand stream carries upvalue descriptors; opcode_len skips them.
         OpCode::Closure => {
             next.stack.push(SlotType::Value);
         }
 
-        // Collections / structs / enums — all push `Value`.
         OpCode::BuildArray | OpCode::BuildSet => {
             let count = read_u16(code, ip + 1) as usize;
             for _ in 0..count {
@@ -1559,7 +1350,7 @@ fn transfer(
             }
             next.stack.push(SlotType::Value);
         }
-        OpCode::Index => {
+        OpCode::Index | OpCode::IndexExisting => {
             next.stack.pop();
             next.stack.pop();
             next.stack.push(SlotType::Value);
@@ -1581,17 +1372,14 @@ fn transfer(
         }
 
         OpCode::StructDef | OpCode::EnumDef | OpCode::DefineMethod => {
-            // DefineMethod consumes (name, closure) pairs; the rest just push Value.
             if matches!(op, OpCode::DefineMethod) {
                 let count = code[ip + 3] as usize;
                 for _ in 0..(2 * count) {
                     next.stack.pop();
                 }
             }
-            // StructDef / EnumDef register in globals rather than consuming from the stack.
         }
         OpCode::StructLiteral => {
-            // u16 name, then a u8 field count.
             let count = code[ip + 3] as usize;
             for _ in 0..(2 * count) {
                 next.stack.pop();
@@ -1625,7 +1413,6 @@ fn transfer(
             next.stack.push(SlotType::Value);
         }
 
-        // Error / pattern / misc — conservative.
         OpCode::ErrorConstruct => {
             let has_tag = code[ip + 1] != 0;
             for _ in 0..(1 + has_tag as usize) {
@@ -1638,7 +1425,6 @@ fn transfer(
             next.stack.push(SlotType::Value);
         }
         OpCode::Guard => {
-            // Binds top of stack (peek, not pop) and may jump on error.
             let off = read_u16(code, ip + 3) as usize;
             targets.push(ip + 5 + off);
         }
@@ -1649,7 +1435,6 @@ fn transfer(
 
         OpCode::Import => {
             let has_selective = code[ip + 3] != 0;
-            // Import doesn't leave anything on the stack for v1.
             let _ = has_selective;
         }
 
@@ -1661,7 +1446,6 @@ fn transfer(
             next.stack.push(SlotType::Value);
         }
         OpCode::Log => {
-            // Pops one slot per set flag (tag/sub/msg) and pushes None; see vm::handle_log.
             let flags = code[ip + 1];
             let has_tag = flags & 1 != 0;
             let has_sub = flags & 2 != 0;
@@ -1680,12 +1464,10 @@ fn transfer(
             }
         }
         OpCode::Main => {
-            // No stack effect — just emits a jump.
             let off = read_u16(code, ip + 1) as usize;
             targets.push(ip + 3 + off);
         }
         OpCode::IterLen | OpCode::IterGet | OpCode::IterEntry => {
-            // Must match the VM dispatch arms exactly or the JIT virtualizes the wrong slots (silent infinite loops).
             next.stack.pop();
             if matches!(op, OpCode::IterGet | OpCode::IterEntry) {
                 next.stack.pop();
@@ -1695,8 +1477,11 @@ fn transfer(
                 next.stack.push(SlotType::Value);
             }
         }
+        OpCode::Lock => {
+            next.stack.pop();
+            next.stack.push(SlotType::Value);
+        }
         OpCode::TypeWrap => {
-            // TypeWrap to INTEGER is identity, so preserve Int64 and keep typed-int locals virtualizable.
             let top = next.stack.pop().unwrap_or(SlotType::Value);
             let target_idx = read_u16(code, ip + 1) as usize;
             let target_is_int = chunk
@@ -1716,16 +1501,11 @@ fn transfer(
             }
             next.stack.push(SlotType::Value);
         }
-        OpCode::DefinePattern => {
-            // No stack effect — registers a pattern globally.
-        }
+        OpCode::DefinePattern => {}
         OpCode::TestPattern => {
-            // [value] → [value, bool] — peeks.
             next.stack.push(SlotType::Value);
         }
-        // No operand-stack effect; unreachable since scan rejects these functions.
         OpCode::PushHandler | OpCode::PopHandler | OpCode::CheckType | OpCode::SetLocalLocked => {}
-        // Peeks the return value and leaves it, and its type, as they were.
         OpCode::CheckReturn => {}
     }
 
@@ -1737,11 +1517,7 @@ fn read_u16(code: &[u8], offset: usize) -> u16 {
     ((code[offset] as u16) << 8) | (code[offset + 1] as u16)
 }
 
-/// Phase 2.1: whether every reachable operation stays inside the integer world.
-///
-/// Deliberately a whitelist. A blacklist would silently admit every opcode
-/// added later, and the failure mode here is not a wrong answer but a lean
-/// entry running with VM state it never materialized.
+/// Whether every reachable operation stays inside the integer world.
 fn compute_lean_entry_eligible(
     func: &Function,
     _slots: &[SlotType],
@@ -1751,22 +1527,6 @@ fn compute_lean_entry_eligible(
     if func.arity == 0 {
         return false;
     }
-    // Note what is deliberately NOT required: that the analyzer proved the
-    // parameters Int64. A lean entry receives raw i64, but nothing reaches it
-    // unguarded —
-    //
-    //   * entry arguments are tag-checked by the caller in `call_closure`,
-    //     which declines the lean path unless every one is `Value::Integer`;
-    //   * recursive arguments are i64 by construction, computed by the integer
-    //     arithmetic below;
-    //   * locals can only ever receive an integer constant, a parameter, or the
-    //     result of an integer operation, because the whitelist admits nothing
-    //     that produces anything else.
-    //
-    // Demanding `SlotType::Int64` would add no safety and would exclude every
-    // untyped-but-integer function — `bench_arith`'s `fun work(n)` among them,
-    // where the analyzer's Int64 is a demand heuristic rather than a proof.
-    // A captured slot outlives the activation, so it cannot live only in a register.
     if !captured.is_empty() {
         return false;
     }
@@ -1782,7 +1542,6 @@ fn compute_lean_entry_eligible(
             return false;
         };
         match op {
-            // Integer constants only — a heap constant would need a real stack slot.
             OpCode::Constant => {
                 let idx = read_u16(code, ip + 1) as usize;
                 match chunk.constants.get(idx).map(|v| v.repr()) {
@@ -1790,14 +1549,7 @@ fn compute_lean_entry_eligible(
                     _ => return false,
                 }
             }
-            // Slot types are not consulted; see the note above. The translator
-            // still refuses a `GetLocal` of a slot never assigned in the body.
             OpCode::GetLocal | OpCode::SetLocal => {}
-            // Wrapping integer arithmetic, integer comparison, branches, returns.
-            // Divide and Modulo are deliberately absent: both can fail (zero
-            // divisor, i64::MIN / -1), and a lean entry has no status channel to
-            // report that through. They become admissible once the cold exit
-            // carries an error kind as well as overflow.
             OpCode::Add
             | OpCode::Subtract
             | OpCode::Multiply
@@ -1812,30 +1564,16 @@ fn compute_lean_entry_eligible(
             | OpCode::JumpIfTrue
             | OpCode::Pop
             | OpCode::Return => {}
-            // Every lean return is an Int (`lean_value_kinds_ok` refuses any
-            // other), so the check passes whenever the declared type takes one.
             OpCode::CheckReturn => {
                 if !check_return_accepts_int(chunk, read_u16(code, ip + 1)) {
                     return false;
                 }
             }
-            // No `Loop`: a lean entry has no VM pointer, so its back-edges
-            // could not check the host's loop budget or interrupt
-            // (`vm::limits`), and such a loop could never be stopped. Loops
-            // run in the generic entry, whose back-edges poll.
-            // Only a self-recursive edge re-enters the same lean entry; any other
-            // callee expects a materialized stack.
             OpCode::Call => {
                 if !self_reachable || code[ip + 1] != func.arity {
                     return false;
                 }
             }
-            // A GetGlobal is allowed solely because it is how a top-level
-            // function names itself for the self-call above. EVERY one must name
-            // this function: the lean translator lowers each Call as a direct
-            // self-call, so a body that also calls some other global would have
-            // that call miscompiled into unbounded self-recursion — observed as a
-            // spurious "stack overflow" rather than a wrong answer.
             OpCode::GetGlobal => {
                 if !self_reachable {
                     return false;
@@ -1881,13 +1619,10 @@ enum LeanKind {
 /// Whether the lean entry, which carries every value as a raw `i64`, computes
 /// exactly what the interpreter does.
 ///
-/// It does as long as comparison results only steer branches. One that is
-/// returned, stored and used later, passed as an argument, or fed to
-/// arithmetic or another comparison is a BOOLEAN to the interpreter (`True`,
-/// or an error for `True + 1`) but a 1 to the lean entry, and the caller boxes
-/// whatever comes back as an INTEGER. Walks the bytecode as the interpreter
-/// would, with a kind per stack position (locals are stack positions), and
-/// refuses on any such use or on a merge it cannot reconcile.
+/// This holds as long as comparison results only steer branches. Walks the
+/// bytecode with a kind per stack position (locals are stack positions), and
+/// refuses on any other use of a comparison result or on a merge it cannot
+/// reconcile.
 fn lean_value_kinds_ok(func: &Function) -> bool {
     let chunk = &func.chunk;
     let code = &chunk.code;
@@ -2004,7 +1739,6 @@ fn lean_value_kinds_ok(func: &Function) -> bool {
                 continue;
             }
             OpCode::JumpIfFalse | OpCode::JumpIfTrue => {
-                // Integer and boolean truthiness agree (zero is false), so either may steer.
                 if !matches!(st.last(), Some(LeanKind::Int) | Some(LeanKind::Bool)) {
                     return false;
                 }
@@ -2013,7 +1747,6 @@ fn lean_value_kinds_ok(func: &Function) -> bool {
                     return false;
                 }
             }
-            // The whitelist above admits nothing else.
             _ => return false,
         }
         if next >= code.len() || !merge(&mut states, &mut worklist, next, &st) {
@@ -2025,12 +1758,7 @@ fn lean_value_kinds_ok(func: &Function) -> bool {
 
 /// True iff `chunk` contains a `GetGlobal` whose name constant is `name`.
 ///
-/// Walks by `instruction_len` rather than a fixed stride: `Closure` carries
-/// trailing upvalue descriptors, and a desynchronised cursor would happily read
-/// an operand byte as an opcode and invent a `GetGlobal` that isn't there.
-///
-/// An undecodable chunk answers `true` — the caller uses this only to *suppress*
-/// an optimization, so the conservative answer is the one that changes nothing.
+/// An undecodable chunk answers `true`.
 fn chunk_reads_global_named(chunk: &Chunk, name: Option<&str>) -> bool {
     let Some(name) = name else {
         return false;
@@ -2057,46 +1785,27 @@ fn chunk_reads_global_named(chunk: &Chunk, name: Option<&str>) -> bool {
     false
 }
 
-// Certifier: debug-only invariant checks for B2.1+ consumers.
-
-/// Structured result of the certifier. Returning a `Result` with a
-/// descriptive string keeps invariant failures out of the panic path so
-/// the JIT can log + bail gracefully in release builds (or the caller
-/// can `.unwrap()` in tests to get a clean failure message).
+/// Structured result of the certifier: `Ok` or a descriptive error string.
 pub type CertifyResult = Result<(), String>;
 
-/// Debug-only invariant checks across a function's bytecode + its
-/// computed `FunctionSlotTypes`. Intended to be called from
-/// `debug_assertions`-guarded code paths in B2.1 codegen, and from
-/// tests that want to assert the metadata is self-consistent.
+/// Debug-only invariant checks across a function's bytecode and its
+/// computed `FunctionSlotTypes`.
 ///
 /// Invariants verified:
 ///
-/// 1. **No captured slot is virtualizable.** `captured_slots`
-///    disqualifies slots from virtualization; if a slot is both
-///    Int64-classified *and* captured, `is_virtualizable` must return
-///    false. (This is a check on the helper, not the data — catches
-///    future refactors that might forget the captured rule.)
+/// 1. **No captured slot is virtualizable.** If a slot is both Int64-classified
+///    and captured, `is_virtualizable` must return false.
 ///
 /// 2. **Every virtualizable slot has a recognized initializer IP.**
-///    B2.1c's `GetLocal` fast path would `use_var` an undefined
-///    Cranelift variable otherwise.
 ///
 /// 3. **Every `SetLocal` targeting a virtualizable slot is immediately
-///    followed by a `Pop`.** Matches Oxigen's peek-not-pop discipline
-///    (B2.0 already relied on this; we re-check so future opcode
-///    emission changes don't silently break B2.1).
+///    followed by a `Pop`.**
 ///
 /// 4. **No `scope_pop_slot_ip` entry points at a slot that isn't a
-///    real local.** Defensive — the walker shouldn't produce these.
+///    real local.**
 ///
 /// 5. **No `local_init_result_ip` IP points to a `Closure` opcode.**
-///    B2.1 only virtualizes `Constant(Integer)` initializers, plus a range
-///    loop's `RangeLimit` (an Integer or an error); a Closure-initialized
-///    slot should stay on the Value path and never appear in this map for a
-///    virtualizable slot.
 pub fn certify(func: &Function, types: &FunctionSlotTypes) -> CertifyResult {
-    // 1. Captured-slot rule.
     for slot in 0..types.slots.len() as u16 {
         if types.slots.get(slot as usize).copied() == Some(SlotType::Int64)
             && types.captured_slots.contains(&slot)
@@ -2109,7 +1818,6 @@ pub fn certify(func: &Function, types: &FunctionSlotTypes) -> CertifyResult {
         }
     }
 
-    // 2. Every virtualizable slot has a known initializer IP.
     for slot in 0..types.slots.len() as u16 {
         if types.is_virtualizable(slot) && !types.has_known_initializer(slot) {
             return Err(format!(
@@ -2119,7 +1827,6 @@ pub fn certify(func: &Function, types: &FunctionSlotTypes) -> CertifyResult {
         }
     }
 
-    // 3. Every SetLocal targeting a virtualizable slot is followed by a Pop.
     let code = &func.chunk.code;
     let mut ip = 0usize;
     while ip < code.len() {
@@ -2147,7 +1854,6 @@ pub fn certify(func: &Function, types: &FunctionSlotTypes) -> CertifyResult {
             .map_err(|err| format!("invalid bytecode at ip {}: {:?}", ip, err))?;
     }
 
-    // 4. scope_pop_slot_ip only references real local slots.
     for (ip, &slot) in &types.scope_pop_slot_ip {
         if (slot as usize) >= types.slots.len() {
             return Err(format!(
@@ -2159,10 +1865,9 @@ pub fn certify(func: &Function, types: &FunctionSlotTypes) -> CertifyResult {
         }
     }
 
-    // 5. No local_init_result_ip entry points at anything but Constant or RangeLimit.
     for (&ip, &slot) in &types.local_init_result_ip {
         if !types.is_virtualizable(slot) {
-            continue; // only virtualizable slots need the Constant guard
+            continue;
         }
         let Some(op) = code.get(ip).copied().and_then(OpCode::from_byte) else {
             continue;
@@ -2179,8 +1884,6 @@ pub fn certify(func: &Function, types: &FunctionSlotTypes) -> CertifyResult {
     Ok(())
 }
 
-// Tests
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2190,7 +1893,6 @@ mod tests {
         let mut func = Function::new(Some(name.to_string()), arity);
         func.chunk.code = code;
         func.chunk.constants = constants;
-        // Reserve locals for params + a reasonable buffer for locals.
         for _ in 0..(arity as usize + 8) {
             func.locals.push(LocalInfo::default());
         }
@@ -2205,8 +1907,6 @@ mod tests {
         func
     }
 
-    // ── Lattice ───────────────────────────────────────────────────────
-
     #[test]
     fn lattice_join_is_commutative_and_conservative() {
         use SlotType::*;
@@ -2218,8 +1918,6 @@ mod tests {
         assert_eq!(Bottom.join(Bottom), Bottom);
     }
 
-    // ── Single-opcode transfer functions ─────────────────────────────
-
     #[test]
     fn constant_int_pushes_int64() {
         let mut f = make_fn(
@@ -2228,7 +1926,6 @@ mod tests {
             vec![OpCode::Constant as u8, 0, 0, OpCode::Return as u8],
             vec![Value::Integer(42)],
         );
-        // slot 0 is the closure marker; we use slot 1 to stash a value.
         f.chunk.code = vec![
             OpCode::Constant as u8,
             0,
@@ -2267,7 +1964,6 @@ mod tests {
 
     #[test]
     fn int_plus_int_is_int() {
-        // locals[1] = 3 + 5  → int + int → int
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(3), Value::Integer(5)]);
         f.chunk.code = vec![
             OpCode::Constant as u8,
@@ -2289,9 +1985,6 @@ mod tests {
 
     #[test]
     fn struct_literal_pops_only_its_fields() {
-        // The field count is one byte; reading two took the next opcode as
-        // part of it and emptied the stack under the literal, so 3 + 5 below
-        // came out as Value.
         let mut f = make_fn(
             "f",
             0,
@@ -2365,7 +2058,6 @@ mod tests {
 
     #[test]
     fn slot_reassigned_to_value_merges_to_value() {
-        // slot 1 set first to Int, then to Value → merge Value.
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(7)]);
         f.chunk.code = vec![
             OpCode::Constant as u8,
@@ -2385,36 +2077,30 @@ mod tests {
         assert_eq!(r.get(1), SlotType::Value);
     }
 
-    // ── Control flow ──────────────────────────────────────────────────
-
     #[test]
     fn int_through_unconditional_jump() {
-        // slot 1 = 1; jump to end; at end slot 1 still int.
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(1)]);
         f.chunk.code = vec![
             OpCode::Constant as u8,
             0,
-            0, // ip=0  push 1
+            0,
             OpCode::SetLocal as u8,
             0,
-            1, // ip=3  set slot 1
+            1,
             OpCode::Jump as u8,
             0,
-            2,                    // ip=6  jump +2 → ip=11
-            OpCode::None as u8,   // ip=9  (dead)
-            OpCode::None as u8,   // ip=10 (dead)
-            OpCode::None as u8,   // ip=11
-            OpCode::Return as u8, // ip=12
+            2,
+            OpCode::None as u8,
+            OpCode::None as u8,
+            OpCode::None as u8,
+            OpCode::Return as u8,
         ];
         let r = analyze(&f);
         assert_eq!(r.get(1), SlotType::Int64);
     }
 
-    // ── Realistic shape: the bench_loop pattern ──────────────────────
-
     #[test]
     fn loop_counter_stays_int() {
-        // loop_sum(n). Slots: 0=closure, 1=n, 2=total, 3=i.
         let mut f = make_fn(
             "loop_sum",
             1,
@@ -2422,60 +2108,52 @@ mod tests {
             vec![Value::Integer(0), Value::Integer(1), Value::Integer(2)],
         );
         f.params[0].type_ann = Some("int".to_string());
-        // Offsets are approximate; this test is about the fixed point converging on Int64 for slots 2/3.
         f.chunk.code = vec![
-            // total := 0
             OpCode::Constant as u8,
             0,
-            0, // 0..=2 push 0
+            0,
             OpCode::SetLocal as u8,
             0,
-            2, // 3..=5 slot 2 := 0
-            // i := 1
+            2,
             OpCode::Constant as u8,
             0,
-            1, // 6..=8 push 1
+            1,
             OpCode::SetLocal as u8,
             0,
-            3, // 9..=11 slot 3 := 1
-            // loop_start (ip=12): total := total + i * 2.
+            3,
             OpCode::GetLocal as u8,
             0,
-            2, // 12..=14 push total
+            2,
             OpCode::GetLocal as u8,
             0,
-            3, // 15..=17 push i
+            3,
             OpCode::Constant as u8,
             0,
-            2,                      // 18..=20 push 2
-            OpCode::Multiply as u8, // 21 i*2
-            OpCode::Add as u8,      // 22 total+(i*2)
+            2,
+            OpCode::Multiply as u8,
+            OpCode::Add as u8,
             OpCode::SetLocal as u8,
             0,
-            2, // 23..=25 slot 2 := result
-            // i := i + 1
+            2,
             OpCode::GetLocal as u8,
             0,
-            3, // 26..=28
+            3,
             OpCode::Constant as u8,
             0,
-            1,                 // 29..=31 push 1
-            OpCode::Add as u8, // 32
+            1,
+            OpCode::Add as u8,
             OpCode::SetLocal as u8,
             0,
-            3, // 33..=35
-            // Return total
+            3,
             OpCode::GetLocal as u8,
             0,
-            2,                    // 36..=38
-            OpCode::Return as u8, // 39
+            2,
+            OpCode::Return as u8,
         ];
         let r = analyze(&f);
         assert_eq!(r.get(2), SlotType::Int64, "total should stay Int64");
         assert_eq!(r.get(3), SlotType::Int64, "i should stay Int64");
     }
-
-    // B2.0 acceptance gate: compile each bench's hot-loop shape and assert the counter/accumulator are Int64.
 
     /// Lex + parse + compile a source string. Returns the top-level
     /// function, plus — when `inner_name` is provided — the nested
@@ -2499,7 +2177,6 @@ mod tests {
         match inner_name {
             None => top,
             Some(want) => {
-                // The compiler embeds the raw Function as a constant since the closure isn't built yet.
                 for c in &top.chunk.constants {
                     if let Some(closure) = c.as_closure()
                         && closure.function.name.as_deref() == Some(want)
@@ -2507,7 +2184,6 @@ mod tests {
                         return (*closure.function).clone();
                     }
                 }
-                // Some compiler versions embed the Function via a different path, so recurse into nested functions.
                 for c in &top.chunk.constants {
                     if let Some(closure) = c.as_closure() {
                         for inner in &closure.function.chunk.constants {
@@ -2532,16 +2208,14 @@ mod tests {
         }
     }
 
-    /// Helper: count Int64 slots. Includes param slot 0 which is the
-    /// closure marker (always Value), so a function with `k` int
-    /// locals/params returns at least `k` here.
+    /// Count Int64 slots. Includes param slot 0 which is the
+    /// closure marker (always Value).
     fn count_int64(tys: &FunctionSlotTypes) -> usize {
         tys.int64_count()
     }
 
     #[test]
     fn annotated_int_param_classifies_as_int() {
-        // An explicit <int> param is Int64 at entry, which is the B2.2 unboxed-calling-convention trigger.
         let src = r#"
             fun loop_sum(n <int>) {
                 total := 0
@@ -2556,7 +2230,6 @@ mod tests {
         "#;
         let f = compile_for_analysis(src, Some("loop_sum"));
         let tys = analyze(&f);
-        // slot 1 is `n` (slot 0 = closure marker).
         assert_eq!(
             tys.get(1),
             SlotType::Int64,
@@ -2572,7 +2245,6 @@ mod tests {
 
     #[test]
     fn int_constants_propagate_through_loop_even_without_param_annotation() {
-        // Mirrors example/bench_loop.oxi, which does not annotate its parameter.
         let src = r#"
             fun loop_sum(n) {
                 total := 0
@@ -2588,7 +2260,6 @@ mod tests {
         let f = compile_for_analysis(src, Some("loop_sum"));
         let tys = analyze(&f);
 
-        // `total` and `i` should be Int64 even though `n` isn't.
         assert!(
             count_int64(&tys) >= 2,
             "expected ≥2 Int64 locals (total, i); got {:?}",
@@ -2598,7 +2269,6 @@ mod tests {
 
     #[test]
     fn nested_loop_locals_stay_int() {
-        // Actual bench_nested_loop.oxi shape.
         let src = r#"
             fun nested_sum(n) {
                 total := 0
@@ -2626,7 +2296,6 @@ mod tests {
 
     #[test]
     fn bench_fib_unannotated_param_stays_value() {
-        // Current B2.0 limit: fib's unannotated `n` can't be proven int; invert this test once feedback vectors land.
         let src = r#"
             fun fib(n) {
                 option { n < 2 -> n, fib(n - 1) + fib(n - 2) }
@@ -2647,7 +2316,6 @@ mod tests {
 
     #[test]
     fn fib_with_typed_param_classifies_as_int() {
-        // With the annotation the analysis types fib's param, so B2.2 unboxes the call site.
         let src = r#"
             fun fib(n <int>) {
                 option { n < 2 -> n, fib(n - 1) + fib(n - 2) }
@@ -2665,22 +2333,19 @@ mod tests {
         );
     }
 
-    // ── Guard correctness ────────────────────────────────────────────
-
     #[test]
     fn call_result_is_value_even_if_args_are_int() {
-        // slot 1 = f(int_arg) → Value (callee return type unknown)
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(1)]);
         f.chunk.code = vec![
-            OpCode::None as u8, // closure
+            OpCode::None as u8,
             OpCode::Constant as u8,
             0,
-            0, // int arg
+            0,
             OpCode::Call as u8,
-            1, // call with 1 arg
+            1,
             OpCode::SetLocal as u8,
             0,
-            1, // slot 1 := result
+            1,
             OpCode::None as u8,
             OpCode::Return as u8,
         ];
@@ -2688,18 +2353,15 @@ mod tests {
         assert_eq!(r.get(1), SlotType::Value);
     }
 
-    // ── B2.1a: new metadata tests ─────────────────────────────────────
-
     #[test]
     fn local_init_result_ip_recorded_for_constant_int_init() {
-        // With arity=0 slot 1 is the first local, and the following None doesn't consume the top.
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(42)]);
         f.chunk.code = vec![
             OpCode::Constant as u8,
             0,
-            0,                    // ip=0 push 42 → slot 1 init
-            OpCode::None as u8,   // ip=3 push None
-            OpCode::Return as u8, // ip=4
+            0,
+            OpCode::None as u8,
+            OpCode::Return as u8,
         ];
         f.local_decls = vec![(3, 1)];
         let r = analyze(&f);
@@ -2709,19 +2371,18 @@ mod tests {
 
     #[test]
     fn local_init_result_ip_picks_first_when_reassigned() {
-        // First init is the ip=0 Constant push, not the later SetLocal that only rewrites the slot.
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(1), Value::Integer(2)]);
         f.chunk.code = vec![
             OpCode::Constant as u8,
             0,
-            0, // ip=0 push 1 → slot 1 init
+            0,
             OpCode::Constant as u8,
             0,
-            1, // ip=3 push 2 (temp at slot 2)
+            1,
             OpCode::SetLocal as u8,
             0,
-            1,                 // ip=6 slot 1 := 2
-            OpCode::Pop as u8, // ip=9
+            1,
+            OpCode::Pop as u8,
             OpCode::None as u8,
             OpCode::Return as u8,
         ];
@@ -2736,7 +2397,6 @@ mod tests {
 
     #[test]
     fn condition_cleanup_pops_detected_on_loop_pattern() {
-        // Compile a real loop and check condition-cleanup pops are collected.
         let src = r#"
             fun loop_sum(n <int>) {
                 total := 0
@@ -2751,7 +2411,6 @@ mod tests {
         "#;
         let f = compile_for_analysis(src, Some("loop_sum"));
         let r = analyze(&f);
-        // At least two: the body entry (fall-through) and the loop exit (branch target).
         assert!(
             !r.condition_cleanup_pop_ips.is_empty(),
             "expected at least one condition-cleanup Pop; got {:?}",
@@ -2771,7 +2430,6 @@ mod tests {
 
     #[test]
     fn captured_slots_empty_for_flat_function() {
-        // loop_sum has no nested closures, so captured_slots is empty.
         let src = r#"
             fun loop_sum(n <int>) {
                 total := 0
@@ -2791,7 +2449,6 @@ mod tests {
             "no nested closures should mean no captured slots; got {:?}",
             r.captured_slots
         );
-        // All the int locals (n, total, i) should be virtualizable.
         for slot in 1..=3u16 {
             assert!(
                 r.is_virtualizable(slot),
@@ -2822,12 +2479,11 @@ mod tests {
 
     #[test]
     fn is_virtualizable_requires_all_three_conditions() {
-        // Int64 slot with an initializer that isn't captured: OK.
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(0)]);
         f.chunk.code = vec![
             OpCode::Constant as u8,
             0,
-            0, // ip=0: slot 1 init
+            0,
             OpCode::None as u8,
             OpCode::Return as u8,
         ];
@@ -2835,12 +2491,10 @@ mod tests {
         let mut r = analyze(&f);
         assert!(r.is_virtualizable(1));
 
-        // Pretend it's captured → no longer virtualizable.
         r.captured_slots.insert(1);
         assert!(!r.is_virtualizable(1));
         r.captured_slots.remove(&1);
 
-        // Remove the initializer record → no longer virtualizable.
         r.local_init_result_ip.clear();
         r.init_sites.remove(&1);
         assert!(!r.is_virtualizable(1));
@@ -2848,18 +2502,16 @@ mod tests {
 
     #[test]
     fn certify_rejects_non_constant_initializer_for_virtualizable_slot() {
-        // Manufacture a local_init_result_ip pointing at a non-Constant opcode; certifier rule 5 catches it.
         let mut f = make_fn("f", 0, vec![], vec![Value::Integer(7)]);
         f.chunk.code = vec![
             OpCode::Constant as u8,
             0,
-            0,                    // ip=0
-            OpCode::None as u8,   // ip=3 (not a Constant)
-            OpCode::Return as u8, // ip=4
+            0,
+            OpCode::None as u8,
+            OpCode::Return as u8,
         ];
         f.local_decls = vec![(3, 1)];
         let mut r = analyze(&f);
-        // Point slot 1's initializer at the None at ip=3.
         r.local_init_result_ip.clear();
         r.local_init_result_ip.insert(3, 1);
         assert!(r.is_virtualizable(1));
@@ -2873,9 +2525,6 @@ mod tests {
 
     #[test]
     fn init_sites_come_from_declarations_not_stack_shape() {
-        // `t := 0` reuses the slot the loop's hidden index held. Both are
-        // constant-initialized declarations, so both IPs are init sites and
-        // the slot stays virtualizable; a call argument at that depth is not.
         let src = r#"
             fun f(b) {
                 s := 0
@@ -2888,19 +2537,16 @@ mod tests {
         "#;
         let f = compile_for_analysis(src, Some("f"));
         let r = analyze(&f);
-        // A range loop's limit is the one non-Constant initializer.
         for &ip in r.local_init_result_ip.keys() {
             assert!(matches!(
                 OpCode::from_byte(f.chunk.code[ip]),
                 Some(OpCode::Constant | OpCode::RangeLimit)
             ));
         }
-        // Every declaration point that follows a plain Constant at the right depth is recorded.
         let decl_slots: HashSet<u16> = f.local_decls.iter().map(|&(_, s)| s).collect();
         for slot in r.local_init_result_ip.values() {
             assert!(decl_slots.contains(slot));
         }
-        // `t`'s slot is also declared by a call result, so it is never virtualized.
         let t_slot = f
             .local_decls
             .iter()
@@ -2915,7 +2561,6 @@ mod tests {
 
     #[test]
     fn int_param_is_virtualizable_via_init_sites() {
-        // Params are in init_sites but not local_init_result_ip: the caller initializes them.
         let mut f = make_fn("f", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![OpCode::GetLocal as u8, 0, 1, OpCode::Return as u8];
@@ -2929,26 +2574,23 @@ mod tests {
         );
     }
 
-    // ── A1: specialized-entry eligibility ────────────────────────────
-
     #[test]
     fn specialized_eligible_typed_int_param_returning_int() {
-        // Minimal self-call to satisfy has_call; the specialized body is only useful as a direct-call target.
         let mut f = make_fn("f", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
             OpCode::GetLocal as u8,
             0,
-            1, // push f (self)
+            1,
             OpCode::Constant as u8,
             0,
-            0, // push 0
+            0,
             OpCode::Call as u8,
-            1,                 // call (synthetic arity 1)
-            OpCode::Pop as u8, // discard result
+            1,
+            OpCode::Pop as u8,
             OpCode::GetLocal as u8,
             0,
-            1, // push n
+            1,
             OpCode::Return as u8,
         ];
         f.chunk.constants = vec![Value::Integer(0)];
@@ -2959,7 +2601,6 @@ mod tests {
 
     #[test]
     fn specialized_ineligible_zero_arity() {
-        // fun f() { 42 } — nothing to unbox, not worth a second entry.
         let f = make_fn(
             "f",
             0,
@@ -2973,7 +2614,6 @@ mod tests {
 
     #[test]
     fn specialized_eligible_even_with_value_return() {
-        // String return is still eligible: the Return path bails via status 2 on non-Integer at runtime.
         let mut f = make_fn("f", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
@@ -2988,7 +2628,7 @@ mod tests {
             OpCode::Pop as u8,
             OpCode::Constant as u8,
             0,
-            1, // push "hello"
+            1,
             OpCode::Return as u8,
         ];
         f.chunk.constants = vec![
@@ -3001,9 +2641,7 @@ mod tests {
 
     #[test]
     fn specialized_ineligible_untyped_value_param_with_no_int_demand() {
-        // Unannotated `n` with no int-demand use, so int_mirror skips it and the param isn't Int-stable.
         let mut f = make_fn("f", 1, vec![], vec![]);
-        // no type_ann — defaults to Value
         f.chunk.code = vec![OpCode::GetLocal as u8, 0, 1, OpCode::Return as u8];
         let r = analyze(&f);
         assert!(!r.specialized_entry_eligible);
@@ -3011,7 +2649,6 @@ mod tests {
 
     #[test]
     fn specialized_eligible_int_param_with_arith_and_return() {
-        // has_call satisfied, arithmetic return eligible.
         let mut f = make_fn("f", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
@@ -3037,21 +2674,17 @@ mod tests {
         let r = analyze(&f);
         assert!(r.specialized_entry_eligible);
         assert_eq!(r.specialized_param_slots, vec![1]);
-        // No GetUpvalue, so plain NativeIntBody rather than the closure-aware variant.
         assert!(!r.wants_closure_arg);
     }
 
-    // ── B2.2: closure-aware specialized entry eligibility ──────────────
-
     #[test]
     fn specialized_eligible_closure_with_int_upvalue() {
-        // The closure reads upvalue 0 and adds its int param: eligible and wants_closure_arg.
         let mut f = make_fn("closure", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
             OpCode::GetLocal as u8,
             0,
-            1, // push self (for synthetic call)
+            1,
             OpCode::Constant as u8,
             0,
             0,
@@ -3060,10 +2693,10 @@ mod tests {
             OpCode::Pop as u8,
             OpCode::GetUpvalue as u8,
             0,
-            0, // push upvalue 0 (x)
+            0,
             OpCode::GetLocal as u8,
             0,
-            1, // push y (param)
+            1,
             OpCode::Add as u8,
             OpCode::Return as u8,
         ];
@@ -3076,7 +2709,6 @@ mod tests {
 
     #[test]
     fn specialized_ineligible_closure_with_set_upvalue() {
-        // SetUpvalue is rejected; write-through is out of scope for v1.
         let mut f = make_fn("mut_closure", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
@@ -3094,7 +2726,7 @@ mod tests {
             1,
             OpCode::SetUpvalue as u8,
             0,
-            0, // mutate upvalue 0
+            0,
             OpCode::Pop as u8,
             OpCode::GetLocal as u8,
             0,
@@ -3113,7 +2745,6 @@ mod tests {
 
     #[test]
     fn specialized_ineligible_closure_with_close_upvalue() {
-        // CloseUpvalue is rejected: the v1 specialized return path never runs close_upvalues.
         let mut f = make_fn("closing", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
@@ -3126,7 +2757,6 @@ mod tests {
             OpCode::Call as u8,
             1,
             OpCode::Pop as u8,
-            // A real CloseUpvalue has the captured local on top and pops it; keep this bytecode stack-valid.
             OpCode::Constant as u8,
             0,
             0,
@@ -3148,7 +2778,6 @@ mod tests {
 
     #[test]
     fn captured_local_loop_analysis_converges() {
-        // If CloseUpvalue were stack-neutral the abstract stack would grow per pass and this test would hang.
         let src = r#"
             fun f() {
                 out := []
@@ -3172,16 +2801,15 @@ mod tests {
 
     #[test]
     fn specialized_eligible_closure_no_call_with_upvalue() {
-        // The bench_closure inner-closure shape: no Call, but closure-aware dispatch still reaches it.
         let mut f = make_fn("inner_closure", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![
             OpCode::GetUpvalue as u8,
             0,
-            0, // push upvalue 0 (x)
+            0,
             OpCode::GetLocal as u8,
             0,
-            1, // push y (param)
+            1,
             OpCode::Add as u8,
             OpCode::Return as u8,
         ];
@@ -3194,7 +2822,6 @@ mod tests {
 
     #[test]
     fn specialized_ineligible_no_call_no_upvalue() {
-        // No Call and no GetUpvalue means no path reaches a specialized entry, so reject as RejectedNoCall.
         let mut f = make_fn("identity", 1, vec![], vec![]);
         f.params[0].type_ann = Some("int".to_string());
         f.chunk.code = vec![OpCode::GetLocal as u8, 0, 1, OpCode::Return as u8];
@@ -3208,14 +2835,8 @@ mod tests {
         assert!(!r.wants_closure_arg);
     }
 
-    // OpCode::Closure always rejects first, so the nested-closure case never reaches has_get_upvalue.
-
-    // ── Phase 2.1: lean entry eligibility ───────────────────────────────
-
     #[test]
     fn lean_entry_accepts_typed_int_self_recursion() {
-        // bench_arith's shape with the parameter annotated: pure integer
-        // arithmetic, integer comparison, a self-recursive edge, integer return.
         let f = compile_for_analysis(
             r#"
 fun work(n <int>) {
@@ -3234,7 +2855,6 @@ work(10)
 
     #[test]
     fn lean_entry_rejects_string_valued_body() {
-        // A heap constant cannot live in a register, so the body needs a real slot.
         let f = compile_for_analysis(
             r#"
 fun label(n <int>) {
@@ -3251,15 +2871,11 @@ label(3)
 
     #[test]
     fn lean_entry_rejects_upvalue_reader() {
-        // The bench_closure inner closure: reads an upvalue, so it depends on
-        // closure state a lean entry does not carry.
         let f = compile_for_analysis(
             "fun mk(x) { fun(y <int>) { x + y } }
 mk(1)",
             None,
         );
-        // The inner closure is the constant; analyze the outer and assert the
-        // outer itself is not lean-eligible either (it builds a closure).
         let r = analyze(&f);
         assert!(!r.lean_entry_eligible);
     }
@@ -3277,11 +2893,6 @@ c()",
 
     #[test]
     fn lean_entry_accepts_untyped_param_because_the_caller_guards() {
-        // bench_arith as written. The parameter is untyped, so the analyzer's
-        // Int64 would only be a demand heuristic — but eligibility does not rest
-        // on it. `call_closure` refuses the lean path unless every argument is
-        // actually `Value::Integer`, so the entry is guarded where the guess
-        // would otherwise have to be trusted.
         let f = compile_for_analysis(
             r#"
 fun work(n) {
@@ -3303,9 +2914,6 @@ work(10)
 
     #[test]
     fn self_reachable_by_global_name_true_for_top_level_recursion() {
-        // A top-level fn reaches itself through GetGlobal, so the JIT's direct
-        // self-recursion guard can match and must stay enabled. bench_fib and
-        // bench_arith depend on this being true.
         let f = compile_for_analysis(
             r#"
 fun fib(n <int>) {
@@ -3323,10 +2931,6 @@ fib(10)
 
     #[test]
     fn self_reachable_by_global_name_false_for_local_callee() {
-        // The bench_closure `run` shape: it calls a closure held in a LOCAL, so no
-        // GetGlobal names `run` and the self-recursion guard is dead weight.
-        // Eligibility must survive — we want to drop the guard, not the specialized
-        // entry, which still serves the closure-aware dispatch path.
         let f = compile_for_analysis(
             r#"
 fun make_adder(x) { fun(y) { x + y } }
@@ -3357,8 +2961,6 @@ run(10)
 
     #[test]
     fn self_reachable_by_global_name_false_for_mutual_recursion() {
-        // a -> b -> a never satisfies "callee is my own closure", so the guard was
-        // failing 100% of the time here too.
         let f = compile_for_analysis(
             r#"
 fun a(n <int>) {
@@ -3376,16 +2978,6 @@ a(4)
 
     #[test]
     fn nested_named_self_recursion_is_eligible_and_closure_aware() {
-        // Documents the shape that used to sink an entire function. A nested named
-        // fn is predeclared as a local of the ENCLOSING frame, so from inside its own
-        // body its own name resolves as an upvalue — leaving it specialized-entry
-        // eligible AND closure-aware AND containing a Call, all at once.
-        //
-        // That trio is what the JIT's direct self-recursion path must refuse: it
-        // passes [vm, args..] while the closure-aware signature leads with a
-        // *const ObjClosure, and the resulting arity mismatch fails the Cranelift
-        // verifier, dropping the whole function to the interpreter. See the
-        // !spec_wants_closure_arg clause in jit::engine's a3_eligible.
         let f = compile_for_analysis(
             r#"
 fun outer() {

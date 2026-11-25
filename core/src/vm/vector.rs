@@ -1,11 +1,6 @@
-//! `vec2`, `vec3` and `vec4`: small vectors of `f32` components for game
-//! maths.
+//! `vec2`, `vec3` and `vec4`: small vectors of `f32` components for game maths.
 //!
-//! A vector is one `Value::Vector(Rc<Vector>)`. It is an `Rc` rather than
-//! inline because the JIT treats every value tag past `None` (except
-//! `Builtin`) as an `Rc` it may refcount in place; an inline vector would
-//! need those checks taught a new exception first. Vectors are values:
-//! operators build new vectors, and components are read, never assigned.
+//! A vector is one `Value::Vector(Rc<Vector>)`. Vectors are values: operators build new vectors, and components are read, never assigned.
 
 use std::fmt;
 use std::rc::Rc;
@@ -107,7 +102,6 @@ impl Vector {
 
 impl fmt::Display for Vector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // f32's own Display, so `vec2(0.1, 0)` reads back as written.
         let parts: Vec<String> = self.components().iter().map(|c| c.to_string()).collect();
         write!(f, "{}({})", self.constructor(), parts.join(", "))
     }

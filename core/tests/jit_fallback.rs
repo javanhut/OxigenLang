@@ -1,11 +1,9 @@
-//! Milestone 1 fallback-harness tests.
+//! JIT fallback-harness tests.
 //!
-//! These exercise the full JIT plumbing end-to-end: the Cranelift module
-//! emits a thunk, the thunk calls `jit_run_via_interpreter`, and the helper
-//! drives the interpreter for one activation. Program output must match
-//! the interpreter-only baseline byte-for-byte.
-//!
-//! No actual bytecode translation happens yet (that's Step 3).
+//! These exercise the JIT plumbing end-to-end: the Cranelift module emits a
+//! thunk, the thunk calls `jit_run_via_interpreter`, and the helper drives the
+//! interpreter for one activation. Program output must match the
+//! interpreter-only baseline byte-for-byte.
 
 #![cfg(feature = "jit")]
 
@@ -45,10 +43,8 @@ fn run_result(source: &str, jit_threshold: Option<u32>) -> Result<String, String
         .map_err(|e| e.message)
 }
 
-/// Like `run_result` but expects an Err and returns both the message
-/// and the source line the VMError carries. Used by line-store elision
-/// tests that need to verify the JIT writes `JitFrame.line` correctly
-/// at every fault site.
+/// Like `run_result` but expects an Err and returns both the message and the
+/// source line the VMError carries.
 fn run_expect_err(source: &str, jit_threshold: Option<u32>) -> (String, u32) {
     let lexer = Lexer::new(source);
     let mut parser = Parser::new(lexer, source);
@@ -143,15 +139,9 @@ fn compile_function(source: &str) -> oxigen_core::vm::value::Function {
         .expect("compile should succeed")
 }
 
-/// `arr[i] = v` is JIT-compiled via the shared `VM::eval_index_assign`
-/// FFI helper (mirrors the `Index` read path). Previously `IndexAssign`
-/// was outside the allow-list, so any function mutating an array element
-/// in place fell back entirely to the interpreter. The body is in a hot
-/// loop so it actually compiles, and the checks are order-sensitive (a
-/// sum would hide a slot mix-up) and cover negative and out-of-bounds
-/// (no-op) indices plus read-after-write. No map literal here — a
-/// `BuildMap` would force the function off the JIT for an unrelated
-/// reason (map-assign is covered separately below).
+/// `arr[i] = v` in a hot loop is JIT-compiled via the shared
+/// `VM::eval_index_assign` helper. Covers negative and out-of-bounds (no-op)
+/// indices plus read-after-write.
 #[test]
 fn jit_index_assign_matches_and_compiles() {
     let src = "fun t(n <int>){\n\
@@ -167,8 +157,6 @@ fn jit_index_assign_matches_and_compiles() {
         }\n\
         acc }\n\
         t(500)";
-    // arr[0]=99, arr[4]=88, arr[2]=99+88=187 → 99*100000+88*1000+187 =
-    // 9988187 per iter * 500 = 4994093500.
     let expected = "4994093500";
     assert_eq!(run_disabled(src).0, expected, "interp baseline");
     let (out, ok, failed) = run(src, Some(1));
@@ -180,9 +168,8 @@ fn jit_index_assign_matches_and_compiles() {
     assert_eq!(failed, 0, "no compile failures expected (failed={failed})");
 }
 
-/// `map[k] = v` index-assign also routes through the helper. The map is
-/// passed in as a param (constructing one needs `BuildMap`, which is not
-/// JIT-supported, so building it inside the hot fn would force a bail).
+/// `map[k] = v` index-assign also routes through the helper. The map is passed
+/// in as a param.
 #[test]
 fn jit_map_index_assign_matches_and_compiles() {
     let src = "fun mutate(m <generic>, n <int>){\n\
@@ -195,18 +182,14 @@ fn jit_map_index_assign_matches_and_compiles() {
     assert_eq!(run_disabled(src).0, expected, "interp baseline");
     let (out, ok, _failed) = run(src, Some(1));
     assert_eq!(out, expected, "jit output must match interpreter");
-    // `mutate` compiles (its `m[k]=v` is now supported); `go` does NOT —
-    // its `{"k": 0}` map literal is a `BuildMap`, still outside the
-    // allow-list — so we assert a compile happened, not that none failed.
     assert!(
         ok >= 1,
         "expected the map-mutating fn to JIT-compile (ok={ok})"
     );
 }
 
-/// Assigning to an index of a non-indexable value must error identically
-/// under the JIT and the interpreter (the helper stashes the VMError and
-/// returns status 1, which the engine turns into a graceful bail).
+/// Assigning to an index of a non-indexable value errors identically under the
+/// JIT and the interpreter.
 #[test]
 fn jit_index_assign_error_matches_interpreter() {
     let src = "fun t(){ x <int> := 5\n x[0] = 1\n x }\nt()";
@@ -221,9 +204,6 @@ fn jit_index_assign_error_matches_interpreter() {
 
 #[test]
 fn fallback_matches_interpreter_simple_add() {
-    // The nested fn `compute` has a body of just `Constant Constant Add
-    // Return` — every opcode is in the M1 allow-list, so scan passes and
-    // the fallback thunk gets installed.
     let source = r#"
 fun compute() {
     1 + 2
@@ -253,10 +233,6 @@ compute()
 
 #[test]
 fn fallback_matches_interpreter_arith_via_args() {
-    // The function body is pure arithmetic on a parameter — exercises
-    // GetLocal + Constant + Add + Multiply + Return, all in the M1
-    // allow-list. Type annotations trigger `TypeWrap`, which is NOT in
-    // the allow-list, so we deliberately leave the parameter untyped.
     let source = r#"
 fun poly(x) {
     x * x + x + 1
@@ -278,8 +254,6 @@ poly(5)
 
 #[test]
 fn fallback_matches_interpreter_conditional_branch() {
-    // Exercises JumpIfFalse + Jump + Pop: the `option` construct compiles
-    // to a classic then/else branch.
     let source = r#"
 fun max2(a, b) {
     option { a > b -> a, b }
@@ -296,8 +270,6 @@ max2(3, 7)
 
 #[test]
 fn fallback_matches_interpreter_recursive_fib() {
-    // True recursive fib — requires GetGlobal (fib references itself via
-    // the enclosing scope). Exercises JIT-to-JIT recursion with globals.
     let source = r#"
 fun fib(n) {
     option { n < 2 -> n, fib(n - 1) + fib(n - 2) }
@@ -361,9 +333,6 @@ walk(6)
 
 #[test]
 fn fallback_matches_interpreter_closure_with_upvalue() {
-    // Verifies Closure + GetUpvalue. `make_adder` returns a closure that
-    // captures `n` as an upvalue; the inner closure reads it via
-    // GetUpvalue and adds it to its argument.
     let source = r#"
 fun make_adder(n) {
     fun(x) { x + n }
@@ -419,13 +388,6 @@ boom(10)
 
 #[test]
 fn fallback_matches_interpreter_jit_to_jit_call() {
-    // Exercises the Call opcode from inside JIT code. `apply` receives the
-    // callee as an argument (a local) rather than a global, so its body
-    // stays inside the M1 allow-list (GetLocal / Call / Return). When
-    // `apply` invokes `double`, both call sides run JIT-compiled code.
-    //
-    // (A classic recursive fib can't be used here: fib references itself
-    // via `GetGlobal`, which is intentionally outside M1.)
     let source = r#"
 fun double(x) {
     x * 2
@@ -451,8 +413,6 @@ apply(double, 5)
 
 #[test]
 fn fallback_matches_interpreter_struct_methods() {
-    // Exercises StructLiteral / GetField / MethodCall all inside JIT
-    // code.
     let source = r#"
 struct Point {
     x <int>
@@ -569,9 +529,6 @@ run()
 
 #[test]
 fn fallback_matches_interpreter_mixed_numeric_add() {
-    // Integer+Float takes the slow path in the JIT (tag check fails on
-    // the right operand). Make sure the slow-path fallback still
-    // produces the correct promoted-float result.
     let source = r#"
 fun addem(n) {
     n + 1.5
@@ -761,8 +718,6 @@ update(20)
 
 #[test]
 fn unsupported_opcodes_bail_out_cleanly() {
-    // Map literals are still outside the JIT allow-list, so the top-level
-    // scan must fail and the interpreter must take over without disruption.
     let source = r#"
 m := {"x": 7}
 m["x"]
@@ -827,9 +782,6 @@ pick()
 
 #[test]
 fn jit_array_index_out_of_range_matches_interpreter() {
-    // Was: both engines returned `None` for an out-of-range read. It is now a
-    // runtime error, and the JIT's array fast path must raise the same one
-    // rather than quietly producing a value.
     for index in ["99", "-4"] {
         let source = format!(
             "\nfun pick() {{\n    arr <array> := [10, 20, 30]\n    arr[{index}]\n}}\npick()\n"
@@ -846,7 +798,6 @@ fn jit_array_index_out_of_range_matches_interpreter() {
 
 #[test]
 fn jit_index_assign_out_of_range_matches_interpreter() {
-    // An out-of-range write used to be dropped silently by both engines.
     let src = "fun t() {\n\
         arr := [10, 20, 30]\n\
         arr[100] = 7\n\
@@ -908,23 +859,8 @@ loop_sum(20)
     );
 }
 
-// ── MethodCall IC hit path refcount regression tests ─────────────────────
-//
-// These two tests pin down the inline MethodCall IR fast path's
-// refcount + Vec::len semantics. The disabled-then-re-enabled code
-// (see `core/src/jit/engine.rs` OpCode::MethodCall with arg_count <= 1)
-// must (a) bump the method closure's Rc strong count before stamping a
-// synthetic Value::Closure on the stack, and (b) sync Vec::len via
-// `jit_stack_commit_len` so bounds-checked helpers see the new slots.
-// Without either, a tight method-call loop crashes within a few
-// iterations (Rc free while cache still holds the pointer; or OOB
-// panic on `self.stack[idx]`). 5000 iterations is more than enough to
-// surface either bug if reintroduced.
-
 #[test]
 fn method_call_ic_hit_path_getter_loop_is_refcount_safe() {
-    // arg_count == 0 getter — exercises the `if arg_count == 0` branch:
-    // one emit_copy_value (move receiver) + emit_write_closure_value.
     let source = r#"
 struct C { val <int> }
 C includes { fun get() { self.val } }
@@ -952,9 +888,6 @@ run(5000)
 
 #[test]
 fn method_call_ic_hit_path_setter_loop_is_refcount_safe() {
-    // arg_count == 1 setter — exercises the `else` branch of the
-    // inline IR: two emit_copy_value calls (move arg, then move
-    // receiver over arg's old slot) + emit_write_closure_value.
     let source = r#"
 struct C { val <int> }
 C includes {
@@ -982,22 +915,8 @@ run(5000)
     );
 }
 
-// ── Line-store elision regression tests ──────────────────────────────
-//
-// These cover the `opcode_always_needs_line` / `maybe_emit_current_line`
-// path in `core/src/jit/engine/mod.rs`. The JIT now elides writes to
-// `JitFrame.line` for opcodes whose emission cannot reach a runtime
-// helper that calls `vm.jit.stash_error()` from this IP. The slow
-// paths of arithmetic/comparison opcodes (and every always-fault op)
-// still write the line. These tests confirm that runtime errors raised
-// by either path report the correct source line.
-
 #[test]
 fn jit_line_store_correct_for_modulo_by_zero_in_hot_loop() {
-    // `total % 0` triggers `binary_mod` → "modulo by zero" on the
-    // first iteration. The Modulo opcode is on the source line written
-    // below; the line-elision change must still stamp the line at the
-    // virt-int divmod emit site.
     let source = "
 fun bad(n <int>) {
     total <int> := 0
@@ -1012,17 +931,11 @@ bad(5)
 ";
     let (msg, line) = run_expect_err(source, Some(1));
     assert!(msg.contains("modulo by zero"), "msg = {msg:?}");
-    // The `i % 0` expression spans line 6 in the source above (line 1
-    // is empty, line 2 is `fun bad...`, etc.). 1-indexed.
     assert_eq!(line, 6, "expected line 6, got {} (msg: {msg})", line);
 }
 
 #[test]
 fn jit_line_store_correct_for_type_mismatch_in_arith() {
-    // Hot int loop suddenly hits a string addition — the slow-path
-    // helper raises a type-mismatch error from inside the JIT-emitted
-    // arith fast path's fallback. The line must point at the offending
-    // `+`, not at any preceding GetLocal/Constant.
     let source = "
 fun trigger() {
     a := 1
@@ -1036,14 +949,11 @@ trigger()
         msg.contains("type mismatch") || msg.contains("operands must"),
         "msg = {msg:?}"
     );
-    // `a + b` is on source line 5.
     assert_eq!(line, 5, "expected line 5, got {} (msg: {msg})", line);
 }
 
 #[test]
 fn jit_line_store_correct_for_undefined_global_call() {
-    // A `Call` opcode is in the always-need-line set. When the callee
-    // is undefined, `handle_get_global` raises with the current line.
     let source = "
 fun outer() {
     1 + 2
@@ -1056,16 +966,11 @@ outer()
         msg.contains("undefined") || msg.contains("not_a_real_fn"),
         "msg = {msg:?}"
     );
-    // The undefined call is on source line 4.
     assert_eq!(line, 4, "expected line 4, got {} (msg: {msg})", line);
 }
 
 #[test]
 fn jit_line_store_correct_for_int_divide_by_zero() {
-    // The proven-int Divide path emits its own zero / overflow guards
-    // that exit through `exit_block` with a stashed error. Make sure
-    // the line is written before that emission so the resulting
-    // VMError points at the divide.
     let source = "
 fun zero_div() {
     a <int> := 10
@@ -1079,14 +984,11 @@ zero_div()
         msg.contains("zero") || msg.contains("division"),
         "msg = {msg:?}"
     );
-    // `a / b` is on source line 5.
     assert_eq!(line, 5, "expected line 5, got {} (msg: {msg})", line);
 }
 
 #[test]
 fn jit_line_store_correct_for_typed_negate_on_non_numeric() {
-    // Negate is in the always-need-line set. Negating a string
-    // surfaces a type error attributed to the unary minus.
     let source = "
 fun neg_bad() {
     s := \"text\"
@@ -1104,12 +1006,6 @@ neg_bad()
 
 #[test]
 fn jit_line_store_correct_for_index_on_non_collection() {
-    // `Index` is in the always-need-line set. Indexing a non-
-    // collection value (here, an integer) surfaces a type error
-    // from `eval_index`. (Out-of-range indices on real arrays return
-    // `None` in Oxigen; only structurally invalid indexing errors,
-    // so we use a non-collection target to trigger the helper-stash
-    // path.)
     let source = "
 fun bad_index() {
     a := 5
@@ -1125,18 +1021,11 @@ bad_index()
             || msg.contains("subscript"),
         "msg = {msg:?}"
     );
-    // The indexing expression `a[0]` is on line 4.
     assert_eq!(line, 4, "expected line 4, got {} (msg: {msg})", line);
 }
 
-// ── Bitwise + Log JIT coverage (Tier 1) ───────────────────────────────
-//
-// Oxigen has no 0b/0x literal prefixes, no `while`, and no `return` —
-// these tests use decimal integers, `repeat when`, and option-as-value.
-
 #[test]
 fn fallback_bitwise_band_matches_interpreter() {
-    // 12 & 10 == 8
     let source = r#"
 fun f() { 12 & 10 }
 f()
@@ -1149,7 +1038,6 @@ f()
 
 #[test]
 fn fallback_bitwise_bor_matches_interpreter() {
-    // 12 | 10 == 14
     let source = r#"
 fun f() { 12 | 10 }
 f()
@@ -1162,7 +1050,6 @@ f()
 
 #[test]
 fn fallback_bitwise_bxor_matches_interpreter() {
-    // 12 ^ 10 == 6
     let source = r#"
 fun f() { 12 ^ 10 }
 f()
@@ -1187,7 +1074,6 @@ f()
 
 #[test]
 fn fallback_bitwise_shl_matches_interpreter() {
-    // 1 << 4 == 16
     let source = r#"
 fun f() { 1 << 4 }
 f()
@@ -1200,7 +1086,6 @@ f()
 
 #[test]
 fn fallback_bitwise_shr_matches_interpreter() {
-    // 256 >> 3 == 32
     let source = r#"
 fun f() { 256 >> 3 }
 f()
@@ -1213,12 +1098,6 @@ f()
 
 #[test]
 fn fallback_bitwise_loop_virt_int_fast_path() {
-    // total = total ^ i across a tight loop — exercises the virt-int
-    // SSA fast path. The single-Constant inits `total := 0` and
-    // `i := 0` avoid an unrelated pre-existing JIT bug in multi-op
-    // initializers (`c := 1 + 5` style); the BitXor in the loop body
-    // exercises in-place update semantics, which is the shape we want
-    // to cover here.
     let source = r#"
 fun loop_xor(n) {
     total := 0
@@ -1236,10 +1115,6 @@ loop_xor(64)
     assert_eq!(baseline, jitted);
     assert!(j_ok >= 1);
 }
-
-// Shift edges, split per-case so a failure tells us which edge diverged.
-// Pinned semantics: shift count masked to low 6 bits (matches x86
-// SHL/SAR + Cranelift ishl/sshr + Rust wrapping_shl/shr).
 
 fn check_match(source: &str) {
     let (baseline, _, _) = run(source, None);
@@ -1265,7 +1140,6 @@ fn fallback_shift_edge_shl_sixty_three() {
 
 #[test]
 fn fallback_shift_edge_shl_sixty_four_masks_to_zero() {
-    // 1 << 64 should equal 1 << 0 = 1 under the pinned masking semantics.
     check_match("fun f() { 1 << 64 }\nf()");
 }
 
@@ -1276,71 +1150,31 @@ fn fallback_shift_edge_shr_basic() {
 
 #[test]
 fn fallback_shift_edge_shr_negative_one_arithmetic() {
-    // -1 >> 1 is the arithmetic shift right on a sign-extended value:
-    // still -1.
     check_match("fun f() { -1 >> 1 }\nf()");
 }
 
-// NOTE on multi-op initializers (`c := 1 << 63`, `c := 1 + 5`, etc.):
-//
-// A pre-existing JIT bug causes any `c := <expr>` whose initializer is
-// multi-op AND starts with a Constant to mis-store: the Constant handler's
-// init_slot path does `def_var(c_var, <first_constant>)` eagerly, and the
-// later SetLocal's def_var doesn't override it (suspected Cranelift
-// SSA/CSE interaction). Result: `c` ends up holding the LHS constant
-// rather than the expression's value. Reproduces with both `1 + 5` and
-// `1 << 4` — not bitwise-specific. Out of scope for the Tier 1 PR;
-// existing benchmarks don't hit it because they only use single-Constant
-// inits like `n := 0`. The shifts-through-arg test below avoids the
-// pattern by passing the shift result as a parameter.
-
-// ── Type-contract audit (Tier 2.1) ────────────────────────────────────
-//
-// These probes ask: does the JIT honor the explicit type annotation as
-// a guarantee, or does it still speculate? If a typed `<int>` slot is
-// non-negotiable, multi-op init RHS should compute correctly because
-// the slot's type is fixed by contract. If these tests fail the same
-// way the untyped form did, the JIT is downgrading despite the
-// annotation — that's the bug to fix.
-
 #[test]
 fn type_contract_form3_walrus_multiop_init() {
-    // Form 3: typed walrus. `c <int> := 1 + 5` — the type annotation
-    // means c's slot is locked to Int64. Multi-op RHS should work.
     check_match("fun f() {\n    c <int> := 1 + 5\n    c + 1\n}\nf()");
 }
 
 #[test]
 fn type_contract_form2_strict_multiop_init() {
-    // Form 2: strict typed. `c <int> = 1 + 5` — value AND type frozen.
-    // Foldable to a single Constant in principle.
     check_match("fun f() {\n    c <int> = 1 + 5\n    c + 1\n}\nf()");
 }
 
 #[test]
 fn type_contract_form4_zero_init_then_assign() {
-    // Form 4: zero-init, then explicit assign. Forces the typed slot
-    // path through a separate code path (no init expression).
     check_match("fun f() {\n    c <int>\n    c = 6\n    c + 1\n}\nf()");
 }
 
 #[test]
 fn type_contract_form3_walrus_int_min() {
-    // Form 3 with INT_MIN init. The typed contract says c is i64,
-    // and 1 << 63 fits — should not require any speculation.
     check_match("fun f() {\n    c <int> := 1 << 63\n    c + 1\n}\nf()");
 }
 
-// Tier 2.1 (iii) — compile-time literal folding for walrus init RHS.
-// Pure-literal RHS expressions are folded to a single Constant at
-// compile time, so the JIT init-slot path sees a single push (no
-// multi-op-init mishap). Applies to all four init forms.
-
 #[test]
 fn fold_form1_untyped_multiop_init() {
-    // Pre-fold: `c := 1 + 5` emitted Constant 1, Constant 5, Add. The
-    // JIT's init-slot path primed c_var = 1 and never overrode it.
-    // Post-fold: `c := 6` — single Constant init, works correctly.
     check_match("fun f() {\n    c := 1 + 5\n    c + 1\n}\nf()");
 }
 
@@ -1364,9 +1198,6 @@ f()
 
 #[test]
 fn fold_form1_three_locals_sum() {
-    // The cascade case (3+ sequential walrus inits with multi-op RHS)
-    // was the smallest deferred bug from Tier 1. With folding, each
-    // RHS becomes a single Constant — no cascade, no bug.
     let source = r#"
 fun f() {
     a := 1 << 4
@@ -1398,8 +1229,6 @@ shift_table()
 
 #[test]
 fn fold_form3_typed_three_locals_sum() {
-    // Same cascade shape, typed. Folding makes each RHS a single
-    // Constant; the subsequent TypeWrap still validates the type.
     let source = r#"
 fun f() {
     a <int> := 1 << 4
@@ -1414,15 +1243,11 @@ f()
 
 #[test]
 fn fold_form2_immutable_init() {
-    // Form 2: immutable typed. Pure-literal RHS folds to single
-    // Constant; the slot is forever the folded value.
     check_match("fun f() {\n    c <int> = 1 + 5\n    c + 1\n}\nf()");
 }
 
 #[test]
 fn fold_arith_chain() {
-    // Mixed operators — exercises that the folder handles ordering
-    // and precedence correctly (matches the parser's tree shape).
     check_match("fun f() {\n    c := (1 + 2) * 3 - 4\n    c\n}\nf()");
 }
 
@@ -1433,10 +1258,6 @@ fn fold_bitwise_chain() {
 
 #[test]
 fn fold_division_by_zero_falls_through() {
-    // `1 / 0` MUST NOT fold — would lose the runtime error. Folder
-    // returns None for div-by-zero; compiler falls through to
-    // compile_expression, which emits the Divide opcode and the
-    // interpreter / JIT raise the same runtime error.
     let source = "fun f() {\n    c := 1 / 0\n    c\n}\nf()";
     let baseline_err = run_result(source, None).expect_err("interpreter must error");
     let jitted_err = run_result(source, Some(1)).expect_err("JIT must error");
@@ -1445,9 +1266,6 @@ fn fold_division_by_zero_falls_through() {
 
 #[test]
 fn fold_non_literal_rhs_uses_runtime() {
-    // Non-foldable RHS (contains a function call) compiles unchanged.
-    // The fold returns None for `f()` so the original Add opcode is
-    // emitted at runtime. No behavior change vs pre-folding.
     let source = r#"
 fun get_five() { 5 }
 fun caller() {
@@ -1461,9 +1279,6 @@ caller()
 
 #[test]
 fn fallback_shift_int_min_through_param() {
-    // INT_MIN = 1 << 63 produced at the call site (function value, not a
-    // multi-op init), then summed inside the function. Exercises an i64
-    // payload at the parameter slot and an Add on top.
     let source = r#"
 fun f(c) { c + 1 }
 f(1 << 63)
@@ -1473,8 +1288,6 @@ f(1 << 63)
 
 #[test]
 fn fallback_shift_six_via_args_sum() {
-    // Same idea as the original six-locals test but with the shifted
-    // values passed as arguments — bypasses the multi-op-init bug.
     let source = r#"
 fun sum6(a, b, c, d, e, f) { a + b + c + d + e + f }
 sum6(1 << 0, 1 << 1, 1 << 63, 1 << 64, 256 >> 3, -1 >> 1)
@@ -1484,8 +1297,6 @@ sum6(1 << 0, 1 << 1, 1 << 63, 1 << 64, 256 >> 3, -1 >> 1)
 
 #[test]
 fn fallback_bitwise_type_error_matches_interpreter() {
-    // f(1) tier-ups via the int branch; f(0) then exercises the
-    // JIT-compiled type-check slow path of `1.5 & 2`.
     let source = r#"
 fun f(b) {
     option {
@@ -1567,10 +1378,6 @@ f()
 
 #[test]
 fn fallback_post_log_stack_coherence() {
-    // Pre-Log virt-int staging then Log flush then post-Log continuation.
-    // Pass the staged value as an argument to avoid the multi-op-init
-    // bug noted above; the function body is single-statement so Log's
-    // flush + post-Log expression is the load-bearing test surface.
     let source = r#"
 fun f(x) {
     <log>("x")
@@ -1586,10 +1393,6 @@ f((1 + 2) ^ 7)
 
 #[test]
 fn fallback_bitwise_plus_log_compiles() {
-    // 4660 (0x1234) & 255 == 52; 52 << 1 == 104. `masked := n & 255`
-    // starts with GetLocal (not Constant), so the multi-op-init bug
-    // doesn't trip — masked stays out of int_locals and goes through
-    // memory, which is correct.
     let source = r#"
 fun f(n) {
     masked := n & 255
@@ -1604,14 +1407,8 @@ f(4660)
     assert!(j_ok >= 1, "function with both bitwise and log should JIT");
 }
 
-// ── Regression tests for JIT correctness bugs (2026-06) ──────────────────
-
-/// Regression: `option { cond -> X, Y }` whose arms are bare locals must
-/// return the selected arm, not always the second. The compile-time
-/// operand stack (virt_stack) was not flushed at block boundaries, so both
-/// arms read the same (last-emitted) SSA value — `min(a,b)` returned `b`
-/// unconditionally once JIT-compiled. See "flush virt_stack at block
-/// boundaries" fix in jit/engine/mod.rs.
+/// `option { cond -> X, Y }` whose arms are bare locals returns the selected
+/// arm.
 #[test]
 fn regression_option_arms_select_correct_value() {
     let src_min = r#"
@@ -1624,7 +1421,6 @@ mn(3, 7)
     assert_eq!(jitted, baseline, "JIT min(3,7) must match interpreter");
     assert!(j_ok >= 1, "mn should JIT-compile");
 
-    // max: the other arm must win.
     let src_max = r#"
 fun mx(a, b) { option { a >= b -> a, b } }
 mx(3, 7)
@@ -1635,9 +1431,8 @@ mx(3, 7)
     assert_eq!(j2, b2, "JIT max(3,7) must match interpreter");
 }
 
-/// Regression: a hot `option`-returning function must stay correct after it
-/// tiers up in *default* mode (not just eager --jit). Drives `mn` past the
-/// default hot threshold inside a loop and checks every result.
+/// A hot `option`-returning function stays correct after it tiers up in default
+/// mode.
 #[test]
 fn regression_option_correct_when_hot_default_mode() {
     let src = r#"
@@ -1654,17 +1449,12 @@ fun run() {
 }
 run()
 "#;
-    // None => default thresholds (mn tiers up after the hot threshold).
     let (baseline, _, _) = run(src, None);
     assert_eq!(baseline, "0", "hot min(3,7) must return 3 every iteration");
 }
 
-/// Regression: calling a builtin (`len`, `str`, `push`, …) inside a
-/// JIT-compiled loop must not crash. The GetGlobal IC hit path bumped the
-/// "Rc" of any tag > 6, but `Value::Builtin` (tag 13) holds a function
-/// pointer, not an Rc — bumping it wrote into a read-only code page
-/// (SIGBUS) on the second+ fetch. See the Builtin-tag guard in the
-/// GetGlobal IC.
+/// Calling a builtin (`len`, `str`, `push`, ...) inside a JIT-compiled loop does
+/// not crash.
 #[test]
 fn regression_builtin_call_in_loop_no_crash() {
     let src = r#"
@@ -1689,16 +1479,14 @@ go()
     assert!(j_ok >= 1, "go should JIT-compile");
 }
 
-/// B4c: a declared type lock on a *local* must be enforced on reassignment in
-/// BOTH the interpreter and the JIT — never "enforced while cold, ignored once
-/// hot". Before B4c the eager JIT silently accepted wrong-typed primitive
-/// stores (the inline SetLocal fast path skipped the tag check).
+/// A declared type lock on a local is enforced on reassignment in both the
+/// interpreter and the JIT.
 #[test]
 fn jit_enforces_local_type_lock_on_reassignment() {
     for src in [
-        "fun f(){ x <int> := 1\nx = \"hi\"\nx }\nf()", // string into int-locked
-        "fun f(){ x <int> := 1\nx = 2.5\nx }\nf()",    // float into int-locked
-        "fun f(){ x <float> := 1.0\nx = 2\nx }\nf()",  // int into float-locked
+        "fun f(){ x <int> := 1\nx = \"hi\"\nx }\nf()",
+        "fun f(){ x <int> := 1\nx = 2.5\nx }\nf()",
+        "fun f(){ x <float> := 1.0\nx = 2\nx }\nf()",
     ] {
         assert!(
             run_result(src, None).is_err(),
@@ -1710,9 +1498,6 @@ fn jit_enforces_local_type_lock_on_reassignment() {
         );
     }
 
-    // A valid typed-local hot loop (virtualized int accumulators) must compile
-    // under the JIT and match the interpreter exactly — enforcement adds cost
-    // only on the violation path, not the hot path.
     let ok = "fun run(n <int>){ i <int> := 0\ntotal <int> := 0\nrepeat when i < n { total = total + i\ni = i + 1 }\ntotal }\nrun(1000)";
     assert_eq!(run_result(ok, None).unwrap(), "499500");
     assert_eq!(
@@ -1722,8 +1507,8 @@ fn jit_enforces_local_type_lock_on_reassignment() {
     );
 }
 
-/// B12: a bare identifier in a method body that names a struct field resolves
-/// to `self.field` (implicit self) — in the interpreter and the JIT alike.
+/// A bare identifier in a method body that names a struct field resolves to
+/// `self.field` in the interpreter and the JIT alike.
 #[test]
 fn jit_resolves_implicit_self_field_read() {
     let read = "struct C { r <float> }\nC includes { fun area(){ 3.14 * r * r } }\nC(2.0).area()";
@@ -1734,56 +1519,47 @@ fn jit_resolves_implicit_self_field_read() {
         "implicit-self field read under the JIT must match the interpreter"
     );
 
-    // A parameter shadows a same-named field.
     let shadow = "struct C { r <int> }\nC includes { fun set(r <int>){ r } }\nC(1).set(99)";
     assert_eq!(run_result(shadow, Some(1)).unwrap(), "99");
 
-    // A bare name that is not a field still falls through to the global.
     let glob = "g := 42\nstruct C { r <int> }\nC includes { fun h(){ g } }\nC(1).h()";
     assert_eq!(run_result(glob, Some(1)).unwrap(), "42");
 
-    // Implicit-self field read inside a JIT-hot loop.
     let hot = "struct A { v <int> }\nA includes { fun g(){ v } }\nfun run(){ a := A(7)\ns := 0\neach i in range(1000){ s = s + a.g() }\ns }\nrun()";
     assert_eq!(run_result(hot, None).unwrap(), "7000");
     assert_eq!(run_result(hot, Some(1)).unwrap(), "7000");
 }
 
-/// C1: `skip` (continue) must clean up the loop body's operand stack and
-/// continue correctly. Previously it bare-jumped to the loop top, leaking the
-/// loop variable / body locals every iteration until a stack-overflow abort.
+/// `skip` (continue) cleans up the loop body's operand stack and continues
+/// correctly.
 #[test]
 fn skip_in_loop_does_not_leak_stack() {
-    // `each` with a guard and a live body local (`x`).
     let each = "fun f(){ s := 0\neach i in range(6){ x := i * 10\nskip when i % 2 == 0\ns = s + x }\ns }\nf()";
-    assert_eq!(run_result(each, None).unwrap(), "90"); // 10 + 30 + 50
+    assert_eq!(run_result(each, None).unwrap(), "90");
     assert_eq!(run_result(each, Some(1)).unwrap(), "90");
 
-    // Bare `skip` on every iteration must still terminate.
     let bare = "fun f(){ each i in range(4){ skip }\n42 }\nf()";
     assert_eq!(run_result(bare, None).unwrap(), "42");
     assert_eq!(run_result(bare, Some(1)).unwrap(), "42");
 
-    // `skip` in `repeat` with a live body local (`y`).
     let rep = "fun f(){ i := 0\ns := 0\nrepeat when i < 5 { i = i + 1\ny := i * 10\nskip when i == 3\ns = s + y }\ns }\nf()";
-    assert_eq!(run_result(rep, None).unwrap(), "120"); // 10 + 20 + 40 + 50
+    assert_eq!(run_result(rep, None).unwrap(), "120");
     assert_eq!(run_result(rep, Some(1)).unwrap(), "120");
 }
 
-/// C2: a closure capturing an `each` loop variable must not leave a dangling
-/// open upvalue (previously crashed with an index-out-of-bounds), and each
-/// closure captures its own iteration's value (per-iteration capture, D2).
+/// A closure capturing an `each` loop variable leaves no dangling open upvalue,
+/// and each closure captures its own iteration's value.
 #[test]
 fn loop_var_capture_is_per_iteration() {
     let src = "fun f(){ fns := []\neach i in range(4){ fns := push(fns, fun(){ i * i }) }\ns := 0\neach g in fns { s = s + g() }\ns }\nf()";
-    assert_eq!(run_result(src, None).unwrap(), "14"); // 0 + 1 + 4 + 9
+    assert_eq!(run_result(src, None).unwrap(), "14");
     assert_eq!(run_result(src, Some(1)).unwrap(), "14");
 }
 
-/// Error-model rework (B14-B17 + L1): `guard` (angle/keyword/tag-filtered),
-/// the `option` `<Error>` arm, `<Value>.value`, and `<type<Error||Value>>`
-/// normalization all recover runtime errors / `<fail>` in-band, identically
-/// under the interpreter and the JIT-mode bailout path (handler opcodes aren't
-/// JIT-compiled, so `--jit` runs the same VM path — equality guards drift).
+/// `guard` (angle/keyword/tag-filtered), the `option` `<Error>` arm,
+/// `<Value>.value`, and `<type<Error||Value>>` normalization all recover
+/// runtime errors / `<fail>` in-band, identically under the interpreter and the
+/// JIT-mode bailout path.
 #[test]
 fn error_model_recovery() {
     let cases: &[(&str, &str)] = &[
@@ -1793,14 +1569,14 @@ fn error_model_recovery() {
         ),
         ("fun bad(){ 1/0 }\nbad() <guard>(\"safe\")", "safe"),
         ("fun ok(){ 42 }\nok() <guard>(\"x\")", "42"),
-        ("fun n(){ None }\nn() <guard>(\"fb\")", "None"), // guard does NOT catch None
+        ("fun n(){ None }\nn() <guard>(\"fb\")", "None"),
         ("fail \"boom\" guard err -> err.msg", "boom"),
         (
             "fun risky(){ <fail>(\"boom\") }\noption { risky() -> \"ok\", <Error> -> \"fb\" }",
             "fb",
         ),
-        ("option { True -> \"ok\", <Error> -> \"fb\" }", "ok"), // <Error> only on error
-        ("option { False -> \"x\" }", "None"),                  // no-match => None
+        ("option { True -> \"ok\", <Error> -> \"fb\" }", "ok"),
+        ("option { False -> \"x\" }", "None"),
         ("<Value>(\"ok\").value", "ok"),
         ("(<type<Error || Value>>(\"x\")).value", "x"),
         (
@@ -1811,7 +1587,6 @@ fn error_model_recovery() {
             "fun rn(){ <fail>(<Error<retry>>(\"lost\")) }\nrn() <guard<Error<retry>>>(\"Guest\")",
             "Guest",
         ),
-        // tag mismatch re-propagates to an outer (untagged) guard
         (
             "fun rn(){ <fail>(<Error<retry>>(\"lost\")) }\nrn() <guard<Error<x>>>(\"inner\") <guard>(\"outer\")",
             "outer",
@@ -1827,49 +1602,40 @@ fn error_model_recovery() {
     }
 }
 
-/// `stop` (break) must clean the loop variable + body locals off the operand
-/// stack before exiting — otherwise an enclosing loop's iterator slot is
-/// corrupted (previously crashed with "cannot iterate over INTEGER"), including
-/// when `stop` runs from inside a recovered `option` `<Error>` arm.
+/// `stop` (break) cleans the loop variable and body locals off the operand
+/// stack before exiting, including when `stop` runs from inside a recovered
+/// `option` `<Error>` arm.
 #[test]
 fn stop_does_not_leak_loop_locals() {
-    // Plain nested `stop` (no error handling).
     let nested = "fun f(){ s := 0\neach i in range(3){ each k in range(3){ stop when k == 1\ns = s + 1 } }\ns }\nf()";
     assert_eq!(run_result(nested, None).unwrap(), "3");
     assert_eq!(run_result(nested, Some(1)).unwrap(), "3");
-    // `stop` from inside a recovered `<Error>` arm in a nested loop (C4).
     let in_arm = "fun f(){ each i in range(2){ each k in range(3){ option { k == 1 -> <fail>(\"x\"), <Error> -> { stop }, k } } }\n\"done\" }\nf()";
     assert_eq!(run_result(in_arm, None).unwrap(), "done");
     assert_eq!(run_result(in_arm, Some(1)).unwrap(), "done");
-    // `stop` that breaks past a captured loop variable (push happens before
-    // the stop, so i=0,1,2 are all captured, then break at i==2).
     let cap = "fun f(){ fns := []\neach i in range(5){ fns := push(fns, fun(){ i })\nstop when i == 2 }\ns := 0\neach g in fns { s = s + g() }\ns }\nf()";
-    assert_eq!(run_result(cap, None).unwrap(), "3"); // 0 + 1 + 2
+    assert_eq!(run_result(cap, None).unwrap(), "3");
     assert_eq!(run_result(cap, Some(1)).unwrap(), "3");
 }
 
-/// V1: a `:=` reassignment of a top-level/global variable from inside a nested
-/// block must update the global, not create a shadowing local that never stores
-/// (previously hung / produced 0). A genuinely-new block-local `:=` stays local.
+/// A `:=` reassignment of a top-level variable from inside a nested block
+/// updates the global. A new block-local `:=` stays local.
 #[test]
 fn global_walrus_reassign_in_nested_block() {
-    let loop_src = "x := 0\nrepeat when x < 1 { x := 1 }\nx"; // was an infinite loop
+    let loop_src = "x := 0\nrepeat when x < 1 { x := 1 }\nx";
     assert_eq!(run_result(loop_src, None).unwrap(), "1");
     assert_eq!(run_result(loop_src, Some(1)).unwrap(), "1");
     let acc = "total := 0\neach i in range(4){ total := total + i }\ntotal";
-    assert_eq!(run_result(acc, None).unwrap(), "6"); // was 0
+    assert_eq!(run_result(acc, None).unwrap(), "6");
     assert_eq!(run_result(acc, Some(1)).unwrap(), "6");
-    // A new block-local `:=` (no outer binding) stays a block-local.
     let local = "fun f(){ s := 0\neach i in range(3){ t := i + 1\ns = s + t }\ns }\nf()";
-    assert_eq!(run_result(local, None).unwrap(), "6"); // 1 + 2 + 3
+    assert_eq!(run_result(local, None).unwrap(), "6");
     assert_eq!(run_result(local, Some(1)).unwrap(), "6");
 }
 
-/// V2: a JIT-specialized self-recursive function that can return a NON-integer
-/// (float/string/None) must not report the boxed value's raw bits as an i64.
-/// The spec entry's success Return now tag-checks the result and returns
-/// non-ints the generic (boxed) way; the JIT must match the interpreter, and
-/// int self-recursion must stay correct (and on the fast i64 path).
+/// A JIT-specialized self-recursive function that can return a non-integer
+/// (float/string/None) returns it correctly and matches the interpreter. Int
+/// self-recursion stays correct.
 #[test]
 fn jit_specialized_recursion_non_int_return() {
     let cases: &[(&str, &str)] = &[
@@ -1893,11 +1659,6 @@ fn jit_specialized_recursion_non_int_return() {
             "fun fib(n) { give n when n < 2\nfib(n-1) + fib(n-2) }\nfib(15)",
             "610",
         ),
-        // Call-with-arith fusion: the caller emits the arithmetic twice, once for
-        // each place the callee can leave its result. `g(1)` returns an Integer
-        // (status 0, result handed over in a register — the fast side); `g(0)`
-        // returns a Float (status 3, result already boxed on the stack — the slow
-        // side). One compiled `caller` body, both duplicated emissions exercised.
         (
             "fun g(n <int>) { option { n <= 0 -> 3.5, n == 1 -> 7, g(n - 1) } }\n\
              fun caller(k <int>) { 1 + g(k) }\ncaller(1)",
@@ -1908,9 +1669,6 @@ fn jit_specialized_recursion_non_int_return() {
              fun caller(k <int>) { 1 + g(k) }\ncaller(0)",
             "4.5",
         ),
-        // Subtract and Multiply take the same fused path; operand order differs
-        // between the two sides (memory-lhs vs register-rhs), so a transposition
-        // would show up here and not in the Add cases above.
         (
             "fun g(n <int>) { option { n <= 0 -> 3.5, n == 1 -> 7, g(n - 1) } }\n\
              fun caller(k <int>) { 10 - g(k) }\ncaller(1)",
@@ -1937,45 +1695,36 @@ fn jit_specialized_recursion_non_int_return() {
     }
 }
 
-/// A `guard` inside a hot loop must not leak handlers or desync the stack
-/// across iterations — the recoverable-error unwind runs every iteration.
+/// A `guard` inside a hot loop does not leak handlers or desync the stack
+/// across iterations.
 #[test]
 fn guard_in_loop_no_leak() {
     let src = "fun boom(){ <fail>(\"e\") }\nfun f(){ s := 0\neach i in range(100){ x := boom() <guard>(i)\ns = s + x }\ns }\nf()";
-    assert_eq!(run_result(src, None).unwrap(), "4950"); // sum 0..99
+    assert_eq!(run_result(src, None).unwrap(), "4950");
     assert_eq!(run_result(src, Some(1)).unwrap(), "4950");
 }
 
-/// `each x in <collection>` JIT-compiles (IterLen/IterGet supported) instead
-/// of bailing the whole function to the interpreter. Must match the
-/// interpreter across every iterable kind and actually compile. Includes the
-/// `stop`-over-array case that regressed once (BuildArray element ordering vs
-/// the loop-var slot): `stop` cleans the loop var, so its position matters.
+/// `each x in <collection>` JIT-compiles and matches the interpreter across
+/// every iterable kind, including `stop` over an array.
 #[test]
 fn jit_each_over_collections_matches_and_compiles() {
     let cases: &[(&str, &str)] = &[
-        // array
         (
             "fun f(a){ t := 0\neach x in a { t = t + x }\nt }\nf([10,20,30])",
             "60",
         ),
-        // string
         (
             "fun f(s){ n := 0\neach c in s { n = n + 1 }\nn }\nf(\"abcde\")",
             "5",
         ),
-        // tuple
         (
             "fun f(p){ t := 0\neach x in p { t = t + x }\nt }\nf((1,2,3,4))",
             "10",
         ),
-        // stop must fire at the right element (regression: array was built
-        // [1,3,2,4], so `stop when x==3` fired early). Expect 1+2 = 3.
         (
             "fun f(a){ s := 0\neach x in a { stop when x == 3\ns = s + x }\ns }\nf([1,2,3,4])",
             "3",
         ),
-        // skip over array
         (
             "fun f(a){ s := 0\neach x in a { skip when x == 2\ns = s + x }\ns }\nf([1,2,3,4])",
             "8",
@@ -1993,10 +1742,9 @@ fn jit_each_over_collections_matches_and_compiles() {
     }
 }
 
-/// `each i in range(a, b)` with the *builtin* range lowers to a counting
-/// loop (no array materialized; body is JIT-eligible). The counting loop
-/// must match the interpreter and actually JIT-compile. A *user-shadowed*
-/// `range` must fall back to ordinary iteration (correctness only).
+/// `each i in range(a, b)` with the builtin `range` lowers to a counting loop
+/// that matches the interpreter and JIT-compiles. A user-shadowed `range` falls
+/// back to ordinary iteration.
 #[test]
 fn jit_each_in_range_counting_loop_matches_and_compiles() {
     let cases: &[(&str, &str)] = &[
@@ -2020,17 +1768,13 @@ fn jit_each_in_range_counting_loop_matches_and_compiles() {
         assert_eq!(failed, 0, "compile failure for: {src} (failed={failed})");
     }
 
-    // A user-shadowed `range` must NOT be lowered to a counting loop — it
-    // iterates the returned array instead. Correctness only (each-over-array
-    // is not JIT-compiled, so no compile-count assertion here).
     let shadow =
         "fun range(n){ give [9, 9] }\nfun f(){ t := 0\neach x in range(3) { t = t + x }\nt }\nf()";
     assert_eq!(run_disabled(shadow).0, "18");
 }
 
-/// Compile-time constant folding now runs in every expression position,
-/// not just `:=` initializers. Folded literals must produce identical
-/// results to runtime evaluation.
+/// Compile-time constant folding in every expression position produces results
+/// identical to runtime evaluation.
 #[test]
 fn constant_folding_all_positions() {
     let cases: &[(&str, &str)] = &[
@@ -2038,7 +1782,7 @@ fn constant_folding_all_positions() {
         ("(1 + 2) * (3 + 4)", "21"),
         ("2 < 3", "True"),
         ("-5 + 10", "5"),
-        ("println(7 * 6)\n0", "0"), // folds inside a call argument
+        ("println(7 * 6)\n0", "0"),
     ];
     for (src, expected) in cases {
         assert_eq!(run_result(src, None).unwrap(), *expected, "interp: {src}");
@@ -2046,53 +1790,41 @@ fn constant_folding_all_positions() {
     }
 }
 
-// ── Phase 1: closure-body inlining at the call site ─────────────────────────
-
-/// The inlinable shape and every neighbouring shape that must NOT inline.
-/// All are asserted against the interpreter, so a mis-fired guard shows up as
-/// a wrong answer rather than merely a slow one.
+/// The inlinable closure shape and every neighbouring shape that must not
+/// inline, each asserted against the interpreter.
 #[test]
 fn closure_inline_shapes_match_interpreter() {
     let cases: &[(&str, &str)] = &[
-        // The target shape: immutable captured int, arity 1, body is one add.
         (
             "fun mk(x) { fun(y) { x + y } }\nadd5 := mk(5)\n\
              fun run(n <int>) { t <int> := 0\ni <int> := 0\n\
              repeat when i < n { t = t + add5(i)\ni = i + 1 }\nt }\nrun(200)",
             "20900",
         ),
-        // Mutable capture: the body contains SetUpvalue, so it is not the
-        // 8-byte shape and must never inline.
         (
             "fun mk() { c := 0\nfun(y) { c = c + y\nc } }\nacc := mk()\n\
              fun run(n <int>) { t <int> := 0\ni <int> := 0\n\
              repeat when i < n { t = t + acc(i)\ni = i + 1 }\nt }\nrun(50)",
             "20825",
         ),
-        // Non-integer upvalue: shape matches, but the runtime upvalue-kind
-        // guard must decline and fall through to the normal path.
         (
             "fun mk(x) { fun(y) { x + y } }\nf := mk(1.5)\n\
              fun run(n <int>) { t := 0.0\ni <int> := 0\n\
              repeat when i < n { t = t + f(i)\ni = i + 1 }\nt }\nrun(100)",
             "5100",
         ),
-        // Non-integer argument: the argument-tag guard must decline.
         (
             "fun mk(x) { fun(y) { x + y } }\nf := mk(2)\n\
              fun run(n <int>) { t := 0.0\ni <int> := 0\n\
              repeat when i < n { t = t + f(i + 0.5)\ni = i + 1 }\nt }\nrun(100)",
             "5200",
         ),
-        // String upvalue with a string argument — shape matches but neither
-        // value is an integer; concatenation semantics must survive.
         (
             "fun mk(x) { fun(y) { x + y } }\nf := mk(\"a\")\n\
              fun run(n <int>) { s := \"\"\ni <int> := 0\n\
              repeat when i < 3 { s = s + f(\"b\")\ni = i + 1 }\ns }\nrun(3)",
             "ababab",
         ),
-        // Wrong arity for the shape (2 params) — must not inline.
         (
             "fun mk(x) { fun(a, b) { x + a + b } }\nf := mk(1)\n\
              fun run(n <int>) { t <int> := 0\ni <int> := 0\n\
@@ -2110,9 +1842,8 @@ fn closure_inline_shapes_match_interpreter() {
     }
 }
 
-/// Two different closures reaching one call site must not reuse each other's
-/// inline metadata. The site sees `add5` first, then `add100`; a stale
-/// upvalue index or a skipped identity check would return the wrong sum.
+/// Two different closures reaching one call site do not reuse each other's
+/// inline metadata.
 #[test]
 fn closure_inline_does_not_reuse_stale_metadata_across_callees() {
     let src = r#"
@@ -2131,13 +1862,12 @@ fun run(n <int>) {
 }
 run(200)
 "#;
-    // sum over i<200 of (5+i) + (100+i) = 200*105 + 2*(199*200/2) = 21000 + 39800
     assert_eq!(run_result(src, None).unwrap(), "60800");
     assert_eq!(run_result(src, Some(1)).unwrap(), "60800");
 }
 
-/// A closure that stops being inlinable mid-run (its call site later sees a
-/// non-inlinable callee) must keep producing correct results.
+/// A closure whose call site later sees a non-inlinable callee keeps producing
+/// correct results.
 #[test]
 fn closure_inline_site_survives_callee_swap() {
     let src = r#"
@@ -2161,7 +1891,6 @@ fun run(n <int>) {
 }
 run(100)
 "#;
-    // sum(5+i) = 500 + 4950 = 5450 ; sum(3i) = 3*4950 = 14850
     assert_eq!(run_result(src, None).unwrap(), "20300");
     assert_eq!(run_result(src, Some(1)).unwrap(), "20300");
 }

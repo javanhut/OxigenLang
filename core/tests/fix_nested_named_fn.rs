@@ -1,10 +1,5 @@
-//! V3 regression: a nested NAMED function must be able to reference itself
-//! (recursive self-call) from inside its own body.
-//!
-//! Before the fix, the VM/JIT reported `undefined variable: rec` because a
-//! named function declared inside another function did not bind its own name
-//! in the enclosing scope before its body was compiled. VM (interp) == VM (JIT)
-//! is the bar.
+//! Tests that a nested named function can reference itself (recursive
+//! self-call) from inside its own body, with VM (interp) == VM (JIT).
 
 #![cfg(feature = "jit")]
 
@@ -47,8 +42,6 @@ fn assert_parity(source: &str, expected: &str) {
 
 #[test]
 fn nested_named_fn_can_self_recurse() {
-    // The canonical V3 repro: factorial via a nested named function `rec`
-    // that calls itself.
     let src = r#"
 fun outer(){
   fun rec(n){
@@ -64,7 +57,6 @@ outer()
 
 #[test]
 fn nested_named_fn_no_recursion_still_works() {
-    // A nested named fn that does NOT recurse must be unaffected by the fix.
     let src = r#"
 fun outer(){
   fun helper(n){
@@ -79,7 +71,6 @@ outer()
 
 #[test]
 fn deeper_nested_named_fn_self_recurse() {
-    // Two levels of nesting; the innermost named fn recurses on itself.
     let src = r#"
 fun a(){
   fun b(){
@@ -93,14 +84,11 @@ fun a(){
 }
 a()
 "#;
-    // 4 + 3 + 2 + 1 = 10
     assert_parity(src, "10");
 }
 
 #[test]
 fn nested_named_fn_captures_outer_local_and_recurses() {
-    // The recursive nested fn ALSO captures an outer local (`base`) as an
-    // upvalue, exercising self-capture alongside ordinary capture.
     let src = r#"
 fun outer(){
   base := 100
@@ -112,13 +100,11 @@ fun outer(){
 }
 outer()
 "#;
-    // base(100) + 1 + 1 + 1 = 103
     assert_parity(src, "103");
 }
 
 #[test]
 fn two_nested_named_fns_each_recurse() {
-    // Two sibling nested named fns in the same body, each self-recursive.
     let src = r#"
 fun outer(){
   fun fac(n){
@@ -133,14 +119,11 @@ fun outer(){
 }
 outer()
 "#;
-    // 24 + 7 = 31
     assert_parity(src, "31");
 }
 
 #[test]
 fn nested_named_fn_used_after_recursion() {
-    // A local declared AFTER the nested fn must still get the right slot
-    // (the pre-declared fn slot must not corrupt subsequent locals).
     let src = r#"
 fun outer(){
   fun rec(n){
@@ -152,18 +135,11 @@ fun outer(){
 }
 outer()
 "#;
-    // 24 + 7 = 31
     assert_parity(src, "31");
 }
 
 #[test]
 fn typed_nested_named_fn_capturing_an_outer_local_compiles_under_jit() {
-    // Int-annotated so specialized-entry eligibility is deterministic rather than
-    // dependent on the int-mirror demand heuristic. That combination — eligible,
-    // closure-aware (self-reference is an upvalue), and self-calling — used to
-    // emit a direct call whose arity mismatched the closure-aware signature; the
-    // Cranelift verifier rejected it and the function ran interpreted forever.
-    // Parity alone would not have caught it, since the interpreter is correct.
     let src = r#"
 fun outer(){
   base <int> := 100

@@ -1,25 +1,15 @@
-//! Regression: a struct imported from another module inherits its parent's
-//! FIELDS, not just its methods.
+//! Tests that a struct imported from another module inherits its parent's
+//! fields, not just its methods.
 //!
-//! `resolve_field_layout` walked the inheritance chain with `get_struct_def`,
-//! which only sees the active scope. `introduce {Child} from .lib` binds Child
-//! but not Base, so at instantiation the parent lookup returned None, the chain
-//! stopped at Child, and the instance got a layout with none of Base's fields.
-//! Methods still resolved (`find_method_on_def` consults the DEFINING module's
-//! globals), so the failure surfaced far from its cause: an inherited method
-//! touching an inherited field died with "field 'x' not found on Child".
-//!
-//! Both halves are asserted: the parent resolves through the child's own module,
-//! and a genuinely unresolvable parent errors at instantiation instead of
-//! silently producing a struct missing every inherited field.
+//! The parent resolves through the child's own module, and an unresolvable
+//! parent errors at instantiation.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
 use oxigen_core::parser::Parser;
 use oxigen_core::vm::VM;
 
-/// Base owns the field; Child adds none of its own — so an empty layout and a
-/// correct one differ by exactly the inherited slot.
+/// Base owns the field; Child adds none of its own.
 const LIB: &str = "\
 struct Base {\n\
     hide x <array>\n\
@@ -68,7 +58,6 @@ fn run_with_lib(main_src: &str, tag: &str) -> String {
 
 #[test]
 fn child_imported_without_parent_still_has_parent_fields() {
-    // The exact failing shape: only Child is named in the import.
     let out = run_with_lib(
         "introduce {Child} from .lib\n\
          c <Child>\n\
@@ -85,7 +74,6 @@ fn child_imported_without_parent_still_has_parent_fields() {
 
 #[test]
 fn importing_the_parent_too_still_works() {
-    // The workaround path must not regress now that the module lookup wins.
     let out = run_with_lib(
         "introduce {Base, Child} from .lib\n\
          c <Child>\n\
@@ -98,8 +86,6 @@ fn importing_the_parent_too_still_works() {
 
 #[test]
 fn unresolvable_parent_errors_at_instantiation() {
-    // Dropping the parent silently yields an instance missing every inherited
-    // field; the error has to land here, not at the first field access.
     let out = run_with_lib(
         "struct Orphan(NoSuchBase) {\n\
              y <str>\n\

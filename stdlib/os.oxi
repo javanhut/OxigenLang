@@ -1,99 +1,57 @@
-// Execute a command THROUGH A SHELL. Returns a map with "stdout", "stderr",
-// and "code". Shell metacharacters (; | $() `` > &) are interpreted, so never
-// build this string out of untrusted input — use exec_argv for that.
 fun exec(cmd <str>) { __exec(cmd) }
 
-// Execute a program directly, with no shell. Each element of argv is passed as
-// one literal argument, so untrusted values cannot inject commands.
-// Returns the same map shape as exec. stdin, when given, is sent to the
-// program's standard input, so data never has to pass through a shell.
 fun exec_argv(prog <str>, argv, stdin = None) { __exec_argv(prog, argv, stdin) }
 
-// Start a program in the background and return a handle to it at once. Write
-// to its stdin with write_stdin. Its output goes to the terminal, unless
-// capture is True: then read it with read_output_line or read_output.
-// Programs still running when the script ends are stopped.
 fun spawn(prog <str>, argv = [], capture <bool> = False) { __spawn_process(prog, argv, capture) }
 
-// Send text to a spawned program's stdin. No newline is added.
 fun write_stdin(proc <int>, text <str>) { __process_write(proc, text) }
 
-// Close a spawned program's stdin, for programs that read until end of input.
 fun close_stdin(proc <int>) { __process_close_stdin(proc) }
 
-// The next line a spawned program printed (capture=True), waiting for it.
-// None once the program has closed its output.
 fun read_output_line(proc <int>) { __process_read_line(proc) }
 
-// Everything a spawned program prints from now until it closes its output.
 fun read_output(proc <int>) { __process_read_all(proc) }
 
-// Wait for a spawned program to end and return its exit code (-1 if a signal
-// ended it). With timeout_ms, return None if it is still running by then.
-// Closes the program's stdin first.
 fun wait(proc <int>, timeout_ms = None) { __process_wait(proc, timeout_ms) }
 
-// Send a signal to a spawned program: "TERM" (the default), "KILL", "INT"...
 fun kill(proc <int>, signal <str> = "TERM") { __process_kill(proc, signal) }
 
-// Whether a spawned program is still running.
 fun is_running(proc <int>) { __process_is_running(proc) }
 
-// The operating system's process ID of a spawned program.
 fun process_pid(proc <int>) { __process_pid(proc) }
 
-// A channel that receives the named signals, such as ["INT", "TERM"], as
-// strings. Once a signal is subscribed it no longer ends the program, so
-// receive from the channel and clean up. Use with the channel module.
 fun signals(names) { __signals(names) }
 
-// Get the operating system name (e.g. "linux", "macos", "windows")
 fun name() { __os_name() }
 
-// Get the CPU architecture (e.g. "x86_64", "aarch64")
 fun arch() { __os_arch() }
 
-// Get an environment variable. Returns None if not set.
 fun env_get(key <str>) { __env_get(key) }
 
-// Set an environment variable.
 fun env_set(key <str>, val <str>) { __env_set(key, val) }
 
-// Get all environment variables as a map.
 fun env_vars() { __env_vars() }
 
-// Get the current working directory.
 fun cwd() { __cwd() }
 
-// Get the arguments passed to the running script.
 fun args() { __args }
 
-// Change the current working directory.
 fun chdir(path <str>) { __chdir(path) }
 
-// List entries in a directory (non-recursive). Returns array of paths.
 fun list_dir(path <str>) { __list_dir(path) }
 
-// Recursively walk a directory tree. Returns array of all paths.
 fun walk_dir(path <str>) { __walk_dir(path) }
 
-// Create a directory (and parents if needed).
 fun mkdir(path <str>) { __mkdir(path) }
 
-// Remove a directory and all its contents.
 fun rmdir(path <str>) { __rmdir(path) }
 
-// Remove a file.
 fun remove_file(path <str>) { __remove(path) }
 
-// Check if a path is a directory.
 fun is_dir(path <str>) { __is_dir(path) }
 
-// Check if a path is a file.
 fun is_file(path <str>) { __is_file(path) }
 
-// Exit the process with an optional exit code (default 0).
 fun exit(code <int>) { __exit(code) }
 
-// Get the current process ID.
 fun pid() { __pid() }

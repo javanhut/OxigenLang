@@ -77,6 +77,7 @@ Oxigen has four declaration forms. Reach for the most explicit one that fits:
 | `x <type>` | Type-locked, zero-initialized, value-mutable |
 | `x <type> := value` | Type-locked with an initial value, value-mutable |
 | `x <type> = value` | Type-locked **and immutable** (a constant) |
+| `lock x = value` | Variable and value permanently read-only (a constant collection) |
 | `x := value` | Dynamic — both type and value can change (avoid) |
 
 ### Always Declare the Expected Type

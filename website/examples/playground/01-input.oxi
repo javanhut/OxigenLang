@@ -1,5 +1,3 @@
-// Reading input
-// Asks for your name and some numbers. Type the answers into the output pane, or give them in Input and arguments.
 introduce io
 introduce strings
 

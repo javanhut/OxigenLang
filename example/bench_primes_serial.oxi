@@ -1,7 +1,3 @@
-// Serial baseline for the concurrency benchmark: count primes below each
-// chunk limit sequentially via `array.map`. Pairs with `bench_primes_parallel`
-// (same workload, `array.pmap`) so the report's two rows show the parallel
-// speedup directly. CPU-bound; the inner loop JIT-compiles per chunk.
 introduce array
 
 fun count_primes(limit <int>) {

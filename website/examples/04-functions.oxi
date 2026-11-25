@@ -1,5 +1,3 @@
-// Functions and closures
-// First-class functions, closures, defaults, named arguments and the array module.
 introduce array
 
 fun make_counter(start <int> = 0) {
