@@ -178,6 +178,8 @@ fn classify(source: &str, tokens: &[(TokenType, Range<usize>)], i: usize) -> Opt
         T::Ident if source[range.clone()].starts_with(|c: char| c.is_ascii_uppercase()) => {
             Class::Type
         }
+        // `lock` is a keyword only in `lock name = ...`; elsewhere it's a name.
+        T::Ident if &source[range.clone()] == "lock" && next == Some(&T::Ident) => Class::Keyword,
         T::Ident if next == Some(&T::LParen) => Class::Function,
         T::Ident
             if prev == Some(&T::Lt)
@@ -279,6 +281,18 @@ mod tests {
                 ("Person", Class::Type),
                 ("True", Class::Constant),
                 ("2.5", Class::Number),
+            ]
+        );
+    }
+
+    #[test]
+    fn lock_is_a_keyword_only_before_a_name() {
+        assert_eq!(
+            classes("lock xs = [1]\nlock := 5\n"),
+            vec![
+                ("lock", Class::Keyword),
+                ("1", Class::Number),
+                ("5", Class::Number)
             ]
         );
     }

@@ -60,6 +60,9 @@ pub enum Sendable {
         variant: String,
         payload: SendPayload,
     },
+    /// A collection or struct made read-only by `lock`; its contents are
+    /// wrapped too, so the receiving thread rebuilds it just as locked.
+    Locked(Box<Sendable>),
 }
 
 /// Transfer form of `VmEnumPayload`.
@@ -73,6 +76,15 @@ pub enum SendPayload {
 /// `vm` is the VM the value lives in, which knows where its modules came
 /// from; without it a module's struct travels by name only.
 fn detach(v: &Value, vm: Option<&VM>) -> Result<Sendable, String> {
+    let plain = detach_unlocked(v, vm)?;
+    Ok(if v.is_locked() {
+        Sendable::Locked(Box::new(plain))
+    } else {
+        plain
+    })
+}
+
+fn detach_unlocked(v: &Value, vm: Option<&VM>) -> Result<Sendable, String> {
     let each = |items: &mut dyn Iterator<Item = &Value>| -> Result<Vec<Sendable>, String> {
         items.map(|x| detach(x, vm)).collect()
     };
@@ -170,6 +182,11 @@ fn attach(s: Sendable, vm: &VM) -> Result<Value, String> {
             })?;
             let layout = field_layout(vm, &def)?;
             Value::StructInstance(Rc::new(ObjStructInstance::new(name, vals, layout, def)))
+        }
+        Sendable::Locked(inner) => {
+            let v = attach(*inner, vm)?;
+            v.mark_locked();
+            v
         }
         Sendable::Enum {
             ename,
@@ -886,6 +903,7 @@ fn struct_modules(s: &Sendable, out: &mut Vec<PathBuf>) {
         Sendable::Arr(items) | Sendable::Tuple(items) | Sendable::Set(items) => {
             items.iter().for_each(|x| struct_modules(x, out));
         }
+        Sendable::Locked(inner) => struct_modules(inner, out),
         Sendable::Map(pairs) => pairs.iter().for_each(|(k, v)| {
             struct_modules(k, out);
             struct_modules(v, out);

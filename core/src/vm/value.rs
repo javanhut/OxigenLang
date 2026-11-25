@@ -1367,6 +1367,19 @@ impl Value {
         }
     }
 
+    /// Set the lock flag on this value itself (not its contents). Used when a
+    /// locked value is rebuilt on another thread, whose contents were
+    /// rebuilt locked already.
+    pub fn mark_locked(&self) {
+        match self {
+            Value::Array(a) => a.borrow_mut().1.set(),
+            Value::Map(m) => m.borrow_mut().lock(),
+            Value::Set(s) => s.borrow_mut().lock(),
+            Value::StructInstance(inst) => inst.locked.set(true),
+            _ => {}
+        }
+    }
+
     /// "a locked array", "a locked `Point`", ... when `lock` made this value
     /// read-only; `None` when it can be changed.
     pub fn locked_description(&self) -> Option<String> {
