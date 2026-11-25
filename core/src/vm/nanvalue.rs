@@ -1,31 +1,13 @@
-//! NaN-boxed `Value` representation — A1 of the optimization roadmap.
+//! NaN-boxed `Value` representation.
 //!
-//! This module defines `NanValue`, a Value representation that fits in a
-//! single `u64` (8 bytes) instead of the current 40-byte tagged enum. It
-//! is **not yet wired into the rest of the VM** — that migration is
-//! A1.1–A1.5 in `docs/optimization-roadmap.md`. This file is the
-//! foundation: the encoding, the Clone/Drop semantics, and the
-//! round-trip tests that establish correctness before the wholesale
-//! migration begins.
-//!
-//! # Why NaN-boxing
-//!
-//! An IEEE-754 `f64` has 2^52 NaN bit patterns but only one "real" NaN
-//! semantically. We can store any value that fits in 48 bits inside the
-//! unused-NaN bit space: integers up to ±2^47, booleans, pointers to
-//! heap objects, function pointers, etc. A 64-bit word is either a
-//! genuine finite `f64` **or** a tagged payload — never both.
-//!
-//! Net effect: Value shrinks from 40 B to 8 B (5× cache reduction),
-//! stack stride from `imul slot, 40` to `shl slot, 3`, and the JIT can
-//! keep values live in single registers across opcodes.
+//! This module defines `NanValue`, a value representation that fits in a
+//! single `u64`: either a genuine `f64` or a tagged payload.
 //!
 //! # Encoding scheme
 //!
-//! The top 16 bits of the `u64` carry the tag. Tag values are chosen so
-//! that no non-NaN `f64` ever uses them, and the one canonical NaN we
-//! allow from `f64` storage (`0x7FF8_0000_0000_0000`) sits safely below
-//! the tagged-value range.
+//! The top 16 bits of the `u64` carry the tag. No non-NaN `f64` uses a tag
+//! value, and the one canonical NaN allowed from `f64` storage
+//! (`0x7FF8_0000_0000_0000`) sits below the tagged-value range.
 //!
 //! ```text
 //! Bit pattern                         Kind
@@ -38,60 +20,23 @@
 //! 0xFFFB_<48-bit fn ptr>              Builtin function pointer
 //! 0xFFFC_<subkind:3 bits>_<44-bit ptr> Pointer group A (8 kinds)
 //! 0xFFFD_<subkind:3 bits>_<44-bit ptr> Pointer group B (8 kinds)
-//! 0xFFFE, 0xFFFF                       reserved for future use
+//! 0xFFFE, 0xFFFF                       reserved
 //! ```
 //!
-//! ## Why two pointer groups
+//! # Pointer kinds
 //!
-//! We have 16 heap-object variants in the existing `Value` enum
-//! (`String`, `Array`, `Tuple`, `Map`, `Set`, `Closure`, `StructDef`,
-//! `StructInstance`, `EnumDef`, `EnumInstance`, `Module`, `ErrorValue`,
-//! `Wrapped`, `Error`, and space for boxed ints/uints). Encoding all 16
-//! kinds in a single tag would require 4 subkind bits — more than the
-//! 3 bits we can safely carry in the low bits of an 8-aligned pointer.
-//! Two tag slots × 8 subkinds = 16 kinds, with the pointer occupying
-//! the full 44–47 available bits.
-//!
-//! Alignment invariant: every heap object stored through this Value is
-//! reached via `Rc<T>`, which allocates with alignment `max(8,
-//! align_of::<T>())`. The low 3 bits of every Rc pointer are therefore
-//! zero and we can repurpose them for the subkind tag.
-//!
-//! ## Why not 4 bits of subkind in the top nibble of payload
-//!
-//! That would leave only 44 bits of pointer, and x86_64 Linux user-space
-//! can reach 47-bit addresses (128 TiB virtual). We'd eventually trip on
-//! ASLR producing an allocation outside the representable range.
-//! Packing the subkind into the 8-byte-alignment slack of the pointer
-//! avoids this: the pointer keeps its full 48-bit range, and subkind
-//! lives in bits 0–2 (always 0 for aligned allocations anyway).
+//! Heap-object kinds are split across two pointer groups of 8 subkinds each.
+//! The subkind is stored in the low 3 bits of the pointer, which are zero
+//! because every heap object is reached via an `Rc<T>` aligned to at least 8
+//! bytes.
 //!
 //! # Drop / Clone semantics
 //!
 //! Pointer-bearing tags (`TAG_POINTER_A`, `TAG_POINTER_B`) hold the raw
-//! bit pattern of an `Rc<T>`, meaning the `NanValue` **owns a logical
-//! strong-count reference**. Clone and Drop MUST maintain the refcount:
-//! - `Clone`: decode the Rc pointer + subkind, call `Rc::clone` (which
-//!   bumps `strong`), re-encode.
-//! - `Drop`: decode, reconstruct the `Rc<T>` via `Rc::from_raw`, and let
-//!   it drop naturally (which decrements `strong` and, on 0, frees).
-//!
-//! The JIT's inline method-call IC (currently in `jit/engine.rs`) does
-//! the strong-count bump via an inline i64 load+add+store at RcBox
-//! offset 0. That invariant still holds under NaN-box: the pointer we
-//! store is the `NonNull<RcBox<T>>`, same bit pattern as the current
-//! `Value::StructInstance(Rc<_>)` payload, just moved from byte offset 8
-//! to the low 48 bits of a 64-bit word (and subkind-masked to 0 for
-//! comparisons).
-//!
-//! # Non-goals for A1.0 (this file)
-//!
-//! - Wiring `NanValue` into the VM (A1.1).
-//! - Wiring into the JIT (A1.3, A1.4).
-//! - SMI arithmetic fast paths (A2).
-//!
-//! Those come later. This file exists so the encoding and its tests can
-//! be reviewed and committed in isolation.
+//! bit pattern of an `Rc<T>`, so the `NanValue` owns a strong-count reference:
+//! - `Clone`: decode the Rc pointer + subkind, call `Rc::clone`, re-encode.
+//! - `Drop`: decode, reconstruct the `Rc<T>` via `Rc::from_raw`, and let it
+//!   drop.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -102,31 +47,26 @@ use super::value::{
     ObjStructInstance, Value as OldValue,
 };
 
-// ── Bit-level constants ────────────────────────────────────────────────
-
 /// Mask covering the 16 tag bits at the top of the word.
 pub const TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
 
 /// Mask covering the low 48 bits (payload).
 pub const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
-/// The one canonical `f64` NaN bit pattern we allow. All other incoming
-/// NaN bit patterns (e.g., `-NaN = 0xFFF8_…`) are normalized to this on
-/// encode so they don't collide with the tagged-value space.
+/// The one canonical `f64` NaN bit pattern. All other incoming NaN bit
+/// patterns are normalized to this on encode.
 pub const CANONICAL_F64_NAN_BITS: u64 = 0x7FF8_0000_0000_0000;
 
-/// Tag values (top 16 bits) — only these eight patterns are tagged
-/// values. Any bit pattern whose top 16 bits are strictly less than
-/// `0xFFF8_…` is a genuine `f64`.
+/// Tag values (top 16 bits). Any bit pattern whose top 16 bits are strictly
+/// less than `0xFFF8_…` is a genuine `f64`.
 pub const TAG_SMI: u64 = 0xFFF8_0000_0000_0000;
 pub const TAG_SMI_UINT: u64 = 0xFFF9_0000_0000_0000;
 pub const TAG_PRIMITIVE: u64 = 0xFFFA_0000_0000_0000;
 pub const TAG_BUILTIN: u64 = 0xFFFB_0000_0000_0000;
 pub const TAG_POINTER_A: u64 = 0xFFFC_0000_0000_0000;
 pub const TAG_POINTER_B: u64 = 0xFFFD_0000_0000_0000;
-// 0xFFFE, 0xFFFF reserved for future use.
 
-/// SMI range: [SMI_MIN, SMI_MAX]. Integers outside this range box to the
+/// SMI range: [SMI_MIN, SMI_MAX]. Integers outside this range are boxed on the
 /// heap as a pointer-tagged `Rc<i64>` (`HeapKind::BoxedInt`).
 pub const SMI_MIN: i64 = -(1 << 47);
 pub const SMI_MAX: i64 = (1 << 47) - 1;
@@ -174,30 +114,22 @@ pub enum PointerKindB {
     BoxedUint = 7,
 }
 
-// ── Pre-computed complete bit patterns for None and Bool singletons ────
-
 pub const NANVALUE_NONE_BITS: u64 = TAG_PRIMITIVE | ((PrimitiveKind::None as u64) << 40);
 pub const NANVALUE_BOOL_FALSE_BITS: u64 = TAG_PRIMITIVE | ((PrimitiveKind::Bool as u64) << 40);
 pub const NANVALUE_BOOL_TRUE_BITS: u64 = NANVALUE_BOOL_FALSE_BITS | 1;
 
-// ── Boxed storage types for non-primitive values we can't inline ───────
-
-/// Heap box for `ErrorValue { msg, tag }`. Two `Rc<str>` don't fit in a
-/// 48-bit payload, so we store them via this single-pointer indirection.
+/// Heap box for `ErrorValue { msg, tag }`.
 #[derive(Debug)]
 pub struct ErrorValueStorage {
     pub msg: Rc<str>,
     pub tag: Option<Rc<str>>,
 }
 
-/// Heap box for `Rc<Value>` (`Wrapped`). Keeps the same ownership shape
-/// the current enum has: a single-pointer indirection to a Value.
+/// Heap box for `Rc<Value>` (`Wrapped`).
 #[derive(Debug)]
 pub struct WrappedStorage {
     pub inner: NanValue,
 }
-
-// ── The NaN-boxed Value itself ─────────────────────────────────────────
 
 /// A NaN-boxed runtime value. 8 bytes on all 64-bit targets. `Drop` runs
 /// the Rc decrement on pointer-bearing kinds; `Clone` runs the bump.
@@ -208,7 +140,6 @@ pub struct NanValue {
 
 impl std::fmt::Debug for NanValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Per-variant pretty-printing lands once the type is wired into the VM.
         let tag = self.raw & TAG_MASK;
         let kind = match tag {
             _ if self.is_f64() => "f64",
@@ -231,10 +162,7 @@ impl std::fmt::Debug for NanValue {
 }
 
 impl NanValue {
-    // ── Primitive / SMI constructors ──────────────────────────────────
-
-    /// `None` as a `const`-evaluable value, so `Value::None` can be a
-    /// `pub const` after the A1.2.5 storage swap.
+    /// `None` as a `const`-evaluable value.
     pub const NONE: NanValue = NanValue {
         raw: NANVALUE_NONE_BITS,
     };
@@ -279,8 +207,8 @@ impl NanValue {
         NanValue { raw: bits }
     }
 
-    /// Integer constructor: inlines to an SMI when in range, otherwise
-    /// boxes on the heap. Use this for `Value::Integer(i64)` parity.
+    /// Integer constructor: inlines to an SMI when in range, otherwise boxes
+    /// on the heap.
     pub fn from_i64(n: i64) -> Self {
         if (SMI_MIN..=SMI_MAX).contains(&n) {
             Self::smi_from_i64_unchecked(n)
@@ -310,14 +238,9 @@ impl NanValue {
         }
     }
 
-    // ── Pointer-kind constructors ─────────────────────────────────────
-
     pub fn from_string(s: Rc<str>) -> Self {
-        // Rc<str> is a fat pointer, but a NaN-box payload holds only 48 bits.
         let raw = Rc::into_raw(s);
-        // Rebox as Rc<String> so the pointer is thin enough to fit the payload.
         unsafe {
-            // Safety: raw came from Rc::into_raw immediately above.
             let s_back: Rc<str> = Rc::from_raw(raw);
             let s_owned: String = (*s_back).to_owned();
             let rc_string: Rc<String> = Rc::new(s_owned);
@@ -379,7 +302,6 @@ impl NanValue {
     }
 
     pub fn from_error(msg: Rc<str>) -> Self {
-        // Same Rc<str> → Rc<String> conversion as `from_string`.
         let s_owned: String = (*msg).to_owned();
         Self::from_rc_pointer_b(
             Rc::into_raw(Rc::new(s_owned)) as *const (),
@@ -387,14 +309,13 @@ impl NanValue {
         )
     }
 
-    /// Zero-copy variant of [`from_error`] when the caller already owns
-    /// an `Rc<String>` (e.g. the bridge layer from `Value::Error`).
+    /// Zero-copy variant of [`Self::from_error`] when the caller already owns an
+    /// `Rc<String>`.
     pub fn from_error_rc_string(msg: Rc<String>) -> Self {
         Self::from_rc_pointer_b(Rc::into_raw(msg) as *const (), PointerKindB::Error)
     }
 
     pub fn from_builtin(f: BuiltinFn) -> Self {
-        // `fn(Vec<Value>) -> Value` — a function pointer. Cast to usize.
         let addr = f as usize as u64;
         debug_assert!(
             addr & TAG_MASK == 0,
@@ -405,8 +326,6 @@ impl NanValue {
             raw: TAG_BUILTIN | (addr & PAYLOAD_MASK),
         }
     }
-
-    // ── Internal pointer assembly ─────────────────────────────────────
 
     #[inline]
     fn from_rc_pointer_a(ptr: *const (), kind: PointerKindA) -> Self {
@@ -437,8 +356,6 @@ impl NanValue {
             raw: TAG_POINTER_B | (addr & PAYLOAD_MASK) | (kind as u64),
         }
     }
-
-    // ── Accessors / introspection ─────────────────────────────────────
 
     #[inline]
     pub fn raw_bits(&self) -> u64 {
@@ -476,16 +393,13 @@ impl NanValue {
     pub fn as_i64(&self) -> Option<i64> {
         let masked = self.raw & TAG_MASK;
         if masked == TAG_SMI {
-            // Sign-extend the 48-bit payload back to i64.
             let payload = self.raw & PAYLOAD_MASK;
-            // Shift left 16 then arithmetic-shift right 16 to sign-extend the i48.
             let v = ((payload as i64) << 16) >> 16;
             Some(v)
         } else if masked == TAG_POINTER_B {
             let kind = (self.raw & 0x7) as u8;
             if kind == PointerKindB::BoxedInt as u8 {
                 let ptr = ((self.raw & PAYLOAD_MASK) & !0x7) as *const i64;
-                // SAFETY: created via Rc<i64>::into_raw; live as long as the NanValue.
                 Some(unsafe { *ptr })
             } else {
                 None
@@ -568,7 +482,6 @@ impl NanValue {
 
     #[inline]
     fn decode_pointer_addr(&self) -> *const () {
-        // Low 48 bits with the subkind (low 3 bits) masked off.
         ((self.raw & PAYLOAD_MASK) & !0x7) as *const ()
     }
 }
@@ -580,17 +493,13 @@ pub enum PointerGroup {
     B,
 }
 
-// ── Clone / Drop ownership plumbing ────────────────────────────────────
-
 impl Clone for NanValue {
     fn clone(&self) -> Self {
-        // Primitives, SMIs, f64 and Builtin are bitwise copies with no Rc to bump.
         let masked = self.raw & TAG_MASK;
         if masked != TAG_POINTER_A && masked != TAG_POINTER_B {
             return NanValue { raw: self.raw };
         }
 
-        // Reconstruct the typed Rc, bump via clone, drop the temporary.
         let addr = self.decode_pointer_addr();
         let sub = (self.raw & 0x7) as u8;
         unsafe {
@@ -690,7 +599,6 @@ impl Drop for NanValue {
 #[inline]
 unsafe fn clone_and_forget<T>(addr: *const ()) {
     let typed = addr as *const T;
-    // Bump the strong count, then discard the raw clone; the original is untouched.
     unsafe {
         let rc = Rc::<T>::from_raw(typed);
         let bumped = Rc::clone(&rc);
@@ -713,10 +621,7 @@ fn unreachable_subkind(sub: u8) -> ! {
     panic!("NanValue: unexpected pointer subkind {}", sub)
 }
 
-// Unused-import suppression for types A1.1 callers will consume.
 const _: Option<&HashMap<String, OldValue>> = None;
-
-// Display and PartialEq route through the bridge to reuse Value's impls verbatim.
 
 impl std::fmt::Display for NanValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -726,7 +631,6 @@ impl std::fmt::Display for NanValue {
 
 impl PartialEq for NanValue {
     fn eq(&self, other: &Self) -> bool {
-        // f64 must keep IEEE semantics: canonical-NaN normalization would make every NaN pair bit-equal.
         let a_is_f64 = self.is_f64();
         let b_is_f64 = other.is_f64();
         if a_is_f64 || b_is_f64 {
@@ -735,18 +639,14 @@ impl PartialEq for NanValue {
             }
             return f64::from_bits(self.raw) == f64::from_bits(other.raw);
         }
-        // Fast path: identical encoded payload, since Clone keeps the pointer identical.
         if self.raw == other.raw {
             return true;
         }
-        // Slow path bridges into the legacy enum, including its intentional `_ => false` arm.
         let a = self.clone().into_value();
         let b = other.clone().into_value();
         a == b
     }
 }
-
-// Bridge layer between Value and NanValue until the flag-day migration.
 
 impl From<&OldValue> for NanValue {
     fn from(v: &OldValue) -> Self {
@@ -767,8 +667,7 @@ impl From<&OldValue> for NanValue {
             OldValue::EnumDef(d) => NanValue::from_enum_def(Rc::clone(d)),
             OldValue::EnumInstance(i) => NanValue::from_enum_instance(Rc::clone(i)),
             OldValue::Module(m) => NanValue::from_module(Rc::clone(m)),
-            OldValue::Task(_) => NanValue::none(), // task handles never NaN-boxed (bridge is test-only)
-            // Nor host-embedding values, for the same reason.
+            OldValue::Task(_) => NanValue::none(),
             OldValue::Native(_) | OldValue::Host(_) | OldValue::Vector(_) => NanValue::none(),
             OldValue::Array(arr) => {
                 let nans: Vec<NanValue> = arr.borrow().iter().map(NanValue::from).collect();
@@ -791,7 +690,6 @@ impl From<&OldValue> for NanValue {
                 NanValue::from_set(Rc::new(RefCell::new(nans)))
             }
             OldValue::ErrorValue(data) => {
-                // ErrorValueStorage uses Rc<str> and ErrorValueData uses Rc<String>, so convert per component.
                 let storage = ErrorValueStorage {
                     msg: Rc::from(data.msg.as_str()),
                     tag: data.tag.as_ref().map(|t| Rc::from(t.as_str())),
@@ -804,16 +702,11 @@ impl From<&OldValue> for NanValue {
 }
 
 impl NanValue {
-    /// Bridge back into the legacy `Value` enum, consuming `self`.
-    /// Pointer-bearing kinds transfer their strong-count to the resulting
-    /// `Value` (or, for container kinds, decrement and reallocate). The
-    /// caller is responsible for ensuring `self` is in a well-formed
-    /// state — every constructor in this module produces well-formed
-    /// values, so this is just `from_*` round-trip plus `From<&Value>`.
+    /// Convert back into the `Value` enum, consuming `self`. Pointer-bearing
+    /// kinds transfer their strong count to the resulting `Value`.
     pub fn into_value(self) -> OldValue {
         let masked = self.raw & TAG_MASK;
         if masked < TAG_SMI {
-            // f64 — no Drop needed (no Rc payload).
             let v = OldValue::Float(f64::from_bits(self.raw));
             std::mem::forget(self);
             return v;
@@ -848,7 +741,6 @@ impl NanValue {
             }
             TAG_BUILTIN => {
                 let addr = (self.raw & PAYLOAD_MASK) as usize;
-                // SAFETY: addr came from from_builtin on a live BuiltinFn.
                 let f: BuiltinFn = unsafe { std::mem::transmute(addr) };
                 std::mem::forget(self);
                 OldValue::Builtin(f)
@@ -862,7 +754,6 @@ impl NanValue {
         let masked = self.raw & TAG_MASK;
         let sub = (self.raw & 0x7) as u8;
         let addr = self.decode_pointer_addr();
-        // SAFETY: addr/subkind pairs come only from the matching from_* constructors.
         let v = unsafe {
             if masked == TAG_POINTER_A {
                 if sub == PointerKindA::String as u8 {
@@ -941,7 +832,6 @@ impl NanValue {
                     drop(rc);
                     OldValue::Wrapped(Rc::new(inner_value))
                 } else if sub == PointerKindB::Error as u8 {
-                    // `from_error*` always boxes a `Rc<String>`.
                     let rc = Rc::<String>::from_raw(addr as *const String);
                     OldValue::Error(rc)
                 } else if sub == PointerKindB::BoxedInt as u8 {
@@ -964,13 +854,9 @@ impl NanValue {
     }
 }
 
-// Tests
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── Size / layout pins ────────────────────────────────────────────
 
     #[test]
     fn nanvalue_is_exactly_eight_bytes() {
@@ -978,22 +864,16 @@ mod tests {
         assert_eq!(std::mem::align_of::<NanValue>(), 8);
     }
 
-    /// The JIT will eventually emit `iconst(TAG_MASK)` + `band` to test
-    /// the top 16 bits, and `iconst(PAYLOAD_MASK)` + `band` to extract
-    /// the 48-bit payload. Pin those constants so a future encoding tweak
-    /// fails fast at `cargo test`.
+    /// The tag mask and payload mask constants have the expected values.
     #[test]
     fn tag_and_payload_masks_are_pinned() {
         assert_eq!(TAG_MASK, 0xFFFF_0000_0000_0000);
         assert_eq!(PAYLOAD_MASK, 0x0000_FFFF_FFFF_FFFF);
-        // The two masks must partition u64 exactly.
         assert_eq!(TAG_MASK | PAYLOAD_MASK, u64::MAX);
         assert_eq!(TAG_MASK & PAYLOAD_MASK, 0);
     }
 
-    /// JIT IR will branch on `(raw & TAG_MASK) == TAG_X` for each kind.
-    /// Pin tag values so the JIT-emitted `icmp.eq` constants stay
-    /// in sync with the Rust-side encoding.
+    /// Tag values have the expected bit patterns.
     #[test]
     fn tag_constants_are_pinned() {
         assert_eq!(TAG_SMI, 0xFFF8_0000_0000_0000);
@@ -1002,15 +882,10 @@ mod tests {
         assert_eq!(TAG_BUILTIN, 0xFFFB_0000_0000_0000);
         assert_eq!(TAG_POINTER_A, 0xFFFC_0000_0000_0000);
         assert_eq!(TAG_POINTER_B, 0xFFFD_0000_0000_0000);
-        // f64 sentinel must sit strictly below the tagged-value range.
         const { assert!(CANONICAL_F64_NAN_BITS < TAG_SMI) }
     }
 
-    /// Pointer-group subkind tags ride in the low 3 bits of the 48-bit
-    /// payload. JIT field-access ICs will eventually emit
-    /// `iconst(0x7); band(raw, mask)` to extract subkind, then dispatch.
-    /// Pin the values here so a refactor of `PointerKindA/B` doesn't
-    /// silently shift dispatch.
+    /// Pointer-group subkind tags occupy the low 3 bits of the payload.
     #[test]
     fn pointer_subkind_layout_is_pinned() {
         assert_eq!(PointerKindA::String as u8, 0);
@@ -1031,15 +906,11 @@ mod tests {
         assert_eq!(PointerKindB::BoxedInt as u8, 6);
         assert_eq!(PointerKindB::BoxedUint as u8, 7);
 
-        // Subkind index must fit in 3 bits.
         assert!(PointerKindA::StructInstance as u8 <= 0x7);
         assert!(PointerKindB::BoxedUint as u8 <= 0x7);
     }
 
-    /// Pin the byte position of the primitive subkind inside the
-    /// payload: byte 5 (= bit 40). The JIT's primitive dispatch will
-    /// shift right 40 and band 0xFF to recover the subkind without going
-    /// through Rust enum pattern matching.
+    /// The primitive subkind sits in byte 5 (bit 40) of the payload.
     #[test]
     fn primitive_subkind_lives_at_bit_40() {
         let v = NanValue::from_char('a');
@@ -1050,26 +921,21 @@ mod tests {
         assert_eq!(sk, PrimitiveKind::Byte as u8);
     }
 
-    /// SMI sign-extension boundary: -1 must encode with all 48 payload
-    /// bits set, since the JIT's eventual SMI inline-decode will do
-    /// `(payload << 16) >> 16` (arithmetic shift) to sign-extend.
+    /// SMI -1 encodes with all 48 payload bits set.
     #[test]
     fn smi_sign_extension_at_boundary() {
         let neg = NanValue::from_i64(-1);
-        // Payload is 48 ones — entire low 48 bits set.
         assert_eq!(neg.raw_bits() & PAYLOAD_MASK, PAYLOAD_MASK);
         assert_eq!(neg.as_i64(), Some(-1));
 
         let smi_min = NanValue::from_i64(SMI_MIN);
-        // SMI_MIN sets only bit 47, so (payload << 16) >> 16 recovers the original.
         let recovered = ((smi_min.raw_bits() & PAYLOAD_MASK) as i64) << 16 >> 16;
         assert_eq!(recovered, SMI_MIN);
     }
 
-    /// Pointer-bearing values store the raw `Rc::into_raw` pointer in the
-    /// low 48 bits, with the subkind in bits 0..3. The JIT will load the
-    /// pointer via `iconst(!0x7); band(raw, mask)` to reach the typed Rc
-    /// payload. Pin that the round-trip is bit-exact for an aligned Rc.
+    /// Pointer-bearing values store the raw `Rc::into_raw` pointer in the low
+    /// 48 bits, with the subkind in bits 0..3; the round-trip is bit-exact for
+    /// an aligned Rc.
     #[test]
     fn pointer_bits_round_trip_through_payload_mask() {
         use crate::vm::value::{FieldLayout, ObjStructDef, ObjStructInstance};
@@ -1091,9 +957,7 @@ mod tests {
             layout,
             def,
         ));
-        // The payload points at T inside the RcBox, not the header; the JIT casts it directly.
         let expected_raw = Rc::as_ptr(&inst) as usize;
-        // Sanity: alignment lets us repurpose the low 3 bits.
         assert_eq!(
             expected_raw & 0x7,
             0,
@@ -1106,7 +970,6 @@ mod tests {
             extracted, expected_raw,
             "pointer bits must survive payload-mask + subkind-mask"
         );
-        // Tag dispatch picks Pointer A.
         assert_eq!(nan.raw_bits() & TAG_MASK, TAG_POINTER_A);
         let sub = (nan.raw_bits() & 0x7) as u8;
         assert_eq!(sub, PointerKindA::StructInstance as u8);
@@ -1115,7 +978,6 @@ mod tests {
 
     #[test]
     fn tag_constants_do_not_collide_with_finite_f64() {
-        // Every finite f64 has bits < TAG_SMI.
         let samples = [
             0.0_f64,
             -0.0,
@@ -1136,8 +998,6 @@ mod tests {
             );
         }
     }
-
-    // ── SMI round-trips ───────────────────────────────────────────────
 
     #[test]
     fn smi_roundtrips_common_values() {
@@ -1182,8 +1042,6 @@ mod tests {
         }
     }
 
-    // ── Primitives ────────────────────────────────────────────────────
-
     #[test]
     fn bool_roundtrips() {
         assert_eq!(NanValue::from_bool(true).as_bool(), Some(true));
@@ -1215,8 +1073,6 @@ mod tests {
         }
     }
 
-    // ── f64 handling ──────────────────────────────────────────────────
-
     #[test]
     fn f64_roundtrips_normal_values() {
         for x in [
@@ -1231,7 +1087,6 @@ mod tests {
             let v = NanValue::from_f64(x);
             let back = v.as_f64().expect("should be f64");
             if x == 0.0 {
-                // 0.0 and -0.0 both equal 0.0 under ==; compare bits.
                 assert_eq!(back.to_bits(), x.to_bits());
             } else {
                 assert_eq!(back, x);
@@ -1241,7 +1096,6 @@ mod tests {
 
     #[test]
     fn f64_nan_is_canonicalized() {
-        // Any NaN bit pattern going in comes out as the canonical NaN.
         let bad_nan = f64::from_bits(0xFFF8_0000_1234_5678);
         assert!(bad_nan.is_nan());
         let v = NanValue::from_f64(bad_nan);
@@ -1249,8 +1103,6 @@ mod tests {
         let back = v.as_f64().unwrap();
         assert!(back.is_nan());
     }
-
-    // ── Pointer Rc semantics ──────────────────────────────────────────
 
     #[test]
     fn struct_instance_clone_drop_preserves_refcount() {
@@ -1277,7 +1129,6 @@ mod tests {
         ));
         let before = Rc::strong_count(&inst);
 
-        // from_struct_instance consumes one Rc via into_raw while we still hold the original.
         let v = NanValue::from_struct_instance(Rc::clone(&inst));
         assert_eq!(
             Rc::strong_count(&inst),
@@ -1285,7 +1136,6 @@ mod tests {
             "NanValue::from_struct_instance should own one strong reference"
         );
 
-        // Clone the NanValue: another strong reference.
         let v2 = v.clone();
         assert_eq!(Rc::strong_count(&inst), before + 2);
 
@@ -1299,35 +1149,29 @@ mod tests {
     fn string_clone_drop_roundtrip() {
         let v = NanValue::from_rc_string(Rc::new("hello".to_string()));
         let v2 = v.clone();
-        // Both values should resolve to pointers of the same heap kind.
         let (group, sub) = v.pointer_kind().unwrap();
         assert_eq!(group, PointerGroup::A);
         assert_eq!(sub, PointerKindA::String as u8);
         let (group2, sub2) = v2.pointer_kind().unwrap();
         assert_eq!(group2, group);
         assert_eq!(sub2, sub);
-        // Drop both — must not double-free.
         drop(v);
         drop(v2);
     }
 
     #[test]
     fn boxed_i64_clone_drop_roundtrip() {
-        // Outside SMI range — forces heap boxing.
         let big = SMI_MAX + 1;
         let v = NanValue::from_i64(big);
         let v2 = v.clone();
         assert_eq!(v.as_i64(), Some(big));
         assert_eq!(v2.as_i64(), Some(big));
         drop(v);
-        drop(v2); // must not double-free the underlying Rc<i64>
+        drop(v2);
     }
-
-    // ── Tag exclusivity ───────────────────────────────────────────────
 
     #[test]
     fn tag_dispatch_is_exclusive() {
-        // Every constructor should land in exactly one accessor.
         let values: Vec<(NanValue, &str)> = vec![
             (NanValue::from_i64(7), "smi"),
             (NanValue::from_u64(7), "uint"),
@@ -1356,8 +1200,6 @@ mod tests {
         }
     }
 
-    // ── Bridge: Value ↔ NanValue (A1.2.1) ─────────────────────────────
-
     /// Construct a representative corpus covering every `Value` variant.
     /// Used to exercise the bridge round-trip.
     fn build_value_corpus() -> Vec<OldValue> {
@@ -1368,7 +1210,6 @@ mod tests {
         };
         use std::cell::Cell;
 
-        // Struct def + instance for the corpus.
         let mut indices = HashMap::new();
         indices.insert("a".to_string(), 0);
         indices.insert("b".to_string(), 1);
@@ -1397,7 +1238,6 @@ mod tests {
             Rc::clone(&struct_def),
         ));
 
-        // Closure (no upvalues).
         let func = Rc::new(Function::new(Some("noop".to_string()), 0));
         let (kinds, values) = make_upvalue_int_caches(0);
         let closure = Rc::new(ObjClosure {
@@ -1418,7 +1258,6 @@ mod tests {
             upvalue_int_values: values,
         });
 
-        // Enum def + instance.
         let enum_def = Rc::new(ObjEnumDef {
             name: "Color".to_string(),
             variants: vec![
@@ -1440,7 +1279,6 @@ mod tests {
             payload: VmEnumPayload::Tuple(vec![OldValue::Integer(7), OldValue::Integer(8)]),
         });
 
-        // Module.
         let mut globals = HashMap::new();
         globals.insert("PI".to_string(), OldValue::Float(std::f64::consts::PI));
         let module = Rc::new(ObjModule {
@@ -1453,8 +1291,8 @@ mod tests {
             OldValue::Integer(0),
             OldValue::Integer(42),
             OldValue::Integer(-1),
-            OldValue::Integer(i64::MAX), // forces boxed-int path
-            OldValue::Integer(i64::MIN), // forces boxed-int path
+            OldValue::Integer(i64::MAX),
+            OldValue::Integer(i64::MIN),
             OldValue::Float(0.0),
             OldValue::Float(-std::f64::consts::PI),
             OldValue::Float(f64::INFINITY),
@@ -1465,7 +1303,7 @@ mod tests {
             OldValue::Byte(0xAB),
             OldValue::Uint(0),
             OldValue::Uint(SMI_UINT_MAX),
-            OldValue::Uint(SMI_UINT_MAX + 1), // forces boxed-uint
+            OldValue::Uint(SMI_UINT_MAX + 1),
             OldValue::None,
             OldValue::String(Rc::new("hello".into())),
             OldValue::Error(Rc::new("oops".into())),
@@ -1498,10 +1336,9 @@ mod tests {
         ]
     }
 
-    /// Round-trip every variant through the bridge: the resulting
-    /// `OldValue` must compare equal to the original (where `PartialEq`
-    /// is defined). For `Closure` / `StructDef` / `Builtin`, fall back
-    /// to identity-pointer compare via `Rc::as_ptr`.
+    /// Round-trip every variant through the bridge: the result must compare
+    /// equal to the original (by `Rc` pointer identity for `Closure` /
+    /// `StructDef` / `Builtin`).
     #[test]
     fn bridge_round_trips_all_variants() {
         for (idx, original) in build_value_corpus().into_iter().enumerate() {
@@ -1551,7 +1388,6 @@ mod tests {
 
     fn values_equivalent(a: &OldValue, b: &OldValue) -> bool {
         match (a, b) {
-            // These variants lack a legacy PartialEq case or carry fn pointers compared by identity.
             (OldValue::Closure(x), OldValue::Closure(y)) => Rc::ptr_eq(x, y),
             (OldValue::StructDef(x), OldValue::StructDef(y)) => Rc::ptr_eq(x, y),
             (OldValue::EnumDef(x), OldValue::EnumDef(y)) => Rc::ptr_eq(x, y),
@@ -1593,11 +1429,9 @@ mod tests {
         assert_eq!(Rc::strong_count(&inst), baseline + 1);
 
         let nan = NanValue::from(&v);
-        // From<&OldValue> clones the Rc — both holders alive.
         assert_eq!(Rc::strong_count(&inst), baseline + 2);
 
         let v2 = nan.into_value();
-        // into_value transfers the Rc, so total live Rcs are unchanged.
         assert_eq!(Rc::strong_count(&inst), baseline + 2);
 
         drop(v);
@@ -1605,12 +1439,8 @@ mod tests {
         assert_eq!(Rc::strong_count(&inst), baseline);
     }
 
-    // Refcount conformance across every pointer kind.
-
-    /// Generic helper: build a `Rc<T>` once, wrap it via `wrap`, then
-    /// clone the NanValue and drop both — refcount must round-trip
-    /// exactly. Works for every pointer kind whose constructor takes a
-    /// single Rc.
+    /// Build a `Rc<T>` once, wrap it via `wrap`, then clone the NanValue and
+    /// drop both; the refcount must round-trip exactly.
     fn check_rc_refcount_round_trip<T>(rc: Rc<T>, wrap: impl Fn(Rc<T>) -> NanValue) {
         let baseline = Rc::strong_count(&rc);
         let v = wrap(Rc::clone(&rc));
@@ -1638,8 +1468,6 @@ mod tests {
             "final drop must restore strong"
         );
     }
-
-    // StructInstance and String are already covered; add the rest.
 
     #[test]
     fn refcount_array_round_trip() {
@@ -1708,8 +1536,6 @@ mod tests {
         check_rc_refcount_round_trip(rc, NanValue::from_struct_def);
     }
 
-    // PointerKindB: EnumDef, EnumInstance, Module, ErrorValue, Wrapped, Error, BoxedInt, BoxedUint.
-
     #[test]
     fn refcount_enum_def_round_trip() {
         use crate::vm::value::ObjEnumDef;
@@ -1759,15 +1585,13 @@ mod tests {
 
     #[test]
     fn refcount_boxed_i64_round_trip() {
-        // Reached implicitly via from_i64 outside SMI range; there is no Rc<i64> constructor.
         let big = SMI_MAX + 1;
         let v = NanValue::from_i64(big);
-        // The count is unobservable, but clone+drop must not panic and must round-trip.
         let v2 = v.clone();
         assert_eq!(v.as_i64(), Some(big));
         assert_eq!(v2.as_i64(), Some(big));
         drop(v);
-        drop(v2); // must not double-free the underlying Rc<i64>
+        drop(v2);
     }
 
     #[test]
@@ -1781,9 +1605,8 @@ mod tests {
         drop(v2);
     }
 
-    /// Wrapped is special because its constructor takes a `NanValue`,
-    /// not an `Rc<_>`. Verify the inner NanValue's refcount is preserved
-    /// through a Wrapped clone/drop cycle.
+    /// Wrapped takes a `NanValue` rather than an `Rc<_>`; the inner NanValue's
+    /// refcount is preserved through a Wrapped clone/drop cycle.
     #[test]
     fn refcount_wrapped_preserves_inner_refcount() {
         use crate::vm::value::ObjModule;
@@ -1798,22 +1621,17 @@ mod tests {
         assert_eq!(Rc::strong_count(&inner_rc), baseline + 1);
 
         let wrapped = NanValue::from_wrapped(inner_nan);
-        // The inner Module strong stays at +1: from_module's strong did not move.
         assert_eq!(Rc::strong_count(&inner_rc), baseline + 1);
 
         let wrapped2 = wrapped.clone();
-        // Cloning bumps Rc<WrappedStorage> only; the storage holds the Module once.
         assert_eq!(Rc::strong_count(&inner_rc), baseline + 1);
 
         drop(wrapped);
         assert_eq!(Rc::strong_count(&inner_rc), baseline + 1);
 
         drop(wrapped2);
-        // The last drop frees the storage, dropping its NanValue and decrementing Module.
         assert_eq!(Rc::strong_count(&inner_rc), baseline);
     }
-
-    // ── Display / PartialEq parity with Value (A1.2.2) ────────────────
 
     /// Display of a NanValue must produce the same string as
     /// Display of the corresponding Value, for every variant.
@@ -1835,7 +1653,6 @@ mod tests {
     /// equal exactly when the underlying Values would.
     #[test]
     fn partial_eq_parity_with_value_for_primitives_and_containers() {
-        // Variants where Value defines structural equality.
         let pairs: Vec<(OldValue, OldValue)> = vec![
             (OldValue::Integer(7), OldValue::Integer(7)),
             (OldValue::Integer(7), OldValue::Integer(8)),
@@ -1885,9 +1702,8 @@ mod tests {
         }
     }
 
-    /// PartialEq fast path: same NanValue bit pattern returns true even
-    /// for Closure (where Value::eq would say false). This is a
-    /// strictly-stronger semantic — same Closure compares equal.
+    /// PartialEq: the same NanValue bit pattern compares equal, even for
+    /// Closure.
     #[test]
     fn partial_eq_bit_equal_fast_path_handles_closures() {
         use crate::vm::value::{Function, make_upvalue_int_caches};
@@ -1913,7 +1729,6 @@ mod tests {
         });
         let a = NanValue::from_closure(Rc::clone(&rc));
         let b = a.clone();
-        // Same encoded pointer → same raw bits → fast-path true.
         assert!(
             a == b,
             "NanValue with same closure pointer must compare equal"

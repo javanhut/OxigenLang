@@ -15,15 +15,12 @@ pub fn escape(text: &str) -> String {
     out
 }
 
-/// An Oxigen code card: highlighted at build time, with Copy, and Run plus
-/// "Open in playground" when the example runs on its own. site.js wires the
-/// buttons; the code itself needs no script to read.
+/// An Oxigen code card: highlighted at build time, with Copy, and Run plus "Open in playground" when the example runs on its own.
 pub fn oxi_block(code: &str, runnable: bool) -> String {
     oxi_card(code, runnable, None)
 }
 
-/// [`oxi_block`] with the output of a run already shown under the code, as
-/// the build produced it. Run replaces it with a live run.
+/// [`oxi_block`] with the output of a run already shown under the code.
 pub fn oxi_card(code: &str, runnable: bool, output: Option<&str>) -> String {
     let output = match output {
         Some(text) => format!(
@@ -44,7 +41,7 @@ pub fn oxi_card(code: &str, runnable: bool, output: Option<&str>) -> String {
     )
 }
 
-/// A cheap content hash for cache-busting asset URLs (FNV-1a, hex).
+/// A content hash for cache-busting asset URLs (FNV-1a, hex).
 pub fn fingerprint(bytes: &[u8]) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in bytes {
@@ -54,11 +51,8 @@ pub fn fingerprint(bytes: &[u8]) -> String {
     format!("{:08x}", hash as u32)
 }
 
-/// Put `base` in front of the root-relative URLs in `html`'s attributes, for
-/// a site served below the root of its host: a GitHub project page lives at
-/// `user.github.io/Repo/`, so `/docs/` must become `/Repo/docs/`. Protocol-
-/// relative `//host` URLs and text are left alone; an empty `base` changes
-/// nothing.
+/// Put `base` in front of the root-relative URLs in `html`'s attributes, for a site served below the root of its host (`/docs/` becomes `/Repo/docs/`).
+/// Protocol-relative `//host` URLs and text are left alone; an empty `base` changes nothing.
 pub fn rebase(html: &str, base: &str) -> String {
     if base.is_empty() {
         return html.to_string();

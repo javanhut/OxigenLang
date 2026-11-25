@@ -1,17 +1,6 @@
-//! Regression: a struct is constructible through its module's namespace.
-//!
-//! `introduce .lib` then `lib.Pt(1, 2)` evaluated `lib.Pt` to the struct def,
-//! but the constructor dropped the def and looked it up again by name with
-//! `resolve_field_layout`, which only sees the active scope. The importer
-//! never bound `Pt`, so the call died with "struct 'Pt' is not defined in this
-//! scope" while `introduce {Pt} from .lib` worked.
-//!
-//! Construction through the namespace must behave exactly like construction
-//! through a selective import: same fields, same checks, same values.
-//!
-//! The same goes for annotations: `<lib.Pt>` checks as `Pt`, and `p <lib.Pt>`
-//! builds Pt's zero value through the module, refusing anything that isn't a
-//! struct instead of calling it.
+//! Tests that a struct is constructible through its module's namespace
+//! (`introduce .lib` then `lib.Pt(1, 2)`) exactly like through a selective
+//! import, and that `<lib.Pt>` annotations check as `Pt`.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -177,7 +166,6 @@ fn qualified_zero_value_refuses_non_structs() {
 
 #[test]
 fn bare_zero_value_refuses_non_structs() {
-    // `p <make>` used to call make() and bind its result.
     let cases = [
         (
             "fun make() { 5 }\np <make>\np\n",
@@ -207,8 +195,6 @@ fn bare_zero_value_still_builds_structs() {
 
 #[test]
 fn brace_literal_through_namespace() {
-    // `lib.Pt { ... }` parses like an enum struct variant; the VM builds the
-    // struct when `lib` turns out to be a module.
     let out = run_with_lib(
         "introduce .lib\n[lib.Pt { y: 2, x: 1 }, lib.Pt {}, lib.P3 { x: 1, y: 2, z: 3 }]\n",
         "brace",

@@ -1,16 +1,12 @@
 //! Background processes (`os.spawn`) and signals (`os.signals`).
 //!
 //! A spawned process lives in a process-wide registry and a script holds its
-//! integer id, so a handle crosses into `diverge` tasks like a socket does.
-//! Each part of a child (its stdin, its stdout, the `Child` itself) has its own
-//! lock, so a task blocked reading the output does not stop another from
-//! writing to it or killing it.
+//! integer id. Each part of a child (its stdin, its stdout, the `Child`
+//! itself) has its own lock.
 //!
-//! Children still running when the script ends are stopped: at a normal exit
-//! (an `atexit` hook), and on SIGINT, SIGTERM or SIGHUP the script is not
-//! handling itself. Signals reach the script as messages on a channel, which
-//! a self-pipe and a watcher thread deliver, since a signal handler can do
-//! almost nothing safely.
+//! Children still running when the script ends are stopped: at a normal exit,
+//! and on SIGINT, SIGTERM or SIGHUP the script is not handling itself. Signals
+//! reach the script as messages on a channel.
 
 use crate::vm::value::{Value, ValueRepr, rc_str};
 use std::collections::HashMap;
@@ -57,8 +53,7 @@ fn str_of(v: Option<&Value>) -> Option<String> {
 
 /// `__spawn_process(prog, argv, capture)`: start `prog` with `argv`, its stdin
 /// a pipe the script writes to, and its stdout a pipe when `capture` is true
-/// (inherited otherwise, so a child that prints cannot fill a pipe nobody
-/// reads). stderr is always inherited.
+/// (inherited otherwise). stderr is always inherited.
 fn builtin_spawn_process(args: &[Value]) -> Value {
     let Some(prog) = str_of(args.first()) else {
         return err("os.spawn takes (program, argv)");
@@ -72,8 +67,6 @@ fn builtin_spawn_process(args: &[Value]) -> Value {
         args.get(2).map(|v| v.repr()),
         Some(ValueRepr::Boolean(true))
     );
-    // Before the child starts: a child that could not be stopped at exit
-    // would outlive the script, which is what spawn promises it won't.
     if let Err(e) = signals::watch_for_exit() {
         return err(format!(
             "os.spawn: cannot arrange to stop children at exit: {e}"
@@ -190,8 +183,7 @@ fn try_exit_code(p: &Proc) -> Result<Option<i64>, String> {
 }
 
 /// `__process_wait(p, timeout_ms)`: the exit code, or `None` on timeout.
-/// Polls instead of blocking in `wait`, so the child's lock is free for
-/// `kill` from another task in the meantime.
+/// Polls rather than blocking in `wait`.
 fn builtin_process_wait(args: &[Value]) -> Value {
     let p = match proc_of(args.first(), "wait") {
         Ok(p) => p,
@@ -201,7 +193,6 @@ fn builtin_process_wait(args: &[Value]) -> Value {
         .get(1)
         .and_then(|v| v.as_integer())
         .map(|ms| Instant::now() + Duration::from_millis(ms.max(0) as u64));
-    // Waiting on input it is still being sent would never end.
     lock(&p.stdin).take();
     let mut pause = Duration::from_millis(1);
     loop {
@@ -279,7 +270,6 @@ fn builtin_signals(args: &[Value]) -> Value {
 
 /// Stop every child still running: SIGTERM, a moment to exit, then SIGKILL.
 fn stop_children() {
-    // Never block an exiting process on a registry another thread holds.
     let Some(all) = PROCS
         .get()
         .and_then(|m| m.try_lock().ok())
@@ -292,8 +282,6 @@ fn stop_children() {
         .filter(|p| matches!(try_exit_code(p), Ok(None)))
         .collect();
     for p in &running {
-        // A child that has just exited refuses the signal; the SIGKILL pass
-        // below covers any other failure, and the process is ending anyway.
         let _ = signals::send(p, "TERM");
     }
     let deadline = Instant::now() + Duration::from_millis(200);
@@ -302,8 +290,6 @@ fn stop_children() {
             std::thread::sleep(Duration::from_millis(5));
         }
         if matches!(try_exit_code(p), Ok(None)) {
-            // The last resort while the process exits: there is nobody left to
-            // tell if SIGKILL or reaping fails.
             let _ = lock(&p.child).kill();
             let _ = lock(&p.child).wait();
         }
@@ -370,7 +356,6 @@ mod signals {
     extern "C" fn on_signal(sig: libc::c_int) {
         let byte = sig as u8;
         let fd = PIPE_W.load(Ordering::Relaxed);
-        // write(2) is async-signal-safe; nothing else here may allocate or lock.
         unsafe { libc::write(fd, &byte as *const u8 as *const libc::c_void, 1) };
     }
 
@@ -421,8 +406,6 @@ mod signals {
             }
             return;
         }
-        // Nobody asked for it: end the program as the signal would have, and
-        // its children with it.
         stop_children();
         unsafe {
             libc::signal(sig, libc::SIG_DFL);
@@ -480,7 +463,6 @@ mod signals {
                 return Err("atexit failed".into());
             }
             for &sig in ENDING {
-                // A signal the host or shell ignores (nohup) stays ignored.
                 let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
                 unsafe { libc::sigaction(sig, std::ptr::null(), &mut old) };
                 if old.sa_sigaction != libc::SIG_IGN {
@@ -493,8 +475,6 @@ mod signals {
     }
 }
 
-// ponytail: no signals on Windows, and children are not stopped at exit there;
-// add SetConsoleCtrlHandler and a job object if Windows users need them.
 #[cfg(not(unix))]
 mod signals {
     use super::*;
@@ -534,8 +514,7 @@ pub(crate) fn register(globals: &mut HashMap<String, Value>) {
 }
 
 /// Run `cmd` to completion, feeding it `stdin` when given. The input is
-/// written from another thread, so a child that fills its output pipe before
-/// reading all its input cannot deadlock against us.
+/// written from another thread.
 pub(crate) fn output_with_stdin(
     mut cmd: Command,
     stdin: Option<String>,
@@ -550,13 +529,9 @@ pub(crate) fn output_with_stdin(
         .spawn()?;
     let mut pipe = child.stdin.take().expect("stdin is piped");
     let writer = std::thread::spawn(move || {
-        // A child may exit without reading all its input (`head`), which
-        // shows here as a broken pipe; its exit code says how it went.
         let _ = pipe.write_all(input.as_bytes());
     });
     let out = child.wait_with_output();
-    // The writer only returns or hits the broken pipe above; it cannot fail
-    // in a way the output does not already report.
     let _ = writer.join();
     out
 }

@@ -1,7 +1,5 @@
-//! End-to-end test for `array.pmap` and the spawn/join worker pool it rides on.
-//! `pmap` must run a named function across the pool and return results in input
-//! order. Exercises the whole concurrency stack in one shot: spawn, the
-//! `Sendable` transfer (detach/attach), the elastic worker pool, and join.
+//! End-to-end test for `array.pmap` and the spawn/join worker pool.
+//! `pmap` runs a named function across the pool and returns results in input order, exercising spawn, the `Sendable` transfer (detach/attach), the worker pool, and join.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -21,7 +19,6 @@ fn run(source: &str) -> String {
         .compile(&program)
         .map_err(|e| format!("{:?}", e))
         .expect("compile should succeed");
-    // Workers rebuild a VM from this source to resolve spawned functions by name.
     oxigen_core::concurrent::set_src(source.to_string());
     let mut vm = VM::new();
     vm.run(function)

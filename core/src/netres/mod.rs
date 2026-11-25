@@ -1,20 +1,11 @@
 //! Native network resources for the `net` stdlib.
 //!
-//! Backs the TCP/UDP socket builtins with a process-wide handle registry, and
-//! provides the streaming HTTP helpers (`download`/`upload`) that avoid
-//! buffering whole bodies in memory.
+//! Backs the TCP/UDP socket builtins with a process-wide handle registry, and provides the streaming HTTP helpers (`download`/`upload`) that do not buffer whole bodies in memory.
 //!
-//! A *handle* is an opaque `u64` "ticket number" handed to Oxigen code; the
-//! real OS resource lives here. `close` returns the ticket and is idempotent.
-//! The registry is a global lock-protected table, so a handle works from any
-//! worker thread (lets an accepted socket be handed to a `spawn`ed task).
-//! Because every VM in the process shares it, handle numbers are drawn from a
-//! keyed hash rather than counted up from 1: a script cannot reach another
-//! VM's socket by guessing a small integer.
+//! A handle is an opaque `u64` handed to Oxigen code; the real OS resource lives here. `close` releases it and is idempotent.
+//! The registry is a global lock-protected table, so a handle works from any worker thread. Handle numbers are drawn from a keyed hash.
 //!
-//! Socket reads/writes operate on UTF-8 text (lossy on read). This covers the
-//! common case (HTTP, line protocols, JSON over TCP); binary-safe byte I/O is
-//! intentionally deferred until a concrete need exists.
+//! Socket reads and writes operate on UTF-8 text (lossy on read).
 
 use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
@@ -31,34 +22,24 @@ enum Resource {
     Tcp(TcpStream),
     Listener(TcpListener),
     Udp(UdpSocket),
-    // Own Arc<Mutex> so the registry lock is dropped before the channel wait.
-    // Only an HTTP response makes one, and the wasm build has no HTTP client.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     HttpBody(Arc<Mutex<HttpStream>>),
 }
 
-/// The receiving end of a streaming HTTP body. A background thread owns the
-/// reader and pushes raw byte chunks into `rx`; `carry` holds bytes not yet
-/// returned, including the trailing bytes of a multi-byte UTF-8 char that
-/// landed on a chunk boundary (so `http_read` only ever returns whole
-/// codepoints — critical for token streams with emoji/accents/CJK).
+/// The receiving end of a streaming HTTP body. A background thread owns the reader and pushes raw byte chunks into `rx`; `carry` holds bytes not yet returned, including the trailing bytes of a multi-byte UTF-8 char split across chunks, so `http_read` only returns whole codepoints.
 struct HttpStream {
     rx: Receiver<Vec<u8>>,
     carry: Vec<u8>,
     done: bool,
 }
 
-/// How many 8 KiB chunks may sit unread before the reader thread blocks; see
-/// `spawn_body_reader`.
+/// How many 8 KiB chunks may sit unread before the reader thread blocks; see `spawn_body_reader`.
 #[cfg(not(target_arch = "wasm32"))]
 const BODY_QUEUE_CHUNKS: usize = 8;
 
-/// The longest line `http_read_line` will collect. A server that never sends
-/// a newline would otherwise grow the buffer until the process ran out of
-/// memory.
+/// The longest line `http_read_line` will collect.
 const HTTP_MAX_LINE: usize = 8 * 1024 * 1024;
 
-// One lock so handles cross threads; I/O runs on a cloned fd outside it.
 static REGISTRY: LazyLock<Mutex<HashMap<u64, Resource>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -73,7 +54,6 @@ fn insert(res: Resource) -> u64 {
         let mut hasher = ID_KEY.build_hasher();
         hasher.write_u64(NEXT_ID.fetch_add(1, Ordering::Relaxed));
         let id = hasher.finish() & HANDLE_MASK;
-        // 0 stays free: callers use it as "no socket".
         if id != 0 && !registry.contains_key(&id) {
             registry.insert(id, res);
             return id;
@@ -99,21 +79,9 @@ fn with_udp<T>(id: u64, f: impl FnOnce(&UdpSocket) -> Result<T, String>) -> Resu
     f(&s)
 }
 
-// ── Ports ───────────────────────────────────────────────────────────────
-
-/// Validates a caller-supplied port before the `u16` cast. A bare `port as u16`
-/// silently keeps the low 16 bits, so 74626 quietly connected to 9090, 65616
-/// hit port 80, -1 hit 65535, and 65536 masked to 0 and bound a *random*
-/// ephemeral port while reporting success — a server believing it listens on a
-/// port it does not.
+/// Validates a caller-supplied port before the `u16` cast, rejecting values outside the valid range.
 ///
-/// Judgement call: port 0 is accepted only when `allow_ephemeral` (the bind
-/// paths, `tcp_listen`/`udp_bind`), where "let the OS pick a free port" is a
-/// real and documented use of 0. Connecting or sending *to* port 0 is never
-/// meaningful — it is a reserved number no service can listen on — so those
-/// paths reject it instead of handing the OS a request that can only fail (or,
-/// worse, be reinterpreted). Allowing it everywhere would re-open exactly the
-/// masking bug above for the 65536 case.
+/// Port 0 is accepted only when `allow_ephemeral` (the bind paths, `tcp_listen`/`udp_bind`), where it asks the OS to pick a free port; connecting or sending to port 0 is rejected.
 fn port_u16(port: i64, allow_ephemeral: bool) -> Result<u16, String> {
     let low = if allow_ephemeral { 0 } else { 1 };
     if port < low || port > 65535 {
@@ -122,19 +90,11 @@ fn port_u16(port: i64, allow_ephemeral: bool) -> Result<u16, String> {
     Ok(port as u16)
 }
 
-/// A TCP connect that hangs forever is never what anyone wants: the peer is
-/// down or a firewall is blackholing the SYN, and `crate::concurrent::drain()`
-/// spins at exit until every spawned task finishes, so one stuck connect wedges
-/// process exit until SIGKILL. Only the handshake is bounded — `accept` and
-/// `receive` block on purpose and keep today's behaviour. Name resolution is
-/// still bounded only by the OS resolver.
+/// The timeout bounding a TCP connect handshake. `accept` and `receive` are not bounded by it, and name resolution is bounded only by the OS resolver.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-
-// ── TCP ─────────────────────────────────────────────────────────────────
 
 pub fn tcp_connect(host: &str, port: i64) -> Result<u64, String> {
     let port = port_u16(port, false)?;
-    // connect_timeout needs a resolved address; try each A/AAAA candidate.
     let addrs: Vec<_> = (host, port)
         .to_socket_addrs()
         .map_err(|e| e.to_string())?
@@ -159,7 +119,6 @@ pub fn tcp_listen(host: &str, port: i64) -> Result<u64, String> {
 }
 
 pub fn tcp_accept(id: u64) -> Result<u64, String> {
-    // Clone so the registry lock is released before the blocking accept.
     let listener = match REGISTRY.lock().unwrap().get(&id) {
         Some(Resource::Listener(l)) => l.try_clone().map_err(|e| e.to_string())?,
         Some(_) => return Err(format!("handle {} is not a TCP server", id)),
@@ -169,13 +128,8 @@ pub fn tcp_accept(id: u64) -> Result<u64, String> {
     Ok(insert(Resource::Tcp(stream)))
 }
 
-/// Bound how long a `tcp_receive` on this connection waits for data. `ms == 0`
-/// restores the default of waiting forever.
-///
-/// Without this an idle peer holds its reader indefinitely, which is fatal to a
-/// thread-per-connection server: a keep-alive client that stops sending pins one
-/// worker for good, and enough of them wedge the whole server. A timed-out read
-/// reports EOF (see `tcp_receive`), so the reader just sees the connection end.
+/// Bound how long a `tcp_receive` on this connection waits for data. `ms == 0` restores the default of waiting forever.
+/// A timed-out read reports EOF (see `tcp_receive`).
 pub fn tcp_set_read_timeout(id: u64, ms: i64) -> Result<(), String> {
     if ms < 0 {
         return Err("set_read_timeout: milliseconds must not be negative".to_string());
@@ -194,29 +148,21 @@ pub fn tcp_send(id: u64, data: &str) -> Result<i64, String> {
     })
 }
 
-/// One socket read never usefully needs a buffer larger than this; see
-/// `tcp_receive`.
+/// The largest buffer one socket read uses; see `tcp_receive`.
 const TCP_READ_CHUNK: usize = 64 * 1024;
 
-/// Larger than any datagram that can be delivered, so a UDP read is never
-/// truncated by the buffer; see `udp_receive`.
+/// Larger than any deliverable datagram; see `udp_receive`.
 const UDP_MAX_DATAGRAM: usize = 64 * 1024;
 
-/// Reads up to `max` bytes. Returns `""` on a clean EOF (peer closed), and also
-/// when a `tcp_set_read_timeout` deadline passes with nothing to read — an idle
-/// peer is indistinguishable from a departed one to a caller that asked to stop
-/// waiting, and reporting it as an error would turn every timeout into a raised
-/// failure the caller has to unwrap.
+/// Reads up to `max` bytes. Returns `""` on a clean EOF (peer closed), and also when a `tcp_set_read_timeout` deadline passes with nothing to read.
 pub fn tcp_receive(id: u64, max: i64) -> Result<String, String> {
     if max <= 0 {
         return Err("receive: max bytes must be positive".to_string());
     }
     with_tcp(id, |s| {
-        // Cap the buffer: a caller's i64::MAX asked for 9.2EB and aborted.
         let mut buf = vec![0u8; (max as usize).min(TCP_READ_CHUNK)];
         let n = match s.read(&mut buf) {
             Ok(n) => n,
-            // Both kinds appear here: WouldBlock on Unix, TimedOut on Windows.
             Err(e)
                 if matches!(
                     e.kind(),
@@ -232,9 +178,7 @@ pub fn tcp_receive(id: u64, max: i64) -> Result<String, String> {
     })
 }
 
-/// Writes the file at `path` to a TCP connection unchanged and returns how
-/// many bytes went out. `tcp_send` takes text, so this is how a server sends
-/// a binary file (an image, a font) without corrupting it.
+/// Writes the file at `path` to a TCP connection unchanged and returns how many bytes went out. Used to send binary files.
 pub fn tcp_send_file(id: u64, path: &str) -> Result<i64, String> {
     let mut file = File::open(path).map_err(|e| format!("send_file: {}: {}", path, e))?;
     with_tcp(id, |s| {
@@ -243,8 +187,6 @@ pub fn tcp_send_file(id: u64, path: &str) -> Result<i64, String> {
         Ok(n as i64)
     })
 }
-
-// ── UDP ─────────────────────────────────────────────────────────────────
 
 pub fn udp_bind(host: &str, port: i64) -> Result<u64, String> {
     let port = port_u16(port, true)?;
@@ -263,18 +205,12 @@ pub fn udp_send(id: u64, data: &str, host: &str, port: i64) -> Result<i64, Strin
 
 /// Reads one datagram of up to `max` bytes. Returns `(data, sender_address)`.
 ///
-/// A datagram larger than `max` is an **error**, not a short read. UDP has no
-/// stream to resume from: the OS discards the part that does not fit, so the
-/// lost bytes are unrecoverable and the caller cannot even tell it happened —
-/// `udp_receive(h, 4)` on a 16-byte datagram used to return `"0123"` and drop
-/// 12 bytes silently. Erroring is the only honest option; a caller who wants
-/// whatever fits can ask for `UDP_MAX_DATAGRAM` and never see this.
+/// A datagram larger than `max` is an error, not a short read.
 pub fn udp_receive(id: u64, max: i64) -> Result<(String, String), String> {
     if max <= 0 {
         return Err("udp_receive: max bytes must be positive".to_string());
     }
     with_udp(id, |s| {
-        // Read one byte past max: an exact fit also gives n == max, so only n > max proves truncation.
         let want = max as usize;
         let mut buf = vec![0u8; want.saturating_add(1).min(UDP_MAX_DATAGRAM)];
         let (n, addr) = s.recv_from(&mut buf).map_err(|e| e.to_string())?;
@@ -291,18 +227,12 @@ pub fn udp_receive(id: u64, max: i64) -> Result<(String, String), String> {
     })
 }
 
-// ── Lifecycle ─────────────────────────────────────────────────────────────
-
-/// Closes a handle and frees its slot. Idempotent — closing an unknown or
-/// already-closed handle is a no-op.
+/// Closes a handle and frees its slot. Closing an unknown or already-closed handle is a no-op.
 pub fn close(id: u64) {
     REGISTRY.lock().unwrap().remove(&id);
 }
 
-// ── Streaming HTTP ────────────────────────────────────────────────────────
-
-/// Why HTTP fails in a browser build: rustls's `ring` cannot target
-/// wasm32-unknown-unknown, so that build has no HTTP client.
+/// Why HTTP fails in a browser build: that build has no HTTP client.
 pub const NO_HTTP: &str = "http is not available in this build of Oxigen (WebAssembly)";
 
 #[cfg(target_arch = "wasm32")]
@@ -331,9 +261,7 @@ pub fn http_upload(
     Err(NO_HTTP.into())
 }
 
-/// Streams a response body to `path` without buffering it in memory, so a
-/// binary body (audio, an image) reaches the file byte for byte. `method` and
-/// `body` work as in `http_open`. Returns the HTTP status code.
+/// Streams a response body to `path` without buffering it in memory. `method` and `body` work as in `http_open`. Returns the HTTP status code.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn http_download(
     url: &str,
@@ -352,12 +280,9 @@ pub fn http_download(
 }
 
 /// Opens a streaming HTTP request and stashes the response body behind a handle.
-/// Read it line by line with `http_read_line` (the easy path) or byte-wise with
-/// `http_read`; `close` frees it. The body is never buffered whole in memory.
+/// Read it line by line with `http_read_line` or byte-wise with `http_read`; `close` frees it. The body is never buffered whole in memory.
 ///
-/// `method` is GET/POST/PUT/PATCH; `body` is sent for the body methods and
-/// ignored for GET. This is what lets you stream a real LLM API — POST the
-/// model+prompt and read the tokens back.
+/// `method` is GET/POST/PUT/PATCH; `body` is sent for the body methods and ignored for GET.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn http_open(
     method: &str,
@@ -407,20 +332,9 @@ fn send_request(
     .map_err(|e| format!("http error: {}", e))
 }
 
-/// Drains a response body on a background thread into a channel so reads can be
-/// polled with a timeout instead of blocking the interpreter. The thread ends at
-/// EOF, on error, or when the consumer drops the stream (`close`). A thread blocked in
-/// `read` at close lingers until the next byte or EOF.
+/// Drains a response body on a background thread into a bounded channel so reads can be polled with a timeout. The thread ends at EOF, on error, or when the consumer drops the stream (`close`).
 ///
-/// The channel is *bounded*, which is what makes the "never buffered whole in
-/// memory" promise true: on an unbounded channel the reader drained the socket
-/// as fast as the network delivered it, so a slow consumer on a fast stream
-/// accumulated the entire body in the queue. With a bound the reader blocks in
-/// `send` and back-pressure reaches the TCP window. Ceiling is
-/// `(BODY_QUEUE_CHUNKS + 1) * 8 KiB` ≈ 72 KiB per open stream. A consumer that
-/// drops the stream while the reader is parked in `send` wakes it with a
-/// disconnect error, so the close path terminates the thread as before (it now
-/// terminates in strictly more cases than the unbounded version did).
+/// The channel holds at most `(BODY_QUEUE_CHUNKS + 1) * 8 KiB` per open stream; a full channel blocks the reader.
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn_body_reader(mut reader: Box<dyn Read + Send>) -> u64 {
     let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(BODY_QUEUE_CHUNKS);
@@ -445,14 +359,9 @@ fn spawn_body_reader(mut reader: Box<dyn Read + Send>) -> u64 {
     }))))
 }
 
-/// Reads the next newline-delimited line from a stream, without the trailing
-/// newline — the easy way to consume NDJSON/SSE token streams (each call returns
-/// one complete line, so the caller just parses it).
+/// Reads the next newline-delimited line from a stream, without the trailing newline.
 ///
-/// `timeout_ms == 0` blocks until a line or EOF; `> 0` returns `Ok(None)` if no
-/// full line arrived in time. Returns `Ok(Some(""))` at end of stream (NDJSON
-/// has no blank lines, so "" reliably means EOF there). A line never splits a
-/// codepoint — `\n` is one byte — so it is always returned as valid UTF-8.
+/// `timeout_ms == 0` blocks until a line or EOF; `> 0` returns `Ok(None)` if no full line arrived in time. Returns `Ok(Some(""))` at end of stream. The line is always valid UTF-8.
 pub fn http_read_line(id: u64, timeout_ms: i64) -> Result<Option<String>, String> {
     let stream = match REGISTRY.lock().unwrap().get(&id) {
         Some(Resource::HttpBody(s)) => Arc::clone(s),
@@ -461,15 +370,13 @@ pub fn http_read_line(id: u64, timeout_ms: i64) -> Result<Option<String>, String
     };
     let mut st = stream.lock().unwrap();
 
-    // Bytes already searched for a newline; rescanning the whole buffer per
-    // chunk made a long line quadratic.
     let mut scanned = 0;
     loop {
         if let Some(off) = st.carry[scanned..].iter().position(|&b| b == b'\n') {
             let pos = scanned + off;
             let line: Vec<u8> = st.carry.drain(..=pos).collect();
             let text = String::from_utf8_lossy(&line[..line.len() - 1]);
-            return Ok(Some(text.trim_end_matches('\r').to_string())); // tolerate CRLF
+            return Ok(Some(text.trim_end_matches('\r').to_string()));
         }
         scanned = st.carry.len();
         if st.carry.len() > HTTP_MAX_LINE {
@@ -480,7 +387,6 @@ pub fn http_read_line(id: u64, timeout_ms: i64) -> Result<Option<String>, String
             ));
         }
         if st.done {
-            // No newline left: flush any remaining bytes as the last line, "" = EOF.
             let out = String::from_utf8_lossy(&st.carry).into_owned();
             st.carry.clear();
             return Ok(Some(out));
@@ -503,14 +409,11 @@ pub fn http_read_line(id: u64, timeout_ms: i64) -> Result<Option<String>, String
 
 /// Reads up to `max` bytes of valid UTF-8 from an HTTP stream handle.
 ///
-/// `timeout_ms == 0` blocks until data or EOF. `timeout_ms > 0` waits at most
-/// that long and returns `Ok(None)` if nothing arrived yet (so a caller can
-/// animate a spinner and retry). Returns:
+/// `timeout_ms == 0` blocks until data or EOF. `timeout_ms > 0` waits at most that long. Returns:
 ///   - `Ok(Some(text))` — `text` is "" only at end of stream
 ///   - `Ok(None)`       — timed out with no data yet
 ///
-/// A multi-byte codepoint can straddle a chunk boundary; we hold the incomplete
-/// trailing bytes in `carry` and only ever return whole characters.
+/// Only whole characters are returned.
 pub fn http_read(id: u64, max: i64, timeout_ms: i64) -> Result<Option<String>, String> {
     if max <= 0 {
         return Err("read_chunk: max bytes must be positive".to_string());
@@ -522,7 +425,6 @@ pub fn http_read(id: u64, max: i64, timeout_ms: i64) -> Result<Option<String>, S
     };
     let mut st = stream.lock().unwrap();
 
-    // Pull from the channel until we hold at least one whole char, or hit EOF.
     while !has_whole_char(&st.carry) && !st.done {
         let next = if timeout_ms > 0 {
             match st.rx.recv_timeout(Duration::from_millis(timeout_ms as u64)) {
@@ -540,17 +442,15 @@ pub fn http_read(id: u64, max: i64, timeout_ms: i64) -> Result<Option<String>, S
     }
 
     if st.carry.is_empty() {
-        return Ok(Some(String::new())); // EOF, nothing buffered
+        return Ok(Some(String::new()));
     }
 
-    // Return up to `max` bytes without splitting a multi-byte char.
     let cap = (max as usize).min(st.carry.len());
     let end = match std::str::from_utf8(&st.carry[..cap]) {
         Ok(_) => cap,
         Err(e) => e.valid_up_to(),
     };
     if end == 0 {
-        // Char wider than `max`, or a truncated tail at EOF: emit to progress.
         let out = String::from_utf8_lossy(&st.carry).into_owned();
         st.carry.clear();
         return Ok(Some(out));
@@ -590,7 +490,6 @@ pub fn http_upload(
     let resp = req.send(file).map_err(|e| format!("http error: {}", e))?;
     let status = resp.status().as_u16();
     let (_, mut body) = resp.into_parts();
-    // A failed read must not masquerade as an empty body.
     let body_str = body
         .read_to_string()
         .map_err(|e| format!("http error: reading response body: {}", e))?;

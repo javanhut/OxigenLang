@@ -121,7 +121,6 @@ fn lock_is_deep() {
 
 #[test]
 fn locked_value_stays_locked_under_other_names() {
-    // Passing it on or giving it another name does not unlock it.
     assert_error(
         "fun add_one(xs) {\n    push(xs, 1)\n}\nlock xs = [0]\nadd_one(xs)\n",
         "push() cannot change a locked array",
@@ -165,8 +164,6 @@ total * 10 + cfg["w"]
 
 #[test]
 fn methods_on_locked_struct_cannot_write_fields() {
-    // Warm the JIT's field caches on an unlocked instance of the same struct
-    // first, so the locked one has to be caught per instance.
     assert_error(
         r#"
 struct Counter {

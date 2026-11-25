@@ -27,16 +27,12 @@ introduce array
 }
 
 <test>("stringify round-trips through parse") {
-    // stringify emits compact form: parse tolerates the spaces, output drops them.
     compact := "\{\"z\":[1,\{\"q\":false}]}"
     expect(json.stringify(json.parse("\{\"z\": [1, \{\"q\": false}]}"))).eq(compact)
     expect(json.stringify(json.parse(compact))).eq(compact)
 }
 
 <test>("parse failure is a propagating error") {
-    // json.parse raises rather than returning an error value, so it needs
-    // <guard> to be observed — unlike encoding.base64_decode, which is
-    // catchable with is_error().
     expect(json.parse("\{nope") guard _err -> "recovered").eq("recovered")
 }
 
@@ -100,9 +96,6 @@ introduce array
     expect(json.stringify(json.deep_merge(a, b))).eq("\{\"n\":5}")
 }
 
-// ── Arrays of records ──
-// The third record has no "person" key, which set_where must skip rather than
-// error on.
 fun sample_records() { json.parse("\{\"information\": [\{\"person\": \"john\", \"info\": \{\"age\": 32, \"job\": \"unemployed\"}}, \{\"person\": \"jane\"}, \{\"info\": \{\"age\": 28}}]}").information }
 
 <test>("set_where updates a matching record and keeps its other fields") {
@@ -125,7 +118,6 @@ fun sample_records() { json.parse("\{\"information\": [\{\"person\": \"john\", \
 }
 
 <test>("set_where skips records without the key") {
-    // The keyless record must neither match nor be disturbed.
     people <array> := json.set_where(sample_records(), "person", "john", {"info": {"job": "developer"}})
     expect(people[2].info.age).eq(28)
     expect(has(people[2], "person")).falsy()

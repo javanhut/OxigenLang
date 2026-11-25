@@ -7,8 +7,7 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
 pub fn run_repl() {
-    // Large-stack thread so a tiered-up function has room for its native frames.
-    const STACK_SIZE: usize = 256 << 20; // 256 MB
+    const STACK_SIZE: usize = 256 << 20;
     std::thread::Builder::new()
         .stack_size(STACK_SIZE)
         .spawn(repl_loop)
@@ -21,9 +20,7 @@ fn repl_loop() {
     let prompt = ">> ";
     let mut rl = DefaultEditor::new().expect("Failed to initialize line editor");
 
-    // One persistent VM per session, so top-level declarations carry across lines.
     let mut vm = VM::new();
-    // The REPL has no argv, but os.args() must resolve rather than raise.
     vm.set_script_args(&[]);
 
     println!("Oxigen REPL");
@@ -60,10 +57,8 @@ fn repl_loop() {
     }
 }
 
-/// Compile and run a single line on the persistent VM, printing the result
-/// unless it is None. Parse, compile, and runtime errors are reported inline
-/// and do not end the session; after a runtime error the VM's transient state
-/// is reset so the next line runs against a balanced stack.
+/// Compile and run a single line on the persistent VM, printing the result unless it is None.
+/// Parse, compile, and runtime errors are reported inline and do not end the session.
 fn eval_line(vm: &mut VM, line: &str) {
     let lexer = Lexer::new(line);
     let mut parser = Parser::new(lexer, line);
@@ -85,7 +80,6 @@ fn eval_line(vm: &mut VM, line: &str) {
     };
 
     vm.set_source(line);
-    // Tasks spawned from now on run against every line so far.
     let unit = oxigen_core::concurrent::unit_of(&function);
     oxigen_core::concurrent::register_program(&function, &program, line, None, true);
     match vm.run(function) {

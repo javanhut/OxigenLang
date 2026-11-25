@@ -1,18 +1,7 @@
-//! A worker rebuilds a spawned function from source, so it has to find the
-//! same code the spawner ran. It used to look code up by a compile-order id
-//! that restarts at 0 for every compiled file, in the main program's table
-//! only, and named functions by bare name in the main program's globals. A
-//! `diverge` inside an imported module then ran whichever main-program
-//! function had the same id or name: a different function, the whole main
-//! script again (recursing until the stack overflowed), or nothing at all
-//! ("function #4 not found").
+//! A worker rebuilds a spawned function or struct from source and must find the same code the spawner ran.
+//! Covers `diverge` inside an imported module and structs defined in a module crossing threads.
 //!
-//! Structs had the same problem: a worker looked a struct up by bare name in
-//! the main program, so a struct defined in a module could not cross threads
-//! at all, and the failure was an uncatchable error that ended the program.
-//!
-//! Every case runs the real CLI in its own process, because the worker pool
-//! is process-global.
+//! Every case runs the real CLI in its own process.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,8 +27,7 @@ fn temp_dir(label: &str) -> PathBuf {
     dir
 }
 
-/// Write `files` into a fresh directory and run the first one, killing it
-/// after `limit` so a hang fails the test instead of the CI job.
+/// Write `files` into a fresh directory and run the first one, killing it after `limit`.
 fn run_files(label: &str, files: &[(&str, &str)], limit: Duration) -> Output {
     let dir = temp_dir(label);
     for (name, source) in files {
@@ -160,8 +148,6 @@ fn a_capturing_block_in_a_module_runs_on_a_worker() {
 
 #[test]
 fn a_spawned_module_function_sees_its_own_modules_helpers() {
-    // `helper` and `base` exist only in the module; main has a `helper` of
-    // its own that must not be the one called.
     let out = run_files(
         "spawn-mod-helpers",
         &[
@@ -181,8 +167,6 @@ fn a_spawned_module_function_sees_its_own_modules_helpers() {
 
 #[test]
 fn a_nested_named_function_is_not_resolved_by_name_in_main() {
-    // `inner` is a named function inside another function, so it is not a
-    // global anywhere. Spawning it by name used to find main's `inner`.
     let out = run_files(
         "spawn-nested-named",
         &[(
@@ -231,9 +215,6 @@ fn a_struct_from_a_module_goes_into_a_task() {
 
 #[test]
 fn a_struct_the_receiver_cannot_rebuild_is_a_catchable_error() {
-    // Only the worker imports `shapes` (inside the task's call), so the main
-    // thread has no definition of `Point` to rebuild the result with. That
-    // used to raise an uncatchable error and end the program.
     let out = run_files(
         "struct-unknown",
         &[

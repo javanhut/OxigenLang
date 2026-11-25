@@ -1,16 +1,5 @@
-//! Division and modulo by zero are an error for every numeric type.
-//!
-//! Integers and uints already errored, but the float and mixed int/float arms
-//! fell through to IEEE semantics and produced `inf`, `-inf` or `NaN`. That
-//! contradicted the documented contract ("Division `/` and modulo `%` by zero
-//! produce an error") and, worse, was silent: the poisoned value propagated
-//! through every later computation and surfaced somewhere unrelated.
-//!
-//! Every backend routes through `VM::binary_div` / `binary_mod` — the JIT's
-//! `jit_op_div` / `jit_op_mod` delegate to them, and constant folding refuses
-//! to fold a zero divisor — so the check lives in one place. These tests assert
-//! both engines agree anyway, since that is exactly the kind of thing that
-//! drifts.
+//! Division and modulo by zero are an error for every numeric type, on both
+//! the interpreter and the JIT.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -60,7 +49,6 @@ fn assert_both_yield(source: &str, expected: &str) {
 
 #[test]
 fn float_division_by_zero_is_an_error() {
-    // Was: inf / -inf / NaN.
     for source in ["1.0 / 0.0", "-1.0 / 0.0", "0.0 / 0.0", "1.0 / 0", "1 / 0.0"] {
         assert_both_reject(source, "division by zero");
     }
@@ -75,8 +63,6 @@ fn float_modulo_by_zero_is_an_error() {
 
 #[test]
 fn negative_zero_is_still_zero() {
-    // `-0.0 == 0.0` in IEEE, so the divisor check has to catch it; otherwise
-    // `1.0 / -0.0` slips through as -inf.
     assert_both_reject("z := -0.0\n1.0 / z", "division by zero");
     assert_both_reject("z := -0.0\n1.0 % z", "modulo by zero");
 }
@@ -89,10 +75,6 @@ fn integer_and_uint_division_by_zero_still_errors() {
 
 #[test]
 fn the_message_is_the_same_for_ints_and_floats() {
-    // One shared constructor, so a reader can't tell which type failed from
-    // the wording — and the two can't drift apart. Compare the headline only:
-    // the rendered error also quotes the offending source line, which of course
-    // differs between the two programs.
     let headline = |source: &str| {
         run_on(VM::new_interpreter(), source)
             .unwrap_err()
@@ -117,11 +99,6 @@ fn ordinary_division_is_unchanged() {
 
 #[test]
 fn a_hot_loop_agrees_across_backends() {
-    // Enough iterations to tier the function up, so the JIT's div helper is
-    // the one answering rather than the interpreter.
-    // NB: `t = t + d(...)` — accumulating a call's float result — is avoided
-    // here on purpose. It loses an iteration under the JIT, a pre-existing bug
-    // unrelated to division; see the report accompanying this change.
     assert_both_yield(
         "fun d(a <float>, b <float>) { a / b }\nlast <float> := 0.0\neach i in range(200) { last = d(10.0, 4.0) }\nlast",
         "2.5",

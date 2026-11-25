@@ -17,15 +17,12 @@ fn parse_ok(input: &str) -> Program {
 
 #[test]
 fn test_call_args_span_multiple_lines_with_trailing_comma() {
-    // A call's arguments may span newlines, with an optional trailing comma.
     let program = parse_ok("f(\n    1,\n    2,\n    3,\n)");
     match &program.statements[0] {
         Statement::Expr(Expression::Call { args, .. }) => assert_eq!(args.len(), 3),
         other => panic!("expected a call expression, got {:?}", other),
     }
 }
-
-// ==================== LITERAL PARSING TESTS ====================
 
 #[test]
 fn test_parse_integer_literal() {
@@ -68,7 +65,6 @@ fn test_parse_char_literal() {
 
 #[test]
 fn test_parse_string_literals() {
-    // Double quotes
     let program = parse_ok("\"hello\"");
     match &program.statements[0] {
         Statement::Expr(Expression::Str { value, .. }) => {
@@ -77,7 +73,6 @@ fn test_parse_string_literals() {
         _ => panic!("Expected string expression"),
     }
 
-    // Single quotes
     let program = parse_ok("'world'");
     match &program.statements[0] {
         Statement::Expr(Expression::Str { value, .. }) => {
@@ -170,14 +165,9 @@ fn test_parse_empty_multiline_array() {
     }
 }
 
-// ==================== EXPRESSION PARSING TESTS ====================
-
 #[test]
 fn test_parse_prefix_expressions() {
-    let tests = vec![
-        ("-5", "-", 5i64),
-        ("!True", "!", 0), // Can't easily check bool, just verify it parses
-    ];
+    let tests = vec![("-5", "-", 5i64), ("!True", "!", 0)];
 
     for (input, expected_op, _) in tests {
         let program = parse_ok(input);
@@ -344,8 +334,6 @@ fn test_parse_index_expression() {
     }
 }
 
-// ==================== STATEMENT PARSING TESTS ====================
-
 #[test]
 fn test_parse_let_statement() {
     let program = parse_ok("x := 5");
@@ -384,7 +372,6 @@ fn test_parse_each_statement() {
 
 #[test]
 fn test_empty_loop_bodies_are_not_struct_literals() {
-    // `items {}` used to parse as an empty struct literal, leaving no body.
     let program = parse_ok(
         "each x in items {}
 each x in b.items {
@@ -428,7 +415,6 @@ each p in f(Pt {}) {}
         }
         other => panic!("Expected each over an array, got {other:?}"),
     }
-    // A block inside the header is ordinary code: `q := Pt {}` is a literal.
     parse_ok("each x in g(fun() {\n    q := Pt {}\n    q\n}) {}\n");
 }
 
@@ -456,7 +442,6 @@ fn test_parse_repeat_unless_statement() {
         Statement::Repeat {
             condition, body, ..
         } => {
-            // Negated, not inverted: `x <= 0` differs from `not (x > 0)` for NaN.
             match condition {
                 Expression::Prefix { operator, .. } => assert_eq!(operator, "not"),
                 _ => panic!("Expected negated repeat condition"),
@@ -882,8 +867,6 @@ fn test_parse_skip_stop() {
     assert!(matches!(program.statements[0], Statement::Stop { .. }));
 }
 
-// ==================== OPERATOR PRECEDENCE TESTS ====================
-
 #[test]
 fn test_operator_precedence() {
     let tests = vec![
@@ -892,13 +875,10 @@ fn test_operator_precedence() {
         ("a + b * c + d / e - f", "(((a + (b * c)) + (d / e)) - f)"),
     ];
 
-    // A full precedence test would need expression stringification.
     for (input, _expected) in tests {
         let _ = parse_ok(input);
     }
 }
-
-// ==================== TYPED DECLARATION TESTS ====================
 
 #[test]
 fn test_parse_typed_let_strict() {
@@ -961,7 +941,6 @@ fn test_parse_assign() {
 
 #[test]
 fn test_parse_less_than_not_typed() {
-    // x < 10 should still parse as infix comparison, not typed declaration
     let program = parse_ok("x < 10");
     match &program.statements[0] {
         Statement::Expr(Expression::Infix { operator, .. }) => {
@@ -973,7 +952,6 @@ fn test_parse_less_than_not_typed() {
 
 #[test]
 fn test_parse_struct_type_annotation() {
-    // Unknown type names are now parsed as struct types (validated at eval time)
     let program = parse_ok("x <Person> = 1");
     match &program.statements[0] {
         Statement::TypedLet { name, type_ann, .. } => {
@@ -1011,7 +989,6 @@ fn test_parse_qualified_type_annotation() {
         parameters[0].type_ann,
         Some(TypeAnnotation::Union(vec![pt(), TypeAnnotation::Int]))
     );
-    // Checked by name, like a struct imported with `introduce {Pt} from shapes`.
     assert_eq!(pt().type_name(), "Pt");
 }
 
@@ -1026,8 +1003,6 @@ fn test_qualified_builtin_type_is_an_error() {
         errors
     );
 }
-
-// ==================== FUNCTION PARSING TESTS ====================
 
 #[test]
 fn test_parse_anonymous_function() {
@@ -1172,14 +1147,9 @@ fn test_parse_let_with_function_value() {
     }
 }
 
-// ==================== ERROR HANDLING TESTS ====================
-
 #[test]
 fn test_parser_errors() {
-    let tests = vec![
-        ("x :=", "unexpected token"),  // Missing value after :=
-        ("each x in { }", "expected"), // {} parses as empty map, then block '{' is missing
-    ];
+    let tests = vec![("x :=", "unexpected token"), ("each x in { }", "expected")];
 
     for (input, expected_error) in tests {
         let (_, errors) = parse(input);
@@ -1195,8 +1165,6 @@ fn test_parser_errors() {
         );
     }
 }
-
-// ==================== STRUCT PARSING TESTS ====================
 
 #[test]
 fn test_parse_struct_definition() {
@@ -1314,8 +1282,6 @@ fn test_parse_struct_literal() {
     }
 }
 
-// ==================== TUPLE AND MAP PARSING TESTS ====================
-
 #[test]
 fn test_parse_tuple_literal() {
     let program = parse_ok("(1, 2, 3)");
@@ -1379,8 +1345,6 @@ fn test_parse_empty_map() {
         other => panic!("Expected empty MapLiteral, got {:?}", other),
     }
 }
-
-// ==================== HIDE / SELF / TYPED PARAM PARSER TESTS ====================
 
 #[test]
 fn test_parse_hide_struct_field() {
@@ -1474,7 +1438,6 @@ fn test_parse_string_interpolation_with_function_call() {
 
 #[test]
 fn test_parse_string_no_interpolation() {
-    // No braces means plain string, not interpolation
     let program = parse_ok("\"hello world\"");
     match &program.statements[0] {
         Statement::Expr(Expression::Str { value, .. }) => {
@@ -1483,8 +1446,6 @@ fn test_parse_string_no_interpolation() {
         _ => panic!("Expected plain Str expression"),
     }
 }
-
-// ==================== <test> BLOCK PARSING TESTS ====================
 
 #[test]
 fn test_parse_test_block() {
@@ -1505,17 +1466,13 @@ fn test_parse_test_block() {
 
 #[test]
 fn test_parse_test_block_does_not_break_comparisons() {
-    // A bare `<` that is not `<test` must parse as a normal prefix expression.
     let program = parse_ok("x := 1\nx < 2");
     assert_eq!(program.statements.len(), 2);
     assert!(!matches!(program.statements[1], Statement::Test { .. }));
 }
 
-// ============ CONTEXTUAL `includes` KEYWORD TESTS ============
-
 #[test]
 fn test_includes_as_function_name() {
-    // `includes` must work as a normal function name, not only as the block keyword.
     let program = parse_ok("fun includes(arr <array>, val <generic>) {\n    val\n}");
     assert_eq!(program.statements.len(), 1);
     match &program.statements[0] {
@@ -1549,7 +1506,6 @@ fn test_includes_block_still_parses() {
 
 #[test]
 fn test_fun_followed_by_keyword_does_not_hang() {
-    // `fun <keyword>` used to spin forever because synchronize() stopped without consuming.
     let (_program, errors) = parse("fun struct {\n}");
     assert!(!errors.is_empty(), "expected a parse error, got none");
 }

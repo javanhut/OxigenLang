@@ -35,8 +35,6 @@ introduce strings
     expect(strings.lines("a\nb\nc")).eq(["a", "b", "c"])
 }
 
-// Byte-offset slicing used to abort the whole process on any of these: a slice
-// that ends inside a multi-byte character is not a string.
 <test>("searching and capitalizing non-ASCII text") {
     expect(strings.capitalize("élan")).eq("Élan")
     expect(strings.capitalize("ß")).eq("SS")

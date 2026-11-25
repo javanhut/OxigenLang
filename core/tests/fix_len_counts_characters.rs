@@ -1,11 +1,5 @@
-//! Regression: `len` of a string counts characters, like indexing, slicing
-//! and `each` do.
-//!
-//! `docs/builtins.md` says `len` returns "the number of characters in a
-//! string", but the builtin returned `s.len()` — UTF-8 bytes. With slices now
-//! counting characters, `s[len(s) - 1]` on non-ASCII text indexed past the
-//! end, and `len("héllo")` disagreed with the five iterations of
-//! `each c in "héllo"`.
+//! Tests that `len` of a string counts characters, like indexing, slicing and
+//! `each` do.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;

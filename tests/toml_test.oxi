@@ -32,7 +32,6 @@ introduce array
 }
 
 <test>("parse failure is a propagating error") {
-    // Like json.parse, toml.parse raises rather than returning an error value.
     expect(toml.parse("= = =") guard _err -> "recovered").eq("recovered")
 }
 
@@ -100,7 +99,6 @@ introduce array
     expect(toml.deep_merge(a, {"n": 5})["n"]).eq(5)
 }
 
-// ── Arrays of tables ──
 fun sample_products() { toml.parse("[[products]]\nname = \"hammer\"\nsku = 1\n\n[[products]]\nname = \"nail\"\nsku = 2\n").products }
 
 <test>("set_where updates a matching table") {

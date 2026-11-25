@@ -30,8 +30,6 @@ introduce ansi
 }
 
 <test>("coloring is composable") {
-    // Nesting reinstates a reset in the middle; the outer color still opens
-    // and the whole string still ends reset.
     inner := ansi.add_color("x", ansi.ForeGroundColors.Red)
     outer := ansi.add_modifier(inner, ansi.ModCodes.Bold)
     expect(outer).eq("\e[1m\e[31mx\e[0m\e[0m")

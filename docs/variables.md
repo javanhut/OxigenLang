@@ -161,7 +161,7 @@ push(static_arr, 4)     // error: push() cannot change a locked array
 
 - **The value is copied, then locked.** `lock` takes its own copy, so the original (`arr`) stays changeable and later changes to it don't show up in `static_arr`.
 - **The lock is deep.** Arrays, maps, sets and structs inside the value are locked too: `lock grid = [[1, 2], [3, 4]]` refuses `grid[0][1] = 9` and `push(grid[0], 5)`.
-- **The lock travels with the value.** Passing it to a function or giving it another name (`ys := static_arr`) doesn't unlock it.
+- **The lock travels with the value.** Passing it to a function, giving it another name (`ys := static_arr`) or sending it to a [`diverge`](concurrency.md#what-can-cross-threads) task doesn't unlock it.
 - **The variable can never change.** `=`, `:=`, `++`, `--`, `+=`, `-=`, `*=` and `/=` on it are all compile errors, and `lock x = ...` can't redeclare an existing name.
 - **Reading is unaffected.** Indexing, `len`, `has`, `each` and other reads work as normal.
 

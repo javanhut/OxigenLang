@@ -7,60 +7,55 @@ pub enum TokenType {
     Newline,
     Ident,
 
-    // Primative Types
     Integer,
     String,
-    MultilineString, // triple-quoted string literal (`"""..."""` / `'''...'''`)
+    MultilineString,
     Float,
     Char,
 
-    //Operators
-    Assign,         // =
-    Walrus,         // :=
-    Plus,           // +
-    Minus,          // -
-    Asterisk,       // *
-    Ampersand,      // &
-    At,             // @
-    Mod,            // %
-    Eq,             // ==
-    NotEq,          // !=
-    Shebang,        // !
-    DollarSign,     // $
-    Hash,           // #
-    Increment,      // ++
-    Decrement,      // --
-    PlusAssign,     // +=
-    MinusAssign,    // -=
-    AsteriskAssign, // *=
-    SlashAssign,    // /=
-    Gt,             // >
-    Lt,             // <
-    Gte,            // >=
-    Lte,            // <=
-    Arrow,          // ->
-    // Delimiters
-    Comma,    // ,
-    Colon,    // :
-    LBrace,   // {
-    RBrace,   // }
-    LBracket, // [
-    RBracket, // ]
-    LParen,   // (
-    RParen,   // )
-    FullStop, // .
-    FSlash,   // /
-    BSlash,   // \
+    Assign,
+    Walrus,
+    Plus,
+    Minus,
+    Asterisk,
+    Ampersand,
+    At,
+    Mod,
+    Eq,
+    NotEq,
+    Shebang,
+    DollarSign,
+    Hash,
+    Increment,
+    Decrement,
+    PlusAssign,
+    MinusAssign,
+    AsteriskAssign,
+    SlashAssign,
+    Gt,
+    Lt,
+    Gte,
+    Lte,
+    Arrow,
+    Comma,
+    Colon,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    LParen,
+    RParen,
+    FullStop,
+    FSlash,
+    BSlash,
 
-    // Bitwise Operators
-    LShift,     // <<
-    RShift,     // >>
-    Caret,      // ^
-    Pipe,       // |
-    DoublePipe, // ||
-    Tilde,      // ~
+    LShift,
+    RShift,
+    Caret,
+    Pipe,
+    DoublePipe,
+    Tilde,
 
-    // Keywords
     If,
     Function,
     True,
@@ -95,20 +90,16 @@ pub enum TokenType {
     Introduce,
     From,
 
-    // String interpolation
-    InterpStart,          // marks beginning of an interpolated string
-    MultilineInterpStart, // beginning of an interpolated triple-quoted string
-    InterpEnd,            // marks end of an interpolated string
-    InterpExprStart,      // marks start of an interpolation expression {
-    InterpExprEnd,        // marks end of an interpolation expression }
+    InterpStart,
+    MultilineInterpStart,
+    InterpEnd,
+    InterpExprStart,
+    InterpExprEnd,
 }
 
 /// A single source position.
 ///
-/// `line`/`column` are 1-based and count characters (what humans and the LSP
-/// report); `offset` is a 0-based *byte* index into the original source, which
-/// is what lets a renderer slice the text directly and what a machine-
-/// applicable edit splices against.
+/// `line`/`column` are 1-based and count characters; `offset` is a 0-based byte index into the original source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Pos {
     pub line: usize,
@@ -137,10 +128,6 @@ impl Default for Pos {
 }
 
 /// A half-open source range, `start..end`.
-///
-/// Spans used to be single points, which capped every diagnostic at one caret
-/// and made secondary labels and machine-applicable edits impossible to
-/// express — both need to name a region, not a character.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
     pub start: Pos,
@@ -149,9 +136,6 @@ pub struct Span {
 
 impl Span {
     /// A zero-width span at `line`/`column`, with no byte offset.
-    ///
-    /// For synthetic spans that were never tied to real source text (desugared
-    /// AST nodes, tests). Prefer `range` wherever the producer knows both ends.
     pub fn new(line: usize, column: usize) -> Self {
         let p = Pos::new(line, column, 0);
         Self { start: p, end: p }
@@ -165,8 +149,7 @@ impl Span {
         Self { start, end }
     }
 
-    /// Covers both spans: `self.start` to `other.end`. Used to build a
-    /// composite span for an AST node from its leftmost and rightmost tokens.
+    /// Covers both spans: `self.start` to `other.end`.
     pub fn to(self, other: Span) -> Span {
         Span {
             start: self.start,
@@ -174,7 +157,7 @@ impl Span {
         }
     }
 
-    /// Line of the span's start — what a one-caret renderer reports.
+    /// Line of the span's start.
     pub fn line(&self) -> usize {
         self.start.line
     }
@@ -235,7 +218,6 @@ pub fn token_map() -> HashMap<&'static str, TokenType> {
         ("as", As),
         ("struct", Struct),
         ("enum", Enum),
-        // Contextual keyword: lexing it as an identifier lets it also be a function name.
         ("hide", Hide),
         ("self", SelfKw),
         ("and", And),

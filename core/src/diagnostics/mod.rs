@@ -1,19 +1,13 @@
 //! One diagnostic type for every stage.
 //!
-//! The lexer, parser, compiler and VM each used to report problems in their own
-//! shape — one of them by stuffing the message into a token's text field — so
-//! nothing composed and no tool could ask for "everything wrong with this file".
-//! They all build this type now, and rendering lives in exactly one place.
+//! The lexer, parser, compiler and VM all build this type, and rendering lives
+//! in one place. A diagnostic carries:
 //!
-//! The structure is what makes a good error possible rather than just a nicer
-//! string:
-//!
-//! * a **primary** label says where the problem is;
-//! * **secondary** labels say what it conflicts with ("declared immutable
-//!   here") — the single largest readability win, and impossible while spans
-//!   were points;
-//! * **notes** explain *why* the rule exists;
-//! * **helps** say *what to do*, and a help carrying [`Edit`]s is a concrete
+//! * a **primary** label saying where the problem is;
+//! * **secondary** labels saying what it conflicts with ("declared immutable
+//!   here");
+//! * **notes** explaining why the rule exists;
+//! * **helps** saying what to do; a help carrying [`Edit`]s is a concrete
 //!   replacement an editor can apply as a quick fix.
 
 pub mod registry;
@@ -23,13 +17,9 @@ use crate::token::Span;
 
 /// A stable identifier for a class of problem, e.g. `E0003`.
 ///
-/// Codes — not message text — are the interface. Tests assert on them,
-/// suppression keys on them, and `oxigen explain` looks them up, which leaves
-/// the prose free to improve without breaking anything.
-///
-/// Allocated **sequentially as concepts are added**, not partitioned by stage:
-/// the stage that reports a given problem is not stable (argument-count
-/// checking wants to move from runtime to compile time), but a code is forever.
+/// Tests assert on codes, suppression keys on them, and `oxigen explain` looks
+/// them up. Codes are allocated sequentially as concepts are added and are not
+/// partitioned by stage.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Code(pub &'static str);
 
@@ -72,9 +62,9 @@ pub struct Label {
 /// How safe a suggestion is to apply without a human reading it.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Applicability {
-    /// Correct as-is — an editor may offer it as a one-click fix.
+    /// Correct as-is; an editor may offer it as a one-click fix.
     MachineApplicable,
-    /// Plausible but not certainly what was meant; show, never auto-apply.
+    /// Plausible but not certainly what was meant; shown, never auto-applied.
     MaybeIncorrect,
     /// Contains placeholders the user must fill in.
     HasPlaceholders,
@@ -122,10 +112,6 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     /// The primary span is required at construction.
-    ///
-    /// (The design sketch had `primary` as a builder step, which makes an
-    /// un-located diagnostic representable. Requiring it here means a
-    /// diagnostic without a location cannot be built at all.)
     pub fn new(severity: Severity, code: Code, span: Span, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -199,8 +185,8 @@ impl Diagnostic {
 
 /// The source a batch of diagnostics refers to.
 ///
-/// `name` is what makes `--> app.oxi:12:5` a clickable link in an editor
-/// terminal; without it the renderer can only say `--> line 12:5`.
+/// `name` is shown in locations such as `--> app.oxi:12:5`; without it the
+/// renderer says `--> line 12:5`.
 #[derive(Debug, Clone)]
 pub struct SourceFile {
     pub name: Option<String>,
@@ -228,7 +214,7 @@ impl SourceFile {
     }
 }
 
-/// Where every stage writes. One per compilation.
+/// Collects the diagnostics every stage writes. One per compilation.
 #[derive(Debug, Clone, Default)]
 pub struct DiagnosticSink {
     diagnostics: Vec<Diagnostic>,
@@ -263,14 +249,8 @@ impl DiagnosticSink {
         self.diagnostics.len()
     }
 
-    /// Drops diagnostics whose primary span starts inside an earlier
-    /// diagnostic's primary span *on the same line*.
-    ///
-    /// This is a deliberately narrow rule. Suppressing anything merely
-    /// *contained* in an earlier span would swallow independent errors inside a
-    /// block, since a block's span contains all of them. Real cascade
-    /// suppression wants causal tracking (poisoned nodes); until then this only
-    /// removes the obvious same-line repeats.
+    /// Drops diagnostics whose primary span starts inside an earlier diagnostic's
+    /// primary span on the same line.
     pub fn deduplicate(&mut self) {
         let mut kept: Vec<Diagnostic> = Vec::with_capacity(self.diagnostics.len());
         for d in std::mem::take(&mut self.diagnostics) {

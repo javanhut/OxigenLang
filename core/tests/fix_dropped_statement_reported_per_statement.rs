@@ -1,18 +1,9 @@
-//! A dropped statement is reported *per statement*, not per file.
+//! A dropped statement is reported per statement, not per file.
 //!
-//! `assert_nothing_dropped_silently` used to bail out if `self.errors` was
-//! non-empty at the end of the parse. That enforces "something, somewhere, was
-//! reported" — so if statement A produced a diagnostic and statement B was then
-//! dropped quietly, B vanished unmentioned and the check still passed. The
-//! condition is now per statement: either the parser's error count rose while
-//! parsing it, or some diagnostic lands inside its extent.
-//!
-//! The "parser gave up" note (E0030) is a safety net for a bug in Oxigen, not a
-//! user-facing syntax error, so the tests below are mostly about it staying
-//! quiet — in particular for statements the *lexer* reported. The lexer runs
-//! ahead of the parser, so those diagnostics exist before the parser reaches
-//! the statement and are only folded in at the end; matching them by span is
-//! what keeps the stricter check from crying "gave up" over them.
+//! The condition is per statement: either the parser's error count rose while
+//! parsing it, or some diagnostic lands inside its extent. The "parser gave
+//! up" note (E0030) stays quiet for statements the lexer already reported,
+//! which are matched by span.
 
 use oxigen_core::diagnostics::Diagnostic;
 use oxigen_core::lexer::Lexer;
@@ -38,8 +29,6 @@ fn lines_reported(src: &str) -> Vec<usize> {
 
 #[test]
 fn a_second_bad_statement_is_reported_too() {
-    // The masking case: line 1 fails, line 2 must not ride on line 1's
-    // diagnostic. Both lines get their own.
     for src in ["fun\n= 5", "= 5\n= 6", "x := 1 +\n= 5", "each x in\n)"] {
         assert_eq!(lines_reported(src), vec![1, 2], "for:\n{src}");
         assert!(!gave_up(src), "ordinary syntax errors are not parser bugs");
@@ -48,8 +37,6 @@ fn a_second_bad_statement_is_reported_too() {
 
 #[test]
 fn a_lexically_reported_statement_does_not_get_a_gave_up_note() {
-    // The lexer already said what is wrong here; the parser dropping the
-    // statement afterwards is expected, not a bug in Oxigen.
     for src in [
         "x := \"unterminated\nz := 1",
         "x := 1\nb := \"unterminated\ny := 2",
@@ -68,9 +55,6 @@ fn a_lexically_reported_statement_does_not_get_a_gave_up_note() {
 
 #[test]
 fn an_earlier_parser_error_does_not_change_the_lexical_verdict() {
-    // Same sources, now preceded by a statement the *parser* rejects. Before,
-    // that first error suppressed the whole check; now each statement is judged
-    // on its own, so this is where a too-strict span match would show up.
     for tail in [
         "x := \"unterminated\n",
         "/* unclosed\n",
@@ -84,11 +68,6 @@ fn an_earlier_parser_error_does_not_change_the_lexical_verdict() {
 
 #[test]
 fn no_syntax_error_is_ever_dropped_unreported() {
-    // Deterministic token soup: every one of these programs is garbage, so the
-    // parser drops statements constantly. None of them may produce the gave-up
-    // note (that would mean either a genuinely silent drop, or — the regression
-    // this guards — a span check too strict to recognise the diagnostic that
-    // *was* emitted). Multi-line so the masking case is exercised throughout.
     const TOKENS: &[&str] = &[
         "fun",
         "struct",

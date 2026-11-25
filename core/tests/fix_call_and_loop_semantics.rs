@@ -1,17 +1,13 @@
-//! Regression: assorted call, loop and scoping checks that one path enforced
-//! and another skipped.
+//! Tests for call, loop and scoping semantics:
 //!
-//! - A JIT-compiled callee skipped its parameter type check: once
-//!   `fun sq(n <int>)` had tiered up, `sq(1.5)` returned 2.25.
-//! - The lowered `each ... in range(...)` loop wrapped past i64::MAX and
-//!   accepted float/string bounds the `range` builtin rejects.
-//! - The loop's synthetic locals (`__index__`, `__iterable__`, ...) were
-//!   ordinary names, so user code could read and overwrite them and end or
-//!   redirect the loop.
-//! - A bare field name inside a lambda nested in a method resolved to a
-//!   global instead of `self`'s field.
-//! - Enum payload annotations were never checked.
-//! - Arity errors for methods counted the implicit `self`.
+//! - A JIT-compiled callee enforces its parameter type check.
+//! - The lowered `each ... in range(...)` loop does not wrap past i64::MAX and
+//!   rejects float/string bounds like the `range` builtin.
+//! - The loop's synthetic locals cannot be read or overwritten by user code.
+//! - A bare field name inside a lambda nested in a method resolves to `self`'s
+//!   field.
+//! - Enum payload annotations are checked.
+//! - Arity errors for methods do not count the implicit `self`.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;

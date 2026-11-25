@@ -1,20 +1,15 @@
 //! VM-backed runner for `oxigen test`.
 //!
-//! Runs each `<test>("name") { ... }` block on the bytecode VM, so test
-//! execution uses the SAME semantics as `oxigen file.oxi` — in particular
-//! **in-place `push`/`insert`** mutation, cross-type numeric coercion, etc.
+//! Runs each `<test>("name") { ... }` block on the bytecode VM, with the same
+//! semantics as `oxigen file.oxi`.
 //!
-//! Each test is compiled and run INDEPENDENTLY: the program for a single test is
-//! `[auto-import expect] + [top-level setup] + [test body]`, where "setup" is the
-//! file's top-level statements other than `<test>` blocks and a `main { }` block
-//! (which is suppressed under `oxigen test`). Running each test on a fresh VM
-//! means a failure or mutation in one test cannot affect another. Test setup is
-//! normally just `fun` definitions (idempotent, no output), so re-running it per
-//! test is invisible.
+//! Each test is compiled and run independently on a fresh VM: the program for a
+//! single test is `[auto-import expect] + [top-level setup] + [test body]`, where
+//! "setup" is the file's top-level statements other than `<test>` blocks and a
+//! `main { }` block (which is suppressed under `oxigen test`).
 //!
-//! A test PASSES iff its body runs without raising an error. Assertions
-//! (`expect(x).eq(y)`) fail by raising an error via `<fail>`, which short-
-//! circuits the body.
+//! A test passes iff its body runs without raising an error. Assertions
+//! (`expect(x).eq(y)`) fail by raising an error via `<fail>`.
 
 use crate::ast::{Expression, Program, Statement};
 use crate::compiler::Compiler;
@@ -34,9 +29,7 @@ pub struct TestOutcome {
     pub message: Option<String>,
 }
 
-/// Parse a snippet into its statements, discarding it on any parse error
-/// (the caller's program already parsed cleanly; this is only the fixed
-/// `introduce {expect} from test` prelude).
+/// Parses a snippet into its statements, discarding it on any parse error.
 fn parse_stmts(src: &str) -> Vec<Statement> {
     let lexer = Lexer::new(src);
     let mut parser = Parser::new(lexer, src);
@@ -48,9 +41,9 @@ fn parse_stmts(src: &str) -> Vec<Statement> {
     }
 }
 
-/// Evaluate a `<test>(...)` name expression to a display string. Names are
-/// almost always string literals, so this compiles+runs the bare expression on
-/// its own; a name that can't be evaluated standalone falls back to `<test>`.
+/// Evaluates a `<test>(...)` name expression to a display string by compiling
+/// and running the bare expression on its own; a name that can't be evaluated
+/// standalone falls back to `<test>`.
 fn eval_test_name(name: &Expression, source: &str, file_path: &Option<PathBuf>) -> String {
     let prog = Program {
         statements: vec![Statement::Expr(name.clone())],
@@ -60,7 +53,6 @@ fn eval_test_name(name: &Expression, source: &str, file_path: &Option<PathBuf>) 
         Ok(func) => {
             let mut vm = VM::new();
             vm.set_source(source);
-            // A test run has no argv, but os.args() reads __args, which must exist or it raises.
             vm.set_script_args(&[]);
             if let Some(p) = file_path {
                 vm.set_file(p.clone());
@@ -74,8 +66,8 @@ fn eval_test_name(name: &Expression, source: &str, file_path: &Option<PathBuf>) 
     }
 }
 
-/// `<test>` blocks that are not at the top level, where the runner never
-/// sees them: inside `main { }` or a function body (`where` names which).
+/// Reports `<test>` blocks that are not at the top level: inside `main { }` or
+/// a function body (`where` names which).
 fn nested_tests<'a>(stmts: &'a [Statement], where_: &str, out: &mut Vec<(&'a Expression, String)>) {
     for stmt in stmts {
         match stmt {
@@ -98,7 +90,7 @@ fn nested_tests<'a>(stmts: &'a [Statement], where_: &str, out: &mut Vec<(&'a Exp
     }
 }
 
-/// Run `program` (a test, or a test file's top level) on a fresh VM.
+/// Runs `program` (a test, or a test file's top level) on a fresh VM.
 fn run_test_program(
     program: &Program,
     source: &str,
@@ -109,21 +101,16 @@ fn run_test_program(
             .map(|e| e.message.clone())
             .unwrap_or_else(|| "compile error".to_string())
     })?;
-    // Tasks a test spawns run against this test's program.
     crate::concurrent::register_program(&func, program, source, file_path.clone(), false);
     let mut vm = VM::new();
     vm.set_source(source);
-    // See above: `os.args()` needs `__args` to exist even with no argv.
     vm.set_script_args(&[]);
     if let Some(p) = file_path {
         vm.set_file(p.clone());
     }
-    // Exiting would end the whole run, reporting success for whatever
-    // failed before; inside a test it is a failure instead.
     vm.register_native("__exit", |_| {
         Err("os.exit() called while testing — a test cannot exit the test runner".to_string())
     });
-    // A panic is a bug in Oxigen, but it fails this test, not the run.
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run(func))) {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(e)) => Err(e.message),
@@ -134,10 +121,10 @@ fn run_test_program(
     }
 }
 
-/// Run every `<test>` block in `program` on the VM, returning one outcome per
-/// test (in source order). A file with no top-level `<test>` blocks yields an
-/// empty vec, unless its top level fails, or it has `<test>` blocks where
-/// they can't run.
+/// Runs every `<test>` block in `program` on the VM, returning one outcome per
+/// test in source order. A file with no top-level `<test>` blocks yields an
+/// empty vec, unless its top level fails or it has `<test>` blocks where they
+/// can't run.
 pub fn run_vm_tests(
     program: &Program,
     source: &str,
@@ -148,7 +135,6 @@ pub fn run_vm_tests(
         .iter()
         .any(|s| matches!(s, Statement::Test { .. }));
 
-    // Everything except <test> blocks and main, which is suppressed during `oxigen test`.
     let setup: Vec<Statement> = program
         .statements
         .iter()
@@ -156,7 +142,6 @@ pub fn run_vm_tests(
         .cloned()
         .collect();
 
-    // Auto-import `expect` so test files need no explicit `introduce`.
     let mut prelude = parse_stmts("introduce {expect} from test");
     prelude.extend(setup);
 
@@ -182,8 +167,6 @@ pub fn run_vm_tests(
         });
     }
 
-    // A `<test>` the runner can't reach would otherwise vanish from the
-    // count: "ok. 0 passed" for a file whose tests never ran.
     let mut nested = Vec::new();
     for stmt in &program.statements {
         if !matches!(stmt, Statement::Test { .. }) {
@@ -200,7 +183,6 @@ pub fn run_vm_tests(
         });
     }
 
-    // With no tests to run it, a failing top level would go unnoticed.
     if !has_tests && outcomes.is_empty() {
         let top = Program {
             statements: prelude,

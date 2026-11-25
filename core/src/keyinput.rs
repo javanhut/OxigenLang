@@ -1,16 +1,12 @@
 //! Single-key terminal input for interactive TUIs.
 //!
-//! `read_key()` puts the terminal into raw mode, reads ONE key event (including
+//! `read_key()` puts the terminal into raw mode, reads one key event (including
 //! arrow keys and other escape sequences), restores the terminal, and returns a
 //! normalized token. Exposed to Oxigen as the `__read_key` builtin.
 //!
 //! Tokens: "up" "down" "left" "right" "enter" "space" "tab" "backspace" "esc"
-//! "home" "end" "delete" "pageup" "pagedown" "ctrl-c" "ctrl-d" "ctrl-<letter>"
+//! "home" "end" "delete" "pageup" "pagedown" "ctrl-c" "ctrl-d" `"ctrl-<letter>"`
 //! "eof", or the literal character for a printable key ("a", "1", "?", "é", ...).
-//!
-//! Raw mode is toggled per call so the terminal is always restored even if the
-//! caller crashes between keys.
-//! Raw mode toggles per call; add raw_enable/raw_disable builtins if a TUI needs it held.
 
 #[cfg(unix)]
 pub fn read_key() -> std::io::Result<String> {
@@ -18,7 +14,6 @@ pub fn read_key() -> std::io::Result<String> {
 
     let fd = std::io::stdin().as_raw_fd();
 
-    // Not a TTY: degrade to a line read so scripts stay runnable non-interactively.
     if unsafe { libc::isatty(fd) } == 0 {
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
@@ -34,15 +29,14 @@ pub fn read_key() -> std::io::Result<String> {
     }
     let mut raw = orig;
     unsafe { libc::cfmakeraw(&mut raw) };
-    raw.c_cc[libc::VMIN] = 1; // block for at least one byte
-    raw.c_cc[libc::VTIME] = 0; // no inter-byte timer for the first byte
+    raw.c_cc[libc::VMIN] = 1;
+    raw.c_cc[libc::VTIME] = 0;
     if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
 
     let result = read_token(fd);
 
-    // Always restore the original terminal settings.
     unsafe { libc::tcsetattr(fd, libc::TCSANOW, &orig) };
     result
 }
@@ -54,13 +48,12 @@ fn read_one(fd: i32) -> Option<u8> {
     if n == 1 { Some(b[0]) } else { None }
 }
 
-// Read the rest of an escape sequence on a short timer so a lone ESC returns promptly.
 #[cfg(unix)]
 fn arm_escape_timeout(fd: i32) {
     let mut t: libc::termios = unsafe { std::mem::zeroed() };
     if unsafe { libc::tcgetattr(fd, &mut t) } == 0 {
         t.c_cc[libc::VMIN] = 0;
-        t.c_cc[libc::VTIME] = 1; // 0.1s
+        t.c_cc[libc::VTIME] = 1;
         unsafe { libc::tcsetattr(fd, libc::TCSANOW, &t) };
     }
 }
@@ -75,9 +68,8 @@ fn read_token(fd: i32) -> std::io::Result<String> {
         0x1b => {
             arm_escape_timeout(fd);
             match read_one(fd) {
-                // CSI / SS3 introducer — the start of an arrow/nav sequence.
                 Some(b'[') | Some(b'O') => decode_csi(fd),
-                _ => "esc".to_string(), // lone ESC (or unrecognized)
+                _ => "esc".to_string(),
             }
         }
         b'\r' | b'\n' => "enter".to_string(),
@@ -88,7 +80,6 @@ fn read_token(fd: i32) -> std::io::Result<String> {
         0x04 => "ctrl-d".to_string(),
         b if b < 0x20 => format!("ctrl-{}", (b + 96) as char),
         b if b < 0x80 => (b as char).to_string(),
-        // UTF-8 lead byte → pull its continuation bytes and decode the char.
         b => {
             let extra = if b >= 0xf0 {
                 3
@@ -109,7 +100,6 @@ fn read_token(fd: i32) -> std::io::Result<String> {
     Ok(tok)
 }
 
-// Decode the byte(s) after a `\x1b[` / `\x1bO` introducer.
 #[cfg(unix)]
 fn decode_csi(fd: i32) -> String {
     let b = match read_one(fd) {
@@ -123,7 +113,6 @@ fn decode_csi(fd: i32) -> String {
         b'D' => "left".to_string(),
         b'H' => "home".to_string(),
         b'F' => "end".to_string(),
-        // Numeric form like \x1b[3~ : collect digits, expect a trailing '~'.
         b'0'..=b'9' => {
             let mut num = String::new();
             num.push(b as char);
@@ -131,7 +120,7 @@ fn decode_csi(fd: i32) -> String {
                 if n.is_ascii_digit() {
                     num.push(n as char);
                 } else {
-                    break; // '~' or anything else terminates
+                    break;
                 }
             }
             match num.as_str() {
@@ -148,7 +137,6 @@ fn decode_csi(fd: i32) -> String {
     }
 }
 
-// Map a whole typed line to a token (non-TTY fallback only).
 fn decode_line(line: &str) -> String {
     let t = line.trim();
     match t.to_lowercase().as_str() {
@@ -164,7 +152,6 @@ fn decode_line(line: &str) -> String {
     }
 }
 
-// Windows has no raw mode here; real raw input needs the console API.
 #[cfg(not(unix))]
 pub fn read_key() -> std::io::Result<String> {
     let mut line = String::new();

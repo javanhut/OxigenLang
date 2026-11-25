@@ -47,8 +47,6 @@ mod imp {
         ("__ffi_cstring", builtin_cstring),
     ];
 
-    // ── C types ─────────────────────────────────────────────────────────
-
     #[derive(Clone)]
     enum CType {
         Void,
@@ -72,7 +70,7 @@ mod imp {
 
     struct StructDef {
         name: String,
-        fields: Vec<(String, CType, usize)>, // name, type, offset
+        fields: Vec<(String, CType, usize)>,
         size: usize,
         align: usize,
         ffi: Type,
@@ -127,8 +125,6 @@ mod imp {
     thread_local! {
         static STRUCTS: RefCell<HashMap<String, Rc<StructDef>>> = RefCell::new(HashMap::new());
         static LIBS: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
-        // ponytail: callbacks live until the thread exits; add ffi.free_callback if a
-        // script makes them in a loop.
         static CALLBACKS: RefCell<Vec<Closure<'static>>> = const { RefCell::new(Vec::new()) };
         /// An error a callback hit, reported when the C call it ran under returns.
         static PENDING: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -279,8 +275,6 @@ mod imp {
         sig.name.as_deref().unwrap_or("C function")
     }
 
-    // ── Values <-> C memory ─────────────────────────────────────────────
-
     fn int_of(v: &Value) -> Option<i64> {
         match v.repr() {
             ValueRepr::Integer(n) => Some(n),
@@ -376,7 +370,6 @@ mod imp {
                 CType::Str | CType::Ptr(_) => {
                     let p = match (ty, v.repr()) {
                         (_, ValueRepr::String(s)) => cstring(s.to_string(), temps)?,
-                        // An array or map for `T*`: point at a copy, copied back after the call.
                         (CType::Ptr(Some(elem)), ValueRepr::Array(_) | ValueRepr::Map(_)) => {
                             let Some(temps) = temps.as_deref_mut() else {
                                 return Err(
@@ -518,8 +511,6 @@ mod imp {
         })
     }
 
-    // ── Calls ───────────────────────────────────────────────────────────
-
     fn cif(args: &[CType], fixed: usize, variadic: bool, ret: &CType) -> Cif {
         let types = args.iter().map(CType::ffi).collect::<Vec<_>>();
         if variadic {
@@ -562,10 +553,7 @@ mod imp {
                 .map_err(|e| format!("{} argument {}: {e}", sig_label(sig), i + 1))?;
             bufs.push(buf);
         }
-        // From here on `args` is not touched: a callback may grow the VM
-        // stack it points into.
         let argv: Vec<Arg> = bufs.iter().map(|b| Arg::new(&b[0])).collect();
-        // libffi widens small integer returns to a full register.
         let mut ret = zeroed(sig.ret.size().max(16));
         PENDING.with(|p| p.borrow_mut().take());
         unsafe { cif.call_return_into(CodePtr(addr as *mut c_void), &argv, Ret::new(&mut ret[0])) };
@@ -574,8 +562,6 @@ mod imp {
         }
 
         for wb in temps.back {
-            // A locked value is read-only: C saw the data, but what it wrote
-            // stays in the temporary copy.
             if wb.target.is_locked() {
                 continue;
             }
@@ -608,8 +594,6 @@ mod imp {
             func: Box::new(move |args| call(addr, &sig, cached.as_ref(), args)),
         }))
     }
-
-    // ── Callbacks ───────────────────────────────────────────────────────
 
     struct CallbackData {
         sig: Sig,
@@ -646,7 +630,6 @@ mod imp {
             Err(_) => "ffi callback panicked".to_string(),
         };
         unsafe { std::ptr::write_bytes(out, 0, if sig.ret.is_int() { 8 } else { sig.ret.size() }) };
-        // The first failure is the one worth reporting.
         PENDING.with(|p| {
             p.borrow_mut().get_or_insert(failed);
         });
@@ -674,8 +657,6 @@ mod imp {
             t => unsafe { write_value(t, v, out, &mut None) },
         }
     }
-
-    // ── Libraries ───────────────────────────────────────────────────────
 
     #[cfg(unix)]
     mod os {
@@ -724,8 +705,6 @@ mod imp {
                     format!("{name}.framework/{name}"),
                 ]
             } else {
-                // `libm.so` is often a linker script dlopen cannot load; the
-                // versioned names are the real files.
                 ["", ".6", ".1", ".0", ".2", ".3", ".4", ".5"]
                     .iter()
                     .map(|v| format!("lib{name}.so{v}"))
@@ -734,7 +713,6 @@ mod imp {
         }
     }
 
-    // ponytail: untested on Windows (no Windows machine in CI here).
     #[cfg(windows)]
     mod os {
         use std::ffi::{CStr, c_char, c_void};
@@ -820,8 +798,6 @@ mod imp {
         let c = CString::new(name).map_err(|_| "symbol name contains a NUL byte")?;
         os::sym(lib as *mut c_void, &c).map(|p| p as usize)
     }
-
-    // ── Builtins ────────────────────────────────────────────────────────
 
     fn wrap(r: Result<Value, String>, what: &str) -> Value {
         r.unwrap_or_else(|e| Value::Error(rc_str(format!("ffi.{what}: {e}"))))
@@ -919,7 +895,6 @@ mod imp {
                                 .map(|w| w.trim_end_matches(';').to_string())
                                 .filter(|w| !w.is_empty())
                         };
-                        // `struct Name { ... }` or `typedef struct { ... } Name;`
                         let name = ident(&first[..open])
                             .or_else(|| ident(&first[close + 1..]))
                             .ok_or_else(bad)?;
@@ -939,7 +914,6 @@ mod imp {
                     if matches!(ty, CType::Void) {
                         return Err(format!("field '{fname}' cannot be void"));
                     }
-                    // ponytail: no inline arrays (`char name[16]`); add an Array CType when a real header needs one.
                     fields.push((fname, ty));
                 }
                 if fields.is_empty() {
@@ -1070,7 +1044,6 @@ mod imp {
             (|| {
                 let (p, ty) = element(args, 3)?;
                 let v = args.get(2).ok_or("expected a value to write")?;
-                // Write into a zeroed copy first, so a bad field leaves memory untouched.
                 let mut buf = zeroed(ty.size());
                 unsafe {
                     write_value(&ty, v, buf.as_mut_ptr() as *mut u8, &mut None)?;

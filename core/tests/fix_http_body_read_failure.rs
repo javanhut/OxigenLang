@@ -1,14 +1,6 @@
-//! A failed HTTP response-body read is an error, not an empty body.
-//!
-//! `__http_request` used to do `read_to_string().unwrap_or_default()`, so a
-//! connection reset mid-body — or a body that is not valid UTF-8 — produced
-//! `{status: 200, body: ""}`. The caller had no way to tell that apart from a
-//! server that legitimately answered with no body: silent data loss on the
-//! network path. `netres::http_upload` had the identical bug on its own line.
-//!
-//! The server here is a one-shot loopback socket, not a network call: it
-//! announces `Content-Length: 64` and then hangs up after 5 bytes, which is
-//! exactly the truncated-body case the old code swallowed.
+//! Tests that a failed HTTP response-body read is an error, not an empty body.
+//! The server is a one-shot loopback socket that announces `Content-Length: 64`
+//! and hangs up after 5 bytes.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -45,7 +37,6 @@ fn truncating_server() -> u16 {
         if let Ok(mut sock) = listener.accept().map(|(s, _)| s) {
             let mut buf = [0u8; 1024];
             let _ = sock.read(&mut buf);
-            // 64 bytes promised, 5 delivered, then the socket drops.
             let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\nshort");
             let _ = sock.flush();
         }

@@ -34,12 +34,11 @@ pub struct Context<'a> {
     pub docs: &'a [Doc],
     pub report: &'a Report,
     pub examples: &'a [Example],
-    /// website/examples/playground: only in the playground's menu, as they
-    /// read input, write files or start threads.
+    /// website/examples/playground: shown only in the playground's menu.
     pub playground_examples: &'a [Example],
     /// What the playground was built from, such as `main` at a commit.
     pub build: Option<&'a Build>,
-    /// website/snippets: shown, not run (they need threads or the test runner).
+    /// website/snippets: shown, not run.
     pub snippets: &'a [(String, String)],
     /// The latest GitHub release; none when built with --offline.
     pub release: Option<&'a Release>,
@@ -60,9 +59,7 @@ impl Build {
     }
 }
 
-/// website/examples/playground, in file-name order. They need what only the
-/// browser provides (typed input, files, threads), so the build checks that
-/// each compiles rather than running it.
+/// website/examples/playground, in file-name order. The build checks that each compiles rather than running it.
 pub fn load_playground_examples(dir: &Path) -> Result<Vec<Example>, String> {
     let mut examples = Vec::new();
     for path in example_paths(dir)? {
@@ -104,8 +101,6 @@ fn parse_example(path: &Path) -> Result<(String, String, String, String), String
         .take(2)
         .map(|l| l.trim_start_matches("//").trim())
         .collect();
-    // The title and summary comments are shown beside the code, so the
-    // code shown (and run) starts after them.
     let mut lines: Vec<&str> = source.lines().collect();
     let first_comment = lines.iter().position(|l| l.starts_with("//")).unwrap_or(0);
     let mut taken = 0;
@@ -128,8 +123,7 @@ fn parse_example(path: &Path) -> Result<(String, String, String, String), String
     ))
 }
 
-/// website/examples, in file-name order. Each must run in the playground's
-/// sandbox: a showcase that fails is a build error, not a broken page.
+/// website/examples, in file-name order. Each must run in the playground's sandbox; a failure is a build error.
 pub fn load_examples(dir: &Path) -> Result<Vec<Example>, String> {
     let mut examples = Vec::new();
     for path in example_paths(dir)? {
@@ -375,8 +369,7 @@ fn placeholder(key: &str, cx: &Context) -> Option<String> {
     })
 }
 
-/// Structured data for a hand-written page: the about page is the creator's
-/// profile, with the questions people ask about the language.
+/// Structured data for a hand-written page: the about page is the creator's profile.
 fn page_graph(
     config: &Config,
     path: &str,

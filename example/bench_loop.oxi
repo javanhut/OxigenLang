@@ -1,6 +1,3 @@
-// Tight integer loop — single function, locals only, no recursion.
-// Maximally favors the inline int fast path since almost every opcode
-// in the body is GetLocal/SetLocal or int arithmetic.
 fun loop_sum(n) {
     total := 0
     i := 1

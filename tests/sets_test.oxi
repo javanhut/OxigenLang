@@ -7,7 +7,6 @@ introduce sets
     expect(sets.intersection(a, b)).eq(set(3))
     expect(sets.difference(a, b)).eq(set(1, 2))
     expect(sets.symmetric_difference(a, b)).eq(set(1, 2, 4))
-    // The arguments are left alone.
     expect(a).eq(set(1, 2, 3))
     expect(b).eq(set(3, 4))
 }

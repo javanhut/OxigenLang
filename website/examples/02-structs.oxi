@@ -1,5 +1,3 @@
-// Structs and methods
-// Typed fields, methods with `includes`, and single inheritance.
 struct Account {
     owner <str>
     balance <float>

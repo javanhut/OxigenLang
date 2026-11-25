@@ -1,6 +1,4 @@
-//! `vec2`, `vec3` and `vec4`: small vectors of `f32` components, the
-//! currency of game maths. Scripts that model them as structs pay for a
-//! struct per value and per intermediate result; these are a single value.
+//! `vec2`, `vec3` and `vec4`: small vectors of `f32` components.
 //!
 //! Vectors are values: operators make new vectors, and components are read,
 //! never assigned.
@@ -51,8 +49,6 @@ fn assert_rejects(source: &str, needle: &str) {
     }
 }
 
-// ── Construction and display ───────────────────────────────────────────
-
 #[test]
 fn vectors_display_their_components() {
     assert_yields("vec2(1, 2)", "vec2(1, 2)");
@@ -74,8 +70,6 @@ fn constructors_need_the_right_count_of_numbers() {
     assert_rejects("vec3(1, \"two\", 3)", "vec3 takes 3 numbers");
 }
 
-// ── Components ─────────────────────────────────────────────────────────
-
 #[test]
 fn components_read_back_as_floats() {
     assert_true("v := vec3(1, 2, 3)\nv.x == 1.0 and v.y == 2.0 and v.z == 3.0");
@@ -94,8 +88,6 @@ fn a_missing_component_is_an_error() {
 fn components_cannot_be_assigned() {
     assert_rejects("v := vec2(1, 2)\nv.x = 5\nv", "vectors are values");
 }
-
-// ── Operators ──────────────────────────────────────────────────────────
 
 #[test]
 fn vectors_add_and_subtract_componentwise() {
@@ -145,8 +137,6 @@ fn vector_maths_in_a_hot_loop() {
     let src = "p := vec2(0, 0)\nv := vec2(1, 2)\ni := 0\nrepeat when i < 1000 {\n    p = p + v * 0.5\n    i++\n}\np == vec2(500, 1000)";
     assert_true(src);
 }
-
-// ── math functions ─────────────────────────────────────────────────────
 
 #[test]
 fn math_dot_and_cross() {

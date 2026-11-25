@@ -2,21 +2,14 @@ introduce io
 introduce strings
 introduce array
 
-// Parse a JSON string into Oxigen values.
-// Objects become maps, arrays stay arrays, null becomes None.
 fun parse(s <str>) { __json_parse(s) }
 
-// Serialize an Oxigen value to a JSON string.
 fun stringify(val <generic>) { __json_stringify(val) }
 
-// Read and parse a JSON file from disk.
 fun read(path <str>) { parse(io.read_file(path)) }
 
-// Write an Oxigen value to a JSON file on disk.
 fun write(path <str>, val <generic>) { io.write_file(path, stringify(val)) }
 
-// Get a nested value using a dotted key path (e.g. "user.address.city").
-// Returns None if any segment is missing.
 fun get_in(obj <map>, path <str>) {
     parts := strings.split(path, ".")
     current := obj
@@ -30,8 +23,6 @@ fun get_in(obj <map>, path <str>) {
     current
 }
 
-// Set a nested value using a dotted key path (e.g. "user.address.city").
-// Creates intermediate objects as needed. Returns the updated root map.
 fun set_in(obj <map>, path <str>, val <generic>) {
     parts := strings.split(path, ".")
     give insert(obj, parts[0], val) when len(parts) == 1
@@ -48,8 +39,6 @@ fun set_in(obj <map>, path <str>, val <generic>) {
     insert(obj, first, set_in(child, rest, val))
 }
 
-// Remove a nested key using a dotted key path.
-// Returns the updated root map.
 fun del_in(obj <map>, path <str>) {
     parts := strings.split(path, ".")
     give remove(obj, parts[0]) when len(parts) == 1
@@ -64,7 +53,6 @@ fun del_in(obj <map>, path <str>) {
     insert(obj, first, del_in(child, rest))
 }
 
-// Check whether a dotted key path exists (e.g. "user.address.city").
 fun has_key_in(obj <map>, path <str>) {
     parts := strings.split(path, ".")
     current := obj
@@ -78,19 +66,6 @@ fun has_key_in(obj <map>, path <str>) {
     True
 }
 
-// ── Arrays of records ──
-// Update the first element whose `key` equals `val` by deep-merging `fields`
-// into it; append a new record when there is none:
-//
-//     data["information"] = json.set_where(data["information"], "person", "john",
-//                                          {"info": {"job": "developer"}})
-//
-// Fields not named survive the update — the merge is recursive, so setting
-// info.job leaves info.age alone. Appending builds {key: val} + fields.
-//
-// Returns the array, edited in place either way (arrays are shared
-// references). Assigning the result back is the clearer form and costs
-// nothing.
 fun set_where(arr <array>, key <generic>, val <generic>, fields <map>) {
     found := array.find_where(arr, key, val)
     give push(arr, deep_merge(insert({}, key, val), fields)) when found == None
@@ -98,7 +73,6 @@ fun set_where(arr <array>, key <generic>, val <generic>, fields <map>) {
     arr
 }
 
-// Merge two maps. Keys in `b` overwrite keys in `a`.
 fun merge(a <map>, b <map>) {
     result := a
     b_keys := keys(b)
@@ -111,8 +85,6 @@ fun merge(a <map>, b <map>) {
     result
 }
 
-// Deep merge two maps. Nested objects are merged recursively;
-// non-object values in `b` overwrite those in `a`.
 fun deep_merge(a <map>, b <map>) {
     result := a
     b_keys := keys(b)

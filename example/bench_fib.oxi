@@ -1,5 +1,3 @@
-// Recursive Fibonacci — exercises Call / Return / arithmetic / branch.
-// Stays inside the JIT allow-list (no println, no collections).
 fun fib(n) {
     option {
         n < 2 -> {

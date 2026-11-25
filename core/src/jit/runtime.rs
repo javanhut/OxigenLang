@@ -1,14 +1,9 @@
 //! `extern "C"` runtime helpers invoked by JIT-compiled code.
 //!
-//! The ABI is uniform: every helper takes `*mut VM` as its first argument
-//! plus any per-op immediates; erroring helpers return `u32` status codes
-//! (0 = ok, 1 = runtime error) so the baseline JIT never needs to unwind
-//! across the FFI boundary. Non-erroring helpers return no value.
-//!
-//! Implementation strategy: each helper is a thin wrapper around the
-//! existing interpreter logic in `core/src/vm/mod.rs`. We deliberately do
-//! *not* duplicate the big type-dispatch match arms — we call the
-//! interpreter's own `binary_add`, `compare_less`, etc.
+//! Every helper takes `*mut VM` as its first argument plus any per-op
+//! immediates. Erroring helpers return `u32` status codes (0 = ok, 1 = runtime
+//! error); non-erroring helpers return no value. Each helper wraps the
+//! interpreter logic in `core/src/vm/mod.rs`.
 
 #![cfg(feature = "jit")]
 
@@ -19,18 +14,17 @@ use std::rc::Rc;
 
 use super::engine::HelperCounter;
 
-// Validates runtime state around a closure-aware specialized call (phase 0 before, 1 after).
-///
+/// Debug check of a specialized call site's frame state.
 /// Args:
 /// - `cache_ptr`: the per-call-site `CallCacheEntry` raw pointer.
-/// - `closure_ptr`: the `*const ObjClosure` we're about to pass as the
-///   spec entry's closure register arg (= `cache.closure_raw + RC_VALUE_OFFSET`).
+/// - `closure_ptr`: the `*const ObjClosure` passed as the spec entry's closure
+///   register argument.
 /// - `phase`: 0 = pre-call, 1 = post-success.
-/// - `expected_slot_offset`: the JitFrame slot_offset the spec body
-///   should observe (= `callee_slot` in caller's IR).
-/// - `expected_jit_frame_len`: phase 0 — caller's `jit_frame_view.len`
-///   AFTER pushing the callee frame; phase 1 — what it should be after
-///   the callee popped its own frame (caller's pre-call value).
+/// - `expected_slot_offset`: the JitFrame slot_offset the spec body should
+///   observe.
+/// - `expected_jit_frame_len`: phase 0 — caller's `jit_frame_view.len` after
+///   pushing the callee frame; phase 1 — its value after the callee popped its
+///   own frame.
 /// - `arg_count`: number of i64 args the caller passed in registers.
 pub unsafe extern "C" fn jit_dbg_check_spec_call(
     vm: *mut VM,
@@ -74,7 +68,6 @@ pub unsafe extern "C" fn jit_dbg_check_spec_call(
     let closure = unsafe { &*closure_ptr };
 
     if phase == 0 {
-        // Pre-call invariants.
         let kind = closure.specialized_kind.get();
         if kind != crate::vm::value::SPECIALIZED_KIND_NATIVE_INT_BODY_WITH_CLOSURE {
             fail!(
@@ -95,7 +88,6 @@ pub unsafe extern "C" fn jit_dbg_check_spec_call(
             );
         }
 
-        // stack_view.len should be expected_slot_offset + 1 (closure on top, args truncated).
         let stack_len = vm.stack_view.len as i64;
         if stack_len != expected_slot_offset + 1 {
             fail!(
@@ -105,9 +97,7 @@ pub unsafe extern "C" fn jit_dbg_check_spec_call(
             );
         }
 
-        // stack[expected_slot_offset] should be Value::Closure pointing to this closure.
         let slot_idx = expected_slot_offset as usize;
-        // sync_stack_from_view first so Vec::len matches stack_view.len.
         vm.sync_stack_from_view();
         if slot_idx >= vm.stack_len() {
             fail!(
@@ -136,7 +126,6 @@ pub unsafe extern "C" fn jit_dbg_check_spec_call(
             );
         }
 
-        // jit_frame_view.len: caller pushed the callee frame; should equal expected.
         let jit_len = vm.jit_frame_view.len as i64;
         if jit_len != expected_jit_frame_len {
             fail!(
@@ -146,7 +135,6 @@ pub unsafe extern "C" fn jit_dbg_check_spec_call(
             );
         }
     } else if phase == 1 {
-        // The callee's Return path already truncated to slot_offset and popped the JitFrame.
         let stack_len = vm.stack_view.len as i64;
         if stack_len != expected_slot_offset {
             fail!(
@@ -170,10 +158,7 @@ pub unsafe extern "C" fn jit_dbg_check_spec_call(
     0
 }
 
-// Fallback harness, kept as a safety valve for functions the translator rejects.
-
 /// Drive the interpreter for the just-pushed frame until it returns.
-/// See the Milestone-1 plan for the full contract.
 pub unsafe extern "C" fn jit_run_via_interpreter(vm: *mut VM) -> u32 {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::RunViaInterpreter);
@@ -187,8 +172,6 @@ pub unsafe extern "C" fn jit_run_via_interpreter(vm: *mut VM) -> u32 {
         }
     }
 }
-
-// ── Stack push helpers ─────────────────────────────────────────────────
 
 pub unsafe extern "C" fn jit_push_constant(vm: *mut VM, idx: u32) {
     let vm = unsafe { &mut *vm };
@@ -212,8 +195,6 @@ pub unsafe extern "C" fn jit_push_float_inline(vm: *mut VM, bits: u64) {
     vm.push(Value::Float(f64::from_bits(bits)));
 }
 
-// ── Stack manipulation ─────────────────────────────────────────────────
-
 pub unsafe extern "C" fn jit_pop(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::Pop);
@@ -228,8 +209,6 @@ pub unsafe extern "C" fn jit_dup(vm: *mut VM) {
     let top = vm.peek(0).clone();
     vm.push(top);
 }
-
-// ── Collections ───────────────────────────────────────────────────────
 
 pub unsafe extern "C" fn jit_build_array(vm: *mut VM, count: u32) {
     let vm = unsafe { &mut *vm };
@@ -251,7 +230,6 @@ pub unsafe extern "C" fn jit_op_index_fast_array_int(vm: *mut VM) -> u32 {
     let index = vm.pop();
     let collection = vm.pop();
 
-    // Wrong types and out-of-range indices fall through to VM::eval_index so the bounds error lives in one place.
     if let (Value::Array(arr), Value::Integer(i)) = (&collection, &index) {
         let borrowed = arr.borrow();
         let len = borrowed.len() as i64;
@@ -434,7 +412,7 @@ pub unsafe extern "C" fn jit_check_return(vm: *mut VM, type_idx: u32) -> u32 {
 }
 
 /// `RangeLimit` when its bounds aren't both staged as ints: [start, end] ->
-/// [limit] on the VM stack, or the `range` builtin's error.
+/// `[limit]` on the VM stack, or the `range` builtin's error.
 pub unsafe extern "C" fn jit_range_limit(vm: *mut VM, step_idx: u32) -> u32 {
     let vm = unsafe { &mut *vm };
     vm.sync_stack_from_view();
@@ -553,12 +531,9 @@ pub unsafe extern "C" fn jit_struct_field_add_const(
         let field_name = vm.current_constant(field_idx as u16);
         if let Some(fname) = field_name.as_string()
             && let Some(&idx) = inst.layout.indices.get(fname.as_ref())
-            // A hidden field is only writable from its struct's methods; the slow path raises the error.
             && (!inst.layout.slots[idx].2 || vm.hidden_field_access_allowed(inst))
-            // A locked instance can't be written; the slow path raises the error.
             && !inst.locked.get()
         {
-            // SAFETY: single-threaded, nothing else borrows fields. Integer->Integer needs no Drop.
             unsafe {
                 let slot = inst.fields.ptr.add(idx);
                 if let Some(n) = (*slot).as_integer() {
@@ -595,10 +570,9 @@ pub unsafe extern "C" fn jit_struct_field_add_const(
     }
 }
 
-/// Populate the peephole's `FieldCacheEntry` with the struct-def identity
-/// and resolved layout index so the JIT's inline hit path can bypass the
-/// full helper on subsequent calls. Invoked from the Integer-fast-path
-/// branch of `jit_struct_field_add_const` / `_local`.
+/// Populate the peephole's `FieldCacheEntry` with the struct-def identity and
+/// resolved layout index for the JIT's inline hit path. Invoked from the
+/// Integer fast-path branch of `jit_struct_field_add_const` / `_local`.
 #[inline]
 unsafe fn populate_field_cache(
     cache_ptr: *mut super::engine::FieldCacheEntry,
@@ -609,7 +583,6 @@ unsafe fn populate_field_cache(
         return;
     }
     let cache = unsafe { &mut *cache_ptr };
-    // Repopulate only on a cold cache or shape change, to avoid re-cloning the keeper each  call.
     let def_raw: *const crate::vm::value::ObjStructDef = unsafe {
         *(&inst.def as *const std::rc::Rc<crate::vm::value::ObjStructDef>
             as *const *const crate::vm::value::ObjStructDef)
@@ -649,7 +622,6 @@ pub unsafe extern "C" fn jit_struct_field_add_local(
             && (!inst.layout.slots[idx].2 || vm.hidden_field_access_allowed(inst))
             && !inst.locked.get()
         {
-            // SAFETY: same as jit_struct_field_add_const.
             unsafe {
                 let slot = inst.fields.ptr.add(idx);
                 if let Some(n) = (*slot).as_integer() {
@@ -686,12 +658,8 @@ pub unsafe extern "C" fn jit_struct_field_add_local(
     }
 }
 
-// ── Locals ─────────────────────────────────────────────────────────────
-
-/// Return the current frame's `slot_offset` for the JIT's inline
-/// GetLocal / SetLocal fast path to cache at thunk entry. Stable for the
-/// lifetime of a thunk activation — our frame never has its slot_offset
-/// rewritten once pushed.
+/// Return the current frame's `slot_offset`. Stable for the lifetime of a
+/// thunk activation.
 pub unsafe extern "C" fn jit_current_slot_offset(vm: *mut VM) -> i64 {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::CurrentSlotOffset);
@@ -717,10 +685,9 @@ pub unsafe extern "C" fn jit_set_local(vm: *mut VM, slot: u32) {
     vm.set_stack_slot(base + slot as usize, value);
 }
 
-/// Type-lock-enforcing variant of `jit_set_local`. The JIT emits this only
-/// for slots that carry a declared type constraint, so unconstrained stores
-/// keep the infallible fast path. Returns 0 on success, 1 if the stored value
-/// violates the lock (the error is stashed for the thunk to surface).
+/// Type-lock-enforcing variant of `jit_set_local`. Returns 0 on success, 1 if
+/// the stored value violates the lock (the error is stashed for the thunk to
+/// surface).
 pub unsafe extern "C" fn jit_set_local_checked(vm: *mut VM, slot: u32) -> u32 {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::SetLocal);
@@ -735,24 +702,12 @@ pub unsafe extern "C" fn jit_set_local_checked(vm: *mut VM, slot: u32) -> u32 {
     0
 }
 
-/// Recursion-depth guard for the JIT call paths that push a `JitFrame`
-/// inline (the A3 self-recursion direct call and the closure-aware
-/// specialized dispatch). The interpreter's `call_closure` /
-/// `call_closure_fast_path` reject a call once
-/// `frames.len() + jit_frame_view.len >= FRAMES_MAX`, raising a graceful
-/// "stack overflow" error; the inline JIT frame-push sites had no such
-/// check, so deep self-recursion overran the pre-allocated `jit_frames`
-/// buffer and SIGSEGV'd. This helper replicates the VM's bound exactly:
-/// it must be called immediately BEFORE the inline frame push. Returns 0
-/// when there is room for one more frame, 1 (with the error stashed for
-/// the thunk to surface) when the call would overflow.
-///
-/// The cost is a single load+compare on the recursive call path; it never
-/// touches the operand stack, so it does not perturb the hot int-return
-/// fast path beyond the bound check itself.
+/// Recursion-depth guard for JIT call paths that push a `JitFrame` inline.
+/// Must be called immediately before the inline frame push. Returns 0 when
+/// there is room for one more frame, 1 (with the error stashed for the thunk
+/// to surface) when the call would overflow the frame limit.
 pub unsafe extern "C" fn jit_check_recursion_depth(vm: *mut VM) -> u32 {
     let vm = unsafe { &mut *vm };
-    // The inline recursion paths bypass the VM's frame and push guards, so mirror both bounds here.
     let frame_overflow =
         vm.frames_len().saturating_add(vm.jit_frame_len()) >= crate::vm::FRAMES_MAX;
     let stack_overflow = vm.stack_view.len >= crate::vm::STACK_MAX - crate::vm::STACK_GUARD_MARGIN;
@@ -774,16 +729,11 @@ pub unsafe extern "C" fn jit_loop_stop(vm: *mut VM) -> u32 {
     let vm = unsafe { &mut *vm };
     let err = match vm.loop_limit_step() {
         Err(e) => e,
-        // The back-edge saw a limit that the VM's own check no longer does.
-        // Neither the interrupt nor the budget can clear itself in between,
-        // so this does not happen; stop anyway rather than loop unchecked.
         Ok(()) => vm.runtime_error("internal error: a loop stopped with no limit reached"),
     };
     vm.jit.stash_error(err);
     1
 }
-
-// ── Arithmetic — return 0 on ok, 1 on runtime error ────────────────────
 
 macro_rules! binop_fallible {
     ($name:ident, $method:ident, $counter:ident) => {
@@ -847,8 +797,6 @@ pub unsafe extern "C" fn jit_op_log(vm: *mut VM, flags: u32) -> u32 {
     0
 }
 
-// ── Comparison that can't fail (PartialEq over Value) ─────────────────
-
 pub unsafe extern "C" fn jit_op_eq(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::Eq);
@@ -868,8 +816,6 @@ pub unsafe extern "C" fn jit_op_ne(vm: *mut VM) {
     let eq = vm.values_equal_forced(a, b);
     vm.push(Value::Boolean(!eq));
 }
-
-// ── Logical / unary ────────────────────────────────────────────────────
 
 pub unsafe extern "C" fn jit_op_not(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
@@ -897,8 +843,6 @@ pub unsafe extern "C" fn jit_op_negate(vm: *mut VM) -> u32 {
     }
 }
 
-// ── Branching truthy checks ────────────────────────────────────────────
-
 /// Peek at top-of-stack (does NOT pop). Returns 1 if truthy, 0 if not.
 /// Matches the semantics of `JumpIfFalse`/`JumpIfTrue`.
 pub unsafe extern "C" fn jit_peek_truthy(vm: *mut VM) -> u32 {
@@ -918,8 +862,6 @@ pub unsafe extern "C" fn jit_pop_truthy(vm: *mut VM) -> u32 {
     if v.is_truthy() { 1 } else { 0 }
 }
 
-// ── Globals ────────────────────────────────────────────────────────────
-
 pub unsafe extern "C" fn jit_get_global(vm: *mut VM, name_idx: u32) -> u32 {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::GetGlobal);
@@ -933,15 +875,12 @@ pub unsafe extern "C" fn jit_get_global(vm: *mut VM, name_idx: u32) -> u32 {
     }
 }
 
-/// GetGlobal with a per-call-site inline cache. When the cache's
-/// recorded `globals_version` matches the VM's current version, we push
-/// a clone of the cached value and skip the HashMap lookup entirely —
-/// one atomic Rc-inc for `Closure`/`String` variants, or a trivial
-/// memcpy for primitives. On miss we fall through to the generic lookup
-/// and repopulate the cache.
+/// GetGlobal with a per-call-site inline cache. When the cache's recorded
+/// `globals_version` matches the VM's current version, pushes a clone of the
+/// cached value; otherwise performs the generic lookup and repopulates the
+/// cache.
 ///
-/// `cache_ptr` was allocated by `JitInner::alloc_global_cache()` and has
-/// a stable address for the JIT engine's lifetime.
+/// `cache_ptr` is allocated by `JitInner::alloc_global_cache()`.
 pub unsafe extern "C" fn jit_get_global_ic(
     vm: *mut VM,
     cache_ptr: *mut super::engine::GlobalCacheEntry,
@@ -951,7 +890,6 @@ pub unsafe extern "C" fn jit_get_global_ic(
     vm.jit.bump_helper(HelperCounter::GetGlobalIc);
     vm.sync_stack_from_view();
     let cache = unsafe { &mut *cache_ptr };
-    // The cache is keyed on the main VM's globals, so skip it when the frame has its own module_globals.
     if vm.has_active_module_globals() {
         return match vm.handle_get_global(name_idx as u16) {
             Ok(()) => 0,
@@ -968,7 +906,6 @@ pub unsafe extern "C" fn jit_get_global_ic(
     match vm.handle_get_global(name_idx as u16) {
         Ok(()) => {
             cache.value = vm.peek(0).clone();
-            // Repoint from the sentinel to this name's version cell so the inline hit path stays valid.
             if let Ok(name) = vm.name_constant(name_idx as u16) {
                 let cell = vm.jit.global_version_cell(name.as_str());
                 cache.version_cell = cell;
@@ -1027,13 +964,10 @@ pub unsafe extern "C" fn jit_define_global_typed(
     }
 }
 
-// ── Upvalues ───────────────────────────────────────────────────────────
-
 pub unsafe extern "C" fn jit_get_upvalue(vm: *mut VM, idx: u32) {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::GetUpvalue);
     vm.sync_stack_from_view();
-    // Inspect the upvalue's shape before mutating the stack so the cache can arm the inline path.
     let mut closed_int_value: Option<i64> = None;
     {
         let upvalue = &vm.active_closure().upvalues[idx as usize];
@@ -1054,7 +988,6 @@ pub unsafe extern "C" fn jit_get_upvalue(vm: *mut VM, idx: u32) {
             c.get_upvalue_fallback.set(c.get_upvalue_fallback.get() + 1);
         }
     }
-    // Cannot fail today; fold any future error into a stashed error rather than propagating.
     if let Err(e) = vm.handle_get_upvalue(idx as u16) {
         vm.jit.stash_error(e);
     }
@@ -1072,7 +1005,6 @@ pub unsafe extern "C" fn jit_set_upvalue(vm: *mut VM, idx: u32) {
         vm.jit.stash_error(e);
         return;
     }
-    // Re-arm on an Integer result, clear the kind otherwise so the next GetUpvalue re-probes.
     let mut closed_int_value: Option<i64> = None;
     {
         let upvalue = &vm.active_closure().upvalues[idx as usize];
@@ -1086,8 +1018,7 @@ pub unsafe extern "C" fn jit_set_upvalue(vm: *mut VM, idx: u32) {
 }
 
 /// Record upvalue `idx`'s current shape in `closure`'s int cache. A cache
-/// filled at an older write epoch is cleared first: its other entries may be
-/// stale, and restamping it would make them look current.
+/// filled at an older write epoch is cleared first.
 fn arm_upvalue_int_cache(
     closure: &crate::vm::value::ObjClosure,
     idx: usize,
@@ -1112,12 +1043,8 @@ fn arm_upvalue_int_cache(
     }
 }
 
-/// Typed-parameter check run by a compiled function's generic entry.
-///
-/// The interpreter checks a callee's annotated parameters in `call_closure`,
-/// but compiled call sites reach the entry directly, and the body is compiled
-/// trusting the annotations (an `<int>` parameter is read as a raw i64). Same
-/// rule and message as the interpreter; the error is reported from the caller.
+/// Typed-parameter check run by a compiled function's generic entry. Applies
+/// the interpreter's rule and message; the error is reported from the caller.
 pub unsafe extern "C" fn jit_check_param_types(vm: *mut VM) -> u32 {
     let vm = unsafe { &mut *vm };
     vm.sync_stack_from_view();
@@ -1156,8 +1083,6 @@ pub unsafe extern "C" fn jit_close_upvalue(vm: *mut VM) {
     vm.handle_close_upvalue();
 }
 
-// ── Closure ────────────────────────────────────────────────────────────
-
 /// Executes the `Closure` opcode. `fn_idx` is the function-constant
 /// index; `descriptors_offset` is the absolute bytecode offset of the
 /// first upvalue descriptor.
@@ -1174,12 +1099,9 @@ pub unsafe extern "C" fn jit_op_closure(vm: *mut VM, fn_idx: u32, descriptors_of
     }
 }
 
-// ── Struct ops ─────────────────────────────────────────────────────────
-
 pub unsafe extern "C" fn jit_op_struct_def(vm: *mut VM, _const_idx: u32) {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::OpStructDef);
-    // StructDef is a no-op in the interpreter, since structs load via Constant.
 }
 
 pub unsafe extern "C" fn jit_op_struct_literal(
@@ -1348,15 +1270,10 @@ pub unsafe extern "C" fn jit_op_define_method(
     }
 }
 
-/// MethodCall with a per-call-site inline cache. On hit (current
-/// instance's struct def matches the cached def), we skip
-/// `find_struct_method`'s two HashMap lookups and dispatch directly to
-/// the cached method closure. On miss we resolve the method, populate
-/// the cache, and dispatch.
-///
-/// The cache is safe across def/method mutation because we compare the
-/// struct def `Rc` identity (not just name). If a def is redefined, it
-/// gets a fresh allocation and the IC misses.
+/// MethodCall with a per-call-site inline cache. On a hit (the instance's
+/// struct def `Rc` matches the cached def) it dispatches directly to the
+/// cached method closure. On a miss it resolves the method, populates the
+/// cache, and dispatches.
 #[inline(always)]
 pub unsafe extern "C" fn jit_op_method_call_ic(
     vm: *mut VM,
@@ -1372,7 +1289,6 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
 
     let instance_idx = vm.stack_len() - 1 - ac;
 
-    // The def lives on the instance, so a hit needs no globals lookup.
     let (struct_def, struct_name_owned) = match vm.stack_at(instance_idx).as_struct_instance() {
         Some(inst) => (Rc::clone(&inst.def), None::<String>),
         None => {
@@ -1380,8 +1296,6 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
         }
     };
 
-    // Cache hit: cached def matches current def. A null raw identity means
-    // `invalidate_method_caches` emptied the entry; the keepers only linger.
     if let (Some(cached_def), Some(cached_closure)) =
         (cache.struct_def.as_ref(), cache.closure.as_ref())
         && Rc::ptr_eq(cached_def, &struct_def)
@@ -1411,7 +1325,6 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
         };
     }
 
-    // Miss: resolve method, populate cache, dispatch.
     let method_name_val = vm.current_constant(method_idx as u16);
     let Some(mname_rc) = method_name_val.as_string().cloned() else {
         return unsafe { jit_op_method_call(vm as *mut VM, method_idx, arg_count) };
@@ -1419,7 +1332,6 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
     let mname: String = mname_rc.to_string();
     let struct_name = struct_name_owned.unwrap_or_else(|| struct_def.name.clone());
 
-    // A callable instance field shadows a method, so only take the IC path for def-resident methods.
     match vm.find_struct_method(&struct_name, &mname) {
         Ok(method) if method.as_closure().is_some() => {
             let closure = method.as_closure().unwrap().clone();
@@ -1438,7 +1350,6 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
             cache.closure_raw = closure_raw;
             cache.thunk_raw = thunk as *const ();
             cache.arity = closure.function.arity;
-            // Record the inline kind when the body is just `self.f = self.f + {const|arg}; return`.
             cache.inline_kind = super::engine::MethodInlineKind::None;
             cache.inline_field_index = 0;
             cache.inline_addend = 0;
@@ -1450,15 +1361,13 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
                     super::engine::MethodInlineKind::FieldAddLocal => 2,
                     super::engine::MethodInlineKind::None => u8::MAX,
                 };
-                if closure.function.arity == expected_arity {
-                    // Resolve the field name through the current receiver's FieldLayout.
-                    if let Some(inst) = vm.stack_at(instance_idx).as_struct_instance()
-                        && let Some(&layout_idx) = inst.layout.indices.get(info.field_name.as_ref())
-                    {
-                        cache.inline_kind = info.kind;
-                        cache.inline_field_index = layout_idx as u32;
-                        cache.inline_addend = info.addend;
-                    }
+                if closure.function.arity == expected_arity
+                    && let Some(inst) = vm.stack_at(instance_idx).as_struct_instance()
+                    && let Some(&layout_idx) = inst.layout.indices.get(info.field_name.as_ref())
+                {
+                    cache.inline_kind = info.kind;
+                    cache.inline_field_index = layout_idx as u32;
+                    cache.inline_addend = info.addend;
                 }
             }
             cache.struct_def = Some(Rc::clone(&struct_def));
@@ -1485,13 +1394,12 @@ pub unsafe extern "C" fn jit_op_method_call_ic(
                 }
             }
         }
-        // Not a closure, not found, or error: defer to generic path.
         _ => unsafe { jit_op_method_call(vm as *mut VM, method_idx, arg_count) },
     }
 }
 
-/// MethodCall — like `call_value`, if a user frame was pushed we must
-/// drive the interpreter until it returns.
+/// MethodCall — like `call_value`, if a user frame was pushed the interpreter
+/// is driven until it returns.
 pub unsafe extern "C" fn jit_op_method_call(vm: *mut VM, method_idx: u32, arg_count: u32) -> u32 {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::OpMethodCall);
@@ -1518,8 +1426,6 @@ pub unsafe extern "C" fn jit_op_method_call(vm: *mut VM, method_idx: u32, arg_co
     }
 }
 
-// Dispatch to call_value and drive the interpreter until any pushed user frame returns.
-
 /// Handle the `Call` opcode from JIT-compiled code.
 ///
 /// Stack must be laid out as `[..., callee, arg0, ..., argN-1]`, exactly
@@ -1542,7 +1448,6 @@ pub unsafe extern "C" fn jit_op_call(vm: *mut VM, arg_count: u32) -> u32 {
 
     match call_result {
         Ok(()) => {
-            // If the JIT did not run it to completion the frame is still on top, so drive until it returns.
             if vm.frames_len() > before_depth {
                 match vm.execute_until(before_depth) {
                     Ok(()) => 0,
@@ -1562,14 +1467,10 @@ pub unsafe extern "C" fn jit_op_call(vm: *mut VM, arg_count: u32) -> u32 {
     }
 }
 
-/// Hit path of the inline-IR Call guard. Pre-conditions (verified by
-/// the caller's IR): the callee on stack is a Closure whose Rc pointer
-/// equals `cache.closure_raw`, which in turn means `cache._keeper` is
-/// populated and `cache.thunk_raw` is a valid `CompiledThunk` pointer.
-///
-/// We skip almost all of `call_closure`'s bookkeeping: no arity check
-/// (cache guarantees it), no named args, no call_count bump, no type
-/// checks. Just push a frame and invoke the cached thunk.
+/// Hit path of the inline-IR Call guard. Pre-conditions (verified by the
+/// caller's IR): the callee on stack is a Closure whose Rc pointer equals
+/// `cache.closure_raw`, and `cache.thunk_raw` is a valid `CompiledThunk`
+/// pointer. Pushes a frame and invokes the cached thunk.
 #[inline(always)]
 pub unsafe extern "C" fn jit_op_call_hit(
     vm: *mut VM,
@@ -1580,9 +1481,7 @@ pub unsafe extern "C" fn jit_op_call_hit(
     vm.sync_stack_from_view();
     let cache = unsafe { &mut *cache_ptr };
 
-    // The IR guard guarantees a populated keeper: closure_raw non-null implies _keeper is Some.
     let Some(cached_rc) = cache._keeper.as_ref().map(Rc::clone) else {
-        // Defensive fallback — shouldn't be reachable if IR guard holds.
         return unsafe { jit_op_call(vm as *mut VM, cache.arity as u32) };
     };
 
@@ -1606,7 +1505,6 @@ pub unsafe extern "C" fn jit_op_call_hit(
             1
         }
         None => {
-            // Thunk deopt'd: invalidate the cache and retry through the generic path.
             cache.closure_raw = std::ptr::null();
             cache.thunk_raw = std::ptr::null();
             cache._keeper = None;
@@ -1660,14 +1558,12 @@ pub unsafe extern "C" fn jit_op_call_miss(
         }
     };
 
-    // Populate cache on success when the callee is a JIT-compiled closure.
     if status == 0
         && let Some(c) = callee_candidate
         && c.jit_state.get() == 1
         && c.function.arity as usize == ac
         && let Some(thunk) = c.jit_thunk.get()
     {
-        // Store the raw RcBox pointer to match Value::Closure's payload; Rc::as_ptr is 16 bytes past.
         let rc_raw: *const crate::vm::value::ObjClosure = unsafe {
             *(&c as *const Rc<crate::vm::value::ObjClosure>
                 as *const *const crate::vm::value::ObjClosure)
@@ -1675,12 +1571,8 @@ pub unsafe extern "C" fn jit_op_call_miss(
         cache.closure_raw = rc_raw;
         cache.thunk_raw = thunk as *const ();
         cache.arity = c.function.arity;
-        // Cache the CA entry too so the IC reads both fields from a constant cache_ptr.
         cache.specialized_kind = c.specialized_kind.get();
         cache.specialized_thunk = c.specialized_thunk.get().unwrap_or(std::ptr::null());
-        // Phase 1: if the callee's whole body is one add over an
-        // immutable captured integer, record it so the call site can
-        // evaluate it directly instead of dispatching.
         match super::engine::detect_inline_closure_upvalue_add(&c.function) {
             Some(idx) => {
                 cache.inline_kind = super::engine::ClosureInlineKind::AddUpvalueArg;
@@ -1697,11 +1589,8 @@ pub unsafe extern "C" fn jit_op_call_miss(
     status
 }
 
-// ── Return — mirrors the interpreter's `Return` opcode handler ────────
-
 /// Truncate the VM stack to `new_len`, dropping values above it.
-/// Used by the JIT's inline op_return fast path to handle Rc-bearing
-/// locals safely without needing to emit Drop IR inline.
+/// Truncate the VM stack to `new_len`, dropping values above it.
 pub unsafe extern "C" fn jit_stack_truncate(vm: *mut VM, new_len: i64) {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::StackTruncate);
@@ -1729,12 +1618,8 @@ pub unsafe extern "C" fn jit_op_return(vm: *mut VM) {
     vm.push(result);
 }
 
-// ── Inline int fast-path support ───────────────────────────────────────
-
-/// Return a raw pointer to the first `Value` on the VM stack. The JIT's
-/// inline int fast path reads the top two values' tag bytes through this
-/// pointer. Valid only for the duration of one opcode emission — any
-/// other runtime helper that might reallocate the stack invalidates it.
+/// Return a raw pointer to the first `Value` on the VM stack. Valid only until
+/// another runtime helper reallocates the stack.
 pub unsafe extern "C" fn jit_stack_as_mut_ptr(vm: *mut VM) -> *mut crate::vm::value::Value {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::StackAsMutPtr);
@@ -1749,9 +1634,8 @@ pub unsafe extern "C" fn jit_stack_len(vm: *mut VM) -> u64 {
     vm.stack_len() as u64
 }
 
-/// Commit the inline int fast path: pop the top Value (which the fast
-/// path already overwrote with the result at the `stack_len - 2` slot
-/// via direct memory write) and truncate the stack by one.
+/// Commit the inline int fast path: pop the top Value and truncate the stack
+/// by one.
 pub unsafe extern "C" fn jit_stack_pop_one(vm: *mut VM) {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::StackPopOne);
@@ -1759,8 +1643,7 @@ pub unsafe extern "C" fn jit_stack_pop_one(vm: *mut VM) {
     vm.stack_shrink(1);
 }
 
-/// Shrink the stack by `n`. Used by the fused compare+branch fast path to
-/// drop both operands in a single helper call after the integer icmp.
+/// Shrink the stack by `n`.
 pub unsafe extern "C" fn jit_stack_pop_n(vm: *mut VM, n: u32) {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::StackPopN);
@@ -1770,17 +1653,9 @@ pub unsafe extern "C" fn jit_stack_pop_n(vm: *mut VM, n: u32) {
 
 /// Commit a raw-IR stack rearrangement to the `Vec<Value>` backing store.
 ///
-/// The inline MethodCall IR fast path writes `Value` bit-patterns at
-/// memory addresses beyond `self.stack.len()` (but within the
-/// `STACK_MAX` capacity pre-allocated in `VM::new()`) via raw stores.
-/// This helper tells the `Vec` that its logical length grew so that
-/// any subsequent helper using `self.stack[idx]` (bounds-checked via
-/// `Vec::len`) sees the new slots — and so that `stack_truncate` /
-/// drop-on-VM-drop run `Drop` on them to balance the refcount bumps
-/// the IR emitted.
-///
-/// Safety is delegated to `VM::stack_set_len_raw`; see that method's
-/// doc comment for the invariants the caller must uphold.
+/// Extends the `Vec`'s logical length to cover `Value` slots written by the
+/// inline MethodCall IR. Safety is delegated to `VM::stack_set_len_raw`; see
+/// that method's doc comment for the invariants the caller must uphold.
 #[inline(always)]
 pub unsafe extern "C" fn jit_stack_commit_len(vm: *mut VM, new_len: u64) {
     let vm = unsafe { &mut *vm };
@@ -1789,11 +1664,8 @@ pub unsafe extern "C" fn jit_stack_commit_len(vm: *mut VM, new_len: u64) {
     unsafe { vm.stack_set_len_raw(new_len as usize) };
 }
 
-/// Commit the inline int fast path for comparison opcodes: pop the top
-/// two Values and push a `Value::Boolean(result != 0)`. Drop handling
-/// is done in Rust so refcount semantics stay correct even for the
-/// (never-taken on this fast path) case where the popped values were
-/// heap-backed.
+/// Commit the inline int fast path for comparison opcodes: pop the top two
+/// Values and push a `Value::Boolean(result != 0)`.
 pub unsafe extern "C" fn jit_replace_top2_with_bool(vm: *mut VM, result: u32) {
     let vm = unsafe { &mut *vm };
     vm.jit.bump_helper(HelperCounter::ReplaceTop2WithBool);
@@ -1803,14 +1675,10 @@ pub unsafe extern "C" fn jit_replace_top2_with_bool(vm: *mut VM, result: u32) {
     vm.push(Value::Boolean(result != 0));
 }
 
-// ── Upvalue type compile-time sanity (avoid unused import warning) ─────
-
 #[allow(dead_code)]
 fn _unused_upvalue_reference() -> Option<Upvalue> {
     None
 }
-
-// ── Phase 2.2/2.4: lean integer entry boundary ──────────────────────────────
 
 /// Why a lean entry did not produce a value.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -1823,12 +1691,7 @@ pub enum LeanExit {
 }
 
 /// Where a lean entry's cold exit lands.
-///
-/// Thread-local, not global. A shared buffer races: one thread's `setjmp` is
-/// overwritten by another's, and the `longjmp` then restores a stack pointer
-/// belonging to a different stack. That reproduced as a SIGTRAP in
-/// `core/tests/jit_unwind_probe.rs`, and Oxigen's `spawn`/`pmap`/threaded
-/// server would hit the same thing in production.
+/// Where a lean entry's cold exit lands. Thread-local.
 #[repr(C, align(16))]
 pub struct LeanJmpBuf([u64; 64]);
 
@@ -1845,17 +1708,12 @@ thread_local! {
 }
 
 /// Raw pointer to this thread's unwind target.
-///
-/// Deliberately separate from the `setjmp` call: `setjmp` must execute in the
-/// frame control returns to, so calling it inside a `with()` closure would
-/// capture the closure's frame and land in one that no longer exists.
 fn lean_unwind_target() -> *mut LeanJmpBuf {
     LEAN_UNWIND.with(|c| c.get())
 }
 
 /// Called from a lean entry when the recursion budget is exhausted. Never
-/// returns — this is the entire cold-exit protocol, and it is why the ABI needs
-/// no status channel.
+/// returns.
 pub unsafe extern "C" fn jit_lean_overflow() -> i64 {
     unsafe { lean_longjmp(lean_unwind_target(), 1) }
 }
@@ -1863,23 +1721,15 @@ pub unsafe extern "C" fn jit_lean_overflow() -> i64 {
 /// Invokes a lean entry with integer arguments.
 ///
 /// `Ok(v)` on success. `Err(LeanExit::Overflow)` when the budget ran out, which
-/// the caller reports as the same "stack overflow" the interpreter would;
-/// `Err(LeanExit::Unsupported)` means this entry cannot be dispatched at all and
-/// the caller must fall through to a normal entry. Conflating the two turned an
-/// unsupported arity into a spurious stack-overflow error.
+/// the caller reports as a "stack overflow". `Err(LeanExit::Unsupported)` means
+/// this entry cannot be dispatched and the caller must fall through to a normal
+/// entry.
 ///
-/// Nothing needs unwinding on the cold path: a lean entry never touches
-/// `stack_view.len`, `jit_frame_view.len` or any `Rc`, so the VM state the
-/// caller held before the call is still exactly right. That is Phase 2.4's
-/// reconstruction description for this entry kind, and it is valid only because
-/// 2.2 holds.
-///
+/// The cold path leaves VM state unchanged: a lean entry never touches
+/// `stack_view.len`, `jit_frame_view.len` or any `Rc`.
 /// # Safety
 /// `entry` must be a finalized lean entry of arity `args.len()`.
 pub unsafe fn invoke_lean(entry: *const (), args: &[i64], budget: i64) -> Result<i64, LeanExit> {
-    // No live state may straddle the setjmp: Rust's FFI declaration cannot
-    // express "returns twice", so the optimizer is free to keep values in
-    // callee-saved registers that longjmp restores from under it.
     let rc = unsafe { lean_setjmp(lean_unwind_target()) };
     if rc != 0 {
         return Err(LeanExit::Overflow);
@@ -1926,10 +1776,6 @@ pub unsafe fn invoke_lean(entry: *const (), args: &[i64], budget: i64) -> Result
                     args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], budget,
                 )
             }
-            // Unreachable: `call_closure` checks the arity before dispatching,
-            // and `compile_lean_entry` refuses to build an entry above this
-            // bound. Returning Err here would be reported as a stack overflow,
-            // which is how an unsupported arity once surfaced.
             _ => return Err(LeanExit::Unsupported),
         }
     };

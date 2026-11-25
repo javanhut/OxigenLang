@@ -1,46 +1,12 @@
-//! Ratchet against the silent-failure pattern.
+//! Ratchet against the silent-failure pattern: error conditions converted into plausible-looking values.
 //!
-//! Two adversarial review passes over this repo turned up 14 bugs. The single
-//! most common shape, by a wide margin, was **an error condition converted into
-//! a plausible-looking value** — the program keeps running and nobody is told:
-//!
-//!   - `resp_body.read_to_string().unwrap_or_default()` — a failed HTTP body
-//!     read became `{status: 200, body: ""}`, indistinguishable from a server
-//!     that genuinely returned nothing.
-//!   - a discarded `thread::Builder::spawn` result — the worker never started,
-//!     the task was enqueued anyway, and `join()` blocked forever.
-//!
-//! Clippy cannot catch this. There is no lint for `unwrap_or_default()` on a
-//! `Result` (verified: `manual_unwrap_or_default` and `let_underscore_must_use`
-//! both report zero here), and the cast/unwrap lints that *do* exist fire 273
-//! times across this crate — overwhelmingly on bytecode-internal conversions
-//! that are perfectly correct. A check that noisy gets muted, so it protects
-//! nothing.
-//!
-//! So this is a **ratchet, not a cleanup**. The 44 existing sites are frozen as
-//! a baseline; most are legitimate (`Rc::into_raw` to leak a refcount on
-//! purpose, `OnceLock::set` where losing the race is fine, `write!` into a
-//! `String` which cannot fail). Auditing all 44 is not the point. The point is
-//! that the 45th has to be a deliberate act.
-//!
-//! ## When this test fails
-//!
-//! **Count went up** — you added one. If the error genuinely cannot matter, say
-//! why in a comment at the site and raise that file's number below. Raising it
-//! silently is the exact habit this guards against, so the comment is the part
-//! that counts.
-//!
-//! **Count went down** — you fixed one. Lower the number to lock the
-//! improvement in. That is what makes it a ratchet rather than a high-water mark.
-//!
-//! Known limits: it greps text rather than types, so it cannot tell a swallowed
-//! `Result` from a harmless `Option`, and per-file counts miss a same-file swap.
-//! Both are accepted — this catches the careless addition, which is how all 14
-//! arrived. Reach for `dylint` only if someone games the counts.
+//! The test greps the source for shapes such as `unwrap_or_default()` on a `Result` and discarded `thread::Builder::spawn` results, and compares per-file counts against a frozen baseline.
+//! A count that goes up or down fails the test; the baseline number is then updated to match.
+//! It matches text rather than types, so it cannot tell a swallowed `Result` from a harmless `Option`.
 
 use std::path::{Path, PathBuf};
 
-/// Frozen per-file totals. See the module docs before changing a number.
+/// Frozen per-file totals.
 const BASELINE: &[(&str, usize)] = &[
     ("core/src/clock.rs", 3),
     ("core/src/compiler/slot_types.rs", 1),
@@ -60,39 +26,20 @@ const BASELINE: &[(&str, usize)] = &[
     ("crates/oxigen-cli/src/repl/mod.rs", 1),
 ];
 
-/// The shapes that turn an error into a value. Each one is how a real bug in
-/// this repo actually looked.
-const SHAPES: &[&str] = &[
-    "unwrap_or_default()", // the HTTP-body bug: read failure -> ""
-    ".ok();",              // Result discarded in statement position
-    "let _ = ",            // Result bound to nothing
-];
+/// The shapes that turn an error into a value.
+const SHAPES: &[&str] = &["unwrap_or_default()", ".ok();", "let _ = "];
 
-/// Files where integers arrive from an Oxigen *program* rather than from our
-/// own bytecode. A narrowing cast here silently rewrites a user's value:
-///
-///   - `net.connect(host, 74626)` reached port 9090        (`port as u16`)
-///   - ``byte(`€`)`` returned 172 instead of erroring       (`c as u8`)
-///   - `chr(4294967393)` returned `a`                       (`n as u32` wrapped
-///     back into the valid range, defeating the range check it fed)
-///   - `os.exit(256)` exited **0** — a failure reported as success (`n as i32`)
-///
-/// Bytecode-internal casts (constant indices, slot numbers) are fine and are
-/// why this cannot be a blanket clippy lint: `cast_possible_truncation` fires
-/// 273 times across this crate. Scoping it to the boundary is what makes the
-/// signal usable.
+/// Files where integers arrive from an Oxigen program rather than from internal bytecode, so a narrowing cast silently rewrites a user's value (such as `port as u16`, `c as u8`, `n as u32`, `n as i32`).
 const BOUNDARY_FILES: &[(&str, usize)] = &[
     ("core/src/vm/builtins.rs", 7),
     ("core/src/netres/mod.rs", 1),
     ("core/src/concurrent.rs", 1),
 ];
 
-/// Narrowing casts. Not `usize` — it is 64-bit here, so it does not narrow from
-/// `i64`, and including it would bury the real hits under indexing arithmetic.
+/// Narrowing casts. `usize` is excluded because it is 64-bit and does not narrow from `i64`.
 const NARROWING: &[&str] = &["as u8", "as u16", "as u32", "as i32"];
 
 fn repo_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR is <repo>/core for this test's package.
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("core/ always has a parent")
@@ -108,8 +55,6 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
         if path.is_dir() {
             rs_files(&path, out);
         } else if path.extension().is_some_and(|e| e == "rs")
-            // Unit-test modules live beside the code they test and are allowed
-            // to swallow freely — a discarded Result in a test is the test.
             && path.file_name().is_some_and(|n| n != "tests.rs")
         {
             out.push(path);
@@ -117,8 +62,7 @@ fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Counts shape occurrences, ignoring `//` comments so that *documenting* a
-/// swallow (which this test actively wants people to do) never trips it.
+/// Counts shape occurrences, ignoring `//` comments.
 fn count_shapes(source: &str) -> usize {
     source
         .lines()

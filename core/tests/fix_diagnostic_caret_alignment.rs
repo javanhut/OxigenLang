@@ -1,6 +1,4 @@
-//! The caret under a diagnostic was padded with one space per character
-//! before the error. A tab renders wider than one space, and a CJK character
-//! two columns wide, so on such lines the caret pointed at the wrong place.
+//! Tests that the caret under a diagnostic aligns with the error column on lines containing tabs and wide (CJK) characters.
 
 use oxigen_core::diagnostics::registry as codes;
 use oxigen_core::diagnostics::{Diagnostic, SourceFile, render};
@@ -21,7 +19,6 @@ fn caret_line(source: &str, line: usize, column: usize, offset: usize) -> String
 
 #[test]
 fn caret_keeps_tabs_before_the_error() {
-    // `\tx ]`: the `]` is column 4, byte 3.
     let line = caret_line("\tx ]\n", 1, 4, 3);
     let marks = line.split(" | ").nth(1).unwrap();
     assert!(
@@ -32,8 +29,6 @@ fn caret_keeps_tabs_before_the_error() {
 
 #[test]
 fn caret_accounts_for_wide_characters() {
-    // `s := "日本" ]`: the `]` is column 11, byte 14; it is displayed at
-    // terminal column 13 because each CJK character takes two cells.
     let line = caret_line("s := \"日本\" ]\n", 1, 11, 14);
     let marks = line.split(" | ").nth(1).unwrap();
     assert_eq!(

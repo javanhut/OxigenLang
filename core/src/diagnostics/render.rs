@@ -1,15 +1,12 @@
-//! Rendering. The only place that knows what a diagnostic looks like.
+//! Rendering of diagnostics.
 //!
 //! Three formats share one traversal: human (terminal), JSON (the LSP and any
 //! other tool), and short (`file:line:col: error[E0003]: msg`, for grep).
 
 use super::{Diagnostic, Help, Label, SourceFile, registry};
 
-/// Renders the caret/underline row for a label.
-///
-/// A span covering real text is underlined across its width; a point span —
-/// synthetic locations, and anything the lexer could not give an extent —
-/// still gets the single caret it always had.
+/// Renders the caret/underline row for a label. A span covering real text is
+/// underlined across its width; a point span gets a single caret.
 fn underline(label: &Label, src: &SourceFile) -> Option<String> {
     let line_no = label.span.line();
     let col = label.span.column();
@@ -18,7 +15,6 @@ fn underline(label: &Label, src: &SourceFile) -> Option<String> {
     }
     let line_text = src.line(line_no)?;
 
-    // Width in characters, clamped so a multi-line span underlines only its first line.
     let start_byte = label.span.start.offset;
     let end_byte = label.span.end.offset;
     let width = if end_byte > start_byte {
@@ -36,12 +32,9 @@ fn underline(label: &Label, src: &SourceFile) -> Option<String> {
     } else {
         1
     };
-    // Don't run past the end of the line.
     let remaining: usize = line_text.chars().skip(col - 1).map(cell_width).sum();
     let width = width.min(remaining.max(1));
 
-    // Pad with what precedes the caret, cell for cell: a tab stays a tab and a
-    // wide character takes two spaces, or the caret drifts left of the error.
     let pad: String = line_text
         .chars()
         .take(col.saturating_sub(1))
@@ -82,13 +75,10 @@ fn secondary_underline(label: &Label, src: &SourceFile) -> Option<String> {
 pub fn render_human(d: &Diagnostic, src: &SourceFile) -> String {
     let mut out = String::new();
 
-    // Header: `error[E0003]: message`
     out.push_str(&format!("{}[{}]: {}\n", d.severity, d.code, d.message));
 
-    // Location. Naming the file is what makes editor terminals linkify it.
     let line_no = d.primary.span.line();
     let col = d.primary.span.column();
-    // Line 0 means no location was given; print what we know rather than an invented 0:0.
     match (&src.name, line_no) {
         (Some(name), 0) => out.push_str(&format!("  --> {name}\n")),
         (Some(name), _) => out.push_str(&format!("  --> {name}:{line_no}:{col}\n")),
@@ -98,7 +88,6 @@ pub fn render_human(d: &Diagnostic, src: &SourceFile) -> String {
 
     let gutter = " ".repeat(format!("{line_no}").len());
 
-    // Secondary labels first so the primary reads last, next to the notes explaining it.
     let mut secondaries: Vec<&Label> = d.secondary.iter().collect();
     secondaries.sort_by_key(|l| (l.span.line(), l.span.column()));
     for label in secondaries {
@@ -141,7 +130,6 @@ pub fn render_human(d: &Diagnostic, src: &SourceFile) -> String {
                     if let Some(line_text) = src.line(n) {
                         let start = edit.span.start.offset;
                         let end = edit.span.end.offset;
-                        // Splice the replacement in so the reader sees the fixed line, not a diff.
                         if let (Some(before), Some(after)) =
                             (src.text.get(..start), src.text.get(end..))
                         {
@@ -200,10 +188,8 @@ fn label_json(l: &Label) -> serde_json::Value {
     })
 }
 
-/// Machine-readable. A superset of the old `oxigen check` shape — `line`,
-/// `column`, `message`, `severity` and `suggestion` are still present at the
-/// top level so an existing consumer keeps working while it migrates to the
-/// richer fields.
+/// Machine-readable JSON. `line`, `column`, `message`, `severity` and
+/// `suggestion` are present at the top level alongside the richer fields.
 pub fn render_json(d: &Diagnostic, _src: &SourceFile) -> serde_json::Value {
     let legacy_suggestion = d.helps.first().map(|h| match h {
         Help::Text(t) => t.clone(),
@@ -211,13 +197,11 @@ pub fn render_json(d: &Diagnostic, _src: &SourceFile) -> serde_json::Value {
     });
 
     serde_json::json!({
-        // legacy shape
         "line": d.primary.span.line(),
         "column": d.primary.span.column(),
         "message": d.message,
         "suggestion": legacy_suggestion,
         "severity": d.severity.as_str(),
-        // new shape
         "code": d.code.0,
         "primary": label_json(&d.primary),
         "secondary": d.secondary.iter().map(label_json).collect::<Vec<_>>(),

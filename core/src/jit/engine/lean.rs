@@ -1,7 +1,6 @@
-//! Phase 2.2 / 2.4: the lean integer entry.
+//! The lean integer entry.
 //!
-//! A third entry kind alongside `Generic` and `IntSpecialized`, with the ABI the
-//! 2.3 A/B selected:
+//! A third entry kind alongside `Generic` and `IntSpecialized`, with the ABI:
 //!
 //! ```text
 //! fn(i64 args.., i64 budget) -> i64
@@ -11,21 +10,11 @@
 //! Cranelift SSA, and self-recursion is a direct call to this same entry with a
 //! decremented budget.
 //!
-//! **Why this can skip VM state entirely (2.2).** `lean_entry_eligible`
-//! (`compiler::slot_types`) admits only integer parameters, integer locals,
-//! integer constants, wrapping arithmetic, integer comparisons, branches, a
-//! self-recursive call, and a return. No upvalue, no capture, no heap value, no
-//! fallible operation. Such a body has nothing to say to the VM, so the entry is
-//! not given a way to reach it. That is stronger than declining to write the
-//! stack — it makes writing it unrepresentable.
-//!
-//! **Why reconstruction is nearly vacuous (2.4).** The plan requires a
-//! reconstruction description per bailout point, and a lean entry has exactly
-//! one: budget exhaustion. Because the body never touched `stack_view.len`,
-//! `jit_frame_view.len`, or any `Rc`, there is no VM state to unwind — the
-//! boundary simply reports the overflow against the state it held before the
-//! call. The reconstruction description is therefore "nothing to reconstruct",
-//! and it is valid precisely because 2.2 holds.
+//! `lean_entry_eligible` (`compiler::slot_types`) admits only integer parameters,
+//! integer locals, integer constants, wrapping arithmetic, integer comparisons,
+//! branches, a self-recursive call, and a return. The only bailout point is
+//! budget exhaustion, which reports the overflow against the VM state held
+//! before the call.
 //!
 //! The cold exit uses the thread-local `longjmp` verified against real Cranelift
 //! frames in `core/tests/jit_unwind_probe.rs`.
@@ -42,8 +31,7 @@ use cranelift_module::{FuncId, Linkage, Module};
 use crate::compiler::opcode::OpCode;
 use crate::vm::value::{Function, ValueRepr};
 
-/// Upper bound on operand-stack depth we will model. The eligible subset is
-/// simple expression code; anything deeper is refused rather than guessed at.
+/// Upper bound on operand-stack depth modelled. Anything deeper is refused.
 const MAX_LEAN_STACK: usize = 32;
 
 fn read_u16(code: &[u8], off: usize) -> u16 {
@@ -51,8 +39,7 @@ fn read_u16(code: &[u8], off: usize) -> u16 {
 }
 
 /// Compiles `func` as a lean entry. Returns `None` when the body uses anything
-/// outside the modelled subset — refusing is always safe, since the caller then
-/// keeps whatever entry it already had.
+/// outside the modelled subset.
 pub(crate) fn compile_lean_entry(
     module: &mut JITModule,
     ctx: &mut Context,
@@ -62,7 +49,6 @@ pub(crate) fn compile_lean_entry(
     seq: u32,
 ) -> Option<FuncId> {
     let arity = func.arity as usize;
-    // Must not exceed what `invoke_lean` can dispatch.
     if arity == 0 || arity > 8 {
         return None;
     }
@@ -71,14 +57,10 @@ pub(crate) fn compile_lean_entry(
     for _ in 0..arity {
         sig.params.push(AbiParam::new(types::I64));
     }
-    sig.params.push(AbiParam::new(types::I64)); // budget
+    sig.params.push(AbiParam::new(types::I64));
     sig.returns.push(AbiParam::new(types::I64));
 
     let name = format!("oxigen_jit_lean_{seq}");
-    // Discarding the error is deliberate and cannot hide a failure: every
-    // caller treats `None` as "no lean entry", and the function then keeps
-    // whichever entry it already had. Refusing to compile is always a
-    // performance outcome, never a correctness one.
     let func_id = module.declare_function(&name, Linkage::Local, &sig).ok()?;
 
     ctx.func.signature = sig;
@@ -91,13 +73,10 @@ pub(crate) fn compile_lean_entry(
         r
     };
     if !ok {
-        // Leave ctx clean for the next caller; the declaration is inert.
         module.clear_context(ctx);
         return None;
     }
 
-    // OXIGEN_JIT_DISASM=LEAN dumps the lean body; 3.4 is an audit, so it needs
-    // to be inspectable the same way the other entries are.
     let want_disasm = std::env::var("OXIGEN_JIT_DISASM")
         .map(|v| v == "LEAN" || v == "ALL")
         .unwrap_or(false);
@@ -141,9 +120,6 @@ fn translate_lean_body(
 
     let budget = b.block_params(entry)[arity];
 
-    // Operand stack and locals both become Variables so Cranelift's SSA
-    // construction builds the phis at merges; nothing needs a block-param
-    // protocol of its own.
     let stack_vars: Vec<Variable> = (0..MAX_LEAN_STACK)
         .map(|_| b.declare_var(types::I64))
         .collect();
@@ -152,16 +128,12 @@ fn translate_lean_body(
     for &v in &stack_vars {
         b.def_var(v, zero);
     }
-    // Slot 0 is the closure marker; parameters are 1..=arity.
     for slot in 1..=arity as u16 {
         let v = b.declare_var(types::I64);
         b.def_var(v, b.block_params(entry)[slot as usize - 1]);
         local_vars.insert(slot, v);
     }
 
-    // One block per branch target, plus the depth the operand stack must have on
-    // entry to it. Structured bytecode is consistent here; a mismatch means the
-    // shape is outside what we model and we refuse.
     let mut blocks: HashMap<usize, Block> = HashMap::new();
     let mut block_depth: HashMap<usize, usize> = HashMap::new();
     let mut ip = 0usize;
@@ -196,9 +168,6 @@ fn translate_lean_body(
 
     let mut depth: usize = 0;
     let mut terminated = false;
-    // The overflow adapter is identical at every call site, so emit it once and
-    // branch to it. Per-site copies also carried a dead epilogue each, since the
-    // helper never returns.
     let mut cold_block: Option<Block> = None;
     ip = 0;
 
@@ -222,7 +191,6 @@ fn translate_lean_body(
     }
 
     while ip < code.len() {
-        // A branch target starts a new block; fall-through needs an explicit edge.
         if let Some(&blk) = blocks.get(&ip) {
             if !terminated {
                 b.ins().jump(blk, &[]);
@@ -238,7 +206,6 @@ fn translate_lean_body(
             terminated = false;
         }
         if terminated {
-            // Unreachable tail: skip without emitting.
             let Ok(len) = chunk.instruction_len(ip) else {
                 return false;
             };
@@ -273,7 +240,6 @@ fn translate_lean_body(
                 push!(v);
             }
             OpCode::SetLocal => {
-                // VM semantics: peek, do not pop. A following Pop drains it.
                 let slot = read_u16(code, ip + 1);
                 if depth == 0 {
                     return false;
@@ -333,9 +299,6 @@ fn translate_lean_body(
                 let Some(&blk) = blocks.get(&target) else {
                     return false;
                 };
-                // The condition is PEEKED, not popped: the compiler emits an
-                // explicit `Pop` at the head of each arm. Popping here made the
-                // depth wrong on both sides of every branch.
                 if depth == 0 {
                     return false;
                 }
@@ -360,9 +323,6 @@ fn translate_lean_body(
                 terminated = true;
             }
             OpCode::GetGlobal => {
-                // Pushes the callee for the self-call below. A lean entry knows
-                // its own identity statically, so nothing is materialized —
-                // just a placeholder the Call pops and discards.
                 push!(zero);
             }
             OpCode::Call => {
@@ -377,7 +337,6 @@ fn translate_lean_body(
                 args.reverse();
                 let _callee_placeholder = pop!();
 
-                // Budget check before recursing; exhaustion never returns.
                 let one = b.ins().iconst(types::I64, 1);
                 let next_budget = b.ins().isub(budget, one);
                 let exhausted = b.ins().icmp(IntCC::SignedLessThanOrEqual, budget, one);
@@ -405,7 +364,6 @@ fn translate_lean_body(
                 b.ins().return_(&[v]);
                 terminated = true;
             }
-            // Eligibility admitted it only where an Int return always passes.
             OpCode::CheckReturn => {}
             _ => return false,
         }
@@ -413,15 +371,12 @@ fn translate_lean_body(
     }
 
     if !terminated {
-        // Body fell off the end without returning — outside the modelled subset.
         return false;
     }
-    // Emit the single shared overflow adapter, if any call site needed one.
     if let Some(c) = cold_block {
         b.switch_to_block(c);
         let cold_ref = module.declare_func_in_func(cold_overflow, b.func);
         b.ins().call(cold_ref, &[]);
-        // Unreachable: the helper longjmps. Cranelift still needs a terminator.
         let z = b.ins().iconst(types::I64, 0);
         b.ins().return_(&[z]);
     }
@@ -464,7 +419,6 @@ mod tests {
         let func = target.expect("named function in constant pool");
         let arity = func.arity as usize;
 
-        // Mirror JitInner::new's ISA configuration so the frames match production.
         let mut fb = settings::builder();
         fb.set("opt_level", "speed").unwrap();
         let flags = settings::Flags::new(fb);
@@ -492,8 +446,6 @@ mod tests {
 
     #[test]
     fn lean_entry_computes_recursive_arithmetic() {
-        // bench_arith's body. The lean entry never touches the VM, so a correct
-        // result here is evidence the whole computation ran in registers.
         let src = r#"
 fun work(n <int>) {
     option {
@@ -505,9 +457,6 @@ work(1)
 "#;
         let (_m, code, arity) = lean_for(src, "work").expect("work must compile lean");
         assert_eq!(arity, 1);
-        // Reference computed here rather than hardcoded, so the expectation
-        // cannot drift from the recurrence it is checking. Wrapping arithmetic
-        // via u64 mirrors Oxigen's integer semantics.
         fn reference(n: i64) -> i64 {
             if n < 2 {
                 return n;
@@ -520,8 +469,6 @@ work(1)
             let v = unsafe { crate::jit::runtime::invoke_lean(code as *const (), &[n], 1_000_000) };
             assert_eq!(v, Ok(reference(n)), "work({n})");
         }
-        // Cross-check the reference itself against the value the interpreter
-        // produces, so a shared mistake cannot pass silently.
         assert_eq!(reference(20), -5_482_531);
     }
 
@@ -537,7 +484,6 @@ fun work(n <int>) {
 work(1)
 "#;
         let (_m, code, _) = lean_for(src, "work").expect("compile");
-        // A budget far below the required depth must unwind, not return garbage.
         let v = unsafe { crate::jit::runtime::invoke_lean(code as *const (), &[30], 4) };
         assert_eq!(
             v,
@@ -545,15 +491,11 @@ work(1)
             "budget exhaustion must take the cold exit"
         );
 
-        // And the entry stays usable afterwards.
         let again = unsafe { crate::jit::runtime::invoke_lean(code as *const (), &[10], 100_000) };
         assert!(again.is_ok(), "entry must be reusable after a cold exit");
     }
 
-    /// Not an assertion — a measurement. Prints the lean entry's time for
-    /// work(34), the same workload bench_arith runs, so it can be put beside
-    /// the current JIT (~132 ms) and the native C floor (~11 ms).
-    /// Run with: cargo test --release -p oxigen-core --lib lean_entry_speed -- --nocapture
+    /// Prints the lean entry's time for `work(34)`.
     #[test]
     fn lean_entry_speed_work_34() {
         let src = "fun work(n <int>) {\n option {\n n < 2 -> { n }\n { work(n - 1) + work(n - 2) * 3 - n }\n }\n}\nwork(1)\n";

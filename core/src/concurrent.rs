@@ -1,4 +1,4 @@
-//! Minimal parallelism spike: `spawn`/`join` builtins backed by a worker pool.
+//! Parallelism for `spawn`/`join` builtins backed by a worker pool.
 //!
 //! A `spawn(func, args...)` hands a task to a pool of worker threads. Each
 //! task runs on a VM of its own, built from the spawning program's
@@ -6,10 +6,9 @@
 //! body skipped). The call result is sent back over an mpsc channel;
 //! `join(handle)` blocks for it.
 //!
-//! Only a small set of "plain old data" values cross the thread boundary
-//! (`Sendable`), since the VM's `Value` is `Rc`-backed and not `Send`.
-//! Functions don't cross either: a worker finds a spawned function's code by
-//! compiling the program it came from again (see `Unit`).
+//! Only plain-data values (`Sendable`) cross the thread boundary. A worker finds
+//! a spawned function's code by compiling the program it came from again (see
+//! `Unit`).
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -36,9 +35,7 @@ use std::rc::Rc;
 pub enum Sendable {
     Unit,
     Int(i64),
-    /// Uints get their own variant: routing them through `Int` wrapped every
-    /// value above `i64::MAX` (18446744073709551615 came back as -1) and
-    /// returned the wrong type besides.
+    /// Unsigned integers.
     Uint(u64),
     Float(f64),
     Bool(bool),
@@ -48,8 +45,7 @@ pub enum Sendable {
     Map(Vec<(Sendable, Sendable)>),
     Set(Vec<Sendable>),
     /// `module` is the file of the module that defined the struct, `None`
-    /// for the program itself: two files may each define a `Point`, and a
-    /// module's struct isn't among the program's globals.
+    /// for the program itself.
     Struct {
         name: String,
         module: Option<PathBuf>,
@@ -60,8 +56,7 @@ pub enum Sendable {
         variant: String,
         payload: SendPayload,
     },
-    /// A collection or struct made read-only by `lock`; its contents are
-    /// wrapped too, so the receiving thread rebuilds it just as locked.
+    /// A collection or struct made read-only by `lock`; its contents are wrapped too.
     Locked(Box<Sendable>),
 }
 
@@ -73,8 +68,7 @@ pub enum SendPayload {
 }
 
 /// Convert a VM `Value` into a `Sendable`. Errors on anything unsupported.
-/// `vm` is the VM the value lives in, which knows where its modules came
-/// from; without it a module's struct travels by name only.
+/// `vm` is the VM the value lives in, which knows where its modules came from.
 fn detach(v: &Value, vm: Option<&VM>) -> Result<Sendable, String> {
     let plain = detach_unlocked(v, vm)?;
     Ok(if v.is_locked() {
@@ -142,9 +136,9 @@ fn detach_payload(p: &VmEnumPayload, vm: Option<&VM>) -> Result<SendPayload, Str
     })
 }
 
-/// Rebuild a VM `Value` from a `Sendable`. Needs the VM only to look up a
-/// struct's definition/layout when rebuilding a `StructInstance`; a struct
-/// it has no definition for is an error.
+/// Rebuild a VM `Value` from a `Sendable`. Needs the VM to look up a struct's
+/// definition/layout when rebuilding a `StructInstance`; a struct it has no
+/// definition for is an error.
 fn attach(s: Sendable, vm: &VM) -> Result<Value, String> {
     let all = |items: Vec<Sendable>| -> Result<Vec<Value>, String> {
         items.into_iter().map(|x| attach(x, vm)).collect()
@@ -231,8 +225,7 @@ fn struct_def(vm: &VM, name: &str, module: Option<&Path>) -> Option<Rc<ObjStruct
     }
 }
 
-/// A struct's flattened field layout, parents' fields first — the layout
-/// `VM::field_layout_of` builds, with the error as a plain message.
+/// A struct's flattened field layout, parents' fields first, with the error as a plain message.
 fn field_layout(vm: &VM, def: &Rc<ObjStructDef>) -> Result<Rc<FieldLayout>, String> {
     if let Some(layout) = def.layout.get() {
         return Ok(Rc::clone(layout));
@@ -263,27 +256,22 @@ fn field_layout(vm: &VM, def: &Rc<ObjStructDef>) -> Result<Rc<FieldLayout>, Stri
         }
     }
     let layout = Rc::new(FieldLayout { slots, indices });
-    // Already set means another path built the layout first; use that one.
     let _ = def.layout.set(Rc::clone(&layout));
     Ok(def.layout.get().cloned().unwrap_or(layout))
 }
 
-// ── Programs ─────────────────────────────────────────────────────────
-
-/// A compiled program that spawned functions can come from, kept so a
-/// worker can compile it again under the same unit and find the same code
-/// by id (see `Function::id`).
+/// A compiled program that spawned functions can come from. A worker compiles
+/// it again under the same unit and finds the same code by id (see
+/// `Function::id`).
 struct Unit {
     /// The compilation unit its functions' ids carry.
     number: u32,
     program: Program,
     source: String,
     file: Option<PathBuf>,
-    /// An imported module rather than a program the host ran: its functions
-    /// run with that module's globals.
+    /// An imported module rather than a program the host ran: its functions run with that module's globals.
     is_module: bool,
-    /// The program registered before this one in the same VM (the REPL's
-    /// earlier lines), whose declarations a worker needs as well.
+    /// The program registered before this one in the same VM (the REPL's earlier lines), whose declarations a worker needs as well.
     previous: Option<Arc<Unit>>,
 }
 
@@ -326,12 +314,9 @@ static UNITS: OnceLock<Mutex<HashMap<u32, Arc<Unit>>>> = OnceLock::new();
 /// The program the host is running, whose declarations every worker VM
 /// gets. Replaced per test by the test runner and per line by the REPL.
 static CURRENT: Mutex<Option<Arc<Unit>>> = Mutex::new(None);
-/// The program source (`set_src`) and file (`set_main_file`), for a host
-/// that registers source text rather than a compiled program.
+/// The program source (`set_src`) and file (`set_main_file`), for a host that registers source text rather than a compiled program.
 static SRC: OnceLock<String> = OnceLock::new();
-/// The program's file path, so a worker VM can resolve LOCAL module imports
-/// (`introduce .mod`) — relative resolution needs `current_file`. Without it,
-/// worker init fails on the import and the worker dies, orphaning tasks.
+/// The program's file path, used by a worker VM to resolve local module imports (`introduce .mod`).
 static MAIN_FILE: OnceLock<PathBuf> = OnceLock::new();
 /// `SRC` parsed, once a spawn needs it.
 static SRC_PROGRAM: OnceLock<Option<Arc<Unit>>> = OnceLock::new();
@@ -347,8 +332,6 @@ fn current_program() -> Option<Arc<Unit>> {
     if let Some(unit) = CURRENT.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         return Some(unit);
     }
-    // `set_src`: the source is the program; its unit number is unknown but
-    // a worker only needs its declarations. Parsed once, not per spawn.
     let src = SRC.get()?;
     SRC_PROGRAM
         .get_or_init(|| {
@@ -361,16 +344,14 @@ fn current_program() -> Option<Arc<Unit>> {
 
 /// The compilation unit a function was compiled in.
 pub fn unit_of(function: &Function) -> u32 {
-    // Lossless: the unit number is exactly the id's top 32 bits.
     (function.id >> 32) as u32
 }
 
 /// Make `program`, compiled into `function`, the program spawned tasks run
 /// against: a worker builds its VM from the program's declarations (`file`
 /// resolves its local imports) and finds a spawned function by compiling it
-/// again. `continues` keeps the declarations of the program registered
-/// before, for a REPL that compiles one line at a time. Call it before
-/// running `function`.
+/// again. `continues` keeps the declarations of the program registered before.
+/// Call it before running `function`.
 pub fn register_program(
     function: &Function,
     program: &Program,
@@ -403,8 +384,7 @@ pub fn unregister_program(function_unit: u32) {
     }
 }
 
-/// Register the program source so workers can rebuild a VM. Call once before
-/// running the program.
+/// Register the program source so workers can rebuild a VM. Call once before running the program.
 pub fn set_src(s: String) {
     let _ = SRC.set(s);
 }
@@ -448,9 +428,7 @@ fn unit_for(closure: &ObjClosure, vm: Option<&VM>) -> Result<Arc<Unit>, String> 
     Ok(unit)
 }
 
-/// Enough of a function to tell that a worker found the same one: a
-/// different program compiled under the same unit (a host that registered
-/// the wrong source) would otherwise run whatever function has the id.
+/// Enough of a function to tell that a worker found the same one as the spawner.
 #[derive(PartialEq, Eq, Debug)]
 struct Shape {
     name: Option<String>,
@@ -479,10 +457,7 @@ struct Callee {
     upvalues: Vec<Sendable>,
 }
 
-// ── Tasks and workers ───────────────────────────────────────────────────
-
-/// A task's cancel request, and the VM running it once a worker has
-/// started it, so a cancel can stop the task's loops, not just its calls.
+/// A task's cancel request, and the VM running it once a worker has started it.
 #[derive(Default)]
 struct Cancel {
     requested: AtomicBool,
@@ -521,8 +496,7 @@ struct TaskBody {
     args: Vec<Sendable>,
     /// The program the task runs in: its declarations are the worker VM's.
     program: Option<Arc<Unit>>,
-    /// The main thread's globals the callee reads: a spawned closure reads
-    /// top-level `main` bindings as GLOBALS, not upvalues.
+    /// The main thread's globals the callee reads.
     globals: Vec<(String, Sendable)>,
     /// Every global name the callee's code can reach (see `reachable`): the
     /// worker runs only the imports that bind one. `None` runs them all.
@@ -546,27 +520,21 @@ struct Pool {
 
 static POOL: OnceLock<Pool> = OnceLock::new();
 
-/// Count of tasks handed to the pool but not yet finished by a worker. Drained
-/// at program exit so fire-and-forget spawns aren't killed when the process ends.
+/// Count of tasks handed to the pool but not yet finished by a worker. Drained at program exit.
 static OUTSTANDING: AtomicUsize = AtomicUsize::new(0);
 
-/// Number of live worker threads. The pool grows toward `MAX_WORKERS` when every
-/// worker is busy, so I/O fan-out isn't capped at core count (blocked threads
-/// park for free); it never shrinks.
+/// Number of live worker threads. The pool grows toward `MAX_WORKERS` when every worker is busy; it never shrinks.
 static WORKERS: AtomicUsize = AtomicUsize::new(0);
 const MAX_WORKERS: usize = 256;
 
-/// Worker stack size — mirror the CLI's large execution stack.
-const STACK_SIZE: usize = 256 << 20; // 256 MB
+/// Worker stack size.
+const STACK_SIZE: usize = 256 << 20;
 
-/// How deeply tasks may nest on one worker. A task's own spawns run inline
-/// on the worker's stack, so without a limit deep nesting overflows it and
-/// aborts the process.
+/// How deeply tasks may nest on one worker; a task's own spawns run inline on the worker's stack.
 const MAX_INLINE_DEPTH: u32 = 64;
 
 thread_local! {
-    /// True when running inside a worker thread. Used to force `spawn` to run
-    /// inline so workers never enqueue more tasks (prevents task explosion).
+    /// True when running inside a worker thread; `spawn` then runs inline.
     static IS_WORKER: Cell<bool> = const { Cell::new(false) };
 
     /// Worker: the running task's cancel state (set by cancel() via the handle).
@@ -578,12 +546,10 @@ thread_local! {
     /// Worker: how many inline spawns are running on this thread's stack.
     static INLINE_DEPTH: Cell<u32> = const { Cell::new(0) };
 
-    /// Worker: each unit's id → function table, compiled once per thread.
-    /// The functions are only code; every task makes its own closures.
+    /// Worker: each unit's id to function table, compiled once per thread.
     static TABLES: RefCell<HashMap<u32, FunctionTable>> = RefCell::new(HashMap::new());
 
-    /// Worker: a unit's declarations compiled, by which of its statements a
-    /// task keeps. Cloned for each task's VM to run.
+    /// Worker: a unit's declarations compiled, by which of its statements a task keeps.
     static DECLARATIONS: RefCell<HashMap<(u32, Vec<bool>), Function>> =
         RefCell::new(HashMap::new());
 }
@@ -591,22 +557,19 @@ thread_local! {
 /// A compiled unit's functions by id.
 type FunctionTable = Rc<HashMap<u64, Rc<Function>>>;
 
-/// Entries a worker's code caches hold before starting over, so a host that
-/// registers a program per test or per REPL line doesn't grow them forever.
+/// Entries a worker's code caches hold before starting over.
 const CODE_CACHE_LIMIT: usize = 256;
 
-/// A spawned task's handle: its result channel, a memoized result, and the
-/// cancel state shared with the worker. Lives inside `Value::Task`.
+/// A spawned task's handle: its result channel, a memoized result, and the cancel state shared with the worker. Lives inside `Value::Task`.
 pub struct TaskHandle {
     rx: mpsc::Receiver<Result<Sendable, String>>,
     memo: RefCell<Option<Value>>,
     cancel: Arc<Cancel>,
 }
 
-/// A task outcome that the program can recover from: produced as a *catchable*
-/// `ErrorValue` (testable with `is_error`), not the raising `Value::Error` kind
-/// that halts execution. Timeouts, cancellation, and failed tasks use this so
-/// `join`/`converge` always return a value you can branch on.
+/// A task outcome that the program can recover from: produced as a catchable
+/// `ErrorValue` (testable with `is_error`), not the raising `Value::Error` kind.
+/// Used for timeouts, cancellation, and failed tasks.
 fn task_error(msg: impl Into<String>, tag: &str) -> Value {
     Value::ErrorValue(Rc::new(ErrorValueData {
         msg: Rc::new(msg.into()),
@@ -635,8 +598,7 @@ impl TaskHandle {
         v
     }
 
-    /// Stops waiting, not the task: a timeout is not remembered, so a later
-    /// join still collects. A result, failed or not, is.
+    /// Stops waiting, not the task: a timeout is not remembered, so a later join still collects. A result, failed or not, is.
     pub fn join_timeout(&self, vm: &VM, ms: u64) -> Value {
         if let Some(v) = &*self.memo.borrow() {
             return v.clone();
@@ -664,11 +626,7 @@ pub fn is_worker() -> bool {
     IS_WORKER.with(|w| w.get())
 }
 
-/// Set once the first worker picks up a task. Lets `cancelled()` skip the
-/// TLS read entirely in programs that never spawn — it's on every
-/// `call_closure`, so a recursion-heavy no-spawn program pays millions of
-/// TLS round-trips otherwise. Only worker threads can have a cancel flag,
-/// and each sets this before running its task body.
+/// Set once the first worker picks up a task; each worker sets it before running its task body.
 static ANY_TASK_RUN: AtomicBool = AtomicBool::new(false);
 
 /// True if the running task was cancelled. Checked at every `call_closure`;
@@ -683,7 +641,6 @@ pub fn cancelled() -> bool {
 
 /// `cancel(handle)` — stop a spawned task at its next call or loop iteration.
 pub fn builtin_cancel(args: &[Value]) -> Value {
-    // A non-task used to be accepted and ignored, reporting success.
     match args.first() {
         Some(Value::Task(h)) => {
             h.cancel();
@@ -700,9 +657,7 @@ pub fn builtin_cancel(args: &[Value]) -> Value {
 }
 
 /// Block until every task handed to the worker pool has finished. Call once at
-/// program exit so never-joined ("fire-and-forget") spawns run to completion
-/// instead of dying with the process. A task that never returns will block
-/// exit unless it is cancelled.
+/// program exit. A task that never returns blocks exit unless it is cancelled.
 pub fn drain() {
     while OUTSTANDING.load(Ordering::SeqCst) > 0 {
         std::thread::sleep(std::time::Duration::from_micros(200));
@@ -710,12 +665,9 @@ pub fn drain() {
 }
 
 /// A top-level statement a worker needs in order to resolve spawned functions:
-/// type/function/pattern/import declarations only. Everything else (the `main`
-/// block, bare expression statements, value bindings, control flow) is the
-/// program's *work* and belongs to the main thread — running it during worker
-/// init would re-execute the driver (e.g. a top-level `spawn`) on every worker
-/// and recurse. Function *bodies* are kept; they only run when the task calls
-/// them, not at init.
+/// type/function/pattern/import declarations only. Function bodies are kept;
+/// everything else (the `main` block, bare expression statements, value
+/// bindings, control flow) is not.
 fn is_declaration(stmt: &Statement) -> bool {
     match stmt {
         Statement::StructDef { .. }
@@ -758,12 +710,10 @@ fn introduced_names(stmt: &Statement) -> Vec<&str> {
     }
 }
 
-/// A fresh VM for one task: restricted the way the spawning VM was before
-/// anything runs on it (a module's top level included), then with the
-/// declarations of `program` (and the programs registered before it)
-/// registered but no executable top-level code run. An import runs only
-/// when it binds one of `names`: each task imports for itself, so imports
-/// the task can't reach would only cost time.
+/// A fresh VM for one task: restricted the way the spawning VM was, then with
+/// the declarations of `program` (and the programs registered before it)
+/// registered but no executable top-level code run. An import runs only when it
+/// binds one of `names`.
 fn build_task_vm(
     program: Option<&Arc<Unit>>,
     capabilities: Option<&[crate::vm::Capability]>,
@@ -773,8 +723,7 @@ fn build_task_vm(
     if let Some(allowed) = capabilities {
         vm.restrict(allowed);
     }
-    vm.is_main_context = false; // register fun defs, skip main body
-    // No registered program means no declarations to replay, not an error.
+    vm.is_main_context = false;
     for unit in program.map(Unit::chain).unwrap_or_default() {
         let keep: Vec<bool> =
             unit.program
@@ -817,7 +766,7 @@ fn build_task_vm(
         };
         vm.set_source(&unit.source);
         if let Some(path) = &unit.file {
-            vm.set_file(path.clone()); // so local `introduce .mod` imports resolve
+            vm.set_file(path.clone());
         }
         vm.run(function)
             .map_err(|e| format!("worker init error: {}", e))?;
@@ -935,7 +884,6 @@ fn run_task(
         return Err("task cancelled".to_string());
     }
     let mut vm = build_task_vm(program.as_ref(), capabilities, names.as_deref())?;
-    // The callee's own module, and the modules of any struct the task was sent.
     let mut modules: Vec<PathBuf> = Vec::new();
     if callee.unit.is_module
         && let Some(path) = &callee.unit.file
@@ -953,7 +901,6 @@ fn run_task(
         vm.module_globals_at(path)
             .map_err(|e| format!("worker init error: {}", e))?;
     }
-    // Seed main's globals: a spawned closure reads them as globals, not upvalues.
     for (name, s) in globals {
         let v = attach(s, &vm)?;
         vm.define_global(name, v);
@@ -1008,11 +955,9 @@ fn spawn_worker(rx: Arc<Mutex<mpsc::Receiver<Task>>>) {
                 };
                 let task = match task {
                     Ok(t) => t,
-                    Err(_) => break, // channel closed
+                    Err(_) => break,
                 };
                 ANY_TASK_RUN.store(true, Ordering::Relaxed);
-                // Each task gets a VM of its own, so nothing one task leaves
-                // behind (module state, the globals it was sent) reaches the next.
                 let result = run_task(task.body, task.capabilities.as_deref(), &task.cancel);
                 let _ = task.reply.send(result);
                 OUTSTANDING.fetch_sub(1, Ordering::SeqCst);
@@ -1040,25 +985,21 @@ fn ensure_pool() -> &'static Pool {
 }
 
 /// `spawn(func, args...)` -> task handle. Address sentinel for the VM's
-/// dispatch (see `call_value`) and the rare direct-call path; the VM routes
-/// real spawns through `spawn_with_vm` so they carry the main thread's globals.
+/// dispatch (see `call_value`); real spawns go through `spawn_with_vm`.
 pub fn builtin_spawn(args: &[Value]) -> Value {
     spawn_inner(args, None)
 }
 
 /// `spawn` with VM access: the spawning VM knows the globals a spawned
-/// closure may read (top-level `main` bindings are GLOBALS, not upvalues),
-/// its restriction, and where its modules came from.
+/// closure may read, its restriction, and where its modules came from.
 pub fn spawn_with_vm(vm: &VM, args: &[Value]) -> Value {
     spawn_inner(args, Some(vm))
 }
 
 /// Every global name a task calling `root` can reach: the names its code
-/// mentions — names are string constants — and, through the globals they
-/// name, those of the functions it can call, plus the methods of every
-/// struct (a method call names no struct). A superset, which is fine for
-/// what it decides: which globals to copy into the task, and which imports
-/// the task's VM runs.
+/// mentions and, through the globals they name, those of the functions it can
+/// call, plus the methods of every struct. A superset, used to decide which
+/// globals to copy into the task and which imports the task's VM runs.
 fn reachable(vm: &VM, root: &Rc<Function>) -> HashSet<String> {
     let mut seen: HashSet<*const Function> = HashSet::new();
     let mut names: HashSet<String> = HashSet::new();
@@ -1095,8 +1036,6 @@ fn reachable(vm: &VM, root: &Rc<Function>) -> HashSet<String> {
 }
 
 /// The main program's globals among `names` whose values can cross.
-/// Shipping only these keeps an unrelated large global from being copied
-/// into every task.
 fn globals_named(vm: &VM, names: &HashSet<String>) -> Vec<(String, Sendable)> {
     names
         .iter()
@@ -1137,8 +1076,6 @@ fn spawn_inner(args: &[Value], vm: Option<&VM>) -> Value {
             }
         }
     }
-    // A module's function reads its module's globals, never the program's,
-    // and its module does its own imports.
     let (globals, names) = match vm {
         Some(_) if unit.is_module => (Vec::new(), Some(Arc::new(HashSet::new()))),
         Some(vm) => {
@@ -1166,7 +1103,6 @@ fn spawn_inner(args: &[Value], vm: Option<&VM>) -> Value {
     let (reply_tx, reply_rx) = mpsc::channel::<Result<Sendable, String>>();
     let cancel = Arc::new(Cancel::default());
 
-    // Inside a worker: run inline so workers can't enqueue more tasks.
     if is_worker() {
         let depth = INLINE_DEPTH.with(|d| d.get());
         let result = if depth >= MAX_INLINE_DEPTH {
@@ -1203,12 +1139,10 @@ fn spawn_inner(args: &[Value], vm: Option<&VM>) -> Value {
             capabilities,
         };
         let pending = OUTSTANDING.fetch_add(1, Ordering::SeqCst) + 1;
-        // Grow when all workers are busy; blocked threads park for free.
         let workers = WORKERS.load(Ordering::SeqCst);
         if pending > workers && workers < MAX_WORKERS {
             spawn_worker(Arc::clone(&pool.rx));
         }
-        // With no workers the task would never drain: join() and drain() hang forever.
         if WORKERS.load(Ordering::SeqCst) == 0 {
             OUTSTANDING.fetch_sub(1, Ordering::SeqCst);
             return Value::Error(Rc::new(
@@ -1231,8 +1165,7 @@ fn spawn_inner(args: &[Value], vm: Option<&VM>) -> Value {
 
 /// `join(handle)` -> the spawned call's result (blocks).
 /// `join(handle, ms)` -> result, or an error if it doesn't finish within `ms`.
-/// Stub: `join` is routed through `join_with_vm` at the builtin dispatch site
-/// (it needs VM access to rebuild struct/enum results). Never reached normally.
+/// Stub: `join` is routed through `join_with_vm`.
 pub fn builtin_join(_args: &[Value]) -> Value {
     Value::Error(Rc::new("join(): internal dispatch error".to_string()))
 }
@@ -1245,9 +1178,7 @@ pub fn join_with_vm(vm: &VM, args: &[Value]) -> Value {
             Some(ms) => h.join_timeout(vm, ms.max(0) as u64),
             None => h.join(vm),
         },
-        // Join in order so `converge [t1, t2]` works; non-tasks pass through.
         Some(Value::Array(arr)) => {
-            // One deadline for the whole batch; per-task would allow k*N ms.
             let deadline = args.get(1).and_then(|v| v.as_integer()).map(|ms| {
                 std::time::Instant::now() + std::time::Duration::from_millis(ms.max(0) as u64)
             });
@@ -1269,13 +1200,6 @@ pub fn join_with_vm(vm: &VM, args: &[Value]) -> Value {
     }
 }
 
-// ── Channels ────────────────────────────────────────────────────────────
-//
-// A channel is a queue of `Sendable` messages in a process-wide registry, and
-// a script holds its integer id, so it crosses into tasks like a socket does.
-// Values are copied in on `send` and rebuilt on `recv`, exactly as task
-// arguments and results are.
-
 struct Chan {
     state: Mutex<ChanState>,
     ready: std::sync::Condvar,
@@ -1287,8 +1211,6 @@ struct ChanState {
     closed: bool,
 }
 
-// ponytail: channels are never freed; drop closed, drained ones from the
-// registry if a script makes channels by the thousand.
 static CHANNELS: OnceLock<Mutex<HashMap<u64, Arc<Chan>>>> = OnceLock::new();
 static NEXT_CHANNEL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -1456,8 +1378,7 @@ pub(crate) fn register_channel_builtins(globals: &mut HashMap<String, Value>) {
     );
 }
 
-/// The builtins that need the calling VM, and the function that gets it.
-/// `VM::call_value` routes these here; every other builtin is a plain `fn`.
+/// The builtins that need the calling VM, and the function that gets it. `VM::call_value` routes these here.
 pub(crate) fn with_vm(func: crate::vm::value::BuiltinFn) -> Option<fn(&VM, &[Value]) -> Value> {
     let is = |f: crate::vm::value::BuiltinFn| std::ptr::fn_addr_eq(func, f);
     if is(builtin_join) {

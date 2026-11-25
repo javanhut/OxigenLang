@@ -24,14 +24,12 @@ fun contains_str(s <str>, sub <str>) { __contains_str(s, sub) }
 
 fun contains(s <str>, sub <str>) { __contains_str(s, sub) }
 
-// ── Slicing & characters ──
 fun slice(s <str>, start <int>, end <int>) { s[start:end] }
 
 fun char_at(s <str>, i <int>) { str(s[i]) }
 
 fun is_empty(s <str>) { len(s) == 0 }
 
-// UTF-8 bytes, for wire formats; `len` counts characters.
 fun byte_len(s <str>) { __byte_len(s) }
 
 fun reverse(s <str>) {
@@ -42,8 +40,6 @@ fun reverse(s <str>) {
     result
 }
 
-// ── Building ──
-// `repeat` is a reserved loop keyword, so the string repeater is `repeated`.
 fun repeated(s <str>, n <int>) {
     result <str> := ""
     i <int>
@@ -54,9 +50,6 @@ fun repeated(s <str>, n <int>) {
     result
 }
 
-// Widths count characters: `len` counts bytes, so "é" (two bytes) used to
-// count as already two wide. An empty fill can never reach the width, which
-// used to loop forever.
 fun pad_left(s <str>, width <int>, fill <str>) {
     result <str> := s
     have <int> := len(chars(s))
@@ -89,8 +82,6 @@ fun pad_right(s <str>, width <int>, fill <str>) {
     result
 }
 
-// Works on characters, never byte offsets: slicing "élan" at byte 1 lands
-// inside the "é".
 fun capitalize(s <str>) {
     option {
         len(s) == 0 -> {
@@ -107,9 +98,6 @@ fun capitalize(s <str>) {
     }
 }
 
-// ── Searching ──
-// Indexes count characters, matching `s[i]`. index_of searches from character
-// start (default 0) and returns -1 when sub is not found.
 fun index_of(s <str>, sub <str>, start <int> = 0) { __str_index_of(s, sub, start) }
 
 fun count(s <str>, sub <str>) { __str_count(s, sub) }

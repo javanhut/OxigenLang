@@ -1,16 +1,10 @@
-//! Regression: typed conversions and call encodings reject values they cannot
-//! represent instead of wrapping silently.
+//! Tests that typed conversions and call encodings reject values they cannot
+//! represent instead of wrapping silently:
 //!
-//! - `x <uint> := -1` gave 18446744073709551615 and `-1.5` gave 0, while
-//!   `docs/type_system.md` limits `uint` conversion to values `>= 0` (and the
-//!   `uint()` builtin already errors).
-//! - `x <int> := 1e30` saturated to i64::MAX and NaN became 0.
-//! - Argument counts and arities are encoded in one byte. A function with
-//!   256 parameters reported "takes 256 to 0 arguments", and a call with 258
-//!   arguments called the wrong callee and corrupted the stack.
-//! - Parameter and variable type checks compare type NAMES, so an instance
-//!   of a user struct called `INTEGER` passed an `<int>` check; such names
-//!   are now reserved.
+//! - `<uint>` conversion of negative values.
+//! - `<int>` conversion of out-of-range floats and NaN.
+//! - Functions with 256 parameters and calls with 258 arguments.
+//! - A user struct named `INTEGER` does not pass an `<int>` check.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;

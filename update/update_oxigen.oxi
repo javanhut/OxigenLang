@@ -63,7 +63,6 @@ fun check_oxigen_version() {
     (True, version_from_output(out)) unless not success then (False, "")
 }
 
-// `oxigen --version` prints "Oxigen Version: 0.1.4": the version is the last word.
 fun version_from_output(out <str>) {
     words := strings.split(strings.trim(out), " ")
     words[len(words) - 1]
@@ -74,7 +73,6 @@ fun semantic_version_split(version_str <str>) {
     (int(major), int(minor), int(patch))
 }
 
-// Whether version `a` comes after version `b`.
 fun is_newer(a <str>, b <str>) {
     a_major, a_minor, a_patch := semantic_version_split(a)
     b_major, b_minor, b_patch := semantic_version_split(b)
@@ -91,9 +89,6 @@ fun is_newer(a <str>, b <str>) {
     }
 }
 
-// The newest release version (the X.Y.Z of a vX.Y.Z tag) in the output of
-// `git ls-remote --tags --refs`, or "" when there is none. Updating builds a
-// release tag, never whatever the default branch holds at the moment.
 fun latest_release(listing <str>) {
     best := ""
     each line in strings.split(listing, "\n") {
@@ -123,8 +118,6 @@ fun cleanup_tmp_dir(home_dir <str>, total_path <str>) {
 }
 
 fun update_oxigen(home_dir <str>, total_path <str>) {
-    // install.sh builds first and stops before touching the installed copy
-    // if the build fails, so a broken build leaves the current oxigen in place.
     install_command <str> = "./scripts/install.sh"
     <log<install>>("Building and installing updated version....")
     install := os.exec(install_command)

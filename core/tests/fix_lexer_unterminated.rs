@@ -1,14 +1,3 @@
-// Regression tests for the lexer's unterminated-string-literal diagnostic.
-//
-// Before this fix, a missing closing quote made the lexer silently swallow
-// characters until the next quote or EOF, producing a misleading cascade of
-// parser errors far from the real mistake (e.g. `{"stream: False}` reported
-// "expected Colon, got Ident(\"body\")" three lines later). The lexer now
-// detects an unterminated string (for single-line strings: a raw newline or
-// EOF before the closing delimiter; triple-quoted strings may span lines, so
-// only EOF before the closing fence is unterminated) and reports a clear error
-// anchored at the OPENING quote.
-
 use oxigen_core::{lexer::Lexer, parser::Parser};
 
 /// Parse `src` and return the collected parser diagnostics rendered as a single
@@ -26,9 +15,6 @@ fn parse_errors(src: &str) -> Vec<(usize, usize, String)> {
 
 #[test]
 fn unterminated_string_reports_error_at_opening_quote() {
-    // The opening quote sits on line 1, column 6 (1-based). The reported error
-    // must mention the unterminated string and be anchored there — not on a
-    // later line where the lexer happens to recover.
     let src = "x := \"hello\ny := 5\n";
     let errors = parse_errors(src);
 
@@ -75,9 +61,6 @@ fn unterminated_string_at_eof_reports_error() {
 
 #[test]
 fn missing_quote_in_map_does_not_cascade_far_away() {
-    // Mirrors the real-world report: a missing closing quote on a map key.
-    // The error must be anchored on the offending line (line 2), NOT three
-    // lines later as a confusing "expected Colon" cascade.
     let src = "config := {\n    \"stream: False,\n    \"body\": data,\n}\n";
     let errors = parse_errors(src);
 
@@ -97,8 +80,6 @@ fn missing_quote_in_map_does_not_cascade_far_away() {
 
 #[test]
 fn well_formed_program_parses_cleanly() {
-    // A normal program with ordinary strings, an escaped newline, an escaped
-    // quote, and interpolation must parse with zero errors.
     let src = concat!(
         "name := \"world\"\n",
         "greeting := \"hello, {name}!\"\n",

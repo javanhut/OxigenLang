@@ -1,12 +1,3 @@
-// Stream an LLM response with a live "thinking" spinner, then live tokens.
-//
-// Same POST + NDJSON streaming as llm_stream.oxi, but reads with a timeout:
-//   net.read_line(stream, timeout_ms)
-// returns None if no full line arrived in the window, so a single thread can
-// animate a spinner while the model thinks, then print tokens as they land.
-//
-// Targets a local Ollama (`ollama run llama3`). Change url / model / body for
-// another NDJSON streaming API.  Run:  oxigen example/llm_stream_spinner.oxi
 introduce net
 introduce json
 introduce strings
@@ -22,10 +13,8 @@ main {
     streaming := False
     print(ansi.hide_cursor())
     repeat unless done {
-        line := net.read_line(s, 80)  // wait up to 80ms for a line
+        line := net.read_line(s, 80)
         option {
-            // None = nothing yet -> animate the spinner (only before tokens flow,
-            // so a mid-stream pause never erases text already printed).
             line == None -> {
                 option {
                     streaming == False -> {
@@ -36,7 +25,7 @@ main {
                 }
             }
             line == "" -> {
-                done = True  // end of stream
+                done = True
             }
             {
                 option {

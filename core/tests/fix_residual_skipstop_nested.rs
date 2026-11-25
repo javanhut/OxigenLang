@@ -1,12 +1,9 @@
-//! Follow-up VM/JIT regression tests for the skip/stop-as-value (R3) work,
-//! covering two gaps the adversarial review found:
+//! VM/JIT tests for `skip`/`stop` as values:
 //!
-//!  1. A NESTED *discarded* option/choose whose inner tail is `skip`/`stop` was
-//!     wrongly compile-rejected by the VM/JIT (the discarded `value_consumed`
-//!     context was dropped one nesting level down in
-//!     `compile_last_statement_as_value`). It must compile + run.
-//!  2. A `skip`/`stop` escaping to a function's RETURN value (via `give` or an
-//!     implicit tail) must be rejected by the VM/JIT.
+//!  1. A nested discarded option/choose whose inner tail is `skip`/`stop`
+//!     compiles and runs.
+//!  2. A `skip`/`stop` escaping to a function's return value (via `give` or an
+//!     implicit tail) is rejected.
 
 #![cfg(feature = "jit")]
 
@@ -40,15 +37,11 @@ fn run_vm(source: &str, jit_threshold: Option<u32>) -> Result<String, String> {
 
 #[test]
 fn nested_discarded_skip_compiles_and_runs() {
-    // The over-rejection case: a discarded outer construct (an expression-
-    // statement loop body) whose INNER option/choose tail is `skip`. The skip is
-    // legitimate loop control flow; all three backends must run it cleanly.
     for src in [
         "each i in range(2){ choose i { else -> { option { True -> { skip } } } } }\n\"ok\"\n",
         "each i in range(2){ option { False -> 1, option { True -> { skip } } } }\n\"ok\"\n",
         "each i in range(2){ option { True -> (option { True -> { skip } }) } }\n\"ok\"\n",
     ] {
-        // Its final value is the string "ok".
         assert_eq!(
             run_vm(src, None).unwrap(),
             "ok",
@@ -63,15 +56,6 @@ fn nested_discarded_skip_compiles_and_runs() {
 
 #[test]
 fn skip_escaping_to_function_return_is_rejected_everywhere() {
-    // `give option{… -> {skip}}` returns a skip sentinel — not a value, so the
-    // compiler rejects it statically.
-    //
-    // These assert on the CODE, not the prose. They also now expect E0016
-    // ("used outside of loop") rather than E0017 ("used as a value"): there is
-    // no loop anywhere in these programs, so the lack of one is the real
-    // problem, and it is reported the same way regardless of whether the
-    // keyword lands in value position. E0017 is still correct — and still
-    // asserted below — when a loop IS present and the value is consumed.
     let give = "fun g(){ give option { 1 >= 0 -> { skip } } }\nprintln(g())\n";
     assert!(
         run_vm(give, None).unwrap_err().contains("E0016"),
@@ -83,7 +67,6 @@ fn skip_escaping_to_function_return_is_rejected_everywhere() {
         "JIT should reject skip as a give value"
     );
 
-    // Same via an implicit (tail) return.
     let implicit = "fun g(){ option { 1 >= 0 -> { stop } } }\nprintln(g())\n";
     assert!(
         run_vm(implicit, None).unwrap_err().contains("E0016"),
@@ -94,8 +77,6 @@ fn skip_escaping_to_function_return_is_rejected_everywhere() {
 
 #[test]
 fn consumed_skip_still_errors_and_normal_loops_unaffected() {
-    // A genuinely consumed skip is rejected statically by the VM/JIT compiler...
-    // A loop IS present here, so "used as a value" (E0017) is the real reason.
     let consumed = "each i in [1] { x := 1 + option { i == 1 -> { skip }, 5 }\nprintln(x) }\n";
     assert!(
         run_vm(consumed, None).unwrap_err().contains("E0017"),
@@ -103,7 +84,6 @@ fn consumed_skip_still_errors_and_normal_loops_unaffected() {
         run_vm(consumed, None)
     );
 
-    // ...while ordinary in-loop skip/stop control flow is untouched.
     let normal = "each i in range(6){ skip when i % 2 == 0\ni }\n";
     assert!(
         run_vm(normal, None).is_ok(),
@@ -117,9 +97,6 @@ fn consumed_skip_still_errors_and_normal_loops_unaffected() {
 
 #[test]
 fn dead_skip_arm_is_rejected_on_all_backends() {
-    // The last residual: a consumed `skip` arm that is DYNAMICALLY UNREACHED.
-    // `c(5)` selects the `n>0` arm so the `skip` arm never runs, but the VM/JIT
-    // reject it statically (compile-error) regardless of which arm runs.
     let src = "fun c(n){ option { n > 0 -> \"p\", True -> { skip } } }\nprintln(c(5))\n";
     assert!(
         run_vm(src, None).unwrap_err().contains("E0016"),
@@ -131,8 +108,6 @@ fn dead_skip_arm_is_rejected_on_all_backends() {
         "JIT must reject a dead consumed skip arm"
     );
 
-    // A function whose option has a stop arm that IS structurally a value but is
-    // never selected at the call — same static rejection.
     let stop_src =
         "fun pick(n){ option { n < 0 -> -1, n == 0 -> 0, True -> { stop } } }\npick(0)\n";
     assert!(
@@ -144,9 +119,6 @@ fn dead_skip_arm_is_rejected_on_all_backends() {
 
 #[test]
 fn skip_stop_outside_loop_in_uncalled_function_rejected_everywhere() {
-    // CLASS A (parity hunt): `skip`/`stop` lexically outside any loop, in a
-    // function/closure/method that is NEVER called. The bytecode compiler rejects
-    // it eagerly ("used outside of loop").
     for src in [
         "f := fun(n){ skip when n == 2 }\nprintln(\"ok\")\n",
         "f := fun(n){ stop when n == 2 }\nprintln(\"ok\")\n",
@@ -167,10 +139,6 @@ fn skip_stop_outside_loop_in_uncalled_function_rejected_everywhere() {
 
 #[test]
 fn non_tail_skip_stop_in_consumed_block_rejected_everywhere() {
-    // CLASS B (parity hunt): a NON-tail bare `skip`/`stop` in an option arm block
-    // whose value is consumed makes the block's value ill-defined. A loop IS
-    // present in each of these, so "used as a value" (E0017) is the real reason
-    // — unlike the no-loop cases above, which report E0016.
     for src in [
         "each i in [1,2,3] {\n  println(option { i == 2 -> { skip\n99 }, i })\n}\n",
         "each i in [1,2,3] {\n  println(option { i == 2 -> { stop\n99 }, i })\n}\n",
@@ -187,8 +155,6 @@ fn non_tail_skip_stop_in_consumed_block_rejected_everywhere() {
         );
     }
 
-    // ...but a non-tail skip/stop in a DISCARDED block is still legitimate loop
-    // control flow and runs on all three backends.
     let discarded = "each i in [1,2,3] {\n  option { i == 2 -> { skip\n99 } }\n}\n\"done\"\n";
     assert!(
         run_vm(discarded, None).is_ok(),

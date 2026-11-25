@@ -1,5 +1,3 @@
-// Tests for type conversion and the time, random, path, and json stdlib modules.
-// Run with:  oxigen test example/new_stdlib_test.oxi
 introduce time
 introduce random
 introduce path

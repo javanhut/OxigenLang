@@ -1,15 +1,13 @@
 //! Baseline JIT compiler for the Oxigen VM.
 //!
-//! The public facade ([`JitEngine`]) is always available so the VM can hold
-//! a `JitEngine` field unconditionally. When the `jit` Cargo feature is off,
-//! the facade is a zero-cost stub: `bump_and_maybe_compile` always returns
-//! `false` and `try_invoke` always bails out. When the feature is on, the
-//! stub defers to the Cranelift-backed [`engine::JitInner`].
+//! The public facade ([`JitEngine`]) is always available so the VM can hold a
+//! `JitEngine` field unconditionally. When the `jit` Cargo feature is off, the
+//! facade is a stub: `bump_and_maybe_compile` always returns `false` and
+//! `try_invoke` always bails out. When the feature is on, the facade defers to
+//! the Cranelift-backed `engine::JitInner`.
 //!
-//! Milestone 1: fallback harness only. Compilation succeeds for functions
-//! whose opcodes are all in the allow-list (see [`scan::scan`]), but the
-//! emitted code just delegates back to the interpreter via
-//! [`runtime::jit_run_via_interpreter`].
+//! Compilation succeeds for functions whose opcodes are all in the allow-list
+//! (see [`scan::scan`]).
 
 use std::rc::Rc;
 
@@ -19,18 +17,15 @@ use crate::vm::value::{Function, ObjClosure};
 
 pub mod scan;
 
-/// Bumped on every write to a closed upvalue cell.
+/// Epoch bumped on every write to a closed upvalue cell.
 ///
-/// Closures sharing a captured variable share its cell, but each keeps its
-/// own int cache of the cell's value (`ObjClosure::upvalue_int_values`), so a
-/// write through one closure — or by the interpreter — cannot reach the
-/// others' caches. Each cache instead records the epoch it was filled at in
-/// `upvalue_int_values[0]`, and both the JIT's inline reads and the helpers
-/// treat it as empty once the epoch has moved. Process-wide and relaxed:
-/// a write on another thread only costs a spurious miss.
+/// Each closure keeps an int cache of its captured cell's value
+/// (`ObjClosure::upvalue_int_values`) and records the epoch it was filled at in
+/// `upvalue_int_values[0]`; both the JIT's inline reads and the helpers treat
+/// the cache as empty once the epoch has moved. Process-wide and relaxed.
 pub static UPVALUE_WRITE_EPOCH: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
-/// Invalidate every closure's upvalue int cache. Called on each write to a
+/// Invalidates every closure's upvalue int cache. Called on each write to a
 /// closed upvalue cell.
 #[inline]
 pub fn note_upvalue_write() {
@@ -54,36 +49,29 @@ pub const JIT_LOOP_HOT_THRESHOLD: u32 = 10_000;
 /// Native entry point emitted by the JIT for one Oxigen function.
 pub(crate) type CompiledThunk = unsafe extern "C" fn(*mut VM) -> u32;
 
-/// Opaque raw pointer to the specialized `fn(*mut VM, i64, ..., i64)
-/// -> (i64, u32)` entry point. Its actual signature depends on the
-/// arity, so we never rebuild it into a typed Rust function — it is
-/// only invoked through Cranelift `call_indirect` with the right
-/// signature built at call-site emission time.
+/// Opaque raw pointer to the specialized `fn(*mut VM, i64, ..., i64) -> (i64, u32)`
+/// entry point. Its signature depends on the arity, so it is only invoked
+/// through Cranelift `call_indirect`.
 pub(crate) type SpecializedThunkRaw = *const ();
 
 /// Pair of entries produced by a single `compile_function` call.
 /// `generic` is the always-present `fn(*mut VM) -> u32` thunk.
 /// `specialized` is Some only when the function qualifies per
-/// `slot_types.specialized_entry_eligible` (A1 analysis).
-/// `specialized_kind` discriminates WHICH specialized body the pointer
-/// points at (forward trampoline vs. native int body) so callers can
-/// gate direct-call optimizations on a real body being present.
+/// `slot_types.specialized_entry_eligible`.
+/// `specialized_kind` says which specialized body the pointer points at
+/// (forward trampoline or native int body).
 #[cfg(feature = "jit")]
 pub(crate) struct CompiledEntries {
     pub generic: CompiledThunk,
     pub specialized: Option<SpecializedThunkRaw>,
     pub specialized_arity: u8,
     pub specialized_kind: Option<engine::SpecializedEntryKind>,
-    /// Phase 2.2 lean integer entry, when the function qualified.
+    /// Lean integer entry, when the function qualified.
     pub lean: Option<*const ()>,
     pub lean_arity: u8,
 }
 
 /// What `maybe_compile_entries_for` hands back for installation on a closure.
-///
-/// A named struct rather than a tuple: it grew to six positional fields as the
-/// specialized and lean entries landed, at which point the call site could no
-/// longer be read without counting commas.
 pub(crate) struct InstalledEntries {
     pub generic: CompiledThunk,
     pub specialized: Option<SpecializedThunkRaw>,
@@ -95,15 +83,14 @@ pub(crate) struct InstalledEntries {
 
 /// Outcome of invoking a JIT-compiled function.
 pub enum JitExit {
-    /// The compiled function completed normally; its return value is on the
-    /// VM stack where the caller expects it.
+    /// The compiled function completed normally; its return value is on the VM
+    /// stack where the caller expects it.
     Returned,
-    /// The JIT refused — either no compiled entry exists for this function
-    /// or a deopt fired mid-execution. The caller must fall back to the
-    /// interpreter.
+    /// The JIT refused: either no compiled entry exists for this function or a
+    /// deopt fired mid-execution. The caller must fall back to the interpreter.
     Bailout,
-    /// The compiled function surfaced a runtime error; retrieve it via the
-    /// `err` field.
+    /// The compiled function surfaced a runtime error; retrieve it via the `err`
+    /// field.
     RuntimeError(VMError),
 }
 
@@ -115,8 +102,8 @@ pub struct JitEngine {
     array_index_fast_misses: usize,
     #[cfg(feature = "jit")]
     inner: Option<engine::JitInner>,
-    /// Address of the VM's armed byte (`vm::limits`), compiled into loop
-    /// back-edges as a constant. 0 until the VM sets it.
+    /// Address of the VM's armed byte (`vm::limits`), compiled into loop back-edges
+    /// as a constant. 0 until the VM sets it.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     limits_armed: usize,
 }
@@ -140,8 +127,8 @@ impl JitEngine {
         }
     }
 
-    /// Tell the engine where its VM's armed byte lives (`vm::limits`). Set
-    /// once, before anything is compiled.
+    /// Tells the engine where its VM's armed byte lives (`vm::limits`). Set once,
+    /// before anything is compiled.
     pub(crate) fn set_limits_armed(&mut self, addr: usize) {
         self.limits_armed = addr;
     }
@@ -154,21 +141,15 @@ impl JitEngine {
             .get_or_insert_with(|| engine::JitInner::new(armed))
     }
 
-    /// Raw pointer to the JIT counters block, if the inner engine has
-    /// been instantiated. Callers use this from runtime helpers that
-    /// only have `&mut self` access to JitEngine via the VM and need
-    /// to bump diagnostic counters without going through borrow-check
-    /// acrobatics. Returns None before first JIT compilation.
+    /// Raw pointer to the JIT counters block, if the inner engine has been
+    /// instantiated. Returns None before first JIT compilation.
     #[cfg(feature = "jit")]
     pub(crate) fn counters_ptr_opt(&self) -> Option<*const engine::JitCounters> {
         self.inner.as_ref().map(|i| i.counters_ptr())
     }
 
-    /// Step 0 attribution: bump a per-helper FFI call counter. Called
-    /// from the entry of every `extern "C"` runtime helper. Cheap when
-    /// counters are present (load + cmp + load + inc + store), no-op
-    /// otherwise. The Option-on-self pattern keeps non-JIT runs paying
-    /// only a nullable check.
+    /// Bumps a per-helper FFI call counter. Called from the entry of every
+    /// `extern "C"` runtime helper. No-op when counters are absent.
     #[cfg(feature = "jit")]
     #[inline]
     pub(crate) fn bump_helper(&self, h: engine::HelperCounter) {
@@ -177,9 +158,9 @@ impl JitEngine {
         }
     }
 
-    /// Invalidate every GetGlobal IC caching `name` by bumping its version
-    /// cell. No-op before first compilation, for names no IC ever cached,
-    /// and in non-JIT builds.
+    /// Invalidates every GetGlobal IC caching `name` by bumping its version cell.
+    /// No-op before first compilation, for names no IC ever cached, and in non-JIT
+    /// builds.
     #[cfg(feature = "jit")]
     #[inline]
     pub(crate) fn bump_global_version(&mut self, name: &str) {
@@ -192,9 +173,7 @@ impl JitEngine {
     #[inline]
     pub(crate) fn bump_global_version(&mut self, _name: &str) {}
 
-    /// Empty every method-call and method-lookup IC. An `includes` block
-    /// replaces methods in the struct def in place, so a cache keyed on the
-    /// def's address would keep calling the old method. No-op before first
+    /// Empties every method-call and method-lookup IC. No-op before first
     /// compilation and in non-JIT builds.
     #[cfg(feature = "jit")]
     pub(crate) fn invalidate_method_caches(&mut self) {
@@ -207,27 +186,25 @@ impl JitEngine {
     #[inline]
     pub(crate) fn invalidate_method_caches(&mut self) {}
 
-    /// Stable per-name version cell pointer for the GetGlobal IC miss
-    /// helper. Only callable from compiled code, so the engine exists.
+    /// Stable per-name version cell pointer for the GetGlobal IC miss helper. Only
+    /// callable from compiled code.
     #[cfg(feature = "jit")]
     pub(crate) fn global_version_cell(&mut self, name: &str) -> *mut u64 {
         self.inner().global_version_cell(name)
     }
 
-    /// Lower the hot-threshold so `--jit` runs and tests don't need a long
-    /// warmup. Clamped to at least 1.
+    /// Lowers the hot-threshold. Clamped to at least 1.
     pub fn set_threshold(&mut self, t: u32) {
         self.threshold = t.max(1);
     }
 
-    /// Lower the loop hot-threshold. Clamped to at least 1.
+    /// Lowers the loop hot-threshold. Clamped to at least 1.
     pub fn set_loop_threshold(&mut self, t: u32) {
         self.loop_threshold = t.max(1);
     }
 
-    /// Completely disable JIT compilation — no function will ever cross
-    /// the threshold. Used by `--no-jit` benchmarking to pin the baseline
-    /// to pure interpreter execution even on a JIT-enabled build.
+    /// Disables JIT compilation entirely: no function will ever cross the
+    /// threshold.
     pub fn disable(&mut self) {
         self.threshold = u32::MAX;
         self.loop_threshold = u32::MAX;
@@ -241,10 +218,10 @@ impl JitEngine {
         self.loop_threshold
     }
 
-    /// Called from `call_closure` after the closure's per-call counter has
-    /// been bumped. Compiles the function if it has reached the threshold
-    /// and hasn't been compiled (or marked failed) yet. Returns `true`
-    /// when a compiled entry is now available.
+    /// Called from `call_closure` after the closure's per-call counter has been
+    /// bumped. Compiles the function if it has reached the threshold and hasn't
+    /// been compiled (or marked failed) yet. Returns `true` when a compiled entry is
+    /// now available.
     pub fn maybe_compile(&mut self, func: &Rc<Function>, call_count: u32) -> bool {
         if call_count < self.threshold {
             return false;
@@ -263,14 +240,12 @@ impl JitEngine {
         }
     }
 
-    /// Compile if hot and return the full CompiledEntries fields,
-    /// exposing generic + specialized + kind discriminator. VM call
-    /// sites use this to install all three on the closure.
+    /// Compiles if hot and returns the full CompiledEntries fields: generic,
+    /// specialized and kind discriminator.
     ///
-    /// The fourth tuple element is the u8 encoding of
-    /// `SpecializedEntryKind` (see `vm::value::SPECIALIZED_KIND_*`).
-    /// Returns 0 (`SPECIALIZED_KIND_NONE`) when there's no specialized
-    /// entry.
+    /// The fourth tuple element is the u8 encoding of `SpecializedEntryKind` (see
+    /// `vm::value::SPECIALIZED_KIND_*`), or 0 (`SPECIALIZED_KIND_NONE`) when there
+    /// is no specialized entry.
     #[cfg(feature = "jit")]
     pub(crate) fn maybe_compile_entries_for(
         &mut self,
@@ -311,9 +286,8 @@ impl JitEngine {
         None
     }
 
-    /// Compile if loop-hot and return the compiled thunk, if one is
-    /// available. This uses the loop threshold rather than the call
-    /// threshold so single-call long-running loops can tier up.
+    /// Compiles if loop-hot (using the loop threshold) and returns the compiled
+    /// thunk, if one is available.
     pub(crate) fn maybe_compile_loop_thunk(
         &mut self,
         func: &Rc<Function>,
@@ -336,9 +310,8 @@ impl JitEngine {
         }
     }
 
-    /// Compile a function that statically contains a loop. This is used at
-    /// function entry for default-mode smart tiering so single-call hot
-    /// loops can execute natively without waiting for a second call.
+    /// Compiles a function that statically contains a loop, at function entry, so
+    /// single-call hot loops can execute natively.
     pub(crate) fn maybe_compile_loop_entry_thunk(
         &mut self,
         func: &Rc<Function>,
@@ -359,16 +332,15 @@ impl JitEngine {
         }
     }
 
-    /// Invoke the compiled entry for this closure's function, if any.
+    /// Invokes the compiled entry for this closure's function, if any.
     ///
     /// # Preconditions
     /// - The caller has already pushed a `CallFrame` for the callee.
-    /// - `stop_depth` is the frame count *before* that push, so the helper
-    ///   knows when to exit the interpreter loop it's driving.
+    /// - `stop_depth` is the frame count before that push.
     ///
     /// # Safety
-    /// `vm` must be the unique `&mut VM` borrow that invoked us; no other
-    /// code may alias it while this call runs.
+    /// `vm` must be the unique `&mut VM` borrow that invoked us; no other code may
+    /// alias it while this call runs.
     pub unsafe fn try_invoke(
         &mut self,
         vm: *mut VM,
@@ -394,8 +366,8 @@ impl JitEngine {
         }
     }
 
-    /// Invoke an already-known compiled thunk. The caller has already
-    /// performed any compiled-entry lookup and pushed the callee frame.
+    /// Invokes an already-known compiled thunk. The caller has already looked up the
+    /// compiled entry and pushed the callee frame.
     pub(crate) unsafe fn invoke_thunk(
         &mut self,
         vm: *mut VM,
@@ -421,10 +393,8 @@ impl JitEngine {
         }
     }
 
-    // ── Observability (primarily for tests) ───────────────────────────
-
-    /// Number of functions for which the JIT successfully emitted native
-    /// code. Always `0` when the `jit` feature is disabled.
+    /// Number of functions for which the JIT emitted native code. Always `0` when
+    /// the `jit` feature is disabled.
     pub fn compiled_ok_count(&self) -> usize {
         #[cfg(not(feature = "jit"))]
         {
@@ -439,8 +409,8 @@ impl JitEngine {
         }
     }
 
-    /// Number of functions the JIT refused to compile (scan rejection,
-    /// Cranelift error). Always `0` when the `jit` feature is disabled.
+    /// Number of functions the JIT refused to compile (scan rejection, Cranelift
+    /// error). Always `0` when the `jit` feature is disabled.
     pub fn compile_failed_count(&self) -> usize {
         #[cfg(not(feature = "jit"))]
         {
@@ -462,8 +432,6 @@ impl JitEngine {
     pub fn array_index_fast_misses(&self) -> usize {
         self.array_index_fast_misses
     }
-
-    // ── Helpers used by runtime.rs (feature-gated) ────────────────────
 
     #[cfg(feature = "jit")]
     pub(crate) fn record_array_index_fast_hit(&mut self) {

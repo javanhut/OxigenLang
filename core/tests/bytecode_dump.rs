@@ -1,10 +1,6 @@
 //! Ad-hoc bytecode dumper for hot benchmarks. Invoked by hand via
 //! `cargo test --release --features jit -p oxigen-core --test bytecode_dump
 //!  -- --nocapture nested_loop_big`.
-//!
-//! Not a real test (no asserts that fail) — exists only so the JIT
-//! review work can read the exact bytecode the compiler emits without
-//! adding a CLI flag.
 
 #![cfg(feature = "jit")]
 
@@ -63,7 +59,6 @@ fn dump_chunk(name: &str, chunk: &Chunk) {
         let line = chunk.lines.get(ip).copied().unwrap_or(0);
         let prefix = format!("  {:>4} L{:<3}", ip, line);
         let len = match op {
-            // 1-byte
             OpCode::None
             | OpCode::True
             | OpCode::False
@@ -88,13 +83,11 @@ fn dump_chunk(name: &str, chunk: &Chunk) {
                 println!("{} {:?}", prefix, op);
                 1
             }
-            // u8
             OpCode::Call => {
                 let ac = code[ip + 1];
                 println!("{} Call ac={}", prefix, ac);
                 2
             }
-            // u16
             OpCode::Constant
             | OpCode::BuildArray
             | OpCode::TypeWrap
@@ -136,14 +129,12 @@ fn dump_chunk(name: &str, chunk: &Chunk) {
                 println!("{} {:?} {}{}", prefix, op, v, extra);
                 3
             }
-            // u16+u8
             OpCode::StructLiteral | OpCode::DefineMethod | OpCode::MethodCall => {
                 let v = r16(code, ip + 1);
                 let n = code[ip + 3];
                 println!("{} {:?} {} {}", prefix, op, v, n);
                 4
             }
-            // u16+u8+u16
             OpCode::DefineGlobalTyped => {
                 let v = r16(code, ip + 1);
                 let m = code[ip + 3];
@@ -185,7 +176,6 @@ fn walk(name: &str, func: &oxigen_core::vm::value::Function) {
                 .clone()
                 .unwrap_or_else(|| format!("<anon@const{}>", i));
             dump_chunk(&fname, &closure.function.chunk);
-            // recurse
             for (j, c2) in closure.function.chunk.constants.iter().enumerate() {
                 if let Value::Closure(inner) = c2 {
                     let n2 = inner

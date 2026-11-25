@@ -1,4 +1,3 @@
-// Matrix library built off arrays
 introduce random
 introduce math
 
@@ -170,7 +169,6 @@ Matrix includes {
         total
     }
 
-    // Bareiss elimination: an int matrix gives an exact int determinant.
     fun determinant() {
         option {
             self.row_size != self.col_size -> {
@@ -182,13 +180,11 @@ Matrix includes {
         sign := 1
         previous_pivot := 1
         each k in range(size) {
-            // Pivot on the largest value in the column, so a tiny float pivot can't blow up the result.
             pivot := k
             each row in range(k + 1, size) {
                 pivot = row when math.abs(values[row][k]) > math.abs(values[pivot][k])
             }
             option {
-                // The whole column is 0: the determinant is 0.
                 values[pivot][k] == 0 -> {
                     sign = 0
                 }
@@ -210,7 +206,6 @@ Matrix includes {
         1 unless size > 0 then sign * values[size - 1][size - 1]
     }
 
-    // Gauss-Jordan elimination, so the values come back as floats.
     fun inverse() {
         option {
             self.row_size != self.col_size -> {
@@ -219,7 +214,6 @@ Matrix includes {
         }
         size := self.row_size
         values := self.to_array()
-        // A pivot this small next to the largest value counts as 0, so float rounding can't hide a singular matrix.
         tolerance := 0.0
         each value in self.flatten() {
             tolerance = math.max(tolerance, math.abs(value) * 1.0)
@@ -326,7 +320,6 @@ fun subtract(mat1 <Matrix>, mat2 <Matrix>) {
     Matrix(mat1.row_size, mat1.col_size, new_matrix)
 }
 
-// Element by element; dot_product is the matrix product.
 fun multiply(mat1 <Matrix>, mat2 <Matrix>) {
     option {
         mat1.row_size != mat2.row_size or mat1.col_size != mat2.col_size -> {

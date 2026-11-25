@@ -1,21 +1,11 @@
-//! What a hostile client could do to a server built on the `api` module, and
-//! what the `strings`, `env` and `parse_args` modules got wrong.
+//! Tests a server built on the `api` module against hostile clients, and the
+//! `strings`, `env` and `parse_args` modules.
 //!
-//! Server side, each probe is one connection to a real server process:
-//!
-//! - A few million `[` in a JSON body overflowed a worker's stack and killed
-//!   the process.
-//! - `redirect`/`respond` copied `\r\n` from a query parameter into a header,
-//!   so a client could inject headers and a body (response splitting).
-//! - The idle timeout was per read, so a client sending one header byte at a
-//!   time held its worker forever; a few such clients took the server down.
-//! - `api.file` read files as text: a binary file, or a directory, got no
-//!   response at all.
-//! - The `app.get("/*", ...)` example in the module's own docs never matched.
-//! - `Content-Length: 1e3` was read as 1000, a body shorter than its
-//!   Content-Length reached the handler truncated, and `Transfer-Encoding:
-//!   chunked` was ignored rather than refused.
-//! - `serve` listened on every interface by default.
+//! Server side, each probe is one connection to a real server process: deeply
+//! nested JSON bodies, header injection through `redirect`/`respond`, slow
+//! clients and the idle timeout, `api.file` on binary files and directories,
+//! wildcard routes, `Content-Length` and `Transfer-Encoding` handling, and the
+//! default listen address.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -115,8 +105,6 @@ main {{ api.serve(routes, port={port}, workers=1, header_timeout=1000) }}
     let mut first = String::new();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     stdout.read_line(&mut first).unwrap();
-    // Keep draining: the server logs failed requests to stdout, and a closed
-    // pipe would kill it on the first log line.
     std::thread::spawn(move || std::io::copy(&mut stdout, &mut std::io::sink()));
     let server = Server(child);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -178,10 +166,8 @@ fn the_api_server_survives_hostile_clients() {
     let port = free_port();
     let (_server, banner) = start(&root, port);
 
-    // serve defaults to loopback only.
     assert!(banner.contains("127.0.0.1"), "banner: {banner}");
 
-    // Header injection: CR/LF from a query parameter must not end the header.
     let resp = get(
         port,
         "/go?next=/home%0d%0aSet-Cookie:%20pwned=1%0d%0a%0d%0a<script>",
@@ -204,7 +190,6 @@ fn the_api_server_survives_hostile_clients() {
         head_of(&resp)
     );
 
-    // A JSON nesting bomb is refused, and the worker lives on.
     let bomb = "[".repeat(4_000_000);
     let resp = exchange(
         port,
@@ -226,7 +211,6 @@ fn the_api_server_survives_hostile_clients() {
         "server did not survive the bomb"
     );
 
-    // Binary files are served byte for byte.
     let resp = get(port, "/img");
     assert_eq!(status_of(&resp), "200", "head: {}", head_of(&resp));
     assert!(
@@ -241,21 +225,18 @@ fn the_api_server_survives_hostile_clients() {
     );
     assert_eq!(body_of(&resp), PNG);
 
-    // The wildcard route from the module's docs, and a directory under it.
     let resp = get(port, "/index.html");
     assert_eq!(status_of(&resp), "200", "head: {}", head_of(&resp));
     assert_eq!(body_of(&resp), b"<h1>home</h1>");
     assert_eq!(status_of(&get(port, "/sub")), "404");
     assert_eq!(status_of(&get(port, "/")), "200");
 
-    // Content-Length must be plain digits.
     let resp = exchange(
         port,
         b"POST /len HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: 1e3\r\n\r\nabc",
     );
     assert_eq!(status_of(&resp), "400");
 
-    // A body that ends before its Content-Length is refused, not truncated.
     let mut s = connect(port);
     s.write_all(
         b"POST /len HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: 10\r\n\r\nabc",
@@ -271,7 +252,6 @@ fn the_api_server_survives_hostile_clients() {
         String::from_utf8_lossy(&resp)
     );
 
-    // Chunked bodies are not understood, so they are refused.
     let resp = exchange(
         port,
         b"POST /len HTTP/1.1\r\nHost: x\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n",
@@ -283,8 +263,6 @@ fn the_api_server_survives_hostile_clients() {
         head_of(&resp)
     );
 
-    // Slowloris: one header byte every 200ms keeps every read alive, but the
-    // request as a whole must not outlive header_timeout (1s here).
     let mut slow = connect(port);
     let started = Instant::now();
     for b in b"GET /index.html HTTP/1.1\r\nHost: x\r\n".iter().cycle() {
@@ -297,13 +275,10 @@ fn the_api_server_survives_hostile_clients() {
     let mut resp = Vec::new();
     let _ = slow.read_to_end(&mut resp);
     assert_ne!(status_of(&resp), "200", "a 4s trickle was served");
-    // ...and the single worker is free again.
     assert_eq!(status_of(&get(port, "/index.html")), "200");
 
     let _ = fs::remove_dir_all(&root);
 }
-
-// ── stdlib modules driven as scripts ────────────────────────────────────────
 
 fn run_script(dir: &Path, source: &str, args: &[&str]) -> (String, String, bool) {
     let script = dir.join("script.oxi");

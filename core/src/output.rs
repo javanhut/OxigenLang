@@ -1,11 +1,8 @@
 //! Where `print`, `println`, `log` and `input`'s prompt write.
 //!
-//! Standard output, unless the host installs a sink. A host that shows a
-//! script's output somewhere else (a game console, a web page, the website
-//! generator checking documentation examples) installs one, and it then
+//! Standard output, unless the host installs a sink. An installed sink
 //! receives every piece of text scripts on this thread print. The sink is per
-//! thread, like a `VM`: tasks spawned with `diverge` still print to standard
-//! output.
+//! thread; tasks spawned with `diverge` still print to standard output.
 
 use std::cell::RefCell;
 use std::io::Write;
@@ -25,16 +22,11 @@ pub fn set_sink(sink: Option<Sink>) -> Option<Sink> {
 
 /// Write `text` where scripts on this thread print: the sink, or standard output.
 pub fn write(text: &str) {
-    // A sink that prints from inside itself would find SINK borrowed; that
-    // text goes to standard output rather than panicking.
     let sent = SINK.with(|s| match s.try_borrow_mut() {
         Ok(mut sink) => sink.as_mut().map(|f| f(text)).is_some(),
         Err(_) => false,
     });
     if !sent {
-        // `print` has no trailing newline, so flush or streaming output never appears.
-        // A closed stdout (`oxigen x.oxi | head`) is not the script's error; it
-        // was ignored the same way before output moved here from builtins.rs.
         let mut out = std::io::stdout().lock();
         let _ = out.write_all(text.as_bytes());
         let _ = out.flush();

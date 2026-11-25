@@ -3,16 +3,15 @@
 //!     oxigen-site [--out DIR] [--wasm FILE] [--wasm-threads FILE] [--lsp FILE]
 //!                 [--base PATH] [--offline]
 //!
-//! Run from the repository root (`imlazy site` does). The documentation comes
-//! from docs/, the hand-written pages, examples, styles and scripts from
-//! website/, the benchmark figures from benchmark_reports/, the playground's
-//! interpreter from its two WebAssembly builds (`imlazy wasm`: single-threaded
-//! for the docs pages and the editor, threads for playground runs) and its
-//! language server from lsp-go built for WASI (`imlazy wasm-lsp`), and the
-//! download page's files from the latest GitHub release (`--offline` skips
-//! that, and the page then links to the releases list instead). `--base` is
-//! the path the site is served under: `/OxigenLang` on a GitHub project page,
-//! nothing at the root of a domain.
+//! Run from the repository root. The documentation comes from docs/, the
+//! hand-written pages, examples, styles and scripts from website/, the benchmark
+//! figures from benchmark_reports/, the playground's interpreter from its two
+//! WebAssembly builds (single-threaded for the docs pages and the editor,
+//! threads for playground runs) and its language server from lsp-go built for
+//! WASI, and the download page's files from the latest GitHub release
+//! (`--offline` skips that, and the page then links to the releases list).
+//! `--base` is the path the site is served under: `/OxigenLang` on a GitHub
+//! project page, nothing at the root of a domain.
 
 mod bench;
 mod config;
@@ -69,7 +68,6 @@ fn main() {
             _ => usage(),
         }
     }
-    // Docs examples run in-process; give the interpreter the stack the CLI gives it.
     let build = std::thread::Builder::new()
         .stack_size(256 << 20)
         .spawn(move || build(&out, &wasm, &base, offline))
@@ -114,15 +112,13 @@ fn write_page(out: &Path, base: &str, path: &str, html: &str) -> Result<(), Stri
     write(out, &file, html::rebase(html, base))
 }
 
-/// The scripts that run in Web Workers, served from /playground/ (see `build`).
+/// The scripts that run in Web Workers, served from /playground/.
 const WORKERS: [&str; 2] = ["worker.js", "lsp-worker.js"];
 
-/// Registers the service worker that makes the playground cross-origin
-/// isolated (website/static/playground/sw.js), then reloads once so the page
-/// is served through it. Isolation gives the page shared memory with its
-/// workers: typed input, threads and the language server need it. Without a
-/// service worker (a private window, say) the playground still works, with
-/// input given up front and no threads.
+/// Registers the service worker that makes the playground cross-origin isolated
+/// (website/static/playground/sw.js), then reloads once so the page is served
+/// through it. Without a service worker the playground still works, with input
+/// given up front and no threads.
 const ISOLATE: &str = r#"<script>
 (() => {
   if (window.crossOriginIsolated || !("serviceWorker" in navigator) || !window.isSecureContext) return;
@@ -143,10 +139,9 @@ const ISOLATE: &str = r#"<script>
 })();
 </script>"#;
 
-/// Copy the editor's vendored modules (scripts/vendor-editor.sh) to
-/// /assets/vendor/ and return the import map naming them: `@scope/name`
-/// lives in `scope-name.js`. The map's addresses are relative to the
-/// playground page, so they need no `--base`.
+/// Copies the editor's vendored modules to /assets/vendor/ and returns the
+/// import map naming them: `@scope/name` lives in `scope-name.js`. The map's
+/// addresses are relative to the playground page.
 fn vendor(out: &Path) -> Result<String, String> {
     let dir = Path::new("website/assets/vendor");
     let mut imports = serde_json::Map::new();
@@ -163,7 +158,6 @@ fn vendor(out: &Path) -> Result<String, String> {
             continue;
         };
         let url = format!("../assets/vendor/{name}?v={}", html::fingerprint(&bytes));
-        // The packages are @codemirror/*, @lezer/*, @marijn/*, @replit/* and unscoped ones.
         let specifier = ["codemirror", "lezer", "marijn", "replit"]
             .iter()
             .find_map(|scope| {
@@ -191,7 +185,6 @@ fn build(out: &Path, wasm: &Wasm, base: &str, offline: bool) -> Result<(), Strin
         fs::remove_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     }
 
-    // ── Static files and assets ──
     copy_dir(Path::new("website/static"), out)?;
     let binary = |path: &Path, name: &str, task: &str| -> Result<String, String> {
         let bytes = fs::read(path)
@@ -203,8 +196,6 @@ fn build(out: &Path, wasm: &Wasm, base: &str, offline: bool) -> Result<(), Strin
     let threads_url = binary(&wasm.threads, "oxigen-threads.wasm", "wasm")?;
     let lsp_url = binary(&wasm.lsp, "oxigen-lsp.wasm", "wasm-lsp")?;
     let mut fingerprints = Vec::new();
-    // wasi.js first: the scripts that import it name its fingerprint, so a
-    // cached copy from before a deploy is never mixed with new ones.
     for name in [
         "wasi.js",
         "site.css",
@@ -227,12 +218,6 @@ fn build(out: &Path, wasm: &Wasm, base: &str, offline: bool) -> Result<(), Strin
                 .into_bytes();
         }
         fingerprints.push((name, html::fingerprint(&bytes)));
-        // Workers live under /playground/, inside the scope of the service
-        // worker that isolates the playground: a browser picks a worker
-        // script's service worker by the script's own address, and an
-        // isolated page refuses a worker that did not come back isolated.
-        // wasi.js sits beside them for their imports, and in /assets/ for
-        // the page's.
         if name == "wasi.js" {
             write(out, "/playground/wasi.js", &bytes)?;
         }
@@ -259,13 +244,11 @@ fn build(out: &Path, wasm: &Wasm, base: &str, offline: bool) -> Result<(), Strin
             .as_ref()
             .map_or(env!("CARGO_PKG_VERSION").to_string(), |r| r.version.clone()),
     };
-    // site.js loads the runner on demand; it needs the runner's and the module's addresses.
     let runtime_head = format!(
         "\n<meta name=\"oxigen-wasm\" content=\"{wasm_url}\">\n<meta name=\"oxigen-runner\" content=\"/assets/runner.js?v={}\">\n<meta name=\"oxigen-worker\" content=\"/playground/worker.js?v={}\">",
         print("runner.js"),
         print("worker.js"),
     );
-    // The playground also runs on threads and has the language server.
     let playground_head = format!(
         "\n<meta name=\"oxigen-wasm-threads\" content=\"{threads_url}\">\n<meta name=\"oxigen-lsp\" content=\"{lsp_url}\">\n<meta name=\"oxigen-lsp-client\" content=\"/assets/lsp.js?v={}\">\n<meta name=\"oxigen-lsp-worker\" content=\"/playground/lsp-worker.js?v={}\">\n{}\n<script type=\"importmap\">{import_map}</script>\n<script type=\"module\" src=\"/assets/playground.js?v={}\"></script>",
         print("lsp.js"),
@@ -274,7 +257,6 @@ fn build(out: &Path, wasm: &Wasm, base: &str, offline: bool) -> Result<(), Strin
         print("playground.js"),
     );
 
-    // ── Documentation ──
     let mut docs = Vec::new();
     for section in &config.sections {
         for page in &section.pages {
@@ -363,7 +345,6 @@ fn build(out: &Path, wasm: &Wasm, base: &str, offline: bool) -> Result<(), Strin
         search.extend(rendered.search);
     }
 
-    // ── Hand-written pages ──
     let report = bench::parse(&read("benchmark_reports/latest-native.md")?)?;
     let examples = pages::load_examples(Path::new("website/examples"))?;
     let playground_examples =
@@ -388,7 +369,6 @@ fn build(out: &Path, wasm: &Wasm, base: &str, offline: bool) -> Result<(), Strin
         let mut page = pages::load(&path, &context)?;
         page.head.push_str(&runtime_head);
         if page.path == "/playground/" {
-            // A module, so its top-level names stay out of site.js's global scope.
             page.head.push_str(&playground_head);
         }
         write_page(
@@ -399,7 +379,6 @@ fn build(out: &Path, wasm: &Wasm, base: &str, offline: bool) -> Result<(), Strin
         )?;
     }
 
-    // ── For crawlers ──
     write(out, "/sitemap.xml", seo::sitemap(&config, &sitemap))?;
     write(out, "/robots.txt", seo::robots(&config))?;
     let mut by_section: Vec<(String, Vec<&Doc>)> = Vec::new();
@@ -417,7 +396,6 @@ fn build(out: &Path, wasm: &Wasm, base: &str, offline: bool) -> Result<(), Strin
         .map(|e| serde_json::json!({ "t": e.title, "p": e.page, "u": e.url, "x": markdown::truncate(&e.text, 180) }))
         .collect();
     write(out, "/search.json", serde_json::to_string(&search).unwrap())?;
-    // GitHub Pages: serve the custom domain, and do not run Jekyll over the files.
     write(
         out,
         "/CNAME",
@@ -436,8 +414,8 @@ fn build(out: &Path, wasm: &Wasm, base: &str, offline: bool) -> Result<(), Strin
     Ok(())
 }
 
-/// The Markdown of `doc` with its links made absolute, for /docs/x/index.md
-/// and llms-full.txt, read outside the site.
+/// The Markdown of `doc` with its links made absolute, for /docs/x/index.md and
+/// llms-full.txt.
 fn absolute_links(renderer: &Renderer, doc: &Doc) -> String {
     let mut out = String::with_capacity(doc.source.len());
     let mut rest = doc.source.as_str();
@@ -446,7 +424,6 @@ fn absolute_links(renderer: &Renderer, doc: &Doc) -> String {
         out.push_str(before);
         let end = after.find(')').unwrap_or(after.len());
         let dest = &after[..end];
-        // Only link targets: `](` also turns up in code, as in `fns[0](x)`.
         let is_link = !dest.contains(' ')
             && (dest.contains(".md") || dest.starts_with("./") || dest.starts_with("../"));
         if is_link {
@@ -485,7 +462,6 @@ fn year() -> i32 {
         .unwrap_or_default()
         .as_secs()
         / 86_400;
-    // Days to civil year (Howard Hinnant's algorithm).
     let z = days as i64 + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;

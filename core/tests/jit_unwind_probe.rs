@@ -1,20 +1,7 @@
-//! Phase 2.3: can a non-local exit cross real Cranelift-generated frames?
+//! A non-local exit (`longjmp`) can cross real Cranelift-generated frames.
 //!
-//! Design 2's lean ABI (`fn(args.., budget) -> i64`) has no status channel, so
-//! recursion exhaustion can only be reported by skipping the intervening frames
-//! outright. The C A/B showed that costs ~1.8%, but it longjmp'd out of *C*
-//! frames. Cranelift frames differ in ways that could matter: on AArch64 they
-//! sign the return address (`Aarch64SetPointerAuth`) and save callee-saved
-//! registers with their own unwind directives.
-//!
-//! This builds a genuinely recursive Cranelift function with the same ISA
-//! settings the engine uses (`opt_level=speed`, host ISA via cranelift-native),
-//! recurses to a real depth, and longjmps out of the middle of it.
-//!
-//! `longjmp` needs no unwind tables — it restores sp/pc/callee-saved registers
-//! from the `jmp_buf` captured at `setjmp`, so the skipped frames are simply
-//! never returned through. What this test proves is that nothing in Cranelift's
-//! prologue (pointer authentication in particular) makes that restore invalid.
+//! Builds a recursive Cranelift function with the same ISA settings the engine uses (`opt_level=speed`, host ISA via cranelift-native), recurses to a real depth, and longjmps out of the middle of it.
+//! The test checks that nothing in Cranelift's prologue (pointer authentication in particular) invalidates the restore.
 
 #![cfg(feature = "jit")]
 
@@ -27,10 +14,6 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module, default_libcall_names};
 
-// The libc crate does not export setjmp/longjmp on this target, so declare
-// them directly. The buffer is deliberately over-sized and 16-byte aligned:
-// Darwin/arm64 `jmp_buf` is 48 ints (192 bytes), and over-allocating costs
-// nothing while removing any doubt about layout.
 #[repr(C, align(16))]
 struct JmpBuf([u64; 64]);
 
@@ -39,21 +22,12 @@ unsafe extern "C" {
     fn longjmp(env: *mut JmpBuf, val: i32) -> !;
 }
 
-// The unwind target MUST be per-thread. A global one raced across cargo's
-// parallel test threads and SIGTRAP'd: one thread's setjmp overwrote another's
-// buffer, so the longjmp restored a stack pointer belonging to a different
-// stack. Oxigen has spawn/pmap/a threaded server, so a global here would
-// reproduce that in production under concurrency, not just in tests.
 thread_local! {
     static JUMP_TARGET: UnsafeCell<JmpBuf> = const { UnsafeCell::new(JmpBuf([0; 64])) };
     static DEPTH_AT_EXIT: Cell<i64> = const { Cell::new(-1) };
 }
 
 /// Raw pointer to this thread's buffer.
-///
-/// Fetched separately from the `setjmp` call on purpose: `setjmp` must run in
-/// the frame control returns to, so calling it inside a `with()` closure would
-/// capture the closure's frame and land in one that no longer exists.
 fn jump_target() -> *mut JmpBuf {
     JUMP_TARGET.with(|c| c.get())
 }
@@ -71,8 +45,7 @@ extern "C" fn cold_exit(depth: i64) -> i64 {
 /// return recurse(n - 1) + 1
 /// ```
 ///
-/// Genuinely recursive, so the longjmp has many live Cranelift frames to cross,
-/// and each carries a real prologue/epilogue rather than being a leaf.
+/// Genuinely recursive, so the longjmp crosses many live Cranelift frames.
 fn build_recursive_jit() -> (JITModule, *const u8) {
     use cranelift_codegen::settings::Configurable;
     let mut flag_builder = settings::builder();
@@ -89,7 +62,6 @@ fn build_recursive_jit() -> (JITModule, *const u8) {
     jit_builder.symbol("cold_exit", cold_exit as *const u8);
     let mut module = JITModule::new(jit_builder);
 
-    // extern: fn(i64) -> i64
     let mut cold_sig = module.make_signature();
     cold_sig.params.push(AbiParam::new(types::I64));
     cold_sig.returns.push(AbiParam::new(types::I64));
@@ -124,14 +96,12 @@ fn build_recursive_jit() -> (JITModule, *const u8) {
         );
         b.ins().brif(done, cold_block, &[], recurse_block, &[]);
 
-        // Budget exhausted: hand off to the cold adapter, which does not return.
         b.switch_to_block(cold_block);
         let cold_ref = module.declare_func_in_func(cold_id, b.func);
         let call = b.ins().call(cold_ref, &[n]);
         let r = b.inst_results(call)[0];
         b.ins().return_(&[r]);
 
-        // Recurse: keeps a live frame with a real prologue at every level.
         b.switch_to_block(recurse_block);
         let self_ref = module.declare_func_in_func(func_id, b.func);
         let n1 = b.ins().iadd_imm_s(n, -1);
@@ -157,13 +127,11 @@ fn longjmp_crosses_cranelift_frames() {
     let (_module, code) = build_recursive_jit();
     let recurse: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(code) };
 
-    // Deep enough that the longjmp must cross many live JIT frames, not one.
     const DEPTH: i64 = 512;
 
     let landed: i32 = unsafe {
         let rc = setjmp(jump_target());
         if rc == 0 {
-            // Should never return — cold_exit longjmps out of the recursion.
             let v = recurse(DEPTH);
             panic!("recursion returned {v} instead of taking the non-local exit");
         }
@@ -180,8 +148,6 @@ fn longjmp_crosses_cranelift_frames() {
 
 #[test]
 fn jit_still_usable_after_a_non_local_exit() {
-    // The mechanism is only useful if the JIT is reusable afterwards: a lean
-    // entry that overflowed once must not poison later calls.
     let (_module, code) = build_recursive_jit();
     let recurse: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(code) };
 
@@ -199,13 +165,7 @@ fn jit_still_usable_after_a_non_local_exit() {
     }
 }
 
-/// Control: the same setjmp/longjmp round trip with NO JIT code involved, so a
-/// failure here indicts the Rust-side FFI rather than Cranelift's frames.
-///
-/// `setjmp` returns twice, which Rust's FFI declaration cannot express — the
-/// optimizer is free to keep values in callee-saved registers across the call
-/// that `longjmp` then restores from under it. That hazard is independent of
-/// what the intervening frames were compiled by.
+/// Control: the same setjmp/longjmp round trip with no JIT code involved.
 #[test]
 fn control_longjmp_across_rust_frames_only() {
     #[inline(never)]
@@ -228,15 +188,12 @@ fn control_longjmp_across_rust_frames_only() {
     assert_eq!(landed, 1);
 }
 
-/// The constraint the global buffer violated: several threads unwinding through
-/// their own JIT frames at once must not interfere. This is the shape Oxigen's
-/// `spawn`/`pmap` would produce, and it is what a lean entry has to survive.
+/// Several threads unwinding through their own JIT frames at once must not interfere.
 #[test]
 fn concurrent_non_local_exits_are_independent() {
     let handles: Vec<_> = (0..4)
         .map(|t| {
             std::thread::spawn(move || {
-                // Each thread builds and drives its own JIT module.
                 let (_module, code) = build_recursive_jit();
                 let recurse: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(code) };
                 for _ in 0..8 {

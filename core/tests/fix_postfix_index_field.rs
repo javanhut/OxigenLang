@@ -1,9 +1,8 @@
-//! `++`/`--` on an index or a field (`m[k]++`, `arr[i]--`, `obj.val++`) used to
-//! fail to compile with "postfix operator requires identifier". The result is
-//! the old value, and the object and index are evaluated once.
+//! Tests `++`/`--` on an index or a field (`m[k]++`, `arr[i]--`, `obj.val++`).
+//! The result is the old value, and the object and index are evaluated once.
 //!
 //! Compound assignment (`+=`, `-=`, `*=`, `/=`) shares the same place-update
-//! path for index and field targets, and means `x = x op e` for a variable.
+//! path for index and field targets.
 
 #![cfg(feature = "jit")]
 
@@ -175,7 +174,7 @@ f()
     );
 }
 
-/// `m[k]++` on a missing key names the key instead of `NONE + INTEGER`.
+/// `m[k]++` on a missing key names the key in the error.
 fn assert_missing_key_error(source: &str, expected: &str) {
     for jit in [None, Some(1)] {
         let err = run_vm(source, jit).expect_err("missing key should error");

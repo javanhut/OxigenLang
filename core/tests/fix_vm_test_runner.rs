@@ -1,11 +1,8 @@
-//! `oxigen test` now runs each `<test>` block on the bytecode VM (not the
-//! tree-walker), so tests observe the same semantics as `oxigen file.oxi` —
-//! notably IN-PLACE `push`/`insert`. These tests cover the VM test runner
-//! (`oxigen_core::test_runner::run_vm_tests`):
+//! `oxigen test` runs each `<test>` block on the bytecode VM, so tests observe the same semantics as `oxigen file.oxi`, including in-place `push`/`insert`.
+//! These tests cover the VM test runner (`oxigen_core::test_runner::run_vm_tests`):
 //!   * pass/fail detection (a body that raises an error fails),
-//!   * push mutating in place (the whole point of the switch),
-//!   * the auto-imported `expect` + its `Expectation` struct/methods resolving
-//!     across the module boundary (the VM module-globals fix), and
+//!   * push mutating in place,
+//!   * the auto-imported `expect` and its `Expectation` struct/methods resolving across the module boundary, and
 //!   * files with no `<test>` blocks yielding nothing.
 
 #![cfg(feature = "jit")]
@@ -40,9 +37,6 @@ fn runner_reports_pass_and_fail() {
 
 #[test]
 fn push_mutates_in_place_under_runner() {
-    // In `oxigen test` (VM) push mutates the original. If it did NOT (the old
-    // tree-walker behavior), `a[2]` would be None and `+ 0` would error,
-    // failing the test.
     let outcomes = run("<test>(\"push\") { a := [1, 2]\n push(a, 3)\n a[2] + 0 }\n");
     assert_eq!(outcomes.len(), 1);
     assert!(
@@ -54,9 +48,6 @@ fn push_mutates_in_place_under_runner() {
 
 #[test]
 fn expect_import_and_module_struct_methods_resolve() {
-    // Exercises the VM module-globals fix: `expect` (imported from the `test`
-    // module) returns an `Expectation`, and `.eq(..)` resolves on it even though
-    // neither `expect` nor `Expectation` is in the test file's own globals.
     let outcomes = run("<test>(\"expect pass\") { expect(2 + 3).eq(5) }\n\
          <test>(\"expect fail\") { expect(1).eq(2) }\n");
     assert_eq!(outcomes.len(), 2);
@@ -75,7 +66,6 @@ fn expect_import_and_module_struct_methods_resolve() {
 
 #[test]
 fn setup_functions_are_visible_to_tests() {
-    // Top-level `fun` definitions (setup) are included before each test body.
     let outcomes = run("fun double(n) { n * 2 }\n\
          <test>(\"uses setup\") { expect(double(21)).eq(42) }\n");
     assert_eq!(outcomes.len(), 1);

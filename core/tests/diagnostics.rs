@@ -1,9 +1,4 @@
-//! The unified diagnostic type, its registry, and its renderers.
-//!
-//! Before this, four stages reported problems in four incompatible shapes, a
-//! diagnostic could only point at one character, and nothing had a stable
-//! identity — so tests had to assert on prose, which made improving a message a
-//! breaking change.
+//! Tests for the unified diagnostic type, its registry, and its renderers.
 
 use oxigen_core::diagnostics::registry;
 use oxigen_core::diagnostics::{
@@ -28,12 +23,8 @@ fn render_parse_errors(src: &str) -> String {
     parser.format_errors()
 }
 
-// ── registry ────────────────────────────────────────────────────────────────
-
 #[test]
 fn every_registered_code_is_unique() {
-    // Codes are permanent identifiers; a duplicate would make `explain`
-    // ambiguous and suppression unpredictable.
     let mut seen = std::collections::HashSet::new();
     for entry in registry::all() {
         assert!(
@@ -63,12 +54,8 @@ fn explain_finds_a_code_case_insensitively() {
     assert!(render::explain("E9999").is_none());
 }
 
-// ── rendering ───────────────────────────────────────────────────────────────
-
 #[test]
 fn a_range_is_underlined_across_its_width() {
-    // The whole point of widening spans: previously this was a single caret
-    // regardless of how much text was wrong.
     let src = SourceFile::named("t.oxi", "value := 1234\n");
     let d = Diagnostic::error(Code("E0003"), span(1, 10, 9, 13), "bad literal");
     let out = render::render_human(&d, &src);
@@ -93,7 +80,6 @@ fn the_filename_is_named_so_terminals_can_link_it() {
     let d = Diagnostic::error(Code("E0003"), Span::new(1, 1), "nope");
     assert!(render::render_human(&d, &src).contains("--> app.oxi:1:1"));
 
-    // Without a name, fall back to the old form rather than inventing one.
     let anon = SourceFile::new("x := 1\n");
     assert!(render::render_human(&d, &anon).contains("--> line 1:1"));
 }
@@ -113,8 +99,6 @@ fn secondary_labels_notes_and_helps_all_render() {
     assert!(out.contains("cannot assign"), "{out}");
     assert!(out.contains("= note: `=` binds immutably"), "{out}");
     assert!(out.contains("= help: rebind with `:=`"), "{out}");
-    // The secondary is marked with dashes so it reads as context, not a second
-    // error.
     assert!(
         out.contains("---"),
         "secondary should underline with dashes:\n{out}"
@@ -139,8 +123,6 @@ fn a_suggestion_shows_the_fixed_line() {
 
 #[test]
 fn an_unknown_location_does_not_invent_a_source_line() {
-    // A site that only knows "something went wrong" must not print line 1's
-    // text under a `0:0` header, which is what a naive renderer does.
     let src = SourceFile::named("t.oxi", "first line\nsecond line\n");
     let d = Diagnostic::error(Code("E0021"), Span::new(0, 0), "no location");
     let out = render::render_human(&d, &src);
@@ -163,7 +145,6 @@ fn short_form_is_greppable() {
 
 #[test]
 fn json_keeps_the_legacy_fields_and_adds_the_new_ones() {
-    // The LSP reads the old shape; it must keep working while it migrates.
     let src = SourceFile::named("t.oxi", "x := 1\n");
     let d = Diagnostic::error(Code("E0003"), span(1, 1, 0, 6), "boom").help("try this");
     let v = render::render_json(&d, &src);
@@ -176,8 +157,6 @@ fn json_keeps_the_legacy_fields_and_adds_the_new_ones() {
     assert_eq!(v["primary"]["end"]["offset"], 6);
     assert_eq!(v["suggestion"], "try this");
 }
-
-// ── sink ────────────────────────────────────────────────────────────────────
 
 #[test]
 fn the_sink_reports_whether_anything_is_fatal() {
@@ -196,10 +175,8 @@ fn the_sink_reports_whether_anything_is_fatal() {
 #[test]
 fn deduplicate_drops_same_line_repeats_but_keeps_distinct_errors() {
     let mut sink = DiagnosticSink::new();
-    // Two diagnostics inside the first one's span, same line — cascade noise.
     sink.push(Diagnostic::error(Code("E0003"), span(1, 1, 0, 10), "outer"));
     sink.push(Diagnostic::error(Code("E0003"), span(1, 3, 2, 4), "inner"));
-    // A genuinely separate error further down must survive.
     sink.push(Diagnostic::error(
         Code("E0003"),
         span(5, 1, 40, 44),
@@ -215,8 +192,6 @@ fn deduplicate_drops_same_line_repeats_but_keeps_distinct_errors() {
     assert_eq!(messages, vec!["outer", "elsewhere"]);
 }
 
-// ── parser integration ──────────────────────────────────────────────────────
-
 #[test]
 fn parse_errors_carry_a_code_and_an_explain_pointer() {
     let out = render_parse_errors("main {\n  y :=\n}\n");
@@ -227,8 +202,6 @@ fn parse_errors_carry_a_code_and_an_explain_pointer() {
 
 #[test]
 fn distinct_problems_get_distinct_codes() {
-    // Codes are the stable interface, so different mistakes must be
-    // distinguishable without reading the prose.
     let type_err = render_parse_errors("x <> := 1\n");
     let interp_err = render_parse_errors("println(\"{ }\")\n");
     let extract = |s: &str| {
@@ -248,8 +221,6 @@ fn distinct_problems_get_distinct_codes() {
 
 #[test]
 fn all_errors_are_shown_rather_than_truncated_at_three() {
-    // The old renderer capped output at three and appended `... and N more`,
-    // which hid independent errors behind cascade noise.
     let src = "fun a(\nfun b(\nfun c(\nfun d(\nfun e(\n";
     let out = render_parse_errors(src);
     assert!(
@@ -257,12 +228,6 @@ fn all_errors_are_shown_rather_than_truncated_at_three() {
         "output should not be truncated:\n{out}"
     );
 }
-
-// ── lexical diagnostics ─────────────────────────────────────────────────────
-// The lexer used to smuggle its error text through `TokenType::Illegal`'s
-// `literal` field — the message stored where a token's *text* belongs — so the
-// parser could not tell a smuggled message from a stray character, and every
-// lexical problem surfaced under the generic "unexpected token" code.
 
 /// The code of the first rendered diagnostic, e.g. `E0002`.
 fn first_code(src: &str) -> String {
@@ -287,10 +252,7 @@ fn lexical_problems_get_lexical_codes_not_the_generic_one() {
 
 #[test]
 fn a_lexical_diagnostic_is_reported_exactly_once() {
-    // The lexer records it and the parser folds it in; if the parser also
-    // reported the `Illegal` token it would appear twice.
     let out = render_parse_errors("x := 1;\n");
-    // Count headers, not mentions — the explain footer names the code too.
     assert_eq!(
         out.matches("error[E0002]").count(),
         1,
@@ -307,8 +269,6 @@ fn the_semicolon_error_explains_the_fix() {
 
 #[test]
 fn a_question_mark_is_not_a_lexical_error() {
-    // `?` lexes as `Illegal` but is a live marker for optional parameters, so
-    // it must not produce a diagnostic.
     let src = "fun f(a?) { a }\nf(1)\n";
     let lexer = Lexer::new(src);
     let mut parser = Parser::with_file(lexer, src, "t.oxi");
@@ -319,8 +279,6 @@ fn a_question_mark_is_not_a_lexical_error() {
 
 #[test]
 fn compiler_errors_that_have_a_span_underline_it() {
-    // Not every compiler site has a span yet; the ones that do must render a
-    // caret rather than pointing at column 0.
     let src = "main {\n    skip\n}\n";
     let lexer = Lexer::new(src);
     let mut parser = Parser::with_file(lexer, src, "t.oxi");
@@ -336,17 +294,6 @@ fn compiler_errors_that_have_a_span_underline_it() {
     assert!(out.contains("^^^^"), "expected `skip` underlined:\n{out}");
     assert!(!out.contains(":0"), "column should not be 0:\n{out}");
 }
-
-// ── skip / stop misuse ──────────────────────────────────────────────────────
-// `skip` and `stop` are lexically scoped to the loop they are written inside: a
-// function called from a loop must not be able to continue it, or the
-// function's control flow would depend on its call site.
-//
-// The rule was already enforced, but *which* error you got was decided by where
-// the keyword happened to sit. `fun f() { skip }` reported "cannot be used as a
-// value" (because a function body's last statement is its return value) while
-// `fun f() { skip\n 0 }` reported "used outside of loop" — one mistake, two
-// errors. The message is now derived from the fact: no enclosing loop.
 
 /// Compiles and returns the first diagnostic's code, or "" if it compiled.
 fn compile_code(src: &str) -> String {
@@ -364,7 +311,6 @@ fn compile_code(src: &str) -> String {
 
 #[test]
 fn no_enclosing_loop_reports_the_same_code_whatever_the_position() {
-    // Identical mistake; `skip` is last in one and not in the other.
     assert_eq!(
         compile_code("fun f() { skip }\neach i in range(2) { f() }"),
         "E0016"
@@ -395,8 +341,6 @@ fn skip_and_stop_outside_any_loop_are_rejected() {
 
 #[test]
 fn used_as_a_value_survives_where_it_is_the_real_reason() {
-    // With a loop present and the value genuinely consumed, "cannot be used as
-    // a value" IS the correct diagnosis — so E0016 must not swallow it.
     assert_eq!(
         compile_code("each i in range(3) { x := option { i == 1 -> skip, 0 }\n println(x) }"),
         "E0017"
@@ -413,7 +357,6 @@ fn legitimate_loop_control_still_compiles() {
         compile_code("each i in range(3) { stop when i == 1\n println(i) }"),
         ""
     );
-    // Value discarded — this is ordinary loop control flow, not a value use.
     assert_eq!(
         compile_code("each i in range(3) { option { i == 1 -> skip, 0 }\n println(i) }"),
         ""
@@ -442,15 +385,6 @@ fn the_outside_loop_error_explains_lexical_scoping() {
     assert!(out.contains("^^^^"), "should underline the keyword:\n{out}");
 }
 
-// ── pattern arity ───────────────────────────────────────────────────────────
-// A pattern is always invoked with exactly one argument — the value being
-// matched (`Call, 1` at every use site) — so no syntax can supply a second.
-// Declaring more used to parse: unreferenced extras were dead syntax, but
-// referencing one failed at run time inside the synthesized `__pattern__`
-// (`cannot compare INTEGER > NONE`) or, from an arm body, as
-// `undefined variable`. Declaring none only worked because a surplus argument
-// is silently discarded.
-
 #[test]
 fn a_pattern_must_declare_exactly_one_parameter() {
     assert_eq!(compile_code("pattern cmp(a, b) when a > b\n1"), "E0024");
@@ -472,8 +406,6 @@ fn the_rule_applies_to_inline_patterns_too() {
 
 #[test]
 fn it_is_rejected_even_when_the_pattern_is_never_used() {
-    // The declaration can never work, so waiting for a use site would let a
-    // broken pattern sit in a file indefinitely.
     assert_eq!(
         compile_code("pattern cmp(a, b) when a > b\nprintln(\"unused\")"),
         "E0024"
@@ -493,7 +425,6 @@ fn single_parameter_patterns_still_compile() {
         compile_code("each i in [1] { choose i { pattern big(n) when n > 3 -> 1, else -> 2 } }"),
         ""
     );
-    // Comparing against a captured value is the supported alternative.
     assert_eq!(
         compile_code("limit := 3\npattern big(n) when n > limit\n1"),
         ""
@@ -517,14 +448,6 @@ fn the_error_names_the_unbindable_parameters() {
     assert!(out.contains("value being matched"), "{out}");
 }
 
-// ── binding provenance ──────────────────────────────────────────────────────
-// A local recorded only `mutable: bool`, so the reporting site knew a write was
-// forbidden but not why — and guessed the advice. A loop variable was told to
-// "use `:=` to override", which produces a rebinding discarded at the end of
-// the iteration; the `i++` site had no advice at all; and `:=` bypassed the
-// check entirely. `BindingKind` carries the reason and the span that
-// established it, so one function derives all three.
-
 /// Renders the first compile diagnostic for `src`.
 fn compile_render(src: &str) -> String {
     let lexer = Lexer::new(src);
@@ -541,7 +464,6 @@ fn compile_render(src: &str) -> String {
 
 #[test]
 fn a_loop_variable_is_not_told_to_use_walrus() {
-    // The original wrong hint: `:=` here lasts one iteration.
     let out = compile_render("fun f() {\n  each i in range(3) { i = i * 2 }\n}\nf()");
     assert!(out.contains("loop variable"), "{out}");
     assert!(
@@ -556,7 +478,6 @@ fn a_loop_variable_is_not_told_to_use_walrus() {
 
 #[test]
 fn the_loop_header_is_shown_as_a_secondary_label() {
-    // Impossible while spans were points — this is the payoff of widening them.
     let out = compile_render("fun f() {\n  each i in range(3) { i = 1 }\n}\nf()");
     assert!(out.contains("rebound on each iteration"), "{out}");
     assert!(
@@ -567,7 +488,6 @@ fn the_loop_header_is_shown_as_a_secondary_label() {
 
 #[test]
 fn the_increment_site_now_has_advice_too() {
-    // `i++` is the more common mistake and previously carried no hint at all.
     let out = compile_render("fun f() {\n  each i in range(3) { i++ }\n}\nf()");
     assert!(
         out.contains("cannot mutate loop variable `i` with `++`"),
@@ -585,12 +505,9 @@ fn a_constant_points_at_its_declaration() {
 
 #[test]
 fn walrus_no_longer_bypasses_the_check_on_a_loop_variable() {
-    // `i = 6` errored while `i := 6` silently wrote the same slot.
     let out = compile_render("fun f() {\n  each i in range(3) { i := i * 10 }\n}\nf()");
     assert!(out.contains("E0025"), "{out}");
     assert!(out.contains("lasts one iteration"), "{out}");
-    // The message must not claim the write does nothing: it IS visible for the
-    // rest of the iteration, just discarded before the next one.
     assert!(
         !out.contains("no effect"),
         "claims something untrue about the rebinding:\n{out}"
@@ -599,7 +516,6 @@ fn walrus_no_longer_bypasses_the_check_on_a_loop_variable() {
 
 #[test]
 fn walrus_still_overrides_a_constant() {
-    // Documented behaviour: `:=` is how you override an immutable binding.
     assert_eq!(
         compile_code("fun f() {\n  PI <float> = 3.14\n  PI := 3.0\n  PI\n}\nf()"),
         ""
@@ -615,16 +531,8 @@ fn mutable_locals_are_unaffected() {
     assert_eq!(compile_code("fun f(p) {\n  p = 2\n  p\n}\nf(1)"), "");
 }
 
-// ── silence is not shippable ────────────────────────────────────────────────
-// A parse function returning `Option` could not distinguish "I reported an
-// error" from "I gave up quietly", and `parse_program` only synchronised when
-// the error count rose — so a quiet `None` dropped the statement and carried
-// on. The file compiled and ran, minus a line nobody was told about.
-
 #[test]
 fn an_out_of_range_integer_is_reported_not_dropped() {
-    // Was: the binding silently never happened and the first symptom was
-    // `undefined variable` on the next, perfectly correct line.
     let out = render_parse_errors("x := 99999999999999999999999999\nprintln(x)\n");
     assert!(out.contains("E0027"), "{out}");
     assert!(out.contains("64-bit"), "{out}");
@@ -636,7 +544,6 @@ fn an_out_of_range_integer_is_reported_not_dropped() {
 
 #[test]
 fn an_unterminated_block_comment_is_reported() {
-    // Was: swallowed the rest of the file, exited 0, and `check` said clean.
     let out = render_parse_errors("println(\"before\")\n/* oops\nprintln(\"after\")\n");
     assert!(out.contains("E0029"), "{out}");
     assert!(out.contains("never closed"), "{out}");
@@ -644,8 +551,6 @@ fn an_unterminated_block_comment_is_reported() {
 
 #[test]
 fn a_second_decimal_point_is_a_number_error_not_field_access() {
-    // Was: `1.2.3` lexed as `1.2` then `.3`, reported as
-    // `cannot access field '3' on FLOAT`.
     let out = render_parse_errors("x := 1.2.3\n");
     assert!(out.contains("E0028"), "{out}");
     assert!(out.contains("decimal point"), "{out}");
@@ -653,8 +558,6 @@ fn a_second_decimal_point_is_a_number_error_not_field_access() {
 
 #[test]
 fn a_valid_number_is_still_a_number() {
-    // The malformed-literal check must not catch ordinary floats or the
-    // field access that genuinely follows one.
     assert_eq!(compile_code("x := 1.25\nx"), "");
     assert_eq!(compile_code("x := 9223372036854775807\nx"), "");
     assert_eq!(compile_code("x := 1.0\ny := [x]\ny[0]"), "");
@@ -662,9 +565,6 @@ fn a_valid_number_is_still_a_number() {
 
 #[test]
 fn the_net_catches_a_parse_failure_that_reports_nothing() {
-    // The guarantee itself: whatever the parser does, it cannot drop a
-    // statement without saying so. Every rejected program must produce at
-    // least one diagnostic — E0030 is the backstop if a path forgets.
     for src in [
         "x := 99999999999999999999999999\n",
         "/* unclosed\n",
@@ -683,8 +583,6 @@ fn the_net_catches_a_parse_failure_that_reports_nothing() {
 
 #[test]
 fn valid_programs_do_not_trip_the_net() {
-    // E0030 means "the parser gave up without saying why" — it must never fire
-    // on code that parses.
     for src in [
         "x := 1\nprintln(x)\n",
         "fun f(a, b) { a + b }\nf(1, 2)\n",

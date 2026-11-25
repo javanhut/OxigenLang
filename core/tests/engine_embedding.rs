@@ -60,8 +60,6 @@ fn write(dir: &Path, file: &str, source: &str) {
     std::fs::write(dir.join(file), source).unwrap();
 }
 
-// ── Native functions ───────────────────────────────────────────────────
-
 #[test]
 fn a_native_function_can_change_host_state() {
     for (name, mut vm) in backends() {
@@ -153,8 +151,6 @@ fn imported_modules_see_native_functions() {
     }
 }
 
-// ── Host values ────────────────────────────────────────────────────────
-
 #[derive(Debug, PartialEq)]
 struct Entity(u32);
 
@@ -232,8 +228,6 @@ fn the_host_reads_a_host_value_the_script_returns() {
     assert_eq!(value.host_ref::<Entity>(), Some(&Entity(9)));
 }
 
-// ── Calling into the script ────────────────────────────────────────────
-
 #[test]
 fn the_host_calls_a_script_function_by_name_every_frame() {
     for (name, mut vm) in backends() {
@@ -264,8 +258,6 @@ fn a_failed_call_leaves_the_vm_usable() {
         assert_eq!(format!("{got}"), "5", "{name}");
     }
 }
-
-// ── Capabilities ───────────────────────────────────────────────────────
 
 fn restricted(name: &str, allowed: &[Capability]) -> VM {
     let mut vm = match name {
@@ -322,7 +314,6 @@ fn a_restricted_vm_refuses_processes_and_the_environment() {
         assert_refused(&mut vm, "__exec(\"true\")", "process");
         assert_refused(&mut vm, "__env_get(\"HOME\")", "process");
         assert_refused(&mut vm, "__chdir(\"/\")", "process");
-        // `__exit` would end the host; it must never run.
         assert_refused(&mut vm, "__exit(3)", "process");
     }
 }
@@ -377,8 +368,6 @@ fn the_script_cannot_rebind_a_refused_builtin_to_get_it_back() {
     }
 }
 
-// ── Hot reload ─────────────────────────────────────────────────────────
-
 const MAIN: &str = "introduce .m\nm.value()";
 
 #[test]
@@ -427,7 +416,6 @@ fn invalidating_a_module_reloads_the_modules_that_imported_it() {
         assert_eq!(run_on(&mut vm, main).unwrap(), "10", "{name}");
 
         write(&dir, "b.oxi", "fun value() { 2 }\n");
-        // The whole import graph shares one cache, so b.oxi is cached here too.
         assert_eq!(
             vm.invalidate_module(&dir.join("b.oxi")),
             2,

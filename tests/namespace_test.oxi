@@ -1,5 +1,3 @@
-// Structs and enums used through their module's namespace, without importing
-// the name: construction, brace literals, type annotations and zero values.
 introduce api
 introduce parse_args
 introduce random
@@ -53,7 +51,6 @@ fun declares_bare_function() {
     expect(r).eq(api.Res(404, {}, "gone"))
     multi := api.Res { body: "", status: 204, headers: {} }
     expect(multi.status).eq(204)
-    // Empty braces give the zero value.
     expect(api.Res {}.status).eq(0)
 }
 
@@ -88,7 +85,6 @@ fun declares_bare_function() {
     expect(has(missing.msg, "has no member 'Nope'")).truthy()
     unimported := <type<Error> || <Value>>(declares_unimported())
     expect(has(unimported.msg, "'shapes' in <shapes.Pt> is not an imported module")).truthy()
-    // The bare form used to call make() and bind 5.
     bare := <type<Error> || <Value>>(declares_bare_function())
     expect(has(bare.msg, "make is a function, not a struct")).truthy()
 }
@@ -109,7 +105,6 @@ fun declares_bare_function() {
     }
     unless done {
     }
-    // Literals inside a loop header are still literals.
     count := 0
     each res in [api.Res {}, api.Res {}] {
         count++

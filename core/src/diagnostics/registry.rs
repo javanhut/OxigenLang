@@ -1,21 +1,13 @@
 //! The code registry: every code's identity and long-form explanation.
 //!
-//! Codes are allocated **sequentially as concepts are added**, deliberately not
-//! partitioned by compiler stage. A stage partition looks tidy until a check
-//! moves — argument-count checking wants to move from runtime to compile time —
-//! and since codes are permanent and never renumbered, the partition would be
-//! wrong forever the first time that happened.
-//!
-//! Rules: never reuse a code, never renumber. A retired code stays here marked
-//! deprecated so old output remains explicable.
+//! Codes are allocated sequentially as concepts are added and are never
+//! reused or renumbered. A retired code stays here marked deprecated.
 
 use super::Code;
 
-// ── Lexical ─────────────────────────────────────────────────────────────────
 pub const UNTERMINATED_STRING: Code = Code("E0001");
 pub const ILLEGAL_TOKEN: Code = Code("E0002");
 
-// ── Syntax ──────────────────────────────────────────────────────────────────
 pub const UNEXPECTED_TOKEN: Code = Code("E0003");
 pub const UNCLOSED_DELIMITER: Code = Code("E0004");
 pub const EXPECTED_TYPE_NAME: Code = Code("E0005");
@@ -29,7 +21,6 @@ pub const REQUIRED_AFTER_OPTIONAL: Code = Code("E0012");
 pub const BAD_STRING_INTERPOLATION: Code = Code("E0013");
 pub const EXPECTED_FUN_IN_INCLUDES: Code = Code("E0014");
 
-// ── Compile ─────────────────────────────────────────────────────────────────
 pub const IMMUTABLE_ASSIGN: Code = Code("E0015");
 pub const SKIP_STOP_OUTSIDE_LOOP: Code = Code("E0016");
 pub const SKIP_STOP_AS_VALUE: Code = Code("E0017");
@@ -47,7 +38,6 @@ pub const MALFORMED_NUMBER: Code = Code("E0028");
 pub const UNTERMINATED_BLOCK_COMMENT: Code = Code("E0029");
 pub const PARSER_GAVE_UP: Code = Code("E0030");
 
-// ── Runtime ─────────────────────────────────────────────────────────────────
 pub const RUNTIME_ERROR: Code = Code("E0031");
 pub const WRONG_ARGUMENT_COUNT: Code = Code("E0032");
 pub const STRUCT_MISSING_FIELDS: Code = Code("E0033");
@@ -56,7 +46,6 @@ pub const NON_HASHABLE_KEY: Code = Code("E0035");
 pub const LOOP_BUDGET_EXHAUSTED: Code = Code("E0036");
 pub const INTERRUPTED: Code = Code("E0037");
 
-// ── Check ───────────────────────────────────────────────────────────────────
 pub const UNDEFINED_NAME: Code = Code("E0038");
 pub const SUSPICIOUS_LOGIC: Code = Code("E0039");
 

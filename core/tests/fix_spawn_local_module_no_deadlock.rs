@@ -1,13 +1,8 @@
-//! Regression: spawning when the program imports a LOCAL module must not
-//! deadlock. Workers rebuild the program's declarations — including
-//! `introduce .mod` — but never set their file path, so relative module
-//! resolution failed at worker init. Every worker died, the queued task was
-//! never served, and `converge`/join blocked forever. Fixes: workers set the
-//! main file path (so local imports resolve), and a worker that still fails to
-//! build replies to tasks with the error instead of dying and orphaning them.
+//! Tests that spawning when the program imports a local module does not
+//! deadlock: workers resolve local imports, and a worker that fails to build
+//! replies to tasks with the error.
 //!
-//! A watchdog thread turns a regression (deadlock) into a fast test failure
-//! rather than a hung CI job.
+//! A watchdog thread turns a deadlock into a fast test failure.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -45,9 +40,6 @@ fn run_in_dir(source: String, file: PathBuf) -> String {
 fn spawn_with_local_module_import_does_not_deadlock() {
     let dir = std::env::temp_dir().join(format!("oxi_spawn_mod_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mk tempdir");
-    // A local module with TOP-LEVEL executable code — the case that used to
-    // sink worker init. It must NOT define `n`, so the spawned thunk's `n`
-    // can only come from the main thread's shipped globals.
     std::fs::write(
         dir.join("mcp.oxi"),
         "introduce json\ng <str> := json.stringify({\"ok\": 1})\nfun mcp_id(x) { x }\n",

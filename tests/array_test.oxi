@@ -58,9 +58,6 @@ introduce array
     expect(len(seen)).eq(2)
 }
 
-// ── Searching an array of records ──
-// The records below are deliberately ragged: one entry has no "person" key at
-// all, which every *_where function must skip rather than error on.
 fun sample_people() {
     [
         {"person": "john", "info": {"age": 32, "job": "unemployed"}},
@@ -114,10 +111,6 @@ fun sample_people() {
 }
 
 <test>("where functions distinguish a stored None from a missing key") {
-    // A missing key reads as None, so without the has() guard every keyless
-    // record would match a search for None. Only an explicit null matches.
-    // The keyless record comes first, so an unguarded index_where would
-    // report 0 instead of 1.
     recs <array> := [{"other": 1}, {"person": None}]
     expect(array.index_where(recs, "person", None)).eq(1)
     expect(len(array.filter_where(recs, "person", None))).eq(1)

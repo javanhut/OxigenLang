@@ -1,20 +1,6 @@
-//! Command-line behaviour around `fmt`, `check` and `test` that the exit-code
-//! contract (0 success, 1 the code failed, 2 the command line was wrong) and
-//! the "fmt never damages a file" rule did not hold for.
-//!
-//! - A non-UTF-8 argument panicked (exit 134) inside `std::env::args`.
-//! - File discovery followed directory symlinks, so a `sub/up -> ..` link ran
-//!   the same tests dozens of times and let `fmt` rewrite files outside the
-//!   tree it was pointed at.
-//! - A missing file for `test`/`check`, or a directory named `x.oxi`, exited 1
-//!   instead of 2; `test --help` was taken as a path; an unknown option was
-//!   reported as an unknown subcommand.
-//! - `fmt` disagreed with the lexer about the header: `#[location=...]` with
-//!   trailing whitespace was dropped, and `#[indent]` after a blank line (or
-//!   followed by spaces) was removed and the file converted to brace style.
-//! - `fmt` stopped at the first file with a syntax error, half-way through a
-//!   batch, and `--check` was only recognised straight after `fmt`.
-//! - `check` ran on the main thread and aborted on deeply nested input.
+//! Tests for the command-line frontend around `fmt`, `check` and `test`: exit
+//! codes (0 success, 1 the code failed, 2 the command line was wrong), file
+//! discovery, option parsing and `fmt` handling of file headers.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,8 +41,6 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-// ── #15: non-UTF-8 arguments ──
-
 #[cfg(unix)]
 #[test]
 fn non_utf8_argument_is_a_usage_error() {
@@ -73,8 +57,6 @@ fn non_utf8_argument_is_a_usage_error() {
     assert!(!stderr(&out).contains("panicked"), "{}", stderr(&out));
 }
 
-// ── #18: symlinked directories ──
-
 #[cfg(unix)]
 #[test]
 fn test_discovery_does_not_follow_directory_symlinks() {
@@ -86,7 +68,6 @@ fn test_discovery_does_not_follow_directory_symlinks() {
     );
     fs::create_dir_all(dir.join("sub")).unwrap();
     std::os::unix::fs::symlink("..", dir.join("sub").join("up")).unwrap();
-    // The test runner finds the stdlib (`expect`) relative to the workspace.
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let out = oxigen()
         .current_dir(root)
@@ -117,8 +98,6 @@ fn fmt_does_not_follow_directory_symlinks() {
         "fmt rewrote a file outside the tree through a symlink"
     );
 }
-
-// ── #19: exit codes ──
 
 #[test]
 fn missing_paths_are_usage_errors() {
@@ -156,8 +135,6 @@ fn unknown_option_is_reported_as_an_option() {
     assert_eq!(code(&out), 2);
     assert!(stderr(&out).contains("unknown option"), "{}", stderr(&out));
 }
-
-// ── M9: fmt keeps the header the lexer reads ──
 
 #[test]
 fn fmt_keeps_a_location_directive_with_trailing_space() {
@@ -202,8 +179,6 @@ fn fmt_keeps_indent_mode_after_a_blank_line_or_trailing_space() {
     }
 }
 
-// ── fmt batches ──
-
 #[test]
 fn fmt_reports_a_broken_file_and_still_formats_the_rest() {
     let dir = temp_dir("fmt-batch");
@@ -245,8 +220,6 @@ fn fmt_never_truncates_a_file_at_a_nul_byte() {
         "fmt deleted code after a NUL"
     );
 }
-
-// ── M4: check on deep input ──
 
 #[test]
 fn check_reports_deep_nesting_instead_of_aborting() {

@@ -1,10 +1,9 @@
 //! Declared return types: `fun area(w <int>, h <int>) <int> { w * h }`.
 //!
 //! Every value a function returns, from its last expression or from a
-//! `give`, is checked against the type written after its parameter list.
-//! Each program must give the same value — or the same error — under the
-//! interpreter, the tiered JIT and the eager JIT, including after warm-up,
-//! where the JIT skips checks it can prove.
+//! `give`, is checked against the declared type. Each program gives the same
+//! value or the same error under the interpreter, the tiered JIT and the
+//! eager JIT, including after warm-up.
 
 #![cfg(feature = "jit")]
 
@@ -63,8 +62,6 @@ fn assert_all_fail(source: &str, needle: &str) {
         );
     }
 }
-
-// ── Values that match ──────────────────────────────────────────────────
 
 #[test]
 fn matching_return_passes() {
@@ -132,8 +129,6 @@ fn bool_return_from_comparison() {
     );
 }
 
-// ── Hot functions: the JIT's skipped checks must still be right ────────
-
 #[test]
 fn hot_int_function() {
     assert_all(
@@ -165,8 +160,6 @@ fn comparison_is_not_an_int_return() {
         "return type mismatch in 'small': expected INTEGER, got BOOLEAN",
     );
 }
-
-// ── Values that don't ──────────────────────────────────────────────────
 
 #[test]
 fn implicit_return_is_checked_without_conversion() {

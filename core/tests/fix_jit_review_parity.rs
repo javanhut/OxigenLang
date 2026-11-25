@@ -1,32 +1,4 @@
-//! Regression tests for JIT miscompiles found by the adversarial review.
-//! Each program must give the same value — or the same error, message,
-//! line and stack trace included — under the interpreter, the tiered JIT
-//! (default thresholds) and the eager JIT.
-//!
-//! 1. `x = x + y` on two locals went through the scaled-update peephole
-//!    with a scale of 1, whose slow path multiplied `y` by 1 first: string
-//!    concatenation failed and `uint + uint` came back INTEGER.
-//! 2. The per-closure upvalue int cache went stale when another closure
-//!    wrote the shared upvalue cell.
-//! 3. The struct-field-add peephole read a register-held int local from its
-//!    stale stack slot.
-//! 4. The lean entry returned comparison results as INTEGER, not BOOLEAN.
-//! 5. A JIT method-call hit ran the method against the caller's module
-//!    globals instead of the defining module's.
-//! 6. Compiled call paths skipped typed-parameter checks, so a STRING in an
-//!    `<int>` parameter was read as a raw pointer.
-//! 7. The lean self-call kept calling the original function after its
-//!    global name was rebound.
-//! 8. Method inline caches survived an `includes` block redefining methods.
-//! 9. The field-add peephole wrote `hide` fields from outside the struct.
-//! 10. Error traces dropped JIT frames when an interpreted frame was on top.
-//! 11. Local-arith peephole slow paths reported the wrong error line.
-//! 12. The slot-type pass mistook a reused slot's earlier initializer, or an
-//!     expression temporary, for a local's initializer.
-//! 13. A block local whose initializer stayed in registers was popped from
-//!     memory at its scope end, dropping the value beneath it.
-//! 14. Inlined callees (`fun(y) { x + y }`, `self.f = self.f + d`) skipped the
-//!     callee's typed-parameter check.
+//! JIT parity tests: each program gives the same value, or the same error (message, line and stack trace included), under the interpreter, the tiered JIT (default thresholds) and the eager JIT.
 
 #![cfg(feature = "jit")]
 
@@ -103,8 +75,6 @@ fn temp_dir(label: &str) -> PathBuf {
     dir
 }
 
-// 1 ------------------------------------------------------------------------
-
 #[test]
 fn local_plus_local_concatenates_strings() {
     assert_all(
@@ -128,8 +98,6 @@ fn local_minus_local_on_floats() {
         "100",
     );
 }
-
-// 2 ------------------------------------------------------------------------
 
 #[test]
 fn shared_upvalue_written_by_sibling_closure() {
@@ -161,8 +129,6 @@ fn closure_upvalue_add_sees_outer_write() {
     );
 }
 
-// 3 ------------------------------------------------------------------------
-
 #[test]
 fn struct_field_add_from_register_local() {
     assert_all(
@@ -172,8 +138,6 @@ fn struct_field_add_from_register_local() {
         "1000",
     );
 }
-
-// 4 ------------------------------------------------------------------------
 
 #[test]
 fn lean_comparison_returns_boolean() {
@@ -194,8 +158,6 @@ fn lean_equality_returns_boolean() {
         "[True, BOOLEAN]",
     );
 }
-
-// 5 ------------------------------------------------------------------------
 
 const VEC_MODULE: &str = "fun scale(v) { v * 2 }\n\
     X := \"geo-X\"\n\
@@ -227,8 +189,6 @@ fn method_ic_ignores_callers_same_named_global() {
         assert_eq!(got, "[360, geo-X]", "{name}");
     }
 }
-
-// 6 ------------------------------------------------------------------------
 
 #[test]
 fn typed_param_checked_after_warmup() {
@@ -264,8 +224,6 @@ fn typed_method_param_checked_after_warmup() {
     );
 }
 
-// 7 ------------------------------------------------------------------------
-
 #[test]
 fn lean_self_call_follows_rebound_global() {
     assert_all(
@@ -284,8 +242,6 @@ fn lean_self_call_rebound_after_warmup() {
     );
 }
 
-// 8 ------------------------------------------------------------------------
-
 #[test]
 fn method_ic_invalidated_by_includes_redefinition() {
     assert_all(
@@ -298,8 +254,6 @@ fn method_ic_invalidated_by_includes_redefinition() {
         "[10100, two]",
     );
 }
-
-// 9 ------------------------------------------------------------------------
 
 #[test]
 fn field_add_peephole_respects_hide() {
@@ -321,8 +275,6 @@ fn field_add_local_peephole_respects_hide() {
     );
 }
 
-// 10 -----------------------------------------------------------------------
-
 #[test]
 fn trace_keeps_jit_frames_below_interpreted_frame() {
     assert_all_fail(
@@ -331,8 +283,6 @@ fn trace_keeps_jit_frames_below_interpreted_frame() {
     );
 }
 
-// 11 -----------------------------------------------------------------------
-
 #[test]
 fn local_arith_slow_path_reports_its_own_line() {
     assert_all_fail(
@@ -340,8 +290,6 @@ fn local_arith_slow_path_reports_its_own_line() {
         "type mismatch",
     );
 }
-
-// 12 -----------------------------------------------------------------------
 
 #[test]
 fn slot_reused_after_loop_keeps_first_local() {
@@ -388,8 +336,6 @@ fn float_param_rejects_int_on_inlined_closure_add() {
 
 #[test]
 fn guarded_counter_after_two_loops_reusing_slots() {
-    // Reported by the stdlib work as "5 under the interpreter, 1 under the
-    // JIT": three `each` loops in one chunk reuse the same hidden slots.
     assert_all(
         "h := []\neach i in range(6) { h = push(h, i + 40) }\neach x in h { str(x) }\n\
          adjacent := 0\n\
@@ -401,8 +347,6 @@ fn guarded_counter_after_two_loops_reusing_slots() {
 
 #[test]
 fn block_local_from_staged_arith_is_popped_virtually() {
-    // `v0`'s initializer is register arithmetic that never reaches memory; its
-    // scope-end Pop used to pop memory instead, dropping `acc` beneath it.
     assert_all(
         "fun f(a, b) {\n  acc := []\n  option {\n    a > -5 -> {\n      v0 := (((-5 * b) - (a - a)) * a)\n    }\n  }\n  acc.push(24 - (b * a) + b)\n  acc\n}\n[f(3, 4), f(1, 7)]",
         "[[16], [24]]",
@@ -411,8 +355,6 @@ fn block_local_from_staged_arith_is_popped_virtually() {
 
 #[test]
 fn float_param_rejects_int_at_a_warm_inlined_call_site() {
-    // The same call site first sees floats (so its IC records the inlinable
-    // `x + y` callee), then an int, which `<float>` rejects.
     assert_all_fail(
         "fun mk() {\n    x := 10\n    fun(y <float>) { x + y }\n}\nadd := mk()\n\
          fun run(f) {\n    t := 0.0\n    i := 0\n    repeat when i < 100 {\n        v := option { i < 99 -> 1.5, 2 }\n        t = t + f(v)\n        i = i + 1\n    }\n    t\n}\nrun(add)",

@@ -18,17 +18,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-pub(crate) const STACK_MAX: usize = 262144; // 256K stack slots
-pub(crate) const FRAMES_MAX: usize = 16384; // 16K call frames — supports deep recursion
+pub(crate) const STACK_MAX: usize = 262144;
+pub(crate) const FRAMES_MAX: usize = 16384;
 /// Stack slots every call keeps free. A function whose own
 /// [`Chunk::stack_bound`](crate::compiler::opcode::Chunk::stack_bound) is
-/// larger reserves that much instead (see [`Function::stack_reserve`]), and
-/// the JIT, whose inline call paths only check this margin, declines to
-/// compile it.
+/// larger reserves that much instead (see [`Function::stack_reserve`]).
 pub(crate) const STACK_GUARD_MARGIN: usize = 8192;
 
-/// Type names the runtime itself uses. A user struct or enum may not take
-/// one, or its instances would satisfy that built-in type's checks.
+/// Type names the runtime itself uses. A user struct or enum may not take one.
 pub(crate) const BUILTIN_TYPE_NAMES: &[&str] = &[
     "INTEGER",
     "FLOAT",
@@ -70,7 +67,6 @@ pub(crate) fn type_matches(expected: &str, actual: &str) -> bool {
         return true;
     }
     if expected.contains(" || ") {
-        // A plain `Error` member accepts tagged errors too, as `<Error>` does alone.
         expected
             .split(" || ")
             .any(|t| t == "GENERIC" || t == actual || (t == "ERROR" && actual.starts_with("ERROR")))
@@ -82,9 +78,8 @@ pub(crate) fn type_matches(expected: &str, actual: &str) -> bool {
 /// The common type for arithmetic on two different kinds of number, by the
 /// same rule `==` uses: `byte` or `uint` with `int` is `int`, `byte` with
 /// `uint` is `uint`, anything with `float` is `float`, and `byte` with `byte`
-/// is `int`. The operator then runs on the converted pair, so it behaves
-/// exactly as it does for that type with itself. `None` for any other pair,
-/// including two numbers that already share a type.
+/// is `int`. `None` for any other pair, including two numbers that already
+/// share a type.
 fn promote_numeric(a: &Value, b: &Value) -> Option<(Value, Value)> {
     use Value::{Byte, Float, Integer, Uint};
     fn to_float(v: &Value) -> Option<f64> {
@@ -96,7 +91,6 @@ fn promote_numeric(a: &Value, b: &Value) -> Option<(Value, Value)> {
             _ => None,
         }
     }
-    // A `uint` past `i64::MAX` wraps, as the `+` and `-` arms always did.
     fn to_int(v: &Value) -> Option<i64> {
         match v {
             Integer(n) => Some(*n),
@@ -117,11 +111,9 @@ fn promote_numeric(a: &Value, b: &Value) -> Option<(Value, Value)> {
 /// How `a` and `b` order, for `<`, `<=`, `>` and `>=`. `None` when they
 /// cannot be compared; `Some(None)` when they can but have no order (a NaN).
 ///
-/// Integers of any width (`int`, `uint`, `byte`) compare by exact value: all
-/// of them fit in an `i128`, so a `uint` above `i64::MAX` is still greater
-/// than every `int` instead of wrapping negative. Anything with a float
-/// compares as floats, as `int` with `float` always has. Strings compare with
-/// strings and chars with chars.
+/// Integers of any width (`int`, `uint`, `byte`) compare by exact value.
+/// Anything with a float compares as floats. Strings compare with strings and
+/// chars with chars.
 fn order(a: &Value, b: &Value) -> Option<Option<Ordering>> {
     fn integer(v: &Value) -> Option<i128> {
         match v {
@@ -149,13 +141,8 @@ fn order(a: &Value, b: &Value) -> Option<Option<Ordering>> {
 
 /// How a file is named in a diagnostic.
 ///
-/// Paths under the working directory are shown relative to it — `src/app.oxi`
-/// reads better than an absolute path and is still clickable in a terminal
-/// launched from that directory. Anything outside (an installed stdlib module
-/// under `/usr/local`) stays absolute rather than becoming a `../../..` chain.
-///
-/// `cwd` is a parameter rather than read here so this stays testable without
-/// mutating the process-global working directory.
+/// Paths under the working directory `cwd` are shown relative to it. Anything
+/// outside stays absolute.
 fn display_path(path: &Path, cwd: Option<&Path>) -> String {
     cwd.and_then(|c| path.strip_prefix(c).ok())
         .unwrap_or(path)
@@ -164,7 +151,6 @@ fn display_path(path: &Path, cwd: Option<&Path>) -> String {
 }
 
 /// `display_path` against the real working directory.
-/// See `VM::set_module_source`.
 type ModuleSource = Rc<dyn Fn(&str) -> Option<String>>;
 
 fn display_path_cwd(path: &Path) -> String {
@@ -174,7 +160,6 @@ fn display_path_cwd(path: &Path) -> String {
 /// Locate the stdlib directory: next to the executable (dev or system install),
 /// then the cwd, then a user install under `~/.oxigen`.
 pub(crate) fn find_stdlib_path() -> PathBuf {
-    // 1. Relative to executable (dev: target/debug/oxigen + stdlib/)
     if let Ok(exe) = std::env::current_exe()
         && let Some(exe_dir) = exe.parent()
     {
@@ -182,7 +167,6 @@ pub(crate) fn find_stdlib_path() -> PathBuf {
         if candidate.is_dir() {
             return candidate;
         }
-        // 2. System install: <prefix>/bin/../lib/oxigen/stdlib
         if let Some(prefix) = exe_dir.parent() {
             let candidate = prefix.join("lib").join("oxigen").join("stdlib");
             if candidate.is_dir() {
@@ -190,17 +174,14 @@ pub(crate) fn find_stdlib_path() -> PathBuf {
             }
         }
     }
-    // 3. Current working directory (preferred for local development)
     let candidate = PathBuf::from("stdlib");
     if candidate.is_dir() {
         return candidate;
     }
-    // 4. Parent of current working directory (useful when tests run from a crate dir)
     let candidate = PathBuf::from("..").join("stdlib");
     if candidate.is_dir() {
         return candidate;
     }
-    // 5. User install: ~/.oxigen/lib/stdlib
     if let Ok(home) = std::env::var("HOME") {
         let candidate = PathBuf::from(home)
             .join(".oxigen")
@@ -210,7 +191,6 @@ pub(crate) fn find_stdlib_path() -> PathBuf {
             return candidate;
         }
     }
-    // Fallback
     PathBuf::from("stdlib")
 }
 
@@ -246,7 +226,7 @@ impl CallFrame {
 
 /// Recover an owned `Rc` from a `JitFrame`'s module-globals raw pointer.
 /// Sound only for pointers produced by `Rc::as_ptr` on an `Rc` that is still
-/// alive at the call site (see `active_module_globals_rc` for the invariant).
+/// alive at the call site.
 unsafe fn mg_rc(ptr: *const HashMap<String, Value>) -> Option<Rc<HashMap<String, Value>>> {
     if ptr.is_null() {
         return None;
@@ -257,8 +237,8 @@ unsafe fn mg_rc(ptr: *const HashMap<String, Value>) -> Option<Rc<HashMap<String,
     }
 }
 
-/// Opaque handle returned by `VM::frames_pop` to the JIT runtime so it can
-/// complete a Return without depending on the private `CallFrame` layout.
+/// Opaque handle returned by `VM::frames_pop` to the JIT runtime, used to
+/// complete a Return.
 #[allow(dead_code)]
 pub(crate) struct CallFrameHandle {
     pub(crate) slot_offset: usize,
@@ -289,7 +269,6 @@ pub(crate) struct JitFrameView {
     pub len: usize,
 }
 
-// Baked into JIT-emitted IR, so unused in a pure-interpreter build.
 #[cfg_attr(not(feature = "jit"), allow(dead_code))]
 impl JitFrameView {
     pub const OFFSET_PTR: i32 = 0;
@@ -301,13 +280,10 @@ impl JitFrameView {
 pub struct VMError {
     pub message: String,
     pub line: u32,
-    /// Stable identity for this failure. Defaults to the generic runtime code
-    /// so all 137 existing sites keep working while specific codes are given
-    /// out incrementally.
+    /// Stable identity for this failure.
     pub code: crate::diagnostics::Code,
     /// Error category tag, if any (e.g. from `<fail>(<Error<network>>(...))`).
-    /// Preserved across a `guard`/`option <Error>` recovery so tag filters
-    /// (`<guard<Error<tag>>>`) can match.
+    /// Preserved across a `guard`/`option <Error>` recovery.
     pub tag: Option<String>,
 }
 
@@ -326,15 +302,10 @@ impl std::fmt::Display for VMError {
     }
 }
 
-/// The OxigenLang virtual machine.
-/// Cached view of `stack`'s `(ptr, len)` readable directly from
-/// Cranelift IR without FFI. `ptr` is written once in `VM::new()`
-/// (the stack is pre-allocated to `STACK_MAX` so pushes never
-/// reallocate) and `len` is synced by every stack mutator.
+/// Cached view of the VM stack's `(ptr, len)`, readable directly from
+/// JIT-compiled code. `len` is synced by every stack mutator.
 ///
-/// Layout is pinned by `#[repr(C)]` so the JIT can bake the offsets
-/// as constants. Keep the field order in sync with the `OFFSET_*`
-/// constants below and with `VM::stack_view`.
+/// The layout is `#[repr(C)]`; field order matches the `OFFSET_*` constants.
 #[repr(C)]
 pub struct StackView {
     pub ptr: *mut Value,
@@ -354,23 +325,13 @@ pub enum ExecutionMode {
 }
 
 pub struct VM {
-    /// Cached view of `stack`'s raw parts for the JIT. Read via direct
-    /// memory loads at a pinned offset from `&mut VM`. Placed first so
-    /// we can stabilize its offset with `#[repr(C)]` later if we want;
-    /// for now we use `std::mem::offset_of!(VM, stack_view)` to pick it
-    /// up from wherever the compiler lands it.
+    /// Cached view of `stack`'s raw parts for the JIT.
     pub(crate) stack_view: StackView,
     pub(crate) jit_frame_view: JitFrameView,
 
-    /// True when a JIT thunk is the innermost executing frame (i.e. we
-    /// are inside `invoke_thunk(...) → thunk(vm)`, NOT inside a nested
-    /// `execute_until`). Used by `current_constant` / `active_closure`
-    /// / `current_slot_offset` / `current_line` / `active_module_globals`
-    /// to decide whether the "active" frame lives in `jit_frame_view`
-    /// (JIT running) or `frames` (interpreter running). Without this,
-    /// an interpreter call that runs while a JIT frame is paused above
-    /// it reads constants from the JIT's chunk instead of the
-    /// interpreter's — corrupting `Closure`, `GetGlobal`, etc.
+    /// True when a JIT thunk is the innermost executing frame, as opposed to a
+    /// nested `execute_until`. Decides whether the active frame lives in
+    /// `jit_frame_view` (JIT running) or `frames` (interpreter running).
     pub(crate) jit_executing: std::cell::Cell<bool>,
 
     stack: Vec<Value>,
@@ -380,7 +341,6 @@ pub struct VM {
     globals: HashMap<String, Value>,
     open_upvalues: Vec<Rc<RefCell<Upvalue>>>,
 
-    // Module system
     pub current_file: Option<PathBuf>,
     pub stdlib_path: PathBuf,
     /// Supplies module sources ahead of the filesystem; see `set_module_source`.
@@ -389,13 +349,10 @@ pub struct VM {
     import_stack: Vec<PathBuf>,
     pub is_main_context: bool,
 
-    // Source for error messages
     source: String,
 
-    // Script arguments
     script_args: Vec<String>,
 
-    // Global variable metadata for is_mut/is_type_mut
     global_mutability: HashMap<String, bool>,
     global_type_constraints: HashMap<String, Option<String>>,
     /// Globals declared with `lock`: never reassigned or re-declared.
@@ -411,8 +368,7 @@ pub struct VM {
     execution_mode: ExecutionMode,
 
     /// `interrupt`'s armed byte (`limits::Limits::armed_ptr`), cached where
-    /// JIT-compiled back-edges can load it at `VM::limits_armed_offset`. The
-    /// `Arc` in `interrupt` keeps it alive.
+    /// JIT-compiled back-edges can load it at `VM::limits_armed_offset`.
     pub(crate) limits_armed: *const std::sync::atomic::AtomicU8,
     /// Loop iterations the budget still allows; meaningful only while a
     /// budget is set. JIT-compiled loops read and decrement it in place, at
@@ -434,8 +390,8 @@ pub struct VM {
 }
 
 /// A recoverable-error landing pad installed by `PushHandler`. Records the
-/// machine state to restore so an error raised in the protected region can be
-/// turned back into an in-band error value at the catch target.
+/// machine state to restore so an error raised in the protected region becomes
+/// an in-band error value at the catch target.
 #[derive(Clone, Copy)]
 struct ErrorHandler {
     /// Absolute ip in the catching frame to resume at.
@@ -475,7 +431,6 @@ impl VM {
         let mut globals = HashMap::new();
         builtins::register_builtins(&mut globals);
 
-        // Pre-allocated so push never reallocates and the JIT can cache a stable raw pointer.
         let mut stack: Vec<Value> = Vec::with_capacity(STACK_MAX);
         let mut jit_frames: Vec<JitFrame> = Vec::with_capacity(FRAMES_MAX);
         let stack_view = StackView {
@@ -535,8 +490,7 @@ impl VM {
         self.execution_mode
     }
 
-    /// Runtime-computed offset of `stack_view` within `VM`. The JIT uses
-    /// this to bake the pointer into emitted IR as a constant.
+    /// Runtime-computed offset of `stack_view` within `VM`.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub const fn stack_view_offset() -> usize {
         std::mem::offset_of!(VM, stack_view)
@@ -559,24 +513,14 @@ impl VM {
         std::mem::offset_of!(VM, jit_frame_view)
     }
 
-    /// Re-sync `self.stack`'s `Vec::len` from the JIT-visible
-    /// `stack_view.len`. The JIT's inline stack ops mutate
-    /// `stack_view.len` directly without touching `Vec::len`; any Rust
-    /// code that reads `self.stack` via Vec's API must call this first.
+    /// Re-sync `self.stack`'s `Vec::len` from the JIT-visible `stack_view.len`.
+    /// Rust code that reads `self.stack` via Vec's API must call this first.
     ///
-    /// # Safety invariant (must be upheld by every JIT inline path)
+    /// # Safety invariant
     ///
-    /// The inline paths may only **decrement** `stack_view.len`, and
-    /// only for stack slots that hold primitive-tag values (tags 0..=6:
-    /// Integer, Float, Char, Boolean, Byte, Uint, None) — values with
-    /// no `Drop` side-effect. If an inline path abandoned an Rc-bearing
-    /// value, `Vec::set_len(shorter)` here would leak its refcount.
-    ///
-    /// This is satisfied by construction: inline pops live only inside
-    /// int-fast-arith / int-fast-cmp fast blocks gated on
-    /// `VALUE_TAG_INTEGER`, and `emit_inline_replace_top2_with_bool`
-    /// replaces two Integers with a Boolean — primitives in, primitives
-    /// abandoned.
+    /// JIT inline paths may only decrement `stack_view.len`, and only for stack
+    /// slots that hold primitive-tag values (tags 0..=6: Integer, Float, Char,
+    /// Boolean, Byte, Uint, None) with no `Drop` side-effect.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn sync_stack_from_view(&mut self) {
@@ -648,8 +592,6 @@ impl VM {
 
         let from_host = self.is_idle();
         let result = self.run_closure(closure);
-        // A failed run leaves its frames and operands behind. Clear them so
-        // the host's next run or call starts clean.
         if result.is_err() && from_host {
             self.reset_exec_state();
         }
@@ -657,10 +599,8 @@ impl VM {
     }
 
     fn run_closure(&mut self, closure: Rc<ObjClosure>) -> Result<Value, VMError> {
-        // Slot 0 is the callee slot call_closure expects.
         self.push(Value::Closure(Rc::clone(&closure)));
 
-        // Routing the top level through call_closure makes it participate in JIT tiering like any other call.
         self.call_closure(closure, 0, &[], None)?;
 
         self.execute_until(0)?;
@@ -668,10 +608,7 @@ impl VM {
     }
 
     /// Clear transient execution state (stack, call frames, open upvalues,
-    /// error handlers) while preserving globals and the module cache. The REPL
-    /// calls this after a runtime error so a failed line leaves the stack
-    /// balanced for the next `run`, without losing prior `var`/`fun`/`struct`
-    /// definitions (which live in globals).
+    /// error handlers) while preserving globals and the module cache.
     pub fn reset_exec_state(&mut self) {
         self.stack.clear();
         self.stack_view.len = 0;
@@ -716,8 +653,6 @@ impl VM {
     /// with an error naming the capability, here and in imported modules.
     pub fn restrict(&mut self, allowed: &[Capability]) {
         self.capabilities = Some(allowed.to_vec());
-        // A module imported before now captured the unrestricted builtins in
-        // its own globals; importing it again must rebuild it under the limits.
         self.module_cache.clear();
         self.module_deps.clear();
         for &(name, capability) in capabilities::GATED_BUILTINS {
@@ -729,9 +664,7 @@ impl VM {
 
     /// Ask `source` for a module's text before looking on disk. It gets the
     /// path as the script wrote it (`math`, `./util`) and returns the source,
-    /// or `None` to fall back to the filesystem. A host without one, such as
-    /// a web page, serves the stdlib this way; a game can serve scripts from
-    /// its asset archive. Imported modules ask it too.
+    /// or `None` to fall back to the filesystem. Imported modules ask it too.
     pub fn set_module_source(&mut self, source: impl Fn(&str) -> Option<String> + 'static) {
         self.module_source = Some(Rc::new(source));
         self.module_cache.clear();
@@ -743,8 +676,7 @@ impl VM {
         self.capabilities.as_deref()
     }
 
-    /// A global the host sets from outside any script. The JIT caches global
-    /// lookups, so it has to hear about the change.
+    /// A global the host sets from outside any script.
     fn set_host_global(&mut self, name: &str, value: Value) {
         self.jit.bump_global_version(name);
         self.globals.insert(name.to_string(), value);
@@ -754,7 +686,6 @@ impl VM {
     /// from the cache, so the next import reads it again. Returns how many
     /// cache entries this VM dropped.
     pub fn invalidate_module(&mut self, path: &Path) -> usize {
-        // Cache keys are canonical paths (see `resolve_module_path`).
         let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let doomed: Vec<PathBuf> = self
             .module_cache
@@ -829,28 +760,23 @@ impl VM {
         to.loop_countdown = std::mem::take(&mut self.loop_countdown);
     }
 
-    /// Look up a global value by name (used by the concurrency worker pool to
-    /// resolve a spawned function by name). Returns a clone if present.
+    /// Look up a global value by name. Returns a clone if present.
     pub fn get_global(&self, name: &str) -> Option<Value> {
         self.globals.get(name).cloned()
     }
 
-    /// Iterate all globals (used by the concurrency worker pool to snapshot the
-    /// main thread's user globals for a spawned closure that references a
-    /// top-level `main` binding — those are GLOBALS, not upvalues).
+    /// Iterate all globals.
     pub fn globals_iter(&self) -> impl Iterator<Item = (&String, &Value)> {
         self.globals.iter()
     }
 
-    /// Install a global (used by a worker to seed a spawned task with the main
-    /// thread's user globals before running it).
+    /// Install a global.
     pub fn define_global(&mut self, name: String, val: Value) {
         self.globals.insert(name, val);
     }
 
     /// Where the module whose globals are `globals` was loaded from, if this
-    /// VM loaded it (used to tell a worker which module a spawned function
-    /// or struct belongs to).
+    /// VM loaded it.
     pub fn module_path_of(&self, globals: &Rc<HashMap<String, Value>>) -> Option<PathBuf> {
         self.module_cache
             .iter()
@@ -867,8 +793,7 @@ impl VM {
     }
 
     /// The globals of the module at `path`, importing it into this VM first
-    /// if it hasn't been. A worker uses it to run a spawned function from a
-    /// module in that module's context.
+    /// if it hasn't been.
     pub fn module_globals_at(
         &mut self,
         path: &Path,
@@ -877,8 +802,6 @@ impl VM {
             return Ok(globals);
         }
         let path_str = path.to_string_lossy().into_owned();
-        // A namespace import also binds the module under its file name; keep
-        // whatever that global held, since nothing here asked for the binding.
         let bound = path_str.rsplit('/').next().unwrap_or(&path_str).to_string();
         let saved = self.globals.get(&bound).cloned();
         self.import_module(&path_str, &[])?;
@@ -896,7 +819,7 @@ impl VM {
 
     /// Call a callee `Value` (closure or builtin) with positional `args` from
     /// external Rust code, driving the VM to completion and returning the
-    /// result. Used by the concurrency worker pool.
+    /// result.
     pub fn call_with_args(&mut self, callee: Value, args: Vec<Value>) -> Result<Value, VMError> {
         let from_host = self.is_idle();
         let result = self.call_with_args_inner(callee, args);
@@ -914,7 +837,6 @@ impl VM {
             self.push(a);
         }
         self.call_value(arg_count, &[])?;
-        // If the call pushed a frame (closure), drive it to completion.
         if self.frames.len() > depth {
             self.execute_until(depth)?;
         }
@@ -947,11 +869,8 @@ impl VM {
         self.frames.is_empty() && self.jit_frame_view.len == 0
     }
 
-    // ── Opcode handlers (shared between interpreter and JIT runtime) ──
-
-    /// Read the name string at constant index `name_idx`. The compiler
-    /// guarantees globals use string constants, but we defensively return
-    /// an error if that invariant is broken.
+    /// Read the name string at constant index `name_idx`. Returns an error if the
+    /// constant is not a string.
     pub(crate) fn name_constant(&self, name_idx: u16) -> Result<Rc<String>, VMError> {
         match self.current_constant(name_idx).repr() {
             ValueRepr::String(s) => Ok(Rc::clone(s)),
@@ -993,7 +912,6 @@ impl VM {
                 "`=` binds immutably; declare it with `:=` to allow reassignment",
             ));
         }
-        // A mutable typed variable keeps its type across reassignment.
         let constraint = self
             .global_type_constraints
             .get(name.as_ref())
@@ -1028,7 +946,6 @@ impl VM {
     pub(crate) fn handle_define_global(&mut self, name_idx: u16) -> Result<(), VMError> {
         let name = self.name_constant(name_idx)?;
         self.reject_locked_global(&name, "declare")?;
-        // A bare walrus keeps an existing type lock; explicit `x <T> := ...` retyping goes elsewhere.
         let constraint = self
             .global_type_constraints
             .get(name.as_ref())
@@ -1095,7 +1012,6 @@ impl VM {
             }
             Upvalue::Closed(v) => {
                 *v = val;
-                // Other closures sharing this cell may hold its old value in their int caches.
                 crate::jit::note_upvalue_write();
             }
         }
@@ -1196,18 +1112,14 @@ impl VM {
         def: Rc<crate::vm::value::ObjStructDef>,
         flat: &[Value],
     ) -> Result<(), VMError> {
-        // Not the literal's own name, which is `shapes.Pt` for `p <shapes.Pt>`.
         let struct_name_str = def.name.clone();
         let layout = self.field_layout_of(&def)?;
         let mut field_vec: Vec<Value> = layout.slots.iter().map(|_| Value::None).collect();
 
-        // Inferring from a None-valued slot is wrong: an explicit None is indistinguishable from unsupplied.
         let mut assigned = vec![false; layout.slots.len()];
         for pair in flat.chunks(2) {
             if let Some(fname) = pair[0].as_string() {
                 if let Some(&idx) = layout.indices.get(fname.as_ref()) {
-                    // Setting a hidden field from a literal is still setting it
-                    // from outside; allowing it would make `hide` half a rule.
                     if layout.slots[idx].2
                         && self.active_closure_method_of().is_none_or(|owner| {
                             !self.struct_chain_contains(&struct_name_str, owner)
@@ -1237,7 +1149,6 @@ impl VM {
             }
         }
 
-        // An empty literal legitimately takes every default; a partial one is the mistake.
         let supplied = flat.len() / 2;
         let mut missing: Vec<String> = Vec::new();
         for (i, slot) in layout.slots.iter().enumerate() {
@@ -1276,8 +1187,7 @@ impl VM {
     }
 
     /// The struct a literal names: `Pt` in scope, or `shapes.Pt` through the
-    /// module bound to `shapes`. `p <Pt>` and `p <shapes.Pt>` compile to an
-    /// empty literal, so this is also what refuses `p <make>`.
+    /// module bound to `shapes`.
     fn struct_def_for_literal(
         &self,
         name: &str,
@@ -1356,10 +1266,7 @@ impl VM {
     }
 
     /// A struct def's flattened field layout (parent fields first, then own).
-    /// Computed lazily on first call and cached in the def's `OnceCell`, so
-    /// subsequent calls are a single pointer load. It takes the def rather than
-    /// a name: one reached through a module (`shapes.Pt(1, 2)`) isn't in scope
-    /// by name.
+    /// Computed lazily on first call and cached in the def's `OnceCell`.
     pub(crate) fn field_layout_of(
         &self,
         def: &Rc<crate::vm::value::ObjStructDef>,
@@ -1368,8 +1275,6 @@ impl VM {
             return Ok(Rc::clone(layout));
         }
 
-        // Parent lookups go through parent_struct_def so a child imported without
-        // its parent still inherits the parent's fields.
         let mut chain: Vec<Rc<crate::vm::value::ObjStructDef>> = Vec::new();
         let mut cur = Some(Rc::clone(def));
         while let Some(d) = cur {
@@ -1377,9 +1282,6 @@ impl VM {
             if cur.is_none()
                 && let Some(p) = &d.parent
             {
-                // Silently dropping an unresolvable parent yields an instance
-                // missing every inherited field, which surfaces much later as a
-                // baffling "field not found" — fail here instead.
                 return Err(self.runtime_error_hint(
                     &format!(
                         "parent struct '{p}' of '{}' is not defined in this scope",
@@ -1390,7 +1292,6 @@ impl VM {
             }
             chain.push(d);
         }
-        // chain is [child, ..., root]; reverse for root-first order.
         chain.reverse();
 
         let mut slots: Vec<(String, String, bool)> = Vec::new();
@@ -1405,7 +1306,6 @@ impl VM {
         }
 
         let layout = Rc::new(crate::vm::value::FieldLayout { slots, indices });
-        // OnceCell may race; the VM is single-threaded but return whichever is set.
         let _ = def.layout.set(Rc::clone(&layout));
         Ok(def.layout.get().cloned().unwrap_or(layout))
     }
@@ -1437,15 +1337,12 @@ impl VM {
                 ))),
             },
             ValueRepr::StructInstance(inst) => {
-                // Direct Vec index via the instance's cached layout, no HashMap in the hot path.
                 if let Some(&idx) = inst.layout.indices.get(fname.as_ref()) {
-                    // slots[idx].2 is the `hide` flag from the declaration.
                     if inst.layout.slots[idx].2 && !self.hidden_field_access_allowed(inst) {
                         return Err(self.hidden_field_error(fname, &inst.struct_name));
                     }
                     return Ok(inst.get_field(idx));
                 }
-                // Fall through: it might be a method on the struct def.
                 let method_val = if let Some(def) = self
                     .globals
                     .get(&inst.struct_name)
@@ -1489,7 +1386,6 @@ impl VM {
                 _ => Err(self.runtime_error(&format!("ErrorValue has no field '{}'", fname))),
             },
             ValueRepr::Map(entries) => {
-                // A missing key is an error: returning None made `m.nmae` a silent typo.
                 let entries = entries.borrow();
                 let key = Value::String(Rc::clone(fname));
                 match entries.get(&key) {
@@ -1604,19 +1500,15 @@ impl VM {
 
     /// Is the code in the current frame allowed to touch a hidden field of
     /// `inst`? Yes when that code was compiled as part of a struct in the
-    /// instance's own inheritance chain — a method of the struct, a method it
+    /// instance's own inheritance chain: a method of the struct, a method it
     /// inherited, or a closure nested inside one of those.
     ///
-    /// Deliberately chain-directional: a `Person` method may read a hidden
-    /// field of an `American` (an American is-a Person), but a method of an
-    /// unrelated struct may not, and neither may top-level code.
+    /// A `Person` method may read a hidden field of an `American`, but a method
+    /// of an unrelated struct may not, and neither may top-level code.
     pub(crate) fn hidden_field_access_allowed(
         &self,
         inst: &crate::vm::value::ObjStructInstance,
     ) -> bool {
-        // `active_closure` is authoritative for both interpreted and JIT'd
-        // frames; reading `frames.last()` would answer for the caller once a
-        // hot method tiered up, and deny its own `self.field`.
         if self.frames.is_empty() && !self.jit_executing.get() {
             return false;
         }
@@ -1752,7 +1644,6 @@ impl VM {
                 }
             }
             drop(methods);
-            // Compiled call sites cache methods by struct def, which was just changed in place.
             self.jit.invalidate_method_caches();
         }
         Ok(())
@@ -1785,7 +1676,6 @@ impl VM {
 
         let upvalue_count = template.function.upvalue_count as usize;
 
-        // Snapshot from the frame so mutable methods below do not conflict on borrows.
         let (chunk_rc, parent_upvalues, slot_offset) = {
             let closure = self.active_closure();
             (
@@ -1817,7 +1707,6 @@ impl VM {
         let closure = Rc::new(ObjClosure {
             function: Rc::clone(&template.function),
             upvalues,
-            // Lexical capture: a closure belongs to the module it is created in.
             module_globals: crate::vm::value::ModuleGlobals::from(
                 template
                     .module_globals
@@ -1844,8 +1733,6 @@ impl VM {
     /// Closure transfer: if `self.stack[start]` is a closure with live (open)
     /// captures, replace it with a snapshot whose upvalues are `Closed` over the
     /// current stack values, so a no-stack builtin (`spawn`) can read them.
-    /// `#[cold]`/`#[inline(never)]` keeps these locals out of `call_value`'s
-    /// frame, which is on the stack for every call including deep recursion.
     #[cold]
     #[inline(never)]
     fn snapshot_spawn_closure(&mut self, start: usize) {
@@ -1869,16 +1756,12 @@ impl VM {
             })
             .collect();
         let closed = crate::vm::value::ObjClosure::closed(Rc::clone(&c.function), vals);
-        // The worker needs to know which module the closure belongs to.
         closed.module_globals.set(c.module_globals.get());
         self.stack[start] = Value::Closure(Rc::new(closed));
     }
 
-    // ── Stack Operations ───────────────────────────────────────────────
-
     #[inline(always)]
     pub(crate) fn push(&mut self, value: Value) {
-        // JIT inline paths decrement stack_view.len without touching Vec::len; re-sync first.
         unsafe {
             self.stack.set_len(self.stack_view.len);
         }
@@ -1886,13 +1769,11 @@ impl VM {
             panic!("stack overflow: exceeded {} slots", STACK_MAX);
         }
         self.stack.push(value);
-        // ptr is stable because the stack was pre-allocated to STACK_MAX in new().
         self.stack_view.len = self.stack.len();
     }
 
     #[inline(always)]
     pub(crate) fn pop(&mut self) -> Value {
-        // See push() above for the rationale.
         unsafe {
             self.stack.set_len(self.stack_view.len);
         }
@@ -1902,10 +1783,7 @@ impl VM {
     }
 
     /// `push`/`pop` without the `set_len` resync. Only callable from the
-    /// dispatch loop, where `stack.len() == stack_view.len` always holds
-    /// (the invariant `peek` and the GetLocal/SetLocal arms already rely
-    /// on). JIT helpers must keep using `push`/`pop`, which tolerate a
-    /// stale `Vec::len` after inline JIT stack ops.
+    /// dispatch loop, where `stack.len() == stack_view.len` always holds.
     #[inline(always)]
     fn push_fast(&mut self, value: Value) {
         debug_assert_eq!(self.stack.len(), self.stack_view.len);
@@ -1928,9 +1806,7 @@ impl VM {
         &self.stack[self.stack.len() - 1 - distance]
     }
 
-    /// Stack slot `n` counted from 0 at the bottom. Used by the JIT
-    /// runtime to read/write locals without constructing a CallFrame
-    /// reference.
+    /// Stack slot `n` counted from 0 at the bottom.
     #[allow(dead_code)]
     pub(crate) fn stack_slot(&self, n: usize) -> &Value {
         &self.stack[n]
@@ -1951,10 +1827,8 @@ impl VM {
         self.frames.last().map(|f| f.slot_offset).unwrap_or(0)
     }
 
-    /// Clone the constant at `idx` from the current frame's chunk. Used by
-    /// the JIT runtime's `jit_push_constant` helper.
+    /// Clone the constant at `idx` from the current frame's chunk.
     pub(crate) fn current_constant(&self, idx: u16) -> Value {
-        // fresh_clone so a typed zero-init heap default is unaliased per load, not shared.
         if self.jit_executing.get()
             && let Some(frame) = self.jit_frame_top()
         {
@@ -2029,7 +1903,6 @@ impl VM {
     }
 
     /// Pop the topmost call frame. Returns `None` if there is none.
-    /// Used by the JIT runtime's `jit_op_return` helper.
     #[allow(dead_code)]
     pub(crate) fn frames_pop(&mut self) -> Option<CallFrameHandle> {
         self.frames.pop().map(|f| CallFrameHandle {
@@ -2052,10 +1925,9 @@ impl VM {
         out
     }
 
-    /// Insert `value` at `idx`, syncing `stack_view.len`. O(stack_len − idx).
+    /// Insert `value` at `idx`, syncing `stack_view.len`. O(stack_len - idx).
     ///
-    /// Refuses to grow the stack past `STACK_MAX`: `Vec::insert` at capacity
-    /// would reallocate and leave the JIT's `stack_view.ptr` dangling.
+    /// Refuses to grow the stack past `STACK_MAX`.
     #[inline(always)]
     pub(crate) fn stack_insert(&mut self, idx: usize, value: Value) -> Result<(), VMError> {
         if self.stack.len() >= STACK_MAX {
@@ -2070,7 +1942,6 @@ impl VM {
     }
 
     /// Overwrite an existing slot in-place (no length change, no sync).
-    /// Use for call-method rearranging that doesn't grow the stack.
     #[inline(always)]
     #[allow(dead_code)]
     pub(crate) fn stack_overwrite(&mut self, idx: usize, value: Value) {
@@ -2098,8 +1969,7 @@ impl VM {
         &self.stack[idx]
     }
 
-    /// Shrink the stack by `n` elements, dropping the values. Used by the
-    /// JIT's inline int fast path to commit a binop result.
+    /// Shrink the stack by `n` elements, dropping the values.
     #[allow(dead_code)]
     #[inline(always)]
     pub(crate) fn stack_shrink(&mut self, n: usize) {
@@ -2110,17 +1980,12 @@ impl VM {
 
     /// Commit a raw-IR stack rearrangement: tell the backing `Vec<Value>`
     /// that its logical length is now `new_len`, matching the writes the
-    /// JIT emitted through `stack_view.ptr`. Only for use by
-    /// `jit_stack_commit_len`.
-    ///
+    /// JIT emitted through `stack_view.ptr`.
     /// # Safety
     /// - `new_len <= STACK_MAX` (the capacity `VM::new` pre-allocates).
     /// - Every slot in `[old_len, new_len)` must hold initialized,
-    ///   bit-valid `Value` data, INCLUDING correctly-adjusted `Rc` strong
-    ///   counts for heap-allocated variants. The JIT's MethodCall hit
-    ///   path ensures this by emitting `strong += 1` before stamping a
-    ///   fresh `Value::Closure` and by treating receiver/arg moves as
-    ///   ownership transfers (no double-count).
+    ///   bit-valid `Value` data, including correctly-adjusted `Rc` strong
+    ///   counts for heap-allocated variants.
     #[allow(dead_code)]
     #[inline(always)]
     pub(crate) unsafe fn stack_set_len_raw(&mut self, new_len: usize) {
@@ -2137,7 +2002,6 @@ impl VM {
         {
             return frame.line;
         }
-        // No frame yet, so there is no line to report; diagnose, never panic.
         let Some(frame) = self.frames.last() else {
             return 0;
         };
@@ -2151,10 +2015,7 @@ impl VM {
 
     /// Source column (1-based) of the opcode that just executed, paired
     /// with `current_line()`. Returns 0 when the chunk has no column
-    /// metadata for this IP (e.g., older bytecode or synthetic opcodes
-    /// emitted without a `set_loc_column` call). The JIT path returns 0
-    /// since `JitFrame` only carries the line — the caret-rendering code
-    /// in `format_error` falls back to no caret when col is 0.
+    /// metadata for this IP, and on the JIT path.
     fn current_column(&self) -> u32 {
         if self.jit_executing.get()
             && let Some(frame) = self.jit_frame_top()
@@ -2193,9 +2054,7 @@ impl VM {
     }
 
     /// The module scope of the innermost activation. A JIT frame's answer is
-    /// authoritative *including* "none" — falling through to the interpreter
-    /// frame underneath would hand a main-script function the module scope of
-    /// whatever module happened to call it.
+    /// authoritative, including "none".
     #[inline(always)]
     fn active_module_globals(&self) -> Option<&HashMap<String, Value>> {
         if self.jit_executing.get()
@@ -2207,15 +2066,7 @@ impl VM {
     }
 
     /// Owned-`Rc` variant of `active_module_globals` for call paths that
-    /// store the dict in a new `CallFrame`/`ObjClosure`. Cloning the `Rc`
-    /// instead of the `HashMap` avoids deep-copying every module global
-    /// (all keys + values) on every call made under a module context.
-    ///
-    /// Safety of the JIT-frame arm: a `JitFrame`'s `module_globals` raw
-    /// pointer always originates from `Rc::as_ptr` of an `Rc` that outlives
-    /// the frame (both `jit_frame_push_raw` call sites in `call_closure` /
-    /// `call_closure_fast_path`), so recovering an owned `Rc` via
-    /// `increment_strong_count` is sound.
+    /// store the dict in a new `CallFrame`/`ObjClosure`.
     fn active_module_globals_rc(&self) -> Option<Rc<HashMap<String, Value>>> {
         if self.jit_executing.get()
             && let Some(frame) = self.jit_frame_top()
@@ -2225,10 +2076,7 @@ impl VM {
         self.frames.last().and_then(|f| f.module_globals.clone())
     }
 
-    /// Cheap presence-only test for `active_module_globals` — the JIT
-    /// global IC uses this to decide whether to bypass its cache. We
-    /// don't need the dict, just to know one exists, so this avoids
-    /// the lifetime juggling on the borrow. Only called from JIT code.
+    /// Presence-only test for `active_module_globals`. Only called from JIT code.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn has_active_module_globals(&self) -> bool {
@@ -2255,7 +2103,6 @@ impl VM {
 
         out.push_str(&format!("error[{}]: {}\n", code, message));
         let frame_name = self.innermost_frame_name();
-        // A line number only means something against its own file, so resolve that first.
         let origin = self.innermost_frame_origin();
         let file = origin
             .as_ref()
@@ -2304,7 +2151,6 @@ impl VM {
             out.push_str("\nstack trace (innermost first):");
             for (name, line, frame_file) in &trace {
                 let label = name.as_deref().unwrap_or("<top-level>");
-                // Name the file whenever we know it: mixed-file frames are what made traces confusing.
                 match frame_file {
                     Some(f) => out.push_str(&format!("\n   at `{}` ({}:{})", label, f, line)),
                     None => out.push_str(&format!("\n   at `{}` (line {})", label, line)),
@@ -2330,9 +2176,7 @@ impl VM {
     }
 
     /// Name of the function active at the innermost frame. `None` means
-    /// the error fired at the top-level script body. Used to annotate
-    /// the location header so a deep failure says which function it was
-    /// in instead of just a line number.
+    /// the error fired at the top-level script body.
     fn innermost_frame_name(&self) -> Option<String> {
         if self.jit_executing.get()
             && let Some(frame) = self.jit_frame_top()
@@ -2346,12 +2190,8 @@ impl VM {
     }
 
     /// Build an error as the caller of the innermost JIT frame would see it.
-    ///
-    /// The interpreter checks a call's arguments before the callee has a frame,
-    /// so the error names the call site. A compiled callee checks them in its
-    /// prologue, with its frame already pushed: hide that frame while the error
-    /// is rendered, and let whichever activation sits highest on the stack —
-    /// a compiled or an interpreted caller — be the one reporting.
+    /// The callee's frame is hidden while the error is rendered, so the error
+    /// names the call site.
     #[cfg(feature = "jit")]
     pub(crate) fn error_in_jit_caller(&mut self, message: &str, hint: &str) -> VMError {
         let Some(callee) = self.jit_frame_pop_raw() else {
@@ -2376,10 +2216,8 @@ impl VM {
 
     /// Walk the active call frames from innermost to outermost, returning
     /// `(function_name, line)` per frame. The top-level script body has
-    /// `name == None`. JIT and interpreter frames are merged by stack base,
-    /// so a trace that crosses between the two keeps every frame in order.
+    /// `name == None`. JIT and interpreter frames are merged by stack base.
     fn stack_trace(&self) -> Vec<(Option<String>, u32, Option<String>)> {
-        // None means the entry script.
         let entry_file = self.current_file.as_deref().map(display_path_cwd);
         let frame_file = |closure: &ObjClosure| -> Option<String> {
             closure
@@ -2391,10 +2229,6 @@ impl VM {
                 .or_else(|| entry_file.clone())
         };
 
-        // JIT and interpreter activations interleave (a compiled caller can run an
-        // interpreted callee and vice versa), so order both by stack base: a callee
-        // always sits above its caller. Equal bases are one activation recorded in
-        // both lists; the one actually executing is the JIT's only while it runs.
         type TraceEntry = (Option<String>, u32, Option<String>);
         let jit_on_top = self.jit_executing.get();
         let mut entries: Vec<(usize, bool, TraceEntry)> = Vec::new();
@@ -2431,15 +2265,13 @@ impl VM {
                 ),
             ));
         }
-        // Innermost first; at an equal base the executing record wins.
         entries.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
         entries.dedup_by(|later, kept| later.0 == kept.0);
         entries.into_iter().map(|(_, _, e)| e).collect()
     }
 
-    /// Whether a field's declared type admits `None`, making omission
-    /// deliberate rather than a slip — a linked-list `next <Node> || <None>`
-    /// is meant to be left off at the tail.
+    /// Whether a field's declared type admits `None`, such as a linked-list
+    /// `next <Node> || <None>`.
     fn field_is_optional(type_name: &str) -> bool {
         type_name
             .split("||")
@@ -2523,7 +2355,6 @@ impl VM {
             .map(|n| format!("`{n}`"))
             .unwrap_or_else(|| "this function".to_string());
         let plural = |n: usize| if n == 1 { "argument" } else { "arguments" };
-        // A method's implicit `self` is counted in its arity but never written by the caller.
         let implicit_self = usize::from(
             function.method_of.is_some()
                 && function.params.first().is_some_and(|p| p.name == "self"),
@@ -2594,11 +2425,8 @@ impl VM {
         )
     }
 
-    /// Map keys and set elements must have a hashable projection.
-    ///
-    /// A non-hashable key used to be accepted and fall back to a linear scan, so a program that
-    /// keyed a map by an array got silent O(n) lookups and a key it could mutate out from under
-    /// its own entry. Both are refused here instead.
+    /// Map keys and set elements must have a hashable projection; non-hashable
+    /// keys are refused.
     pub(crate) fn require_hashable_key(&self, key: &Value, what: &str) -> Result<(), VMError> {
         if key.try_hash_key().is_some() {
             return Ok(());
@@ -2610,31 +2438,21 @@ impl VM {
         ))
     }
 
-    // ── Main Execution Loop ────────────────────────────────────────────
-
     /// Drive the interpreter until the current frame's depth returns to
-    /// `stop_depth`. The top-level entry point uses `stop_depth = 0`; the
-    /// JIT helper passes in its pre-call depth so it can re-enter the
-    /// interpreter for a single callee activation without restarting the
-    /// outer loop.
+    /// `stop_depth`. The top-level entry point uses `stop_depth = 0`.
     ///
     /// On normal exit the last-popped frame's return value sits on top of
-    /// the stack. `run()` consumes it; the JIT helper leaves it for its
-    /// caller.
+    /// the stack.
     pub(crate) fn execute_until(&mut self, stop_depth: usize) -> Result<(), VMError> {
-        // Nothing to do if the JIT already ran the whole call to completion.
         if self.frames.len() <= stop_depth {
             return Ok(());
         }
-        // While the interpreter drives, the active frame is in `frames`, not jit_frame_view.
         let prev_jit_exec = self.jit_executing.replace(false);
         let result = loop {
             match self.execute_until_inner(stop_depth) {
                 Ok(()) => break Ok(()),
                 Err(e) => match self.recover_to_handler(stop_depth, e) {
-                    // Recovered into a catch target: resume the interpreter loop there.
                     Ok(()) => continue,
-                    // No handler in this scope — propagate.
                     Err(e) => break Err(e),
                 },
             }
@@ -2649,8 +2467,6 @@ impl VM {
     /// push the error as an in-band `ErrorValue`, set `ip` to the catch target,
     /// and return `Ok(())`. Otherwise return the error for propagation.
     fn recover_to_handler(&mut self, stop_depth: usize, err: VMError) -> Result<(), VMError> {
-        // The host's limits stop the script; letting it catch them would let
-        // it carry on.
         if err.is_host_limit() {
             return Err(err);
         }
@@ -2658,9 +2474,7 @@ impl VM {
             Some(h) if h.frame_len > stop_depth => {
                 self.error_handlers.pop();
                 self.frames.truncate(h.frame_len);
-                // A JIT callee that errored leaves its frame behind; see call_compiled's RuntimeError arm.
                 self.jit_frame_view.len = h.jit_frame_len;
-                // Close upvalues capturing locals in the unwound region before discarding those slots.
                 self.close_upvalues(h.stack_len);
                 self.stack_truncate(h.stack_len);
                 self.push(Value::ErrorValue(Rc::new(ErrorValueData {
@@ -2677,7 +2491,6 @@ impl VM {
 
     #[inline(always)]
     fn execute_until_inner(&mut self, stop_depth: usize) -> Result<(), VMError> {
-        // Check both operands in place and write over the lhs slot: one Vec pop instead of two pops plus a push.
         macro_rules! int_fast_binop {
             ($l:ident, $r:ident, $guard:expr, $fast:expr, $slow:ident) => {{
                 let n = self.stack.len();
@@ -2709,10 +2522,8 @@ impl VM {
             };
 
             match op {
-                // ── Constants & Literals ────────────────────────────
                 OpCode::Constant => {
                     let idx = self.frames[frame_idx].read_u16();
-                    // fresh_clone so a typed zero-init heap default materializes unaliased per load.
                     let value = self.frames[frame_idx].read_constant(idx).fresh_clone();
                     self.push_fast(value);
                 }
@@ -2720,7 +2531,6 @@ impl VM {
                 OpCode::True => self.push_fast(Value::Boolean(true)),
                 OpCode::False => self.push_fast(Value::Boolean(false)),
 
-                // ── Stack Manipulation ──────────────────────────────
                 OpCode::Pop => {
                     self.pop_fast();
                 }
@@ -2729,7 +2539,6 @@ impl VM {
                     self.push_fast(val);
                 }
 
-                // ── Arithmetic ──────────────────────────────────────
                 OpCode::Add => {
                     int_fast_binop!(l, r, true, Value::Integer(l.wrapping_add(r)), binary_add)
                 }
@@ -2739,7 +2548,6 @@ impl VM {
                 OpCode::Multiply => {
                     int_fast_binop!(l, r, true, Value::Integer(l.wrapping_mul(r)), binary_mul)
                 }
-                // Excludes -1 as well as 0: Rust traps i64::MIN / -1 unconditionally and panic=abort kills the process.
                 OpCode::Divide => {
                     int_fast_binop!(l, r, r != 0 && r != -1, Value::Integer(l / r), binary_div)
                 }
@@ -2747,7 +2555,6 @@ impl VM {
                     int_fast_binop!(l, r, r != 0 && r != -1, Value::Integer(l % r), binary_mod)
                 }
 
-                // ── Comparison ──────────────────────────────────────
                 OpCode::Equal | OpCode::NotEqual => {
                     let want = op == OpCode::Equal;
                     let n = self.stack.len();
@@ -2776,14 +2583,12 @@ impl VM {
                     int_fast_binop!(l, r, true, Value::Boolean(l >= r), compare_greater_equal)
                 }
 
-                // ── Logical ─────────────────────────────────────────
                 OpCode::Not => {
                     let val = self.pop_fast();
                     let val = self.force(val);
                     self.push_fast(Value::Boolean(!val.is_truthy()));
                 }
 
-                // ── Bitwise ─────────────────────────────────────────
                 OpCode::BitAnd => {
                     let b = self.pop();
                     let a = self.pop();
@@ -2820,20 +2625,16 @@ impl VM {
                     self.push(v);
                 }
 
-                // ── Unary ───────────────────────────────────────────
                 OpCode::Negate => {
                     let val = self.pop();
                     let negated = self.unary_negate(val)?;
                     self.push(negated);
                 }
 
-                // ── Postfix ─────────────────────────────────────────
                 OpCode::Increment | OpCode::Decrement => {
-                    // Handled by compiler emitting explicit add/sub + store
                     return Err(self.runtime_error("unexpected increment/decrement opcode"));
                 }
 
-                // ── Variables ───────────────────────────────────────
                 OpCode::GetLocal => {
                     let slot = self.frames[frame_idx].read_u16() as usize;
                     let offset = self.frames[frame_idx].slot_offset;
@@ -2904,7 +2705,6 @@ impl VM {
                     self.handle_define_global_typed(name_idx, mode, type_idx)?;
                 }
 
-                // ── Upvalues ────────────────────────────────────────
                 OpCode::GetUpvalue => {
                     let idx = self.frames[frame_idx].read_u16();
                     self.handle_get_upvalue(idx)?;
@@ -2922,7 +2722,6 @@ impl VM {
                     self.close_upvalue_at_slot(offset + slot);
                 }
 
-                // ── Control Flow ────────────────────────────────────
                 OpCode::Jump => {
                     let offset = self.frames[frame_idx].read_u16() as usize;
                     self.frames[frame_idx].ip += offset;
@@ -2955,7 +2754,6 @@ impl VM {
                     }
                 }
 
-                // ── Functions ───────────────────────────────────────
                 OpCode::Closure => {
                     let fn_idx = self.frames[frame_idx].read_u16();
                     let upvalue_count = match self.frames[frame_idx].read_constant(fn_idx).repr() {
@@ -2965,7 +2763,6 @@ impl VM {
                         }
                     };
                     let descriptors_offset = self.frames[frame_idx].ip;
-                    // handle_closure reads the upvalue descriptors directly from the chunk.
                     self.frames[frame_idx].ip += 3 * upvalue_count;
                     self.handle_closure(fn_idx, descriptors_offset)?;
                 }
@@ -2979,7 +2776,6 @@ impl VM {
                     let pos_count = self.frames[frame_idx].read_byte() as usize;
                     let named_count = self.frames[frame_idx].read_byte() as usize;
 
-                    // Collect named args from stack (name, value pairs)
                     let mut named_args = Vec::with_capacity(named_count);
                     for _ in 0..named_count {
                         let val = self.pop();
@@ -2997,7 +2793,6 @@ impl VM {
                     let result = self.pop();
                     let frame = self.frames.pop().unwrap();
 
-                    // A `give` inside a guarded option arm exits via Return and would otherwise skip its PopHandler.
                     while self
                         .error_handlers
                         .last()
@@ -3008,10 +2803,8 @@ impl VM {
 
                     self.close_upvalues(frame.slot_offset);
 
-                    // Pop the function's stack slots
                     self.stack_truncate(frame.slot_offset);
 
-                    // run() pops the top-level value; nested frames consume it as the Call result.
                     self.push(result);
 
                     if self.frames.len() <= stop_depth {
@@ -3019,7 +2812,6 @@ impl VM {
                     }
                 }
 
-                // ── Collections ─────────────────────────────────────
                 OpCode::BuildArray => {
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count;
@@ -3094,11 +2886,8 @@ impl VM {
                     self.push(result);
                 }
 
-                // ── Struct Operations ───────────────────────────────
                 OpCode::StructDef => {
-                    // Already handled by compiler pushing struct as constant
                     let _idx = self.frames[frame_idx].read_u16();
-                    // This opcode is currently unused; structs are loaded via Constant
                 }
 
                 OpCode::StructLiteral => {
@@ -3123,7 +2912,6 @@ impl VM {
                     self.handle_define_method(struct_name_idx, method_count)?;
                 }
 
-                // Patterns compile to __pattern_<name> globals; these opcodes are stubs for older bytecode.
                 OpCode::DefinePattern => {
                     let _name_idx = self.frames[frame_idx].read_u16();
                     let _param_count = self.frames[frame_idx].read_byte();
@@ -3135,7 +2923,6 @@ impl VM {
                     let _lo = self.frames[frame_idx].read_byte();
                 }
 
-                // ── Error Handling ──────────────────────────────────
                 OpCode::ErrorConstruct => {
                     let has_tag = self.frames[frame_idx].read_byte();
                     if has_tag == 1 {
@@ -3166,19 +2953,16 @@ impl VM {
 
                 OpCode::Guard => {
                     let jump_offset = self.frames[frame_idx].read_u16() as usize;
-                    // The binding name operand is only for disassembly: the fallback
-                    // binds the error as its own local.
                     self.frames[frame_idx].read_u16();
                     let tag_hi = self.frames[frame_idx].read_byte();
                     let tag_lo = self.frames[frame_idx].read_byte();
                     let tag_idx = ((tag_hi as u16) << 8) | (tag_lo as u16);
 
                     let value = self.peek(0).clone();
-                    // End the borrow of `value` before acting on the tag-filter result.
                     let err: Option<(bool, String, Option<String>)> =
                         if let Some(data) = value.as_error_value() {
                             let matches = if tag_idx == 0xFFFF {
-                                true // no filter → catch any error
+                                true
                             } else {
                                 let filter = self.frames[frame_idx].read_constant(tag_idx).clone();
                                 match (filter.as_string(), data.tag.as_ref()) {
@@ -3197,12 +2981,9 @@ impl VM {
 
                     match err {
                         Some((true, _, _)) => {
-                            // Matching error: leave it on the stack, where the fallback
-                            // binds it as a local, and jump to the fallback.
                             self.frames[frame_idx].ip += jump_offset;
                         }
                         Some((false, msg, tag)) => {
-                            // Tag filter didn't match → keep propagating.
                             self.pop();
                             return Err(VMError {
                                 message: msg,
@@ -3211,7 +2992,6 @@ impl VM {
                                 tag,
                             });
                         }
-                        // Not an error: keep the value as-is, including Value(...) wrappers.
                         None => {}
                     }
                 }
@@ -3238,7 +3018,6 @@ impl VM {
                     }
                 }
 
-                // ── Recoverable errors ──────────────────────────────
                 OpCode::PushHandler => {
                     let offset = self.frames[frame_idx].read_u16() as usize;
                     let catch_ip = self.frames[frame_idx].ip + offset;
@@ -3253,7 +3032,6 @@ impl VM {
                     self.error_handlers.pop();
                 }
 
-                // ── Modules ─────────────────────────────────────────
                 OpCode::Import => {
                     let path_idx = self.frames[frame_idx].read_u16();
                     let selective_count = self.frames[frame_idx].read_byte() as usize;
@@ -3276,16 +3054,13 @@ impl VM {
                 OpCode::GetModuleField => {
                     let field_idx = self.frames[frame_idx].read_u16();
                     let _field_name = self.frames[frame_idx].read_constant(field_idx).clone();
-                    // Handled by GetField on module values
                 }
 
-                // ── String Interpolation ────────────────────────────
                 OpCode::StringInterp => {
                     use std::fmt::Write as _;
                     let count = self.frames[frame_idx].read_u16() as usize;
                     let start = self.stack.len() - count;
                     let parts: Vec<Value> = self.stack_drain_from(start);
-                    // One buffer instead of a throwaway String per part; write! into it is alloc-free.
                     let mut result = String::with_capacity(count * 8);
                     for part in &parts {
                         let _ = write!(result, "{}", part);
@@ -3293,7 +3068,6 @@ impl VM {
                     self.push(Value::String(rc_str(result)));
                 }
 
-                // ── Misc ────────────────────────────────────────────
                 OpCode::Log => {
                     let flags = self.frames[frame_idx].read_byte();
                     self.handle_log(flags);
@@ -3302,8 +3076,6 @@ impl VM {
                 OpCode::Unpack => {
                     let count = self.frames[frame_idx].read_byte() as usize;
                     let value = self.pop();
-                    // The names must match the elements exactly (docs/variables.md); padding
-                    // with None or dropping the rest hid the mistake.
                     let mismatch = |got: usize| {
                         self.runtime_error_hint(
                             &format!("expected {} values, got {}", count, got),
@@ -3354,9 +3126,7 @@ impl VM {
                     }
                 }
 
-                // ── Iteration Support ───────────────────────────────
                 OpCode::IterLen => {
-                    // Stack: [iterable] -> [length]
                     let iterable = self.pop();
                     let len = self.iter_len(&iterable)?;
                     self.push(Value::Integer(len));
@@ -3390,7 +3160,6 @@ impl VM {
                     self.push(val);
                 }
 
-                // ── Method Call ──────────────────────────────────
                 OpCode::MethodCall => {
                     let method_idx = self.frames[frame_idx].read_u16();
                     let arg_count = self.frames[frame_idx].read_byte();
@@ -3420,7 +3189,6 @@ impl VM {
                     }
                 }
 
-                // ── Type Introspection ──────────────────────────
                 OpCode::IsMut => {
                     let name_idx = self.frames[frame_idx].read_u16();
                     let name = self.frames[frame_idx].read_constant(name_idx).clone();
@@ -3429,7 +3197,7 @@ impl VM {
                             .global_mutability
                             .get(var_name.as_ref())
                             .copied()
-                            .unwrap_or(true); // untyped globals are mutable
+                            .unwrap_or(true);
                         self.push(Value::Boolean(is_mut));
                     } else {
                         self.push(Value::Boolean(true));
@@ -3479,12 +3247,10 @@ impl VM {
                 }
 
                 OpCode::EnumDef => {
-                    // EnumDefs flow through the constant pool; this opcode is reserved for explicit runtime registration.
                     let _idx = self.frames[frame_idx].read_u16();
                 }
 
                 OpCode::MakeEnumVariantUnit => {
-                    // Reserved: unit variants are built via GetField on an EnumDef receiver.
                     let variant_idx = self.frames[frame_idx].read_u16();
                     let variant_name = self.frames[frame_idx].read_constant(variant_idx).clone();
                     let enum_val = self.pop();
@@ -3664,8 +3430,6 @@ impl VM {
                             }
                         }
                     } else if let Some(m) = enum_val.as_module() {
-                        // `shapes.Pt { x: 1 }` parses like an enum variant, since
-                        // the parser can't tell a module from an enum.
                         let binding = m.name.rsplit('/').next().unwrap_or(&m.name);
                         let binding = binding.strip_suffix(".oxi").unwrap_or(binding);
                         let name = format!("{binding}.{vname}");
@@ -3681,15 +3445,10 @@ impl VM {
         }
     }
 
-    // ── Arithmetic Helpers ──────────────────────────────────────────────
-
     /// Auto-join: a spawned task handle resolves to its result when consumed.
-    /// Called at every value-consuming site — arithmetic/bitwise/shift,
-    /// comparison, equality, unary, and indexing — so a `Task` resolves the
-    /// moment its underlying value is actually needed. Shared by the VM and the
-    /// JIT, which route through the same `binary_*`/`eval_index`/`unary_bnot`
-    /// helpers. Builtins (`converge`, `cancel`) deliberately do NOT force —
-    /// they need the raw handle.
+    /// Called at every value-consuming site (arithmetic, bitwise, shift,
+    /// comparison, equality, unary, and indexing). Builtins (`converge`,
+    /// `cancel`) do not force; they receive the raw handle.
     pub(crate) fn force(&self, v: Value) -> Value {
         match v {
             Value::Task(h) => h.join(self),
@@ -3697,10 +3456,9 @@ impl VM {
         }
     }
 
-    /// A set type stays locked; only <generic> or untyped carries no
+    /// A set type stays locked; only `<generic>` or untyped carries no
     /// constraint. Checks the value about to be stored in `slot` (the top of
-    /// the stack) against `function`'s lock for it. Shared by the interpreter
-    /// and the JIT; allocates only to report a mismatch.
+    /// the stack) against `function`'s lock for it.
     pub(crate) fn check_local_lock(&self, function: &Function, slot: usize) -> Result<(), VMError> {
         let Some(expected) = function
             .locals
@@ -3727,9 +3485,8 @@ impl VM {
     }
 
     /// `CheckReturn`: the value on top of the stack (left in place) against
-    /// the running function's declared return type. Matches the way
-    /// parameters are checked, so `<Enum>` accepts any enum value. Shared by
-    /// the interpreter and the JIT.
+    /// the running function's declared return type. `<Enum>` accepts any enum
+    /// value.
     pub(crate) fn check_return_type(&self, expected: &str) -> Result<(), VMError> {
         let value = self.peek(0);
         if value.effective_type_is(expected) || type_matches(expected, value.type_name()) {
@@ -3827,7 +3584,6 @@ impl VM {
                 new.extend((**r).clone());
                 Ok(Value::Tuple(Rc::new(new)))
             }
-            // Wording matches the tree-walker so file and REPL output agree.
             _ if let Some((a, b)) = promote_numeric(&a, &b) => self.binary_add(a, b),
             _ => match vector::arithmetic(&a, &b, '+') {
                 Some(result) => result.map_err(|message| self.runtime_error(&message)),
@@ -3893,11 +3649,7 @@ impl VM {
         }
     }
 
-    /// The one division-by-zero error. Shared by every numeric type so the
-    /// message can't drift between them.
-    ///
-    /// The hint matches the tree-walker's (evaluator/mod.rs
-    /// `eval_integer_infix`) so file vs REPL output agrees.
+    /// The one division-by-zero error, shared by every numeric type.
     fn division_by_zero(&self) -> VMError {
         self.runtime_error_hint(
             "division by zero",
@@ -3912,12 +3664,8 @@ impl VM {
         )
     }
 
-    /// `i64::MIN / -1` (and `%`) has no representable result. Rust traps
-    /// signed division overflow regardless of `overflow-checks`, and this
-    /// workspace sets `panic = "abort"`, so without this the process dies
-    /// with a raw Rust panic pointing into the compiler's own source. Same
-    /// shape (and code) as `division_by_zero` so `oxigen explain E0031`
-    /// already covers it.
+    /// `i64::MIN / -1` (and `%`) has no representable result; this reports it
+    /// as an error with the same shape (and code) as `division_by_zero`.
     fn division_overflow(&self, op: char) -> VMError {
         self.runtime_error_hint(
             &format!("integer overflow: int_min {op} -1 has no int result"),
@@ -3927,13 +3675,11 @@ impl VM {
 
     pub(crate) fn binary_div(&self, a: Value, b: Value) -> Result<Value, VMError> {
         let (a, b) = (self.force(a), self.force(b));
-        // Float division by zero errors too: silently yielding inf poisons every later computation.
         match (&a, &b) {
             (Value::Integer(l), Value::Integer(r)) => {
                 if *r == 0 {
                     Err(self.division_by_zero())
                 } else {
-                    // `checked_div`, not `/`: see `division_overflow`.
                     l.checked_div(*r)
                         .map(Value::Integer)
                         .ok_or_else(|| self.division_overflow('/'))
@@ -3985,7 +3731,6 @@ impl VM {
                 if *r == 0 {
                     Err(self.modulo_by_zero())
                 } else {
-                    // `checked_rem`, not `%`: see `division_overflow`.
                     l.checked_rem(*r)
                         .map(Value::Integer)
                         .ok_or_else(|| self.division_overflow('%'))
@@ -4026,8 +3771,6 @@ impl VM {
             )),
         }
     }
-
-    // Shift count masked to the low 6 bits, matching x86 and Cranelift.
 
     pub(crate) fn binary_band(&self, a: Value, b: Value) -> Result<Value, VMError> {
         let (a, b) = (self.force(a), self.force(b));
@@ -4077,46 +3820,33 @@ impl VM {
         }
     }
 
-    // ── Comparison Helpers ──────────────────────────────────────────────
-
-    /// Equality for the `==` / `!=` opcodes (B8 / decision D1).
+    /// Equality for the `==` / `!=` opcodes.
     ///
-    /// `Value::eq` is kept STRICT because it backs map-key hashing — there,
-    /// `2` and `2.0` must remain distinct keys. The surface `==` operator,
-    /// however, coerces across numeric kinds exactly like the ordering
-    /// operators (`<`, `<=`, …) already do, so the VM stays internally
-    /// consistent and matches the tree-walker oracle:
-    ///   `2 == 2.0` → True, `2 == 3.0` → False, `byte(1) == 1` → True,
-    ///   `uint(1) == 1` → True. Non-numeric cross-kind pairs (`1 == "1"`)
-    ///   stay unequal, and same-kind pairs (including enum / struct / map
-    ///   keys) fall through to the strict `Value::eq`.
+    /// `Value::eq` is strict (it backs map-key hashing, so `2` and `2.0` are
+    /// distinct keys). The `==` operator coerces across numeric kinds like the
+    /// ordering operators do:
+    /// `2 == 2.0` is True, `2 == 3.0` is False, `byte(1) == 1` is True,
+    /// `uint(1) == 1` is True. Non-numeric cross-kind pairs (`1 == "1"`)
+    /// are unequal, and same-kind pairs fall through to the strict `Value::eq`.
     pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         match (a, b) {
-            // int ⇆ float
             (Value::Integer(l), Value::Float(r)) => (*l as f64) == *r,
             (Value::Float(l), Value::Integer(r)) => *l == (*r as f64),
-            // byte ⇆ int (promote to int, mirrors eval_integer_infix)
             (Value::Byte(l), Value::Integer(r)) => (*l as i64) == *r,
             (Value::Integer(l), Value::Byte(r)) => *l == (*r as i64),
-            // byte ⇆ float
             (Value::Byte(l), Value::Float(r)) => (*l as f64) == *r,
             (Value::Float(l), Value::Byte(r)) => *l == (*r as f64),
-            // uint ⇆ int (cast uint to i64, mirrors eval_integer_infix)
             (Value::Uint(l), Value::Integer(r)) => (*l as i64) == *r,
             (Value::Integer(l), Value::Uint(r)) => *l == (*r as i64),
-            // uint ⇆ float
             (Value::Uint(l), Value::Float(r)) => (*l as f64) == *r,
             (Value::Float(l), Value::Uint(r)) => *l == (*r as f64),
-            // uint ⇆ byte (promote to uint, mirrors eval_uint_infix)
             (Value::Uint(l), Value::Byte(r)) => *l == (*r as u64),
             (Value::Byte(l), Value::Uint(r)) => (*l as u64) == *r,
-            // Same-kind (and every non-numeric pair) → strict equality.
             _ => a == b,
         }
     }
 
-    /// `==`/`!=` with auto-join. `values_equal` is static (it backs nothing
-    /// that owns a `&VM`), so the force lives here rather than inside it.
+    /// `==`/`!=` with auto-join.
     pub(crate) fn values_equal_forced(&self, a: Value, b: Value) -> bool {
         let (a, b) = (self.force(a), self.force(b));
         Self::values_equal(&a, &b)
@@ -4163,8 +3893,6 @@ impl VM {
         }
     }
 
-    // ── Function Calling ────────────────────────────────────────────────
-
     pub(crate) fn call_value(
         &mut self,
         arg_count: usize,
@@ -4185,11 +3913,9 @@ impl VM {
                     ));
                 }
                 let start = self.stack.len() - arg_count;
-                // An ffi callback fired during this call re-enters through here.
                 let outer = ffi::CURRENT_VM.replace(self as *mut VM);
                 let result = (native.func)(&self.stack[start..]);
                 ffi::CURRENT_VM.set(outer);
-                // Drop the args AND the native itself (at start - 1).
                 self.stack_truncate(start - 1);
                 match result {
                     Ok(value) => {
@@ -4211,11 +3937,9 @@ impl VM {
                     func,
                     crate::concurrent::builtin_spawn as fn(&[Value]) -> Value,
                 );
-                // Out of line so its locals do not bloat this hot, deeply-recursed frame.
                 if is_spawn {
                     self.snapshot_spawn_closure(start);
                 }
-                // join and channels rebuild struct/enum values; spawn snapshots the main thread's globals.
                 let result = if is_spawn {
                     crate::concurrent::spawn_with_vm(self, &self.stack[start..])
                 } else if let Some(with_vm) = crate::concurrent::with_vm(func) {
@@ -4223,7 +3947,6 @@ impl VM {
                 } else {
                     func(&self.stack[start..])
                 };
-                // Drop the args AND the builtin itself (at start - 1).
                 self.stack_truncate(start - 1);
                 if let Value::Error(ref msg) = result {
                     return Err(VMError {
@@ -4237,19 +3960,14 @@ impl VM {
                 Ok(())
             }
             ValueRepr::StructDef(def) => {
-                // Positional args fill fields in order; named args bind by name.
                 let start = self.stack.len() - arg_count;
                 let args: Vec<Value> = self.stack_drain_from(start);
-                self.pop(); // pop the struct def
+                self.pop();
 
                 let def_name = def.name.clone();
                 let layout = self.field_layout_of(def)?;
-                // Omitted fields used to take their type's zero, so a half-built struct looked complete.
                 let mut field_vec: Vec<Value> = Vec::with_capacity(layout.slots.len());
                 let mut missing: Vec<String> = Vec::new();
-                // Construction from outside the struct may not supply hidden
-                // fields — otherwise `hide` would stop reads while leaving the
-                // initial value wide open.
                 let outside = self
                     .active_closure_method_of()
                     .is_none_or(|owner| !self.struct_chain_contains(&def_name, owner));
@@ -4277,7 +3995,6 @@ impl VM {
                     };
                     field_vec.push(val);
                 }
-                // Supplying nothing is the documented zero-value form; supplying some is the mistake.
                 let supplied = args.len() + named_args.len();
                 if supplied > 0 && !missing.is_empty() {
                     let plural = if missing.len() == 1 {
@@ -4323,9 +4040,7 @@ impl VM {
     }
 
     /// Fast positional-only closure call used by the JIT `Call` helper.
-    /// Returns `Ok(false)` when the callee is not a closure so the caller
-    /// can fall back to the generic `call_value` path for builtins,
-    /// constructors, and future callable forms.
+    /// Returns `Ok(false)` when the callee is not a closure.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn call_closure_from_stack(&mut self, arg_count: usize) -> Result<bool, VMError> {
@@ -4334,7 +4049,6 @@ impl VM {
             return Ok(false);
         };
         let closure = Rc::clone(closure);
-        // Every recursive and hot-loop call lands here, so it folds straight into jit_op_call.
         if closure.jit_state.get() == 1 && closure.function.arity as usize == arg_count {
             self.check_param_types(&closure.function)?;
             if let Some(result) = self.call_closure_fast_path(&closure) {
@@ -4376,19 +4090,16 @@ impl VM {
 
         match instance.repr() {
             ValueRepr::StructInstance(inst) => {
-                // Check instance fields first (for callable fields)
                 let field_val = if let Some(&idx) = inst.layout.indices.get(method_name) {
                     Some(inst.get_field(idx))
                 } else {
                     None
                 };
                 if let Some(closure) = field_val.as_ref().and_then(|v| v.as_closure()).cloned() {
-                    // Callable field — treat as regular call
                     self.stack[instance_idx] = Value::Closure(Rc::clone(&closure));
                     return self.call_closure(closure, arg_count, named_args, None);
                 }
 
-                // Resolve via the instance's own def, not by name, so it works outside the defining module.
                 let method = self
                     .find_method_on_def(&inst.def, method_name)
                     .ok_or_else(|| {
@@ -4398,13 +4109,10 @@ impl VM {
                         )
                     })?;
 
-                // Use the defining module's globals so the body can reach that module's file-local helpers.
                 let owning_module_globals = inst.def.module_globals.get();
 
                 if let Some(closure) = method.as_closure().cloned() {
-                    // Rearrange [instance, args..] to [closure, instance, args..] so the instance becomes `self`.
                     self.stack[instance_idx] = Value::Closure(Rc::clone(&closure));
-                    // Insert instance as first arg (self) right after the closure
                     self.stack_insert(instance_idx + 1, instance)?;
                     return self.call_closure(
                         closure,
@@ -4424,15 +4132,12 @@ impl VM {
             | ValueRepr::Map(_)
             | ValueRepr::Set(_)
             | ValueRepr::Tuple(_) => {
-                // collection.method(args) becomes __method(collection, args).
                 let builtin_name = format!("__{}", method_name);
                 if let Some(builtin) = self.globals.get(&builtin_name).cloned() {
-                    // Rearrange: [instance, arg1, ...] → [builtin, instance, arg1, ...]
                     self.stack[instance_idx] = builtin;
                     self.stack_insert(instance_idx + 1, instance)?;
                     return self.call_value(arg_count + 1, named_args);
                 }
-                // Try without __ prefix
                 if let Some(builtin) = self.globals.get(method_name).cloned() {
                     self.stack[instance_idx] = builtin;
                     self.stack_insert(instance_idx + 1, instance)?;
@@ -4448,7 +4153,6 @@ impl VM {
                 ))
             }
             ValueRepr::Module(m) => {
-                // Module method call: module.func(args)
                 if m.hidden.contains(method_name) {
                     return Err(self.runtime_error_hint(
                         &format!("'{}' is hidden inside module '{}'", method_name, m.name),
@@ -4457,7 +4161,6 @@ impl VM {
                 }
                 if let Some(func) = m.globals.get(method_name).cloned() {
                     self.stack[instance_idx] = func.clone();
-                    // Pass module globals so the function can reach module-scoped variables.
                     if let Some(closure) = func.as_closure().cloned() {
                         return self.call_closure(
                             closure,
@@ -4474,7 +4177,6 @@ impl VM {
                 ))
             }
             ValueRepr::EnumDef(def) => {
-                // Tuple-variant construction: `EnumName.Variant(args)`.
                 let variant = def.variants.iter().find(|v| v.name == method_name).cloned();
                 match variant {
                     Some(v) => match v.kind {
@@ -4490,7 +4192,7 @@ impl VM {
                             }
                             let start = self.stack.len() - arg_count;
                             let args: Vec<Value> = self.stack_drain_from(start);
-                            self.pop(); // receiver (EnumDef)
+                            self.pop();
                             let args = self.check_variant_args(&def.name, &v, expected, args)?;
                             self.push(Value::EnumInstance(Rc::new(
                                 crate::vm::value::ObjEnumInstance {
@@ -4539,7 +4241,6 @@ impl VM {
         if let Some(Value::StructDef(def)) = self.globals.get(name) {
             return Some(Rc::clone(def));
         }
-        // An imported function must construct structs defined in ITS module, which live in those globals.
         if let Some(mg) = self.active_module_globals()
             && let Some(Value::StructDef(def)) = mg.get(name)
         {
@@ -4549,9 +4250,7 @@ impl VM {
     }
 
     /// Resolve a struct def's parent def. The parent is looked up in the
-    /// DEFINING module's globals first — a child imported into another module
-    /// brings its parent's fields and methods with it even when the importer
-    /// never named the parent — then in the active scope.
+    /// defining module's globals first, then in the active scope.
     pub(crate) fn parent_struct_def(
         &self,
         def: &Rc<crate::vm::value::ObjStructDef>,
@@ -4567,12 +4266,10 @@ impl VM {
 
     /// Look up a method on a struct def, following the inheritance chain.
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
-    /// Resolve a method starting from a struct INSTANCE's carried def, walking
+    /// Resolve a method starting from a struct instance's carried def, walking
     /// the inheritance chain. Parent defs are resolved via the def's own module
-    /// globals first (parents are module-scoped like the child), then the
-    /// current scope's globals. Unlike `find_struct_method` (which looks the def
-    /// up by name in the active scope), this works for instances used outside
-    /// their defining module.
+    /// globals first, then the current scope's globals. Works for instances used
+    /// outside their defining module.
     fn find_method_on_def(
         &self,
         def: &Rc<crate::vm::value::ObjStructDef>,
@@ -4588,7 +4285,6 @@ impl VM {
         None
     }
 
-    // Only JIT helpers resolve by struct name; the interpreter goes through the instance's carried def.
     #[cfg(feature = "jit")]
     pub(crate) fn find_struct_method(
         &self,
@@ -4597,7 +4293,6 @@ impl VM {
     ) -> Result<Value, VMError> {
         let mut current = struct_name.to_string();
         loop {
-            // get_struct_def consults the active frame's module globals, so imported structs resolve.
             if let Some(def) = self.get_struct_def(&current) {
                 let methods = def.methods.borrow();
                 if let Some(method) = methods.get(method_name) {
@@ -4617,8 +4312,7 @@ impl VM {
 
     /// Check the `arity` arguments on top of the stack against `function`'s
     /// parameter annotations. Every call path runs this before entering the
-    /// callee — the JIT trusts `<int>` parameters to hold ints. Defaults are
-    /// filled later by bytecode, so a None in a defaulted slot is skipped here.
+    /// callee. A None in a defaulted slot is skipped.
     #[inline(always)]
     pub(crate) fn check_param_types(&self, function: &Function) -> Result<(), VMError> {
         let expected = function.arity as usize;
@@ -4634,7 +4328,6 @@ impl VM {
             if (param.optional || param.has_default) && matches!(val, Value::None) {
                 continue;
             }
-            // Match the specific type or the generic category, so <Enum> accepts any enum value.
             if !val.effective_type_is(expected_ty) && !type_matches(expected_ty, val.type_name()) {
                 let actual = val.effective_type_name();
                 return Err(self.runtime_error_hint(
@@ -4649,13 +4342,11 @@ impl VM {
         Ok(())
     }
 
-    /// Ultra-tight call path for JIT-compiled closures with exact arity,
-    /// no named args, and no module globals. Marked `inline(always)` so the
-    /// body folds into `call_closure_from_stack` (the JIT call helper's
-    /// direct caller), cutting a Rust function call off the hot path.
+    /// Call path for JIT-compiled closures with exact arity, no named args,
+    /// and no module globals.
     ///
     /// Returns `Ok(true)` on success, `Ok(false)` if the fast path can't
-    /// handle this call (falls through to the slow path).
+    /// handle this call.
     #[inline(always)]
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     pub(crate) fn call_closure_fast_path(
@@ -4672,7 +4363,6 @@ impl VM {
         let expected = closure.function.arity as usize;
         let slot_offset = self.stack.len() - expected - 1;
         let stop_depth = self.frames.len();
-        // The callee's own module, not the caller's — see `call_closure`.
         let inherited_mg = closure.module_globals.as_ptr();
         let entry_line = closure.function.chunk.lines.first().copied().unwrap_or(0);
         self.jit_frame_push_raw(Rc::as_ptr(closure), slot_offset, inherited_mg, entry_line);
@@ -4702,10 +4392,8 @@ impl VM {
     }
 
     /// Record an entry-guard bailout. The frame is re-run by the
-    /// interpreter (bailouts happen before any side effects, at ip 0), and
-    /// the thunk stays installed for the next call — a single mistyped call
-    /// shouldn't drop the closure to interpreter speed forever. Only
-    /// `JIT_BAILOUT_LIMIT` *consecutive* bailouts (counter reset on every
+    /// interpreter and the thunk stays installed for the next call. Only
+    /// `JIT_BAILOUT_LIMIT` consecutive bailouts (counter reset on every
     /// successful JIT return) deopt permanently.
     fn note_jit_bailout(&self, closure: &Rc<ObjClosure>) {
         const JIT_BAILOUT_LIMIT: u8 = 4;
@@ -4741,15 +4429,12 @@ impl VM {
         named_args: &[(String, Value)],
         module_globals: Option<Rc<HashMap<String, Value>>>,
     ) -> Result<(), VMError> {
-        // One TLS read per call; gate behind an AtomicBool if a recursion bench regresses.
         if crate::concurrent::cancelled() {
             return Err(self.runtime_error("task cancelled"));
         }
         let expected = closure.function.arity as usize;
         let state = closure.jit_state.get();
 
-        // Lean by design: skips the call_count bump, the named-args block and the arity re-check.
-        // Never the parameter type check, which the slow path below would have made.
         if state == 1 && named_args.is_empty() && arg_count == expected && module_globals.is_none()
         {
             self.check_param_types(&closure.function)?;
@@ -4758,17 +4443,13 @@ impl VM {
             }
         }
 
-        // Only bump the counter before tier-up; past state == 1 it is never consulted.
         if state != 1 {
             closure
                 .call_count
                 .set(closure.call_count.get().saturating_add(1));
         }
 
-        // Handle named arguments: fill in any missing positional args
         if !named_args.is_empty() {
-            // Validate everything before touching the stack: the frame is placed at
-            // `len - expected`, so surplus positional args would sit below it and leak.
             let params = &closure.function.params;
             let required = params
                 .iter()
@@ -4811,12 +4492,10 @@ impl VM {
                 ));
             }
 
-            // Fill positional slots up to arity with None (will be overwritten by named args)
             for _ in arg_count..expected {
                 self.push(Value::None);
             }
 
-            // Place named args into their correct slots
             let slot_base = self.stack.len() - expected;
             for (name, val) in named_args {
                 if let Some(idx) = closure.function.params.iter().position(|p| p.name == *name) {
@@ -4824,7 +4503,6 @@ impl VM {
                 }
             }
         } else {
-            // Too few args used to be padded with None, surfacing the failure deep inside the callee.
             let required = closure
                 .function
                 .params
@@ -4834,7 +4512,6 @@ impl VM {
             if arg_count < required || arg_count > expected {
                 return Err(self.arity_error(&closure.function, arg_count, required, expected));
             }
-            // Optional/default params are filled in below by the defaults pass.
             for _ in arg_count..expected {
                 self.push(Value::None);
             }
@@ -4849,8 +4526,6 @@ impl VM {
             ));
         }
 
-        // Refuse the call unless the callee's own pushes are sure to fit: this,
-        // not a check in `push`, is what keeps the stack in bounds.
         if self.stack.len() >= STACK_MAX.saturating_sub(closure.function.stack_reserve()) {
             return Err(self.runtime_error_hint(
                 "stack overflow",
@@ -4858,23 +4533,17 @@ impl VM {
             ));
         }
 
-        let slot_offset = self.stack.len() - expected - 1; // -1 for the function itself
+        let slot_offset = self.stack.len() - expected - 1;
 
-        // A function resolves its free names in the module it was DEFINED in, so
-        // fall back to the callee's own module — never the caller's. `module_globals`
-        // is the override struct-method dispatch passes for the defining def.
         let inherited_mg = module_globals.or_else(|| closure.module_globals.get());
 
-        // The JIT helper drives execute_until for exactly this one activation.
         let stop_depth = self.frames.len();
 
-        // A bailout just returns; the outer loop carries on.
         let count = closure.call_count.get();
         let thunk = match closure.jit_state.get() {
             1 => closure.jit_thunk.get(),
             2 => None,
             _ => {
-                // Loop-entry first; maybe_compile_entries_for also installs the specialized pointer.
                 let loop_thunk = self.jit.maybe_compile_loop_entry_thunk(&closure.function);
                 if let Some(thunk) = loop_thunk {
                     closure.jit_thunk.set(Some(thunk));
@@ -4899,23 +4568,6 @@ impl VM {
             }
         };
 
-        // ── Phase 2.2/2.4: lean integer entry ──
-        //
-        // Taken only when the entry exists AND every argument is actually an
-        // Integer. The lean ABI has no tag guard of its own — that check is the
-        // guard, and it is the caller's job precisely because the entry has no
-        // way to report a violation.
-        //
-        // Nothing is unwound on the cold path: a lean entry never touches
-        // stack_view.len, jit_frame_view.len or any Rc, so the state here is
-        // still exactly what it was before the call. That is the Phase 2.4
-        // reconstruction description for this entry kind.
-        // Lean entries only exist in a JIT build; without one, `lean_thunk` stays None.
-        //
-        // The lean body lowers every call to a direct self-call, which is only
-        // what the interpreter does while the function's global name still
-        // names this closure. A rebound name (`orig := fib; fib = ...`) sends
-        // the call through the generic entry, which looks the name up.
         #[cfg(feature = "jit")]
         if let Some(lean) = closure.lean_thunk.get()
             && self.lean_self_name_current(&closure, inherited_mg.as_deref())
@@ -4933,8 +4585,6 @@ impl VM {
                 }
             }
             if args.len() == arity && arity > 0 {
-                // Budget mirrors FRAMES_MAX so the depth at which this reports
-                // overflow matches what the interpreter would have done.
                 let budget = (FRAMES_MAX as i64 - self.frames.len() as i64).max(1);
                 match unsafe { crate::jit::runtime::invoke_lean(lean, &args, budget) } {
                     Ok(v) => {
@@ -4949,7 +4599,6 @@ impl VM {
                             "check for infinite recursion or deeply nested calls",
                         ));
                     }
-                    // Not an error — just no lean path. Fall through below.
                     Err(crate::jit::runtime::LeanExit::Unsupported) => {}
                 }
             }
@@ -4990,8 +4639,6 @@ impl VM {
         Ok(())
     }
 
-    // ── Upvalue Management ──────────────────────────────────────────────
-
     pub(crate) fn capture_upvalue(&mut self, stack_slot: usize) -> Rc<RefCell<Upvalue>> {
         for uv in &self.open_upvalues {
             if let Upvalue::Open(slot) = &*uv.borrow()
@@ -5017,7 +4664,6 @@ impl VM {
 
             if should_close {
                 let uv = self.open_upvalues.remove(i);
-                // An Open upvalue at or beyond the stack length points at a slot already relocated or removed.
                 let value = {
                     let borrow = uv.borrow();
                     if let Upvalue::Open(slot) = &*borrow {
@@ -5037,12 +4683,9 @@ impl VM {
         }
     }
 
-    /// Close any open upvalue captured at EXACTLY `slot`, snapshotting its
-    /// live value from `self.stack[slot]`. Unlike `close_upvalues`, this does
-    /// not touch upvalues at higher slots and never pops the stack — it is
-    /// used for `OpCode::CloseUpvalueAt`, where a block's result value sits
-    /// above the captured floor local whose upvalue must be closed in place
-    /// before the slot is repurposed.
+    /// Close any open upvalue captured at exactly `slot`, snapshotting its
+    /// live value from `self.stack[slot]`. Does not touch upvalues at higher
+    /// slots and never pops the stack. Used for `OpCode::CloseUpvalueAt`.
     pub(crate) fn close_upvalue_at_slot(&mut self, slot: usize) {
         let stack_len = self.stack.len();
         let mut i = 0;
@@ -5065,8 +4708,6 @@ impl VM {
         }
     }
 
-    // Shared by the IterLen/IterGet arms and the JIT helpers so both stay byte-faithful.
-
     /// Length of an iterable for an `each` loop. `[it] -> len`.
     pub(crate) fn iter_len(&self, iterable: &Value) -> Result<i64, VMError> {
         match iterable.repr() {
@@ -5085,10 +4726,9 @@ impl VM {
     /// Both halves of an `each k, v in coll` step. `[it, idx] -> (key, value)`.
     ///
     /// A map yields its entry's own key; every other iterable yields the
-    /// ordinal index, so `each i, ch in "hi"` and `each i, x in [..]` number
-    /// their elements. The value half always matches what the one-name form
-    /// would bind, except for maps — there the one-name form binds the whole
-    /// `(k, v)` tuple, and this splits it.
+    /// ordinal index. The value half matches what the one-name form would
+    /// bind, except for maps, where the one-name form binds the whole `(k, v)`
+    /// tuple and this splits it.
     pub(crate) fn iter_entry(
         &self,
         iterable: &Value,
@@ -5105,7 +4745,6 @@ impl VM {
                 None => (Value::None, Value::None),
             });
         }
-        // Non-map iterables keep `iter_get`'s element semantics verbatim.
         let value = self.iter_get(iterable, index)?;
         Ok((index.clone(), value))
     }
@@ -5128,7 +4767,6 @@ impl VM {
             ValueRepr::Map(m) => {
                 let borrowed = m.borrow();
                 if let Some((k, v)) = borrowed.entries().get(idx) {
-                    // For maps, yield (key, value) tuple
                     Value::Tuple(Rc::new(vec![k.clone(), v.clone()].into()))
                 } else {
                     Value::None
@@ -5138,15 +4776,9 @@ impl VM {
         })
     }
 
-    // ── Index Operations ────────────────────────────────────────────────
-
     /// Resolves a sequence index against `len`, with negative indices counting
     /// back from the end, and reports an out-of-range access as an error.
-    ///
-    /// Reading past the end used to yield `None`, which silently turned a
-    /// bad index into a value that failed somewhere else entirely (or, worse,
-    /// looked like a legitimately absent map entry). Maps keep `None` for a
-    /// missing key — that is a lookup, not an out-of-range access.
+    /// Maps yield `None` for a missing key.
     pub(crate) fn sequence_index(
         &self,
         index: i64,
@@ -5155,7 +4787,6 @@ impl VM {
     ) -> Result<usize, VMError> {
         let len_i64 = len as i64;
         let resolved = if index < 0 {
-            // `checked_add` because a hostile index (i64::MIN) would wrap.
             len_i64.checked_add(index)
         } else {
             Some(index)
@@ -5185,7 +4816,6 @@ impl VM {
                 Ok(borrowed[idx].clone())
             }
             (Value::String(s), Value::Integer(i)) => {
-                // Indices are characters, so the bound is the character count; len() is bytes and disagrees on non-ASCII.
                 let chars: Vec<char> = s.chars().collect();
                 let idx = self.sequence_index(*i, chars.len(), "STRING")?;
                 Ok(Value::String(rc_str(chars[idx].to_string())))
@@ -5260,7 +4890,6 @@ impl VM {
         match (&collection, &index) {
             (Value::Array(arr), Value::Integer(i)) => {
                 let mut borrowed = arr.borrow_mut();
-                // An out-of-range write used to be dropped: no error, no growth, stale value on the next read.
                 let idx = self.sequence_index(*i, borrowed.len(), "ARRAY")?;
                 borrowed[idx] = value;
                 Ok(())
@@ -5313,7 +4942,6 @@ impl VM {
                 Ok(Value::Array(Rc::new(RefCell::new(sliced.into()))))
             }
             ValueRepr::String(s) => {
-                // Bounds count characters, like indexing and `len()`; slicing bytes split code points.
                 let len = s.chars().count();
                 let start_idx = self.slice_bound(start, 0, len)?;
                 let end_idx = self.slice_bound(end, len, len)?;
@@ -5342,15 +4970,11 @@ impl VM {
         }
     }
 
-    // ── Module System ───────────────────────────────────────────────────
-
     fn import_module(&mut self, path_str: &str, selective_names: &[String]) -> Result<(), VMError> {
         let supplied = self
             .module_source
             .as_ref()
             .and_then(|source| source(path_str));
-        // A supplied module has no file; its name in angle brackets keys the
-        // cache and names it in errors, and cannot collide with a real path.
         let module_path = match supplied {
             Some(_) => PathBuf::from(format!("<{path_str}>")),
             None => self.resolve_module_path(path_str)?,
@@ -5361,7 +4985,6 @@ impl VM {
             return self.bind_module(&cached, path_str, selective_names);
         }
 
-        // The importing file itself counts: the main script is never on the stack.
         let importing_self = self
             .current_file
             .as_ref()
@@ -5374,7 +4997,6 @@ impl VM {
             ));
         }
 
-        // Read, lex, parse, compile, and execute the module
         let source = match supplied {
             Some(source) => source,
             None => std::fs::read_to_string(&module_path).map_err(|e| {
@@ -5404,7 +5026,6 @@ impl VM {
             ))
         })?;
 
-        // Tag each function with its own file so a failure renders against that source.
         let origin = Rc::new(crate::vm::value::ModuleOrigin {
             file: display_path_cwd(&module_path),
             source: source.clone(),
@@ -5415,15 +5036,11 @@ impl VM {
         sub_vm.set_source(&source);
         sub_vm.set_file(module_path.clone());
         sub_vm.is_main_context = false;
-        // One import stack and one cache for the whole import graph: a sub-VM that
-        // started empty could neither see a cycle back to its importers nor reuse
-        // a module another branch had already loaded.
         self.import_stack.push(module_path.clone());
         sub_vm.import_stack = self.import_stack.clone();
         sub_vm.module_cache = std::mem::take(&mut self.module_cache);
         sub_vm.module_deps = std::mem::take(&mut self.module_deps);
 
-        // Read before `run` consumes the function.
         let module_hidden: std::collections::HashSet<String> =
             function.hidden_globals.iter().cloned().collect();
 
@@ -5433,7 +5050,6 @@ impl VM {
         self.module_cache = std::mem::take(&mut sub_vm.module_cache);
         self.module_deps = std::mem::take(&mut sub_vm.module_deps);
         self.import_stack.pop();
-        // Everything the module imported, so invalidating any of it drops this module too.
         let mut deps = std::mem::take(&mut sub_vm.imported_here);
         let nested: Vec<PathBuf> = deps
             .iter()
@@ -5443,14 +5059,12 @@ impl VM {
             .collect();
         deps.extend(nested);
         let _result = result.map_err(|e| {
-            // The host's limits pass through unchanged, so they stay uncatchable.
             if e.is_host_limit() {
                 return e;
             }
             self.runtime_error(&format!("error in module '{}': {}", path_str, e.message))
         })?;
 
-        // Wire module-owned definitions back so imported functions reach their file-local helpers.
         let globals_rc = Rc::new(sub_vm.globals);
         for value in globals_rc.values() {
             match value.repr() {
@@ -5482,12 +5096,10 @@ impl VM {
         selective_names: &[String],
     ) -> Result<(), VMError> {
         if selective_names.is_empty() {
-            // Namespace import
             let name = path_str.rsplit('/').next().unwrap_or(path_str).to_string();
             self.jit.bump_global_version(&name);
             self.globals.insert(name, Value::Module(Rc::clone(module)));
         } else {
-            // Selective import
             for name in selective_names {
                 if module.hidden.contains(name) {
                     return Err(self.runtime_error_hint(
@@ -5505,7 +5117,6 @@ impl VM {
     }
 
     fn resolve_module_path(&self, path_str: &str) -> Result<PathBuf, VMError> {
-        // Relative import
         if (path_str.starts_with("./") || path_str.starts_with("../"))
             && let Some(current) = &self.current_file
         {
@@ -5518,7 +5129,6 @@ impl VM {
             }
         }
 
-        // Stdlib import
         let stdlib = self.stdlib_path.join(path_str).with_extension("oxi");
         if stdlib.exists() {
             return stdlib
@@ -5526,7 +5136,6 @@ impl VM {
                 .map_err(|e| self.runtime_error(&format!("cannot resolve stdlib path: {}", e)));
         }
 
-        // Relative to current file (without ./ prefix)
         if let Some(current) = &self.current_file {
             let base = current.parent().unwrap_or(current);
             let resolved = base.join(path_str).with_extension("oxi");
@@ -5543,9 +5152,7 @@ impl VM {
         ))
     }
 
-    // ── Type Wrap / Conversion ──────────────────────────────────────────
-
-    /// Implements `<type<T>>(value)` — the angle-bracket type wrap form.
+    /// Implements `<type<T>>(value)`, the angle-bracket type wrap form.
     /// Handles Error/Value union wrapping, type conversion, etc.
     /// Return the zero/default value for a type name.
     fn zero_value_for_type(type_name: &str) -> Value {
@@ -5568,19 +5175,15 @@ impl VM {
     }
 
     pub(crate) fn type_wrap(&self, target: &str, value: Value) -> Result<Value, VMError> {
-        // Check for Error/Value union pattern: "VALUE || ERROR" or "ERROR || VALUE"
         if target.contains(" || ") {
             let parts: Vec<&str> = target.split(" || ").collect();
             let has_value = parts.contains(&"VALUE");
             let has_error = parts.iter().any(|p| p.starts_with("ERROR"));
             if has_value && has_error {
-                // A value already on the success side must not be wrapped again.
                 if let Value::Wrapped(_) = value {
                     return Ok(value);
                 }
-                // Error/Value union: wrap based on whether value is an error
                 if let Some((tag, msg)) = Self::error_info_from_value(&value) {
-                    // Find the error tag from the target spec
                     let default_tag = parts.iter().find_map(|p| {
                         if p.starts_with("ERROR<") && p.ends_with('>') {
                             Some(p[6..p.len() - 1].to_string())
@@ -5597,7 +5200,6 @@ impl VM {
                     return Ok(Value::Wrapped(Rc::new(value)));
                 }
             }
-            // General union: try each type
             let actual = value.effective_type_name();
             for member in parts {
                 if member == actual || member == "GENERIC" {
@@ -5610,7 +5212,6 @@ impl VM {
             return Err(self.runtime_error(&format!("cannot convert {} to {}", actual, target)));
         }
 
-        // Single type target
         match target {
             "GENERIC" => Ok(value),
             "VALUE" => Ok(Value::Wrapped(Rc::new(value))),
@@ -5677,7 +5278,6 @@ impl VM {
             }
             "INTEGER" => match value.repr() {
                 ValueRepr::Integer(_) => Ok(value.clone()),
-                // `as i64` saturated 1e30 to i64::MAX and turned NaN into 0.
                 ValueRepr::Float(f) => {
                     let t = f.trunc();
                     if f.is_finite() && (-9223372036854775808.0..9223372036854775808.0).contains(&t)
@@ -5716,7 +5316,6 @@ impl VM {
                         .runtime_error(&format!("cannot convert {} to FLOAT", value.type_name()))),
                 }
             }
-            // None is not stringifiable: binding the 4-char string "None" made every absence check silently fail.
             "STRING" => match value.repr() {
                 ValueRepr::None => Err(self.runtime_error("cannot convert NONE to STRING")),
                 _ => Ok(Value::String(rc_str(format!("{}", value)))),
@@ -5770,35 +5369,30 @@ impl VM {
                         .runtime_error(&format!("cannot convert {} to BYTE", value.type_name())))
                 }
             },
-            "UINT" => {
-                match value.repr() {
-                    ValueRepr::Uint(_) => Ok(value.clone()),
-                    // `as u64` wrapped -1 to u64::MAX and saturated -1.5 to 0.
-                    ValueRepr::Integer(n) => u64::try_from(n).map(Value::Uint).map_err(|_| {
-                        self.runtime_error(&format!("cannot convert INTEGER {} to UINT (>= 0)", n))
-                    }),
-                    ValueRepr::Float(f) => {
-                        let t = f.trunc();
-                        if f.is_finite() && (0.0..18446744073709551616.0).contains(&t) {
-                            Ok(Value::Uint(t as u64))
-                        } else {
-                            Err(self.runtime_error(&format!(
-                                "cannot convert FLOAT {} to UINT (>= 0)",
-                                f
-                            )))
-                        }
+            "UINT" => match value.repr() {
+                ValueRepr::Uint(_) => Ok(value.clone()),
+                ValueRepr::Integer(n) => u64::try_from(n).map(Value::Uint).map_err(|_| {
+                    self.runtime_error(&format!("cannot convert INTEGER {} to UINT (>= 0)", n))
+                }),
+                ValueRepr::Float(f) => {
+                    let t = f.trunc();
+                    if f.is_finite() && (0.0..18446744073709551616.0).contains(&t) {
+                        Ok(Value::Uint(t as u64))
+                    } else {
+                        Err(self
+                            .runtime_error(&format!("cannot convert FLOAT {} to UINT (>= 0)", f)))
                     }
-                    ValueRepr::Byte(b) => Ok(Value::Uint(b as u64)),
-                    ValueRepr::String(s) => {
-                        s.trim().parse::<u64>().map(Value::Uint).map_err(|_| {
-                            self.runtime_error(&format!("cannot convert STRING \"{}\" to UINT", s))
-                        })
-                    }
-                    ValueRepr::Boolean(b) => Ok(Value::Uint(u64::from(b))),
-                    _ => Err(self
-                        .runtime_error(&format!("cannot convert {} to UINT", value.type_name()))),
                 }
-            }
+                ValueRepr::Byte(b) => Ok(Value::Uint(b as u64)),
+                ValueRepr::String(s) => s.trim().parse::<u64>().map(Value::Uint).map_err(|_| {
+                    self.runtime_error(&format!("cannot convert STRING \"{}\" to UINT", s))
+                }),
+                ValueRepr::Boolean(b) => Ok(Value::Uint(u64::from(b))),
+                _ => {
+                    Err(self
+                        .runtime_error(&format!("cannot convert {} to UINT", value.type_name())))
+                }
+            },
             "ARRAY" => {
                 match value.repr() {
                     ValueRepr::Array(_) => Ok(value.clone()),
@@ -5841,7 +5435,6 @@ impl VM {
                 }
             }
             _ => {
-                // Struct type or unknown — check if value matches
                 if value.effective_type_name() == target {
                     Ok(value.clone())
                 } else {
@@ -5885,7 +5478,6 @@ fn lock_rec(value: &Value, seen: &mut HashMap<usize, Value>) -> Value {
             }
             let copy = Rc::new(RefCell::new(crate::vm::collections::OxMap::new()));
             seen.insert(key, Value::Map(Rc::clone(&copy)));
-            // Keys are hashable, which already makes them immutable.
             let entries: Vec<(Value, Value)> = m
                 .borrow()
                 .iter()
@@ -5900,7 +5492,6 @@ fn lock_rec(value: &Value, seen: &mut HashMap<usize, Value>) -> Value {
             Value::Map(copy)
         }
         Value::Set(s) => {
-            // Elements are hashable, so only the set itself needs copying.
             let mut copy = s.borrow().clone();
             copy.lock();
             Value::Set(Rc::new(RefCell::new(copy)))
@@ -5920,8 +5511,6 @@ fn lock_rec(value: &Value, seen: &mut HashMap<usize, Value>) -> Value {
             if let Some(done) = seen.get(&key) {
                 return done.clone();
             }
-            // Record the copy before filling it, so a field that leads back
-            // here finds it instead of recursing forever.
             let copy = Rc::new(ObjStructInstance::new(
                 inst.struct_name.clone(),
                 vec![Value::None; inst.field_slice().len()],
@@ -5973,22 +5562,18 @@ mod tests {
     fn diagnostic_paths_are_relative_only_inside_the_working_directory() {
         let cwd = PathBuf::from("/home/u/proj");
 
-        // Under cwd: shortened, so a trace reads `src/app.oxi:8`.
         assert_eq!(
             display_path(Path::new("/home/u/proj/src/app.oxi"), Some(&cwd)),
             "src/app.oxi"
         );
-        // Outside cwd: left absolute rather than turned into `../../..`.
         assert_eq!(
             display_path(Path::new("/usr/local/lib/oxigen/stdlib/os.oxi"), Some(&cwd)),
             "/usr/local/lib/oxigen/stdlib/os.oxi"
         );
-        // A sibling directory sharing a name prefix must not be mistaken for a child.
         assert_eq!(
             display_path(Path::new("/home/u/proj-other/a.oxi"), Some(&cwd)),
             "/home/u/proj-other/a.oxi"
         );
-        // No cwd available: fall back to whatever we were given.
         assert_eq!(
             display_path(Path::new("/home/u/proj/src/app.oxi"), None),
             "/home/u/proj/src/app.oxi"

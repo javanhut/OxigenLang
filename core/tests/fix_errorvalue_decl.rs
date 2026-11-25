@@ -1,11 +1,6 @@
-//! V4 regression: typed `<Error || Value>` declaration must NOT double-wrap
-//! an already-wrapped value.
-//!
-//! `res <Error || Value> := <Value>("hi")` then `res.value` must yield `hi`
-//! (matching the tree-walker). The declaration-position `TypeWrap` used to
-//! re-wrap the already-`Wrapped` value, producing `Value(Value(hi))` so that
-//! `res.value` returned `Value(hi)`. The fix makes the Error||Value
-//! normalization idempotent on the success side.
+//! A typed `<Error || Value>` declaration does not double-wrap an
+//! already-wrapped value: `res <Error || Value> := <Value>("hi")` then
+//! `res.value` yields `hi`.
 
 #![cfg(feature = "jit")]
 
@@ -61,7 +56,6 @@ type(res)
 
 #[test]
 fn errorvalue_decl_error_side_still_normalizes() {
-    // The error side of the union must still surface its message.
     let src = r#"
 res <Error || Value> := <Error<oops>>("boom")
 res.msg
@@ -71,7 +65,6 @@ res.msg
 
 #[test]
 fn errorvalue_decl_plain_value_wraps_once() {
-    // A bare (un-wrapped) value still gets wrapped exactly once.
     let src = r#"
 res <Error || Value> := 42
 res.value

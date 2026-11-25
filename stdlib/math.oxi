@@ -77,7 +77,6 @@ fun ceil(x <int> || <float>) { __ceil(x) }
 
 fun round(x <int> || <float>) { __round(x) }
 
-// ── Trigonometry (radians) ──
 fun sin(x <int> || <float>) { __sin(x) }
 
 fun cos(x <int> || <float>) { __cos(x) }
@@ -92,7 +91,6 @@ fun atan(x <int> || <float>) { __atan(x) }
 
 fun atan2(y <int> || <float>, x <int> || <float>) { __atan2(y, x) }
 
-// ── Exponential & logarithmic ──
 fun exp(x <int> || <float>) { __exp(x) }
 
 fun ln(x <int> || <float>) { __ln(x) }
@@ -101,15 +99,12 @@ fun log2(x <int> || <float>) { __log2(x) }
 
 fun log10(x <int> || <float>) { __log10(x) }
 
-// Floating-point exponentiation (handles fractional/negative exponents).
 fun powf(base <int> || <float>, exp <int> || <float>) { __powf(base, exp) }
 
-// ── Constants ──
 PI <float> = 3.141592653589793
 E <float> = 2.718281828459045
 TAU <float> = 6.283185307179586
 
-// ── Integer helpers ──
 fun gcd(a <int>, b <int>) {
     x <int> := abs(a)
     y <int> := abs(b)
@@ -156,7 +151,6 @@ fun is_even(n <int>) { n % 2 == 0 }
 
 fun is_odd(n <int>) { n % 2 != 0 }
 
-// ── Float helpers ──
 fun trunc(x <int> || <float>) {
     option {
         x < 0 -> {
@@ -176,7 +170,6 @@ fun degrees(rad <int> || <float>) { rad * 180.0 / PI }
 
 fun radians(deg <int> || <float>) { deg * PI / 180.0 }
 
-// Vectors (vec2, vec3, vec4)
 fun dot(a, b) { __vec_dot(a, b) }
 
 fun cross(a, b) { __vec_cross(a, b) }

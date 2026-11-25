@@ -2,22 +2,14 @@ introduce io
 introduce strings
 introduce array
 
-// Parse a TOML string into Oxigen values.
-// Tables become maps, arrays stay arrays, and date/time values become strings.
 fun parse(s <str>) { __toml_parse(s) }
 
-// Serialize an Oxigen map to a TOML document string.
-// Produces proper TOML with [section] headers and [[array_of_tables]] syntax.
 fun stringify(val <map>) { __toml_stringify(val) }
 
-// Read and parse a TOML file from disk.
 fun read(path <str>) { parse(io.read_file(path)) }
 
-// Write an Oxigen map to a TOML file on disk.
 fun write(path <str>, val <map>) { io.write_file(path, stringify(val)) }
 
-// Get a nested value using a dotted key path (e.g. "server.port").
-// Returns None if any segment is missing.
 fun get_in(tbl <map>, path <str>) {
     parts := strings.split(path, ".")
     current := tbl
@@ -31,8 +23,6 @@ fun get_in(tbl <map>, path <str>) {
     current
 }
 
-// Set a nested value using a dotted key path (e.g. "server.port").
-// Creates intermediate tables as needed. Returns the updated root map.
 fun set_in(tbl <map>, path <str>, val <generic>) {
     parts := strings.split(path, ".")
     give insert(tbl, parts[0], val) when len(parts) == 1
@@ -49,8 +39,6 @@ fun set_in(tbl <map>, path <str>, val <generic>) {
     insert(tbl, first, set_in(child, rest, val))
 }
 
-// Remove a nested key using a dotted key path.
-// Returns the updated root map.
 fun del_in(tbl <map>, path <str>) {
     parts := strings.split(path, ".")
     give remove(tbl, parts[0]) when len(parts) == 1
@@ -65,7 +53,6 @@ fun del_in(tbl <map>, path <str>) {
     insert(tbl, first, del_in(child, rest))
 }
 
-// Check whether a dotted key path exists (e.g. "database.credentials.password").
 fun has_key_in(tbl <map>, path <str>) {
     parts := strings.split(path, ".")
     current := tbl
@@ -79,17 +66,6 @@ fun has_key_in(tbl <map>, path <str>) {
     True
 }
 
-// ── Arrays of tables ──
-// Update the first table whose `key` equals `val` by deep-merging `fields`
-// into it; append a new table when there is none. This is the [[array of
-// tables]] editor:
-//
-//     cfg["products"] = toml.set_where(cfg["products"], "name", "hammer",
-//                                      {"sku": 738594937})
-//
-// Fields not named survive the update. Returns the array, edited in place
-// either way (arrays are shared references); assigning the result back is the
-// clearer form and costs nothing.
 fun set_where(arr <array>, key <generic>, val <generic>, fields <map>) {
     found := array.find_where(arr, key, val)
     give push(arr, deep_merge(insert({}, key, val), fields)) when found == None
@@ -97,7 +73,6 @@ fun set_where(arr <array>, key <generic>, val <generic>, fields <map>) {
     arr
 }
 
-// Merge two maps. Keys in `b` overwrite keys in `a`.
 fun merge(a <map>, b <map>) {
     result := a
     b_keys := keys(b)
@@ -110,8 +85,6 @@ fun merge(a <map>, b <map>) {
     result
 }
 
-// Deep merge two maps. Nested tables are merged recursively;
-// non-table values in `b` overwrite those in `a`.
 fun deep_merge(a <map>, b <map>) {
     result := a
     b_keys := keys(b)

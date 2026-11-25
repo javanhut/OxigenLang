@@ -1,6 +1,4 @@
 #[indent]
-// Indentation blocks
-// The #[indent] directive swaps braces for Python-style indentation.
 fun fizzbuzz(n):
     option:
         n % 15 == 0 ->:

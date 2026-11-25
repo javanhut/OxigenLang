@@ -1,10 +1,7 @@
 //! What search engines and AI crawlers read: structured data, the sitemap,
 //! robots.txt and llms.txt.
 //!
-//! Every page carries the same JSON-LD graph naming the language, the
-//! website, the software and its creator, all linked by `@id`, so a crawler
-//! that lands on any page learns that OxigenLang is a programming language
-//! created by Javan Hutchinson.
+//! Every page carries the same JSON-LD graph naming the language, the website, the software and its creator, all linked by `@id`.
 
 use crate::config::Config;
 use crate::markdown::Doc;
@@ -150,8 +147,7 @@ pub fn sitemap(config: &Config, paths: &[(String, f32)]) -> String {
     xml
 }
 
-/// Everyone may crawl everything. The AI crawlers are named so the welcome
-/// is explicit: being in their indexes is how the language gets found.
+/// Allows everyone to crawl everything, naming the AI crawlers explicitly.
 pub fn robots(config: &Config) -> String {
     let bots = [
         "Googlebot",
@@ -187,7 +183,7 @@ pub fn robots(config: &Config) -> String {
     text
 }
 
-/// https://llmstxt.org: a Markdown summary with links to Markdown copies of
+/// <https://llmstxt.org>: a Markdown summary with links to Markdown copies of
 /// every page.
 pub fn llms_txt(config: &Config, sections: &[(String, Vec<&Doc>)]) -> String {
     let author = &config.author.name;

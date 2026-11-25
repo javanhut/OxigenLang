@@ -17,7 +17,7 @@
 //! `oxi_highlight` or `oxi_tokens`, and reads the reply from `oxi_reply_ptr`
 //! and `oxi_reply_len`.
 //!
-//! Natively the crate is a library: [`run`], [`check`] and [`format`] are what
+//! Natively the crate is a library: [`run`], [`check`] and [`format()`] are what
 //! the website generator checks the documentation's examples with, under the
 //! sandbox the docs pages' Run buttons have (no capabilities at all).
 
@@ -30,8 +30,7 @@ use oxigen_core::vm::value::Value;
 use oxigen_core::vm::{Capability, VM};
 use std::path::PathBuf;
 
-/// Loop iterations a playground run may make. Generous for real programs,
-/// and an endless loop still ends in seconds rather than hanging the tab.
+/// Loop iterations a playground run may make.
 pub const LOOP_BUDGET: u64 = 200_000_000;
 
 /// The file name errors are reported against.
@@ -86,7 +85,6 @@ pub fn run(source: &str, loop_budget: u64) -> Outcome {
     vm.set_file(PathBuf::from(FILE_NAME));
 
     match vm.run(function) {
-        // The same as the command line: a script's final value is printed.
         Ok(Value::None) => Outcome::Finished,
         Ok(Value::Error(message)) => Outcome::Failed(format!("Error: {message}")),
         Ok(result) => {
@@ -159,7 +157,6 @@ pub fn playground_capabilities() -> Vec<Capability> {
 pub fn tokens(source: &str) -> String {
     let spans = oxigen_core::highlight::highlight(source);
     let mut out = String::from("[");
-    // Walk the source once, converting byte offsets to UTF-16 as they come.
     let mut unit = 0;
     let mut chars = source.char_indices().peekable();
     let mut to_unit = |target: usize| {
@@ -249,7 +246,6 @@ mod exports {
     /// command line prints them.
     #[unsafe(no_mangle)]
     pub extern "C" fn oxi_main() -> i32 {
-        // WASI starts in `/`; the page says where the files are, as a shell would.
         if let Ok(dir) = std::env::var("PWD") {
             let _ = std::env::set_current_dir(dir);
         }
@@ -373,7 +369,6 @@ mod cli {
                 1
             }
         };
-        // Let fire-and-forget tasks finish, as the command line does.
         if cfg!(wasm_threads) {
             oxigen_core::concurrent::drain();
         }
@@ -438,8 +433,7 @@ mod cli {
         }
     }
 
-    /// `file` against the working directory, without `canonicalize`, which
-    /// needs a `realpath` WASI does not have.
+    /// `file` against the working directory, without `canonicalize`.
     fn absolute(file: &str) -> PathBuf {
         let path = PathBuf::from(file);
         if path.is_absolute() {
@@ -511,7 +505,6 @@ mod tests {
 
     #[test]
     fn tokens_are_utf16_offsets() {
-        // "é" is 2 bytes and 1 UTF-16 unit; "😀" is 4 bytes and 2 units.
         let source = "// é\nx := \"😀\" + 1";
         let tokens = tokens(source);
         let classes = |name: &str| TOKEN_CLASSES.iter().position(|c| *c == name).unwrap();

@@ -1,20 +1,18 @@
 //! The time, for `time`, `datetime`, `log` and seeding `random`.
 //!
-//! Native builds ask the operating system. `wasm32-unknown-unknown` has no
-//! clock to ask (`SystemTime::now` panics there), so a host built for it
-//! installs one with `set_host_clock`; a web page passes `Date.now`. Until it
-//! does, the time there is the Unix epoch.
+//! Native builds ask the operating system. On `wasm32-unknown-unknown` the host
+//! installs a clock with `set_host_clock`; until it does, the time is the Unix
+//! epoch.
 
 use std::time::Duration;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 static HOST_CLOCK: std::sync::OnceLock<fn() -> f64> = std::sync::OnceLock::new();
 
-/// Use `now_ms`, milliseconds since the Unix epoch, as the clock. Only the
+/// Uses `now_ms`, milliseconds since the Unix epoch, as the clock. Only the
 /// first call has an effect.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub fn set_host_clock(now_ms: fn() -> f64) {
-    // Losing to an earlier call is the documented behaviour: one clock per process.
     let _ = HOST_CLOCK.set(now_ms);
 }
 
@@ -47,11 +45,8 @@ pub fn monotonic_nanos() -> i64 {
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub fn monotonic_nanos() -> i64 {
     use std::cell::Cell;
-    // A host clock set before 1970 reads as the epoch; the value only has to
-    // move forward, which LAST guarantees.
     thread_local! {
         static EPOCH: Duration = since_epoch().unwrap_or_default();
-        // The host clock is wall time, which can be set back.
         static LAST: Cell<i64> = const { Cell::new(0) };
     }
     let now = since_epoch().unwrap_or_default();

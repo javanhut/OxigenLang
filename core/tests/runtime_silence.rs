@@ -1,9 +1,4 @@
-//! Runtime operations that used to do something other than what was written.
-//!
-//! Each of these ran to completion and produced a value: a call padded with
-//! `None`, a struct with zero-filled holes, a JSON document silently truncated
-//! to its first value, a `cancel` that cancelled nothing. The failure surfaced
-//! later as a wrong answer, or as an error pointing at code that was correct.
+//! Runtime operations that must fail loudly instead of producing a value: a call padded with `None`, a struct with zero-filled holes, a truncated JSON document, a `cancel` that cancels nothing.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -46,12 +41,8 @@ fn assert_rejected(source: &str, code: &str) -> String {
     out
 }
 
-// ── argument count ──────────────────────────────────────────────────────────
-
 #[test]
 fn too_few_arguments_are_reported_at_the_call() {
-    // Was: padded with `None`, so the failure appeared inside the callee as
-    // `type mismatch: INTEGER + NONE` — on a line the caller wrote correctly.
     let out = assert_rejected("fun add(a, b) { a + b }\nadd(1)", "E0032");
     assert!(
         out.contains("takes 2 arguments but 1 was supplied"),
@@ -66,8 +57,6 @@ fn too_few_arguments_are_reported_at_the_call() {
 
 #[test]
 fn too_many_arguments_are_reported_rather_than_corrupting_the_frame() {
-    // Was worse than ignored: the surplus left the frame misaligned, so a
-    // 1-parameter function reported `cannot call INTEGER`.
     assert_rejected("fun add(a, b) { a + b }\nadd(1, 2, 3)", "E0032");
     let out = assert_rejected("fun one(a) { a }\none(1, 2, 3)", "E0032");
     assert!(
@@ -91,12 +80,8 @@ fn the_arity_message_names_the_function_and_counts() {
     assert!(out.contains("1 argument"), "singular form: {out}");
 }
 
-// ── struct construction ─────────────────────────────────────────────────────
-
 #[test]
 fn a_struct_missing_fields_is_rejected() {
-    // Was: omitted fields took their type's zero, so the struct looked complete
-    // and the missing data showed up later as a wrong answer.
     let out = assert_rejected("struct P { a <int> b <int> }\nP(1)", "E0033");
     assert!(out.contains("missing field `b`"), "{out}");
 }
@@ -108,8 +93,6 @@ fn a_struct_given_too_many_values_is_rejected() {
 
 #[test]
 fn zero_value_initialization_is_still_allowed() {
-    // Supplying nothing is the documented zero-value form (`p <Person>`), which
-    // shares this construction path — only PARTIAL construction is the mistake.
     assert_eq!(run("struct P { a <int> b <int> }\np <P>\np.b"), "0");
     assert_eq!(run("struct P { a <int> }\nP{}.a"), "0");
 }
@@ -121,16 +104,11 @@ fn partial_named_construction_is_rejected_too() {
 
 #[test]
 fn a_field_that_admits_none_may_be_omitted() {
-    // A linked-list tail is written `next <Node> || <None>` and left off on
-    // purpose; only fields that cannot hold `None` must be supplied.
     assert_eq!(run("struct N { d <int>\n nx <N> || <None> }\nN(1).d"), "1");
 }
 
 #[test]
 fn an_explicitly_supplied_none_is_not_treated_as_missing() {
-    // Detecting omission by "the slot still holds None" cannot tell a field
-    // deliberately set to `None` from one never supplied — which broke
-    // `stdlib/test.oxi`'s `Expectation{actual: None}`.
     assert_eq!(run("struct P { a <generic> }\nP{a: None}.a"), "None");
 }
 
@@ -140,12 +118,8 @@ fn complete_struct_construction_is_unaffected() {
     assert_eq!(run("struct P { a <int> b <int> }\nP{a: 1, b: 3}.b"), "3");
 }
 
-// ── json ────────────────────────────────────────────────────────────────────
-
 #[test]
 fn trailing_content_after_a_json_value_is_rejected() {
-    // Was: parsed to the first value and ignored the rest, so a concatenated or
-    // truncated document looked like a successful parse.
     let out = run("introduce json\njson.parse(\"1 2\")");
     assert!(out.contains("trailing content"), "{out}");
 }
@@ -156,19 +130,14 @@ fn well_formed_json_still_parses() {
     assert_eq!(run("introduce json\njson.parse(\"  [1, 2]  \")"), "[1, 2]");
 }
 
-// ── cancel ──────────────────────────────────────────────────────────────────
-
 #[test]
 fn cancel_on_a_non_task_is_rejected() {
-    // Was: silently did nothing and reported success.
     let out = run("cancel(42)");
     assert!(out.contains("requires a task"), "{out}");
 }
 
 #[test]
 fn cancel_on_a_real_task_still_works() {
-    // A spawn needs its program registered with the worker pool (the CLI does
-    // this for every script); without it `diverge` now fails up front.
     let source = "t := diverge { 1 }\ncancel(t)\n\"ok\"";
     for mut vm in [VM::new_interpreter(), VM::new_eager_jit()] {
         let lexer = Lexer::new(source);
@@ -192,12 +161,8 @@ fn spawning_from_an_unregistered_program_is_reported() {
     assert!(out.contains("not registered"), "{out}");
 }
 
-// ── codes ───────────────────────────────────────────────────────────────────
-
 #[test]
 fn every_runtime_error_now_carries_a_code() {
-    // Runtime errors rendered without any code at all, so nothing could be
-    // looked up with `oxigen explain` or asserted on without matching prose.
     for src in [
         "a := [1]\na[9]",
         "1 / 0",

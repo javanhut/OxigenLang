@@ -56,8 +56,7 @@ impl Capability {
 }
 
 /// The builtins that reach outside the VM, and the capability each needs.
-/// Every other builtin is pure; the test below makes sure a new builtin is
-/// put in one list or the other.
+/// Every other builtin is pure.
 pub(crate) const GATED_BUILTINS: &[(&str, Capability)] = &[
     ("__read_file", Capability::FileSystem),
     ("__write_file", Capability::FileSystem),
@@ -134,9 +133,6 @@ pub(crate) const GATED_BUILTINS: &[(&str, Capability)] = &[
     ("__ffi_write", Capability::Ffi),
     ("__ffi_string", Capability::Ffi),
     ("__ffi_cstring", Capability::Ffi),
-    // These take a local path as well as a URL or socket: a script allowed
-    // only the network could otherwise read and write any file through them.
-    // A builtin listed twice needs both capabilities.
     ("__net_download", Capability::FileSystem),
     ("__net_upload", Capability::FileSystem),
     ("__net_send_file", Capability::FileSystem),
@@ -160,8 +156,7 @@ pub(crate) fn refused(builtin: &str, capability: Capability) -> crate::vm::value
 mod tests {
     use super::*;
 
-    /// Builtins that touch nothing outside the VM (`print` writes to the
-    /// host's stdout, which no host has asked to gate).
+    /// Builtins that touch nothing outside the VM.
     const PURE_BUILTINS: &[&str] = &[
         "print",
         "println",

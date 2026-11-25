@@ -1,10 +1,6 @@
-//! A restricted VM that allows threads must not let a spawned task escape
-//! the restriction. Tasks run on a process-wide worker pool whose VMs are
-//! built from the program source, not from the VM that spawned them, so the
-//! restriction has to travel with each task.
-//!
-//! A separate test binary because the worker pool and its source are
-//! process-global.
+//! Tests that a restricted VM that allows threads does not let a spawned task
+//! escape the restriction: the restriction travels with each task run on the
+//! worker pool.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -28,7 +24,7 @@ fn run_restricted(source: &str, allowed: &[Capability]) -> Result<String, String
 const PEEK: &str = "fun peek() { __env_get(\"HOME\") }\nt := __spawn(peek)\n__join_task(t)";
 
 /// A task's failure comes back from `join` as an error value, not a thrown
-/// error, so look at whichever arrives.
+/// error, so both are checked.
 fn outcome(allowed: &[Capability]) -> String {
     match run_restricted(PEEK, allowed) {
         Ok(value) => value,
@@ -43,7 +39,7 @@ fn a_spawned_task_runs_under_the_spawners_restriction() {
 }
 
 /// The control: with the capability, the same task does read the
-/// environment, so the refusal above comes from the restriction.
+/// environment.
 #[test]
 fn a_spawned_task_has_what_the_spawner_allows() {
     let home = std::env::var("HOME").expect("HOME is set");

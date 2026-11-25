@@ -1,5 +1,3 @@
-// Tests
-// <test> blocks sit next to the code they check. Press Test to run them, as oxigen test does.
 fun fizzbuzz(n <int>) {
     option {
         n % 15 == 0 -> {

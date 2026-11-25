@@ -10,7 +10,6 @@ use std::rc::Rc;
 pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("print".to_string(), Value::Builtin(builtin_print));
     globals.insert("println".to_string(), Value::Builtin(builtin_println));
-    // Internal: the public surface is the diverge/converge keywords. `cancel` has no keyword form.
     globals.insert(
         "__spawn".to_string(),
         Value::Builtin(crate::concurrent::builtin_spawn),
@@ -83,7 +82,6 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
         Value::Builtin(vector::builtin_vec_lerp),
     );
 
-    // Internal builtins (used by stdlib wrappers)
     globals.insert("__split".to_string(), Value::Builtin(builtin_split));
     globals.insert("__join".to_string(), Value::Builtin(builtin_join));
     globals.insert("__trim".to_string(), Value::Builtin(builtin_trim));
@@ -116,7 +114,6 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     );
     globals.insert("__sort".to_string(), Value::Builtin(builtin_sort));
 
-    // Math builtins
     globals.insert("__sqrt".to_string(), Value::Builtin(builtin_sqrt));
     globals.insert("__floor".to_string(), Value::Builtin(builtin_floor));
     globals.insert("__ceil".to_string(), Value::Builtin(builtin_ceil));
@@ -134,7 +131,6 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("__exp".to_string(), Value::Builtin(builtin_exp));
     globals.insert("__powf".to_string(), Value::Builtin(builtin_powf));
 
-    // regex
     globals.insert(
         "__regex_match".to_string(),
         Value::Builtin(builtin_regex_match),
@@ -159,11 +155,9 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
         "__regex_captures".to_string(),
         Value::Builtin(builtin_regex_captures),
     );
-    // datetime
     globals.insert("__dt_now".to_string(), Value::Builtin(builtin_dt_now));
     globals.insert("__dt_format".to_string(), Value::Builtin(builtin_dt_format));
     globals.insert("__dt_parse".to_string(), Value::Builtin(builtin_dt_parse));
-    // encoding
     globals.insert(
         "__base64_encode".to_string(),
         Value::Builtin(builtin_base64_encode),
@@ -188,17 +182,14 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
         "__url_decode".to_string(),
         Value::Builtin(builtin_url_decode),
     );
-    // hash
     globals.insert("__sha256".to_string(), Value::Builtin(builtin_sha256));
     globals.insert("__sha1".to_string(), Value::Builtin(builtin_sha1));
     globals.insert("__md5".to_string(), Value::Builtin(builtin_md5));
 
-    // I/O builtins
     globals.insert("__input".to_string(), Value::Builtin(builtin_input));
     globals.insert("__read_line".to_string(), Value::Builtin(builtin_read_line));
     globals.insert("__read_key".to_string(), Value::Builtin(builtin_read_key));
 
-    // File I/O
     globals.insert("__read_file".to_string(), Value::Builtin(builtin_read_file));
     globals.insert(
         "__write_file".to_string(),
@@ -221,7 +212,6 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
         Value::Builtin(builtin_file_exists),
     );
 
-    // OS builtins
     globals.insert("__exec".to_string(), Value::Builtin(builtin_exec));
     globals.insert("__exec_argv".to_string(), Value::Builtin(builtin_exec_argv));
     globals.insert("__os_name".to_string(), Value::Builtin(builtin_os_name));
@@ -242,7 +232,6 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     globals.insert("__is_file".to_string(), Value::Builtin(builtin_is_file));
     globals.insert("__file_size".to_string(), Value::Builtin(builtin_file_size));
 
-    // Time builtins
     globals.insert("__time_now".to_string(), Value::Builtin(builtin_time_now));
     globals.insert(
         "__time_now_ms".to_string(),
@@ -257,7 +246,6 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
         Value::Builtin(builtin_time_monotonic),
     );
 
-    // Random builtins
     globals.insert("__rand_seed".to_string(), Value::Builtin(builtin_rand_seed));
     globals.insert("__rand_int".to_string(), Value::Builtin(builtin_rand_int));
     globals.insert(
@@ -265,7 +253,6 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
         Value::Builtin(builtin_rand_float),
     );
 
-    // Path builtins
     globals.insert("__path_join".to_string(), Value::Builtin(builtin_path_join));
     globals.insert("__path_ext".to_string(), Value::Builtin(builtin_path_ext));
     globals.insert(
@@ -290,7 +277,6 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
         Value::Builtin(builtin_path_is_within),
     );
 
-    // JSON / TOML
     globals.insert(
         "__json_parse".to_string(),
         Value::Builtin(builtin_json_parse),
@@ -308,7 +294,6 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
         Value::Builtin(builtin_toml_stringify),
     );
 
-    // Network
     globals.insert(
         "__http_request".to_string(),
         Value::Builtin(builtin_http_request),
@@ -373,8 +358,6 @@ pub fn register_builtins(globals: &mut HashMap<String, Value>) {
     );
 }
 
-// ── Core builtins ──────────────────────────────────────────────────────
-
 fn builtin_print(args: &[Value]) -> Value {
     let parts: Vec<String> = args.iter().map(|a| format!("{}", a)).collect();
     crate::output::write(&parts.join(" "));
@@ -394,7 +377,6 @@ fn builtin_len(args: &[Value]) -> Value {
         return Value::Error(rc_str("len() takes exactly 1 argument"));
     }
     match args[0].repr() {
-        // Characters, like `s[i]`, slices and `each`; `__byte_len` gives UTF-8 bytes.
         ValueRepr::String(s) => Value::Integer(s.chars().count() as i64),
         ValueRepr::Array(a) => Value::Integer(a.borrow().len() as i64),
         ValueRepr::Tuple(t) => Value::Integer(t.len() as i64),
@@ -427,7 +409,7 @@ fn builtin_push(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Array(arr) => {
             arr.borrow_mut().push(args[1].clone());
-            args[0].clone() // return the array (same behavior as tree-walker)
+            args[0].clone()
         }
         ValueRepr::Set(s) => {
             if let Some(e) = non_hashable_key_error(&args[1], "set element") {
@@ -496,7 +478,6 @@ fn builtin_pop(args: &[Value]) -> Value {
             };
             arr.borrow_mut().remove(idx)
         }
-        // A missing key gives None, as `m[key]` does.
         (ValueRepr::Map(m), 2) => {
             let removed = m.borrow_mut().remove(&args[1]);
             removed.unwrap_or(Value::None)
@@ -527,7 +508,6 @@ fn builtin_clear(args: &[Value]) -> Value {
     if let Some(e) = locked_error(&args[0], "clear") {
         return e;
     }
-    // Take the contents out first so they drop after the borrow ends.
     match args[0].repr() {
         ValueRepr::Array(arr) => drop(std::mem::take(&mut *arr.borrow_mut())),
         ValueRepr::Map(m) => drop(std::mem::take(&mut *m.borrow_mut())),
@@ -552,7 +532,6 @@ fn builtin_copy(args: &[Value]) -> Value {
         ValueRepr::Array(arr) => Value::Array(Rc::new(RefCell::new(arr.borrow().clone()))),
         ValueRepr::Map(m) => Value::Map(Rc::new(RefCell::new(m.borrow().clone()))),
         ValueRepr::Set(s) => Value::Set(Rc::new(RefCell::new(s.borrow().clone()))),
-        // Immutable, so the value itself is as good as a copy.
         ValueRepr::Tuple(_) | ValueRepr::String(_) => args[0].clone(),
         _ => Value::Error(rc_str(format!(
             "copy() requires an array, map, set, tuple or str, got {}",
@@ -666,7 +645,6 @@ fn builtin_str(args: &[Value]) -> Value {
         return Value::Error(rc_str("str() takes exactly 1 argument"));
     }
     match args[0].repr() {
-        // A char stringifies to its bare character, not the `x`-quoted Display form.
         ValueRepr::Char(c) => Value::String(rc_str(c.to_string())),
         _ => Value::String(rc_str(format!("{}", args[0]))),
     }
@@ -679,7 +657,6 @@ fn builtin_int(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Integer(n) => Value::Integer(n),
         ValueRepr::Float(f) => Value::Integer(f as i64),
-        // Trim first, matching the tree-walker's int(" 5 ") == 5.
         ValueRepr::String(s) => match s.trim().parse::<i64>() {
             Ok(n) => Value::Integer(n),
             Err(_) => match s.trim().parse::<f64>() {
@@ -705,12 +682,10 @@ fn builtin_float(args: &[Value]) -> Value {
     match args[0].repr() {
         ValueRepr::Float(f) => Value::Float(f),
         ValueRepr::Integer(n) => Value::Float(n as f64),
-        // Trim first, matching the tree-walker's float(" 1.5 ") == 1.5.
         ValueRepr::String(s) => match s.trim().parse::<f64>() {
             Ok(f) => Value::Float(f),
             Err(_) => Value::Error(rc_str(format!("cannot convert '{}' to float", s))),
         },
-        // float(True) == 1.0, float(False) == 0.0, matching the tree-walker.
         ValueRepr::Boolean(b) => Value::Float(if b { 1.0 } else { 0.0 }),
         ValueRepr::Byte(b) => Value::Float(b as f64),
         ValueRepr::Uint(u) => Value::Float(u as f64),
@@ -732,7 +707,6 @@ fn builtin_range(args: &[Value]) -> Value {
             _ => return Value::Error(rc_str("range() requires integer arguments")),
         }
     }
-    // A negative step counts down, so the bound is exclusive from whichever side it is approached.
     let (start, end, step) = match ints[..] {
         [end] => (0, end, 1),
         [start, end] => (start, end, 1),
@@ -742,9 +716,6 @@ fn builtin_range(args: &[Value]) -> Value {
     if step == 0 {
         return Value::Error(rc_str("range() step must not be zero"));
     }
-    // The whole range is built up front, so a huge one would try to allocate
-    // gigabytes and abort the host. `each i in range(...)` loops never get
-    // here: the compiler lowers them to a counter.
     let span = if step > 0 {
         i128::from(end) - i128::from(start)
     } else {
@@ -767,7 +738,6 @@ fn builtin_range(args: &[Value]) -> Value {
         arr.push(Value::Integer(i));
         match i.checked_add(step) {
             Some(next) => i = next,
-            // A step past i64 bounds ends the range rather than wrapping back into it.
             None => break,
         }
     }
@@ -896,9 +866,7 @@ fn builtin_insert(args: &[Value]) -> Value {
     target.clone()
 }
 
-/// `Some(error)` when `v` cannot be a map key or set element. Mirrors
-/// `VM::require_hashable_key` for the builtin path, which reports through
-/// `Value::Error` rather than `VMError`.
+/// `Some(error)` as a `Value::Error` when `v` cannot be a map key or set element.
 fn non_hashable_key_error(v: &Value, what: &str) -> Option<Value> {
     if v.try_hash_key().is_some() {
         return None;
@@ -925,7 +893,6 @@ fn builtin_remove(args: &[Value]) -> Value {
             s.borrow_mut().remove(&args[1]);
             args[0].clone()
         }
-        // The first element equal to the value, as `has` finds it.
         ValueRepr::Array(arr) => {
             let pos = arr.borrow().iter().position(|e| e == &args[1]);
             if let Some(p) = pos {
@@ -970,7 +937,6 @@ fn builtin_tuple(args: &[Value]) -> Value {
 }
 
 fn builtin_set(args: &[Value]) -> Value {
-    // An array can't be a set element, so `set(arr)` means its elements.
     if let [only] = args
         && let ValueRepr::Array(arr) = only.repr()
     {
@@ -1013,7 +979,6 @@ fn builtin_byte(args: &[Value]) -> Value {
                 Value::Byte(n as u8)
             }
         }
-        // Range-checked like the Integer and Uint arms: `c as u8` made byte(`€`) 172.
         ValueRepr::Char(c) => {
             let code = c as u32;
             if code > 255 {
@@ -1069,7 +1034,6 @@ fn builtin_chr(args: &[Value]) -> Value {
         return Value::Error(rc_str("chr() takes exactly 1 argument"));
     }
     match args[0].repr() {
-        // try_from, not `as u32`: the cast wraps back into valid range and chr(4294967393) returned `a`.
         ValueRepr::Integer(n) => match u32::try_from(n).ok().and_then(char::from_u32) {
             Some(c) => Value::Char(c),
             None => Value::Error(rc_str(format!("invalid char code: {}", n))),
@@ -1087,8 +1051,6 @@ fn builtin_ord(args: &[Value]) -> Value {
         _ => Value::Error(rc_str("ord() requires a char")),
     }
 }
-
-// ── String builtins ────────────────────────────────────────────────────
 
 fn builtin_split(args: &[Value]) -> Value {
     if args.len() != 2 {
@@ -1113,7 +1075,6 @@ fn builtin_join(args: &[Value]) -> Value {
     match (&args[0], &args[1]) {
         (Value::Array(arr), Value::String(sep)) => {
             use std::fmt::Write as _;
-            // One buffer instead of N throwaway format! allocations joined at the end.
             let arr = arr.borrow();
             let mut result = String::new();
             for (i, v) in arr.iter().enumerate() {
@@ -1200,7 +1161,6 @@ fn builtin_contains_str(args: &[Value]) -> Value {
     }
 }
 
-/// Index of the first `sub` in `s`, counted in characters like `s[i]`, or -1.
 /// The character index of `sub` in `s` at or after character `start`, or -1.
 fn builtin_str_index_of(args: &[Value]) -> Value {
     let (s, sub, start) = match args {
@@ -1209,7 +1169,6 @@ fn builtin_str_index_of(args: &[Value]) -> Value {
         [Value::String(s), Value::String(sub), Value::None] => (s, sub, 0),
         _ => return Value::Error(rc_str("__str_index_of() requires (string, string, start?)")),
     };
-    // Past the end there is nothing to find, not even an empty string.
     let Some(from) = s.char_indices().map(|(b, _)| b).chain([s.len()]).nth(start) else {
         return Value::Integer(-1);
     };
@@ -1295,11 +1254,10 @@ fn builtin_sort(args: &[Value]) -> Value {
     }
 }
 
-/// The order `__sort` uses. It has to be total — Rust's sort panics when it
-/// notices a comparator that is not — so values of different types are
-/// ordered by kind (None, booleans, numbers, chars, strings, everything
-/// else by type name), and numbers of any width compare by value, with NaN
-/// after every other number.
+/// The order `__sort` uses. It is total: values of different types are ordered
+/// by kind (None, booleans, numbers, chars, strings, everything else by type
+/// name), and numbers of any width compare by value, with NaN after every other
+/// number.
 fn sort_order(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     fn rank(v: &Value) -> u8 {
@@ -1325,7 +1283,6 @@ fn sort_order(a: &Value, b: &Value) -> std::cmp::Ordering {
             _ => Num::Int(0),
         }
     }
-    // Exact, so an int and a float that differ past f64 precision still order.
     fn int_vs_float(i: i128, f: f64) -> Ordering {
         if f.is_nan() || f >= 1.0e38 {
             return Ordering::Less;
@@ -1364,8 +1321,6 @@ fn sort_order(a: &Value, b: &Value) -> std::cmp::Ordering {
         _ => a.type_name().cmp(b.type_name()),
     }
 }
-
-// ── Math builtins ──────────────────────────────────────────────────────
 
 fn builtin_sqrt(args: &[Value]) -> Value {
     if args.len() != 1 {
@@ -1411,7 +1366,6 @@ fn builtin_round(args: &[Value]) -> Value {
     }
 }
 
-// Shared helpers for floating-point math builtins.
 fn unary_f64(args: &[Value], name: &str, f: fn(f64) -> f64) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str(format!("{}() takes 1 argument", name)));
@@ -1477,8 +1431,6 @@ fn builtin_powf(args: &[Value]) -> Value {
     binary_f64(args, "__powf", f64::powf)
 }
 
-// ── Shared helpers for native extension builtins ──
-
 fn vm_hard_err(msg: impl Into<String>) -> Value {
     Value::Error(rc_str(msg))
 }
@@ -1506,8 +1458,6 @@ fn vm_str_array(items: impl IntoIterator<Item = String>) -> Value {
             .collect(),
     )))
 }
-
-// ── regex ──
 
 fn vm_compile_re(pattern: &str, name: &str) -> Result<regex::Regex, Value> {
     regex::Regex::new(pattern).map_err(|e| vm_hard_err(format!("{}: invalid pattern: {}", name, e)))
@@ -1608,8 +1558,6 @@ fn builtin_regex_captures(args: &[Value]) -> Value {
     }
 }
 
-// ── datetime (UTC) ──
-
 fn builtin_dt_now(args: &[Value]) -> Value {
     if !args.is_empty() {
         return vm_hard_err("__dt_now: expected 0 arguments");
@@ -1629,8 +1577,6 @@ fn builtin_dt_format(args: &[Value]) -> Value {
         Some(f) => f,
         None => return vm_hard_err("__dt_format: format must be a string"),
     };
-    // chrono reports a bad specifier only when the result is written, and
-    // `to_string` turns that report into a panic, so check the format first.
     let items: Vec<chrono::format::Item> = chrono::format::StrftimeItems::new(fmt).collect();
     if items
         .iter()
@@ -1663,8 +1609,6 @@ fn builtin_dt_parse(args: &[Value]) -> Value {
         _ => vm_hard_err("__dt_parse: expected (text, format) strings"),
     }
 }
-
-// ── encoding ──
 
 fn builtin_base64_encode(args: &[Value]) -> Value {
     match args.first().and_then(vm_str_arg) {
@@ -1727,8 +1671,6 @@ fn builtin_url_decode(args: &[Value]) -> Value {
     }
 }
 
-// ── hash (hex digests) ──
-
 fn builtin_sha256(args: &[Value]) -> Value {
     match args.first().and_then(vm_str_arg) {
         Some(s) if args.len() == 1 => {
@@ -1762,8 +1704,6 @@ fn builtin_md5(args: &[Value]) -> Value {
     }
 }
 
-// ── I/O builtins ───────────────────────────────────────────────────────
-
 fn builtin_input(args: &[Value]) -> Value {
     if !args.is_empty() {
         crate::output::write(&args[0].to_string());
@@ -1783,15 +1723,12 @@ fn builtin_read_line(_args: &[Value]) -> Value {
     }
 }
 
-// Read a single key (arrow keys included) in raw mode; see crate::keyinput.
 fn builtin_read_key(_args: &[Value]) -> Value {
     match crate::keyinput::read_key() {
         Ok(k) => Value::String(rc_str(k)),
         Err(e) => Value::Error(rc_str(format!("read_key error: {}", e))),
     }
 }
-
-// ── File I/O ───────────────────────────────────────────────────────────
 
 fn builtin_read_file(args: &[Value]) -> Value {
     if args.len() != 1 {
@@ -1915,14 +1852,10 @@ fn builtin_file_exists(args: &[Value]) -> Value {
     }
 }
 
-// ── OS builtins ────────────────────────────────────────────────────────
-
-/// Turns a finished process into the `{stdout, stderr, code}` map both exec
-/// builtins return, so the shell and argv forms stay drop-in comparable.
+/// Turns a finished process into the `{stdout, stderr, code}` map both exec builtins return.
 fn process_output_map(output: std::process::Output) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    // A signal-killed process has no exit code; -1 stands in for "died".
     let code = output.status.code().unwrap_or(-1);
     let entries: Vec<(Value, Value)> = vec![
         (
@@ -1951,7 +1884,6 @@ fn stdin_arg(v: Option<&Value>, name: &str) -> Result<Option<String>, Value> {
     }
 }
 
-// Runs through a shell, so every metacharacter is live; use __exec_argv with untrusted input.
 fn builtin_exec(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str(
@@ -1986,7 +1918,6 @@ fn builtin_exec(args: &[Value]) -> Value {
     }
 }
 
-// Shell-free: each argv element is one verbatim argument, so "x; rm -rf /" is a filename.
 fn builtin_exec_argv(args: &[Value]) -> Value {
     if !(2..=3).contains(&args.len()) {
         return Value::Error(rc_str(
@@ -2010,7 +1941,6 @@ fn builtin_exec_argv(args: &[Value]) -> Value {
     cmd.args(&argv);
     match crate::process::output_with_stdin(cmd, stdin) {
         Ok(output) => process_output_map(output),
-        // A missing program fails here; the shell form reports that as exit code 127 instead.
         Err(e) => Value::Error(rc_str(format!("__exec_argv({}): {}", program, e))),
     }
 }
@@ -2042,7 +1972,6 @@ fn builtin_env_set(args: &[Value]) -> Value {
     }
     match (&args[0], &args[1]) {
         (Value::String(name), Value::String(val)) => {
-            // set_var panics on any of these rather than returning an error.
             if name.is_empty() || name.contains('=') || name.contains('\0') {
                 return Value::Error(rc_str(format!(
                     "__env_set(): invalid variable name {:?}: it must be non-empty and contain no '=' or NUL",
@@ -2052,7 +1981,6 @@ fn builtin_env_set(args: &[Value]) -> Value {
             if val.contains('\0') {
                 return Value::Error(rc_str("__env_set(): a value must not contain NUL"));
             }
-            // SAFETY: We don't access env vars concurrently from other threads.
             unsafe {
                 std::env::set_var(name.as_ref(), val.as_ref());
             }
@@ -2096,7 +2024,6 @@ fn builtin_exit(args: &[Value]) -> Value {
         0
     } else {
         match args[0].repr() {
-            // Reject out of range: `n as i32` plus the OS's 8-bit truncation made os.exit(256) exit 0.
             ValueRepr::Integer(n) if (0..=255).contains(&n) => n as i32,
             ValueRepr::Integer(n) => {
                 return Value::Error(rc_str(format!(
@@ -2150,9 +2077,6 @@ fn builtin_walk_dir(args: &[Value]) -> Value {
                     for entry in entries.filter_map(|e| e.ok()) {
                         let path = entry.path();
                         items.push(Value::String(rc_str(path.display().to_string())));
-                        // The entry's own type, not its target's: following a
-                        // symlinked directory can loop (`a -> .`), and two
-                        // such links made the walk exponential.
                         if entry.file_type().is_ok_and(|t| t.is_dir()) {
                             walk(&path, items);
                         }
@@ -2251,8 +2175,6 @@ fn builtin_is_file(args: &[Value]) -> Value {
     }
 }
 
-// ── Time builtins ──────────────────────────────────────────────────────
-
 fn builtin_time_now(_args: &[Value]) -> Value {
     match crate::clock::since_epoch() {
         Some(d) => Value::Float(d.as_secs_f64()),
@@ -2272,7 +2194,6 @@ fn builtin_time_sleep(args: &[Value]) -> Value {
         return Value::Error(rc_str("__time_sleep() takes 1 argument"));
     }
     match args[0].repr() {
-        // `ms as u64` made -1 a sleep of 584 million years.
         ValueRepr::Integer(ms) if ms < 0 => Value::Error(rc_str(format!(
             "__time_sleep(): milliseconds must not be negative, got {ms}"
         ))),
@@ -2285,11 +2206,8 @@ fn builtin_time_sleep(args: &[Value]) -> Value {
 }
 
 fn builtin_time_monotonic(_args: &[Value]) -> Value {
-    // Return monotonic time as nanoseconds integer (matches tree-walker)
     Value::Integer(crate::clock::monotonic_nanos())
 }
-
-// ── Random builtins ────────────────────────────────────────────────────
 
 thread_local! {
     static RNG_STATE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -2297,8 +2215,6 @@ thread_local! {
 
 fn xorshift64(state: u64) -> u64 {
     let mut s = if state == 0 {
-        // Auto-seed from time
-        // A clock before 1970 still seeds (with 1); this used to panic instead.
         crate::clock::since_epoch().unwrap_or_default().as_nanos() as u64 | 1
     } else {
         state
@@ -2336,8 +2252,6 @@ fn builtin_rand_int(args: &[Value]) -> Value {
         return Value::Error(rc_str("__rand_int() takes 2 arguments"));
     }
     match (&args[0], &args[1]) {
-        // Inclusive of `max`, as random.rand_int documents. The span is
-        // computed wide: `max - min` overflowed on a range wider than i64.
         (Value::Integer(min), Value::Integer(max)) => {
             if max <= min {
                 return Value::Integer(*min);
@@ -2355,9 +2269,6 @@ fn builtin_rand_float(_args: &[Value]) -> Value {
     Value::Float((r as f64) / (u64::MAX as f64))
 }
 
-// ── Path builtins ──────────────────────────────────────────────────────
-
-// Deliberate PathBuf::push semantics; use __path_is_within for containment.
 fn builtin_path_join(args: &[Value]) -> Value {
     if args.len() != 1 {
         return Value::Error(rc_str("__path_join() takes 1 argument (array)"));
@@ -2451,10 +2362,9 @@ fn builtin_path_is_absolute(args: &[Value]) -> Value {
     }
 }
 
-/// Resolves `.` and `..` purely lexically — no filesystem access, so it works
-/// on paths that do not exist yet. `..` pops the preceding name; above the root
-/// it is dropped (the root has no parent), and in a relative path with nothing
-/// left to pop it is kept, because `../x` genuinely names a sibling.
+/// Resolves `.` and `..` purely lexically, with no filesystem access. `..` pops
+/// the preceding name; above the root it is dropped, and in a relative path with
+/// nothing left to pop it is kept.
 fn normalize_lexical(p: &std::path::Path) -> std::path::PathBuf {
     use std::path::Component;
     let mut out = std::path::PathBuf::new();
@@ -2473,7 +2383,6 @@ fn normalize_lexical(p: &std::path::Path) -> std::path::PathBuf {
                 if pops_a_name {
                     out.pop();
                 } else if !rooted {
-                    // Nothing to clamp against, so the `..` is meaningful and must survive.
                     out.push("..");
                 }
             }
@@ -2488,10 +2397,8 @@ fn normalize_lexical(p: &std::path::Path) -> std::path::PathBuf {
 
 /// Best-effort absolute resolution used for containment checks.
 ///
-/// Canonicalises when the path exists (which is the only way to see through a
-/// symlink); when it does not, canonicalises the longest existing ancestor and
-/// appends the remaining components lexically, so a path that has not been
-/// created yet still resolves against the real parents it will live under.
+/// Canonicalises when the path exists; otherwise canonicalises the longest
+/// existing ancestor and appends the remaining components lexically.
 fn resolve_for_containment(p: &std::path::Path) -> std::path::PathBuf {
     let absolute = if p.is_absolute() {
         p.to_path_buf()
@@ -2501,7 +2408,6 @@ fn resolve_for_containment(p: &std::path::Path) -> std::path::PathBuf {
             Err(_) => p.to_path_buf(),
         }
     };
-    // Canonicalise first: on an existing path that resolves symlinks and `..` together.
     if let Ok(real) = absolute.canonicalize() {
         return real;
     }
@@ -2521,7 +2427,6 @@ fn resolve_for_containment(p: &std::path::Path) -> std::path::PathBuf {
                 trailing.push(name.to_os_string());
                 probe = parent.to_path_buf();
             }
-            // Out of ancestors, so lexical is all we have.
             _ => return lexical,
         }
     }
@@ -2543,18 +2448,13 @@ fn builtin_path_normalize(args: &[Value]) -> Value {
 
 /// Is `candidate` the same as, or inside, `base`?
 ///
-/// Both sides go through resolve_for_containment(), then the comparison is
-/// component-wise (`Path::starts_with`) rather than string-prefix, so the
-/// sibling case — base `/srv/up` vs candidate `/srv/uploaded/x` — is correctly
-/// rejected instead of passing on a shared character prefix.
+/// Both sides go through resolve_for_containment(), then are compared
+/// component-wise (`Path::starts_with`), so base `/srv/up` does not contain
+/// `/srv/uploaded/x`.
 ///
-/// CAVEAT, and it is a real one: this is only as strong as the filesystem state
-/// at the moment of the call. Symlinks are followed for the part of the path
-/// that already exists; components that do not exist yet are resolved lexically
-/// only, so a symlink created there afterwards escapes, as does any symlink
-/// swapped in between this check and the eventual open (TOCTOU). Use it to
-/// reject obvious traversal, not as the sole barrier around secrets — for that
-/// you still want an OS-level sandbox or an openat-style resolved handle.
+/// The result reflects the filesystem state at the moment of the call: symlinks
+/// are followed for the part of the path that already exists, and the rest is
+/// resolved lexically.
 fn builtin_path_is_within(args: &[Value]) -> Value {
     if args.len() != 2 {
         return Value::Error(rc_str(
@@ -2571,11 +2471,7 @@ fn builtin_path_is_within(args: &[Value]) -> Value {
     }
 }
 
-// ── JSON builtins ──────────────────────────────────────────────────────
-
-/// How deeply arrays and objects may nest, in either direction. The parser
-/// and the serializer recurse once per level, and a request body of a few
-/// million `[` used to overflow the stack and abort the process.
+/// How deeply arrays and objects may nest, in either direction.
 const JSON_MAX_DEPTH: usize = 512;
 
 fn builtin_json_parse(args: &[Value]) -> Value {
@@ -2588,7 +2484,6 @@ fn builtin_json_parse(args: &[Value]) -> Value {
             let mut pos = 0;
             match json_parse_value(&chars, &mut pos, 0) {
                 Ok(val) => {
-                    // Trailing content used to be ignored, so a truncated document parsed successfully.
                     json_skip_ws(&chars, &mut pos);
                     if pos < chars.len() {
                         let rest: String = chars[pos..].iter().take(20).collect();
@@ -2631,8 +2526,7 @@ fn json_parse_value(chars: &[char], pos: &mut usize, depth: usize) -> Result<Val
     }
 }
 
-/// The four hex digits of a `\u` escape starting at `pos`; nothing else
-/// (`u32::from_str_radix` alone accepted a sign, so `\u+041` parsed).
+/// The four hex digits of a `\u` escape starting at `pos`; nothing else.
 fn json_hex4(chars: &[char], pos: usize) -> Result<u32, String> {
     if pos + 4 > chars.len() {
         return Err("incomplete unicode escape".to_string());
@@ -2648,7 +2542,7 @@ fn json_hex4(chars: &[char], pos: usize) -> Result<u32, String> {
 }
 
 fn json_parse_string(chars: &[char], pos: &mut usize) -> Result<Value, String> {
-    *pos += 1; // skip opening "
+    *pos += 1;
     let mut s = String::new();
     while *pos < chars.len() && chars[*pos] != '"' {
         if chars[*pos] == '\\' {
@@ -2667,10 +2561,8 @@ fn json_parse_string(chars: &[char], pos: &mut usize) -> Result<Value, String> {
                 'f' => s.push('\u{000C}'),
                 'u' => {
                     let hi = json_hex4(chars, *pos + 1)?;
-                    *pos += 4; // will be incremented once more below
+                    *pos += 4;
                     let cp = match hi {
-                        // A character outside the BMP is written as a UTF-16
-                        // surrogate pair, two escapes in a row.
                         0xD800..=0xDBFF => {
                             if chars.get(*pos + 1) != Some(&'\\')
                                 || chars.get(*pos + 2) != Some(&'u')
@@ -2702,7 +2594,7 @@ fn json_parse_string(chars: &[char], pos: &mut usize) -> Result<Value, String> {
     if *pos >= chars.len() {
         return Err("unterminated string".to_string());
     }
-    *pos += 1; // skip closing "
+    *pos += 1;
     Ok(Value::String(rc_str(s)))
 }
 
@@ -2765,8 +2657,6 @@ fn json_parse_number(chars: &[char], pos: &mut usize) -> Result<Value, String> {
     if is_float {
         as_float()
     } else {
-        // An integer past i64 is still a valid JSON number; read it the way
-        // JavaScript would rather than failing the whole document.
         num_str
             .parse::<i64>()
             .map(Value::Integer)
@@ -2796,7 +2686,7 @@ fn json_parse_null(chars: &[char], pos: &mut usize) -> Result<Value, String> {
 }
 
 fn json_parse_array(chars: &[char], pos: &mut usize, depth: usize) -> Result<Value, String> {
-    *pos += 1; // skip [
+    *pos += 1;
     let mut elements = Vec::new();
     json_skip_ws(chars, pos);
     if *pos < chars.len() && chars[*pos] == ']' {
@@ -2822,7 +2712,7 @@ fn json_parse_array(chars: &[char], pos: &mut usize, depth: usize) -> Result<Val
 }
 
 fn json_parse_object(chars: &[char], pos: &mut usize, depth: usize) -> Result<Value, String> {
-    *pos += 1; // skip {
+    *pos += 1;
     let mut entries = Vec::new();
     json_skip_ws(chars, pos);
     if *pos < chars.len() && chars[*pos] == '}' {
@@ -2889,8 +2779,7 @@ fn json_quote(s: &str) -> String {
     out
 }
 
-/// `open` holds the containers being written, outermost first: one seen
-/// again is a cycle, which used to recurse until the stack overflowed.
+/// `open` holds the containers being written, outermost first; one seen again is a cycle.
 fn value_to_json(val: &Value, open: &mut Vec<*const ()>) -> Result<String, String> {
     let container = match val {
         Value::Array(a) => Some(Rc::as_ptr(a) as *const ()),
@@ -2940,8 +2829,6 @@ fn value_to_json_inner(val: &Value, open: &mut Vec<*const ()>) -> Result<String,
                 .borrow()
                 .iter()
                 .map(|(k, v)| {
-                    // JSON keys are strings; scalar keys are written the way
-                    // JavaScript would write them, anything else is refused.
                     let kj = match k.repr() {
                         ValueRepr::String(s) => json_quote(s),
                         ValueRepr::Char(c) => json_quote(&c.to_string()),
@@ -2974,8 +2861,6 @@ fn value_to_json_inner(val: &Value, open: &mut Vec<*const ()>) -> Result<String,
         _ => Err(format!("cannot serialize {} to JSON", val.type_name())),
     }
 }
-
-// ── TOML builtins ──────────────────────────────────────────────────────
 
 fn builtin_toml_parse(args: &[Value]) -> Value {
     if args.len() != 1 {
@@ -3066,8 +2951,6 @@ fn value_to_toml(val: &Value) -> Result<toml::Value, String> {
     }
 }
 
-// ── HTTP builtins ──────────────────────────────────────────────────────
-
 fn builtin_http_request(args: &[Value]) -> Value {
     if args.len() < 2 || args.len() > 4 {
         return Value::Error(rc_str(
@@ -3138,8 +3021,7 @@ fn builtin_http_request(args: &[Value]) -> Value {
     http_request(&method, &url, &headers, body.as_deref())
 }
 
-/// A browser build has no HTTP client: rustls's `ring` cannot target
-/// wasm32-unknown-unknown, and a page has fetch() for that anyway.
+/// A browser build has no HTTP client.
 #[cfg(target_arch = "wasm32")]
 fn http_request(_: &str, _: &str, _: &[(String, String)], _: Option<&str>) -> Value {
     Value::Error(rc_str(crate::netres::NO_HTTP))
@@ -3168,7 +3050,6 @@ fn http_request(
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     let (_, mut resp_body) = resp.into_parts();
-                    // A failed read used to default to "", indistinguishable from a legitimately empty body.
                     let body_str = match resp_body.read_to_string() {
                         Ok(s) => s,
                         Err(e) => {
@@ -3189,8 +3070,8 @@ fn http_request(
                         ),
                     ];
                     Value::Map(Rc::new(RefCell::new(
-                crate::vm::collections::OxMap::from_pairs(entries),
-            )))
+                        crate::vm::collections::OxMap::from_pairs(entries),
+                    )))
                 }
                 Err(e) => Value::Error(rc_str(format!("http error: {}", e))),
             }
@@ -3228,8 +3109,6 @@ fn http_request(
         ))),
     }
 }
-
-// ── Streaming / socket networking ───────────────────────────────────────
 
 fn net_str(arg: &Value, name: &str) -> Result<String, Value> {
     match arg.repr() {
@@ -3365,7 +3244,6 @@ fn builtin_net_http_read(args: &[Value]) -> Value {
     let max = net_try!(net_int(&args[1], "read_chunk max"));
     let timeout = net_try!(net_int(&args[2], "read_chunk timeout_ms"));
     match crate::netres::http_read(id as u64, max, timeout) {
-        // None means timed out with no data yet; distinct from "" (EOF) and an error value.
         Ok(Some(s)) => Value::String(rc_str(s)),
         Ok(None) => Value::None,
         Err(e) => Value::Error(rc_str(e)),

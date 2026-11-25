@@ -183,7 +183,6 @@ fn executable_script_runs_via_shebang() {
     perms.set_mode(0o755);
     fs::set_permissions(&script, perms).unwrap();
 
-    // Sibling tests fork while we hold a writable fd, so exec can hit ETXTBSY; retry.
     let output = loop {
         match Command::new(&script)
             .current_dir(workspace_root())
@@ -233,7 +232,6 @@ fn test_subcommand_runs_test_blocks() {
     assert!(out.contains("addition"), "stdout:\n{out}");
     assert!(out.contains("contains"), "stdout:\n{out}");
     assert!(out.contains("test result: ok. 2 passed"), "stdout:\n{out}");
-    // Output is captured (not a TTY), so no ANSI color codes should leak.
     assert!(!out.contains('\u{1b}'), "unexpected color codes:\n{out}");
 }
 
@@ -259,8 +257,6 @@ fn test_subcommand_reports_failures_and_exits_nonzero() {
 
 #[test]
 fn vm_enforces_parameter_types() {
-    // Regression: the default (VM) backend must enforce parameter type
-    // annotations, not just the tree-walking interpreter.
     let dir = temp_dir("vm-type-enforce");
     let script = write_script(
         &dir,
@@ -287,8 +283,6 @@ fn vm_accepts_correct_parameter_types() {
 
 #[test]
 fn vm_generic_enum_param_accepts_specific_enum() {
-    // `<Enum>` must accept any specific enum value on the VM, matching the
-    // evaluator.
     let dir = temp_dir("vm-enum-param");
     let script = write_script(
         &dir,
@@ -299,12 +293,6 @@ fn vm_generic_enum_param_accepts_specific_enum() {
     assert!(output.status.success(), "stderr:\n{}", stderr(&output));
     assert_eq!(stdout(&output), "2\n");
 }
-
-// ── command-line handling ───────────────────────────────────────────────────
-// Anything that wasn't a recognised subcommand or a `.oxi` path used to fall
-// through to the REPL, so a typo'd command silently opened an interactive
-// prompt instead of reporting the mistake. Exit code 2 now means "the command
-// line was wrong", separate from 1 ("the code failed").
 
 const EXIT_USAGE: i32 = 2;
 
@@ -328,7 +316,6 @@ fn unknown_subcommand_is_an_error_not_a_repl() {
     );
     let err = stderr(&output);
     assert!(err.contains("unknown subcommand `run`"), "{err}");
-    // `oxigen run` was in the docs once; point at the real spelling.
     assert!(err.contains("oxigen <file.oxi>"), "{err}");
 }
 
@@ -397,8 +384,6 @@ fn subcommands_require_their_argument() {
 
 #[test]
 fn bare_invocation_still_starts_the_repl() {
-    // The REPL is reachable only with no arguments at all. Feed it EOF so it
-    // exits immediately rather than blocking the test.
     use std::process::Stdio;
     let mut child = Command::new(oxigen_bin())
         .current_dir(workspace_root())
@@ -423,7 +408,6 @@ fn check_exits_nonzero_when_the_file_has_errors() {
     let broken = write_script(&dir, "broken.oxi", "main {\n  x :=\n}\n");
     let output = run_args(&["check", broken.to_str().unwrap()]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    // The JSON still goes to stdout — the LSP parses it regardless of status.
     assert!(
         stdout(&output).contains("\"severity\":\"error\""),
         "{}",
@@ -457,8 +441,6 @@ fn jit_flags_before_the_path_are_consumed_by_oxigen() {
 
 #[test]
 fn arguments_after_the_path_belong_to_the_script() {
-    // Regression: `--no-jit` was stripped from anywhere in argv, so a script
-    // could never receive it as its own argument.
     let dir = temp_dir("cli-flags-post");
     let script = write_script(
         &dir,
@@ -470,14 +452,9 @@ fn arguments_after_the_path_belong_to_the_script() {
     assert_eq!(stdout(&output), "--no-jit\nextra\n");
 }
 
-// ── diagnostics reach the editor ────────────────────────────────────────────
-// `check` used to parse and stop, and the LSP is `oxigen check` read back out,
-// so a compile error had never once appeared in an editor.
-
 #[test]
 fn check_reports_compile_errors_not_just_parse_errors() {
     let dir = temp_dir("check-compile");
-    // Parses fine; fails to compile — `skip` needs an enclosing loop.
     let script = write_script(&dir, "c.oxi", "main {\n    skip\n}\n");
     let output = run_args(&["check", script.to_str().unwrap()]);
 
@@ -485,7 +462,6 @@ fn check_reports_compile_errors_not_just_parse_errors() {
     let out = stdout(&output);
     assert!(out.contains("\"code\""), "diagnostic has no code:\n{out}");
     assert!(out.contains("skip"), "{out}");
-    // A real location, not the `0:0` a line-only error would give.
     assert!(
         !out.contains("\"line\":0"),
         "compile error has no location:\n{out}"
@@ -521,8 +497,6 @@ fn explain_prints_a_codes_long_form() {
 
 #[test]
 fn compile_errors_render_like_parse_errors() {
-    // They used to print as `[line N] Compile error: ...`, so the same file
-    // produced two visually unrelated kinds of error.
     let dir = temp_dir("compile-render");
     let script = write_script(&dir, "c.oxi", "main {\n    skip\n}\n");
     let output = run_oxigen(&script, &[]);

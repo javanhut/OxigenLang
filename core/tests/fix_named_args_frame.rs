@@ -1,17 +1,6 @@
-//! Regression: named arguments must never misalign the callee's frame.
-//!
-//! `call_closure`'s named-args branch skipped the arity check whenever the
-//! callee had an optional parameter, then placed its frame at
-//! `len - arity`. Surplus positional args were left BELOW the frame, so the
-//! callee read the wrong slots (`f(1, 2, 3, 4, b=9)` returned `[fun f(), 1]`,
-//! a method saw `self` as an INTEGER) and every such call leaked stack slots
-//! into the caller. Missing required parameters were silently filled with
-//! `None` and unknown names were dropped.
-//!
-//! The leak was also the way in to a memory-safety bug: once a script had
-//! leaked the stack up to `STACK_MAX`, the receiver insert of a method call
-//! (`stack_insert`) reallocated the stack `Vec` and left the JIT's cached
-//! `StackView.ptr` dangling — a segfault in default and `--jit` modes.
+//! Tests that named arguments never misalign the callee's frame: surplus
+//! positional args, missing required parameters and unknown names are errors, and
+//! calls do not leak stack slots.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -76,7 +65,6 @@ fn surplus_positional_args_with_a_named_arg_are_an_arity_error() {
 
 #[test]
 fn caller_frame_survives_a_rejected_named_call() {
-    // The rejected call must not leave its surplus args on the caller's stack.
     let src = format!(
         "{F}fun g() {{\n  r := <type<Error || Value>>(f(1, 2, 3, 4, b=9))\n  z := \"zed\"\n  [is_error(r), z]\n}}\ng()"
     );
@@ -113,9 +101,7 @@ fn method_named_args_keep_self_intact() {
     assert_all_err(&format!("{s}s.m(1, 2, 3, 4, b=9)"), "argument");
 }
 
-/// The original reproducer: leak the stack with rejected named calls, then
-/// make a method call whose receiver insert lands at `STACK_MAX`. Every
-/// backend must finish (or raise a clean error) — never crash.
+/// Leaks the stack with rejected named calls, then makes a method call whose receiver insert lands at `STACK_MAX`. Every backend must finish or raise a clean error.
 #[test]
 fn leaked_stack_cannot_reach_the_receiver_insert() {
     let elems = vec!["z"; 8199].join(", ");

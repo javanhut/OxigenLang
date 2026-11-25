@@ -1,13 +1,6 @@
-//! TS1: Tuple slicing VM regression.
-//!
-//! `(1,2,3,4)[1:3]` must evaluate to `(2, 3)`, but the VM/JIT previously
-//! errored with `cannot slice TUPLE` even though its own hint advertised that
-//! slicing works on tuples. This test pins VM (interp) == VM (JIT) for a spread
-//! of tuple slices, including open and negative bounds, empty/over-range
-//! results.
-//!
-//! INCR_IMMUT: `x <int> = 5; x++` must error on every backend (`=` declares an
-//! immutable typed var; `++` cannot mutate it).
+//! Tests tuple slicing (`(1,2,3,4)[1:3]` is `(2, 3)`) gives the same result on
+//! the interpreter and the JIT, including open, negative and empty/over-range
+//! bounds, and that `x <int> = 5; x++` errors on every backend.
 
 #![cfg(feature = "jit")]
 
@@ -55,55 +48,46 @@ fn tuple_slice_basic() {
 
 #[test]
 fn tuple_slice_open_start() {
-    // `[:2]` -> first two elements.
     assert_parity("(1,2,3)[:2]", "(1, 2)");
 }
 
 #[test]
 fn tuple_slice_open_end() {
-    // `[1:]` -> from index 1 to the end.
     assert_parity("(1,2,3)[1:]", "(2, 3)");
 }
 
 #[test]
 fn tuple_slice_open_both() {
-    // `[:]` -> a copy of the whole tuple.
     assert_parity("(1,2,3)[:]", "(1, 2, 3)");
 }
 
 #[test]
 fn tuple_slice_negative_start() {
-    // A negative start counts from the end, as it does for arrays.
     assert_parity("(1,2,3,4)[-2:]", "(3, 4)");
 }
 
 #[test]
 fn tuple_slice_negative_end() {
-    // A negative end counts from the end, as it does for arrays.
     assert_parity("(1,2,3,4)[:-1]", "(1, 2, 3)");
 }
 
 #[test]
 fn tuple_slice_negative_both() {
-    // Both bounds count from the end.
     assert_parity("(1,2,3,4,5)[-3:-1]", "(3, 4)");
 }
 
 #[test]
 fn tuple_slice_empty_inverted() {
-    // start > end yields an empty tuple, just like arrays.
     assert_parity("(1,2,3)[2:1]", "()");
 }
 
 #[test]
 fn tuple_slice_over_range_end() {
-    // end past the length is clamped to the length.
     assert_parity("(1,2,3)[1:99]", "(2, 3)");
 }
 
 #[test]
 fn tuple_slice_start_at_len() {
-    // start at the length yields an empty tuple.
     assert_parity("(1,2,3)[3:]", "()");
 }
 
@@ -114,18 +98,13 @@ fn tuple_slice_full_explicit() {
 
 #[test]
 fn tuple_slice_mixed_elements() {
-    // Slicing preserves heterogeneous element values/types.
     assert_parity("(1, \"a\", True, 4)[1:3]", "(a, True)");
 }
-
-// ── INCR_IMMUT ──────────────────────────────────────────────────────────────
 
 const INCR_IMMUT_SRC: &str = "x <int> = 5\nx++\n";
 
 #[test]
 fn incr_immut_vm_errors() {
-    // `=` declares an immutable typed binding; `++` cannot mutate it. The VM
-    // (and JIT, which inherits the store op) must reject it.
     let interp = run_vm(INCR_IMMUT_SRC, None);
     assert!(
         interp.is_err(),
@@ -145,8 +124,6 @@ fn incr_immut_vm_errors() {
 
 #[test]
 fn incr_immut_wording() {
-    // At top level the write is caught at compile time, with the same wording
-    // as inside a function.
     let msg = run_vm(INCR_IMMUT_SRC, None).unwrap_err();
     assert!(
         msg.contains("cannot mutate immutable variable `x` with `++`"),
@@ -156,7 +133,6 @@ fn incr_immut_wording() {
 
 #[test]
 fn incr_immut_runtime_wording() {
-    // A write compiled before the declaration can only be caught when it runs.
     let src = "fun f() {\n    x++\n}\nx <int> = 5\nf()\n";
     let msg = run_vm(src, None).unwrap_err();
     assert!(

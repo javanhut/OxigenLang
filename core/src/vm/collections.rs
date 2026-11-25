@@ -1,10 +1,9 @@
 //! Ordered, hash-indexed Map/Set backing stores.
 //!
-//! Replaces the previous `Vec<(Value, Value)>` / `Vec<Value>` linear-scan
-//! representations. Insertion order is preserved (iteration and Display
-//! depend on it); lookups are O(1) average via `index`, with a linear
-//! fallback for keys that have no hashable projection (`try_hash_key`
-//! returned `None` — e.g. an `Array`/`Map`/`StructInstance` used as a key).
+//! Insertion order is preserved (iteration and Display depend on it); lookups
+//! are O(1) average via `index`, with a linear fallback for keys that have no
+//! hashable projection (`try_hash_key` returned `None`, e.g. an
+//! `Array`/`Map`/`StructInstance` used as a key).
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -13,21 +12,20 @@ use super::value::{LockFlag, Value};
 
 /// Hashable projection of a `Value` usable as a map/set key.
 ///
-/// Mirrors `Value`'s `PartialEq` for the hashable kinds. `Integer` and
-/// `Float` are deliberately distinct (matching `Value::eq`, where
-/// `Integer(1) != Float(1.0)`).
+/// Mirrors `Value`'s `PartialEq` for the hashable kinds. `Integer` and `Float`
+/// are distinct (`Integer(1) != Float(1.0)`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum HashKey {
     Int(i64),
     /// Canonicalized f64 bits: `-0.0` folds to `+0.0`, all NaNs fold to a
-    /// single quiet-NaN pattern. See `f64_key_bits` and the module note.
+    /// single quiet-NaN pattern. See `f64_key_bits`.
     Float(u64),
     Bool(bool),
     Char(char),
     Byte(u8),
     Uint(u64),
-    /// Content-hashed/compared via `Rc<String>`'s `Hash`/`Eq` (delegates
-    /// to `String`), so distinct `Rc`s with equal contents are one key.
+    /// Content-hashed/compared via `Rc<String>`'s `Hash`/`Eq`, so distinct
+    /// `Rc`s with equal contents are one key.
     Str(Rc<String>),
     None,
     /// Tuple of hashable elements; `None` if any element is non-hashable.
@@ -37,9 +35,9 @@ pub enum HashKey {
 #[inline]
 fn f64_key_bits(f: f64) -> u64 {
     if f == 0.0 {
-        0 // unify +0.0 and -0.0 (they are `==`, so must be one key)
+        0
     } else if f.is_nan() {
-        0x7ff8_0000_0000_0000 // canonical qNaN
+        0x7ff8_0000_0000_0000
     } else {
         f.to_bits()
     }
@@ -65,7 +63,7 @@ impl Value {
                 }
                 HashKey::Tuple(ks)
             }
-            _ => return None, // Array, Map, Set, StructInstance, closures…
+            _ => return None,
         })
     }
 }
@@ -150,7 +148,6 @@ impl OxMap {
     }
 
     /// Remove by key, preserving order. Returns the removed value.
-    /// O(n) (entry shift + index rebuild); deletes are rare.
     pub fn remove(&mut self, key: &Value) -> Option<Value> {
         let pos = if let Some(hk) = key.try_hash_key() {
             self.index.get(&hk).copied()
@@ -189,7 +186,6 @@ impl OxMap {
 
 impl PartialEq for OxMap {
     fn eq(&self, other: &Self) -> bool {
-        // Key-based and order-insensitive; the old Vec equality was order-sensitive.
         if self.entries.len() != other.entries.len() {
             return false;
         }
@@ -207,7 +203,6 @@ pub struct OxSet {
 
 impl Drop for OxMap {
     fn drop(&mut self) {
-        // A map holding a map holding a map... would drop one frame per level.
         if self
             .entries
             .iter()
@@ -324,7 +319,6 @@ impl PartialEq for OxSet {
 
 impl Drop for OxSet {
     fn drop(&mut self) {
-        // Elements are hashable, but tuples of tuples still nest.
         if self.items.iter().any(Value::may_own_values) {
             let mut values = Vec::with_capacity(self.items.len());
             self.drain_into(&mut values);

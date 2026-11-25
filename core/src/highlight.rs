@@ -70,8 +70,6 @@ pub fn highlight(source: &str) -> Vec<(Range<usize>, Class)> {
     let mut i = 0;
     while i < tokens.len() {
         let (kind, range) = &tokens[i];
-        // Zero-width tokens (newlines, indent mode's braces, the pieces of an
-        // interpolated string) have no text of their own to colour.
         if range.start < cursor || range.is_empty() {
             i += 1;
             continue;
@@ -178,7 +176,6 @@ fn classify(source: &str, tokens: &[(TokenType, Range<usize>)], i: usize) -> Opt
         T::Ident if source[range.clone()].starts_with(|c: char| c.is_ascii_uppercase()) => {
             Class::Type
         }
-        // `lock` is a keyword only in `lock name = ...`; elsewhere it's a name.
         T::Ident if &source[range.clone()] == "lock" && next == Some(&T::Ident) => Class::Keyword,
         T::Ident if next == Some(&T::LParen) => Class::Function,
         T::Ident

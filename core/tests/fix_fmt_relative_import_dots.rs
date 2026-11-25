@@ -1,10 +1,5 @@
-//! `oxigen fmt` must not rewrite which module an `introduce` resolves to.
-//!
-//! `ModulePath` carries three fields — `segments`, `is_relative`, `parent_levels`
-//! — and the formatter used to emit only `segments.join(".")`. That dropped every
-//! leading dot, so `introduce .json` was reformatted to `introduce json`: still
-//! valid source, but now pointing at the stdlib module instead of the local one.
-//! A corrupted file that fails to build is loud; this one ran different code.
+//! `oxigen fmt` keeps which module an `introduce` resolves to, including
+//! leading dots of relative imports.
 
 use oxigen_core::ast::{ModulePath, Statement};
 use oxigen_core::formatter::Formatter;
@@ -81,8 +76,6 @@ fn absolute_imports_gain_no_dots() {
 
 #[test]
 fn a_local_module_is_never_rewritten_into_the_stdlib_one() {
-    // The dangerous case: `.json` and `json` are different modules, and the
-    // formatted file compiles either way.
     let formatted = format_source("introduce .json");
     assert!(
         formatted.contains(".json"),
@@ -96,8 +89,6 @@ fn a_local_module_is_never_rewritten_into_the_stdlib_one() {
 
 #[test]
 fn the_cli_path_keeps_the_dots_too() {
-    // `oxigen fmt` calls `format_source` (comment replay + block style), not
-    // `format`; both share the one `Introduce` arm, so this pins the real entry.
     let source = "// header\nintroduce ..up.mod\n";
     let lexer = Lexer::new(source);
     let mut parser = Parser::new(lexer, source);
@@ -112,7 +103,6 @@ fn the_cli_path_keeps_the_dots_too() {
 
 #[test]
 fn formatting_is_idempotent_for_relative_imports() {
-    // Repeated `fmt` runs must not peel a dot off per run.
     let once = format_source("introduce ..up.mod");
     let twice = format_source(&once);
     assert_eq!(once, twice);

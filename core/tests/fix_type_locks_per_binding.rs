@@ -1,14 +1,6 @@
-//! Regression: a type lock or immutability belongs to the BINDING, so no
-//! write path may skip it.
-//!
-//! - Locks were stored per physical stack slot and dropped whenever two
-//!   locals in disjoint scopes shared a slot. An `each` loop before
-//!   `count <int> := 0` was enough for `count = "oops"` to succeed.
-//! - Writes from a closure (`SetUpvalue`) checked neither the lock nor
-//!   immutability: `x <int> = 1; g := fun() { x = 5 }` changed `x`.
-//! - `x, y = ...` reassignment checked nothing, and `x, y := ...` inside a
-//!   function silently created a same-scope shadow instead of updating `x`
-//!   (at top level both are already rejected).
+//! Tests that a type lock or immutability belongs to the binding, so no write
+//! path skips it: disjoint-scope locals sharing a slot, writes from a closure
+//! (`SetUpvalue`), and `x, y = ...` / `x, y := ...` reassignment.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -78,8 +70,6 @@ fn lock_survives_slot_reuse_after_a_loop() {
 
 #[test]
 fn lock_survives_slot_reuse_by_a_later_untyped_local() {
-    // Typed first, untyped later in a sibling scope: the typed write must
-    // still be checked even though the slot's metadata had to be cleared.
     assert_all_err(
         "fun f(flag) {\n  option {\n    flag -> {\n      n <int> := 1\n      n = \"bad\"\n      n\n    },\n    {\n      s := \"fine\"\n      s = 2\n      s\n    }\n  }\n}\nf(True)",
         "type mismatch",

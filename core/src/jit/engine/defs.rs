@@ -1,9 +1,4 @@
-//! Small enums + VM-offset helpers shared across the engine submodules.
-//!
-//! Pulled out of the original monolithic `engine.rs` so the orchestration
-//! file can focus on the giant `compile_function` dispatch loop. Nothing
-//! here depends on Cranelift IR construction; it's pure constants and
-//! small enums.
+//! Small enums and VM-offset helpers shared across the engine submodules.
 
 #![cfg(feature = "jit")]
 
@@ -11,10 +6,7 @@ use crate::vm::{JitFrameView, StackView, VM, VMError};
 
 use super::super::CompiledEntries;
 
-// ── VM struct field offsets baked into emitted IR ──────────────────────
-
 /// Byte offset of the `stack_view.ptr` field from the base of `VM`.
-/// Computed once and baked into emitted IR as a constant.
 #[inline(always)]
 pub(super) fn vm_stack_view_ptr_offset() -> i32 {
     (VM::stack_view_offset() + StackView::OFFSET_PTR as usize) as i32
@@ -51,81 +43,51 @@ pub(super) fn vm_jit_frame_view_len_offset() -> i32 {
 }
 
 /// Byte offset of a closure's owning-module globals from the base of
-/// `ObjClosure`. `ModuleGlobals` is `#[repr(C)]` with its raw pointer view
-/// first, so this loads as a plain pointer — null for a closure defined in
-/// the main script. Pinned by `module_globals_ptr_is_first_field`.
+/// `ObjClosure`. Loads as a plain pointer, null for a closure defined in the
+/// main script.
 #[allow(dead_code)]
 #[inline(always)]
 pub(super) fn obj_closure_module_globals_offset() -> i32 {
     std::mem::offset_of!(crate::vm::value::ObjClosure, module_globals) as i32
 }
 
-// ── Compile-function state machine ─────────────────────────────────────
-
-/// Cache slot for `JitInner::compiled` — either a successful compile
-/// or a recorded failure so we don't keep retrying broken functions.
+/// Cache slot for `JitInner::compiled`: either a successful compile or a
+/// recorded failure.
 pub(super) enum Entry {
     Compiled { entries: CompiledEntries },
     Failed,
 }
 
-/// Which entry point the compile_function IR emitter is currently
-/// producing. Used as a compile-time branch variable at three
-/// divergence points (entry block params, prologue, OpCode::Return
-/// success path) — everywhere else the emission logic is shared.
+/// Which entry point the compile_function IR emitter is producing.
 ///
-/// The ABI shape per entry kind.
+/// The ABI shape per entry kind:
 ///   Generic:        fn(*mut VM) -> u32
 ///   IntSpecialized: fn(*mut VM, i64, ..., i64) -> (u32, i64)
-///
-/// Every emit site within `compile_function` funnels its return through
-/// a single `exit_block` with two block params (status: I32, payload:
-/// I64). The post-dispatch tail of the entry then issues
-/// `return_(&[status])` for Generic (dropping payload) or
-/// `return_(&[status, payload])` for IntSpecialized. Early-exit /
-/// bailout sites pass `(status, iconst(0))` since payload is only
-/// meaningful on status == 0 success-Return.
-#[allow(dead_code)] // Generic variant not yet routed through this enum
+#[allow(dead_code)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum EntryKind {
-    /// `fn(*mut VM) -> u32`. Caller pushes args onto the VM stack as
-    /// `Value`. Entry reads them through `stack_view`, optionally
-    /// through B2.2a tag guards for int mirrors. Successful
-    /// `OpCode::Return` calls the `op_return` helper.
+    /// `fn(*mut VM) -> u32`. Caller pushes args onto the VM stack as `Value`;
+    /// the entry reads them through `stack_view`. Successful `OpCode::Return`
+    /// calls the `op_return` helper.
     Generic,
-    /// `fn(*mut VM, i64, ..., i64) -> (u32, i64)`. Caller passes args
-    /// in registers; status returns in the first ABI return slot,
-    /// payload (valid iff status == 0) in the second. Entry writes
-    /// each i64 back to the backing stack slot for helper compat +
-    /// `def_var`s the mirror Variable directly — no tag guard (args
-    /// are trusted Int by the caller's contract). Successful
-    /// `OpCode::Return` jumps to `exit_block` with `(0, payload)`;
-    /// the post-dispatch tail issues the multi-value return. Early
-    /// error/bailout returns flow through the same exit_block with
-    /// `(status, 0)` — the payload slot is ignored by the caller on
-    /// non-zero status.
+    /// `fn(*mut VM, i64, ..., i64) -> (u32, i64)`. Caller passes args in
+    /// registers; status returns in the first return slot and the payload
+    /// (valid iff status == 0) in the second. Args are trusted to be Int by
+    /// the caller's contract.
     IntSpecialized,
 }
 
-/// What kind of specialized entry a `CompiledEntries` carries.
-/// Observable on the VM side (ObjClosure) so call sites can gate A3's
-/// direct-call path on having a real body, not a trampoline.
+/// What kind of specialized entry a `CompiledEntries` carries. Observable on
+/// the VM side (ObjClosure).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SpecializedEntryKind {
     /// The real specialized body: runs the function's opcodes with
-    /// i64-resident args, no box/unbox round trip. Safe A3 target.
+    /// i64-resident args, no box/unbox round trip.
     NativeIntBody,
-    /// B2.2: closure-aware specialized body. ABI passes the
-    /// `*const ObjClosure` as a register arg in addition to the i64
-    /// args, so `GetUpvalue` reads through the register instead of
-    /// walking the JitFrame to find `closure_raw`. Eligibility (per
-    /// `compute_specialized_entry_eligibility` in slot_types.rs):
-    /// body uses `GetUpvalue` only (no `SetUpvalue` / `CloseUpvalue`),
-    /// no nested `Closure` op, all the usual int-typed-param /
-    /// has-Return / has-Call rules. Closure-aware Return inlines the
-    /// stack truncate + multi-return without `jit_op_return`'s FFI
-    /// crossing — the path that pays the most for `bench_closure`'s
-    /// 500k invocations.
+    /// Closure-aware specialized body: the `*const ObjClosure` is passed as a
+    /// register arg so `GetUpvalue` reads through it. Requires the body to use
+    /// `GetUpvalue` only (no `SetUpvalue` / `CloseUpvalue`) and no nested
+    /// `Closure` op.
     NativeIntBodyWithClosure,
 }
 

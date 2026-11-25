@@ -1,5 +1,3 @@
-// Collatz step-count over 1..limit. Exercises mod, int division, branching,
-// function calls — all JIT-eligible.
 fun collatz_steps(n <int>) {
     steps <int> := 0
     repeat when n > 1 {

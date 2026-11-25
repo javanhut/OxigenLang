@@ -1,19 +1,6 @@
-//! A callee's entry-guard bailout must not be reported as the caller's.
-//!
-//! The JIT mirrors a parameter into a register when the bytecode suggests it is
-//! used as an int, and guards that at entry: if the runtime tag isn't Integer,
-//! the thunk bails (status 2) and the VM re-runs that call in the interpreter.
-//! Bailouts are only safe because they happen at ip 0, before side effects.
-//!
-//! The inline call-IC dispatch treated *any* nonzero status from the callee's
-//! thunk as an error and propagated it outward, so the callee's bailout became
-//! the CALLER's exit status. The VM then re-ran the caller from ip 0 — in the
-//! middle of its loop, after side effects — replaying part of the loop and
-//! leaving its locals reading a stale counter. Passing a float to a parameter
-//! the analyzer guessed was an int (`fun d(a, b) { a + b }` called with floats)
-//! was enough to trigger it.
-//!
-//! Silent wrong numbers, so every test compares the two backends.
+//! Tests that a JIT callee's entry-guard bailout is not reported as the caller's:
+//! a float passed to a parameter the analyzer guessed was an int must not change
+//! the caller's result. Every test compares the two backends.
 
 use oxigen_core::compiler::Compiler;
 use oxigen_core::lexer::Lexer;
@@ -50,7 +37,6 @@ fn assert_backends_agree(source: &str, expected: &str) {
 
 #[test]
 fn loop_variable_survives_a_calls_bailout() {
-    // The clearest symptom: `i` froze at start+step and an iteration vanished.
     assert_backends_agree(
         "fun d(a <float>) { a / 4.0 }\nlog := []\neach i in range(4) { x := d(10.0)\n log = push(log, i) }\nlog",
         "[0, 1, 2, 3]",
@@ -59,7 +45,6 @@ fn loop_variable_survives_a_calls_bailout() {
 
 #[test]
 fn loop_variable_is_correct_for_any_range_shape() {
-    // The stale value was always `start + step`, so vary both.
     assert_backends_agree(
         "fun d(a <float>) { a / 4.0 }\nlog := []\neach i in range(3, 7) { x := d(10.0)\n log = push(log, i) }\nlog",
         "[3, 4, 5, 6]",
@@ -84,8 +69,6 @@ fn no_iteration_is_lost_when_accumulating_a_call_result() {
 
 #[test]
 fn untyped_params_handed_floats_are_correct() {
-    // The analyzer guesses `a`/`b` are ints from `a + b`; the runtime tag guard
-    // is what catches the float. That bailout must stay the callee's problem.
     assert_backends_agree(
         "fun d(a, b) { a + b }\nt <float> := 0.0\neach i in range(4) { t = t + d(10.0, 4.0) }\nt",
         "56",
@@ -115,15 +98,12 @@ fn float_arithmetic_flavours_all_agree() {
 
 #[test]
 fn a_bailing_callee_still_returns_the_right_value() {
-    // Independent of any loop: the call itself must produce the real result.
     assert_backends_agree("fun d(a, b) { a + b }\nd(10.0, 4.0)", "14");
     assert_backends_agree("fun d(a <float>) { a / 4.0 }\nd(10.0)", "2.5");
 }
 
 #[test]
 fn int_callees_are_unaffected() {
-    // The mirror optimization must still work where it is valid — otherwise
-    // this "fix" would just be turning the optimization off.
     assert_backends_agree(
         "fun d(a, b) { a + b }\nt <int> := 0\neach i in range(4) { t = t + d(10, 4) }\nt",
         "56",
@@ -136,7 +116,6 @@ fn int_callees_are_unaffected() {
 
 #[test]
 fn alternating_int_and_float_calls_agree() {
-    // Forces repeated bail / re-enter transitions on the same callee.
     assert_backends_agree(
         "fun d(a, b) { a + b }\nt <float> := 0.0\neach i in range(50) { t = t + d(1, 2)\n t = t + d(1.5, 2.5) }\nt",
         "350",

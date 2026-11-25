@@ -1,5 +1,3 @@
-// Tests for the json stdlib module (object <-> map roundtrips through a file).
-// Run with:  oxigen test example/json_map_test.oxi
 introduce json
 introduce io
 introduce os

@@ -1,16 +1,11 @@
-//! A host embedding the VM (a game engine running scripts every frame) must
-//! survive any script: a bug in the script is a script error, never a host
-//! crash or hang.
+//! Tests that a host embedding the VM survives any script: a script bug is a
+//! script error, never a host crash or hang.
 //!
-//! - `+`, `-` and `*` wrap as `docs/operators.md` defines. The interpreter
-//!   used plain `l + r`, which panics in any build with overflow checks on
-//!   (every debug build, and so every host's debug build).
-//! - Exhausting the operand stack is a `stack overflow` error. It used to
-//!   `panic!`, which aborts the host when it builds with `panic = "abort"`.
-//! - A host can bound a script's loop iterations (`set_loop_budget`) and stop
-//!   it from another thread (`interrupt_handle`). Both apply to JIT-compiled
-//!   loops too, and neither can be caught by the script itself, or a
-//!   `<guard>` would let a runaway script carry on.
+//! - `+`, `-` and `*` wrap as `docs/operators.md` defines.
+//! - Exhausting the operand stack is a `stack overflow` error.
+//! - A host can bound a script's loop iterations (`set_loop_budget`) and stop it
+//!   from another thread (`interrupt_handle`). Both apply to JIT-compiled loops
+//!   too, and neither can be caught by the script itself.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -70,8 +65,7 @@ fn assert_both_reject(source: &str, needle: &str) {
 }
 
 /// Runs `body` on its own thread and fails if it hasn't finished within 30
-/// seconds, so a script that never stops fails the test instead of hanging
-/// the run. The VM is not `Send`, so `body` builds its own.
+/// seconds. `body` builds its own VM.
 fn within_time(body: impl FnOnce() + Send + 'static) {
     let (done, finished) = mpsc::channel();
     let worker = thread::spawn(move || {
@@ -88,8 +82,6 @@ fn within_time(body: impl FnOnce() + Send + 'static) {
         Err(RecvTimeoutError::Timeout) => panic!("the script was never stopped"),
     }
 }
-
-// ── Integer overflow wraps, as documented ──────────────────────────────
 
 #[test]
 fn addition_wraps_to_the_minimum() {
@@ -116,9 +108,7 @@ fn negating_the_minimum_wraps_to_itself() {
     assert_both_yield(&format!("{INT_MIN}-m"), "-9223372036854775808");
 }
 
-/// Mixed-width arithmetic promotes `byte`/`uint` with `int` to `int`, so it
-/// wraps the same way (`mixed_width_arithmetic.rs` covers the other
-/// operators).
+/// Mixed-width arithmetic promotes `byte`/`uint` with `int` to `int` and wraps.
 #[test]
 fn mixed_width_arithmetic_wraps() {
     assert_both_yield("9223372036854775807 + byte(1)", "-9223372036854775808");
@@ -134,14 +124,7 @@ fn wrapping_inside_a_loop_counter() {
     assert_both_yield(src, "-9223372036854775807");
 }
 
-// ── Stack exhaustion is an error, not a panic ──────────────────────────
-
-/// Recursion is already bounded (`call_closure` refuses a call within a
-/// margin of the stack's end), but one frame can still outgrow that margin
-/// on its own. An array literal pushes every element before building the
-/// array, and a literal nested in another keeps the outer elements pushed,
-/// so five nested 65,534-element literals need about 327K slots of a 256K
-/// stack. That used to reach the `panic!` in `push`.
+/// Five nested 65,534-element array literals do not overflow the operand stack.
 #[test]
 fn one_frame_outgrowing_the_operand_stack_is_an_error() {
     let level = vec!["True"; 65_534].join(", ");
@@ -151,8 +134,6 @@ fn one_frame_outgrowing_the_operand_stack_is_an_error() {
     }
     assert_both_reject(&format!("a := {literal}\nlen(a)"), "stack overflow");
 }
-
-// ── Loop budget ────────────────────────────────────────────────────────
 
 const SPIN: &str = "i := 0\nrepeat when True {\n    i++\n}\ni";
 
@@ -211,8 +192,6 @@ fn loop_budget_cannot_be_caught_by_the_script() {
     });
 }
 
-// ── Interrupt ──────────────────────────────────────────────────────────
-
 fn run_interrupted(vm: &mut VM, source: &str) -> (Result<String, String>, Duration) {
     let handle = vm.interrupt_handle();
     let trigger = thread::spawn(move || {
@@ -262,8 +241,7 @@ fn an_interrupt_is_spent_once_delivered() {
     });
 }
 
-/// An all-integer function with a loop is the shape the JIT's lean tier
-/// compiles: raw machine integers, no VM pointer. Its loop must still stop.
+/// An all-integer function with a loop, as the JIT's lean tier compiles it, still stops at the loop budget.
 const INT_ONLY_SPIN: &str = "fun spin(n) {\n    i := 0\n    repeat when i >= 0 {\n        i = i + n\n        i = i - n\n    }\n    i\n}\nspin(1)\nspin(1)\nspin(1)";
 
 #[test]
@@ -289,9 +267,7 @@ fn an_integer_only_loop_can_be_interrupted() {
     });
 }
 
-/// A fresh directory holding `spin_mod.oxi`, a module whose top level never
-/// finishes. Imported modules run in a child VM, which must inherit the
-/// importer's limits.
+/// A fresh directory holding `spin_mod.oxi`, a module whose top level never finishes; imported modules inherit the importer's limits.
 fn spinning_module(test: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("oxigen-{test}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -342,8 +318,7 @@ fn a_guarded_import_cannot_catch_the_loop_budget() {
     });
 }
 
-/// The JIT half of the tests above only means something if the loops really
-/// were compiled, not left to the interpreter.
+/// Checks that the loops were actually JIT-compiled.
 #[cfg(feature = "jit")]
 #[test]
 fn the_spinning_loops_are_jit_compiled() {

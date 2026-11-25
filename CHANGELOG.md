@@ -18,7 +18,8 @@ push(static_arr, 4)   // error: push() cannot change a locked array
 stays changeable and nested arrays, maps, sets and structs are locked too. The
 lock travels with the value: index and field writes and the in-place builtins
 (`push`, `pop`, `insert`, `remove`, `extend`, `clear`) refuse it under any
-name, including inside a function it was passed to. The variable itself
+name, including inside a function it was passed to or a `diverge` task it
+was sent to (and a value locked in a task comes back locked). The variable itself
 rejects `=`, `:=`, `++` and the compound operators at compile time. `copy()`
 gives a changeable copy. `lock name <type> = value` takes a type. `lock` is
 only a keyword in this position, so it still works as a variable name.

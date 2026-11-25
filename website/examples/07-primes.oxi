@@ -1,5 +1,3 @@
-// Sieve of Eratosthenes
-// A classic algorithm: arrays, index assignment, guards and while-style loops.
 fun primes_below(limit <int>) {
     marked := []
     each i in range(limit) {

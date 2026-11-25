@@ -4,16 +4,10 @@ use crate::token::{Pos, Span, Token, TokenType, token_map};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
-/// A comment seen while lexing.
-///
-/// Comments carry no semantics, so they never become tokens and never reach the
-/// AST — but `fmt` reprints from the AST, so without this record it would drop
-/// every comment in the file. `line`/`column` are where the comment started and
-/// `own_line` distinguishes a comment sitting alone on its line from one
-/// trailing code, which is all the formatter needs to put it back where the
-/// author wrote it. `column` is what separates a comment indented inside a
-/// block from one written past the block's closing delimiter — a distinction
-/// the AST cannot make, since it stores no span for a `}`.
+/// A comment seen while lexing. Comments never become tokens or reach the AST;
+/// the lexer records them so the formatter can reprint them. `line`/`column`
+/// are where the comment started, and `own_line` distinguishes a comment on
+/// its own line from one trailing code.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Comment {
     pub line: usize,
@@ -28,37 +22,24 @@ pub struct Lexer {
     read_position: usize,
     ch: char,
     keywords: HashMap<&'static str, TokenType>,
-    // Indent mode support
     indent_mode: bool,
     indent_stack: Vec<usize>,
     pending_tokens: VecDeque<Token>,
     at_line_start: bool,
-    // Source location tracking
     line: usize,
     column: usize,
-    /// Byte offset of each char in `input`, plus a final entry for EOF, so a
-    /// position can be reported as a byte index without rescanning. `input` is
-    /// `Vec<char>`, and diagnostics/edits need byte offsets into the original
-    /// source text.
+    /// Byte offset of each char in `input`, plus a final entry for EOF.
     char_byte_offsets: Vec<usize>,
     /// Bytes `preprocess_input` stripped (shebang, `#[...]` directives). Added
-    /// to every offset so they index the ORIGINAL source, matching the
-    /// line numbers, which are already original-relative via `start_line`.
+    /// to every offset so they index the original source.
     base_offset: usize,
     comments: Vec<Comment>,
     /// Open `(`, `[` and written `{` brackets. Indentation inside them is
-    /// layout, not structure: a multi-line map or call in an `#[indent]` file
-    /// must not open or close blocks.
+    /// layout, not structure.
     bracket_depth: usize,
-    /// Strings currently being lexed inside interpolations, so absurd nesting
-    /// is reported instead of exhausting the stack.
+    /// Strings currently being lexed inside interpolations.
     interp_depth: usize,
-    /// Real diagnostics for lexical problems.
-    ///
-    /// These used to be smuggled through `TokenType::Illegal`'s `literal`
-    /// field — the error text stored where a token's *text* belongs — leaving
-    /// the parser to guess whether a literal was a message or a stray
-    /// character. `Illegal` is now only a recovery placeholder.
+    /// Diagnostics for lexical problems.
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -66,7 +47,6 @@ impl Lexer {
     pub fn new(input: &str) -> Self {
         let (effective_input, start_line, indent_mode) = Self::preprocess_input(input);
 
-        // preprocess_input returns a suffix, so the byte-length delta is exactly what it stripped.
         let base_offset = input.len() - effective_input.len();
         let mut char_byte_offsets = Vec::with_capacity(effective_input.len() + 1);
         let mut running = 0usize;
@@ -74,7 +54,7 @@ impl Lexer {
             char_byte_offsets.push(running);
             running += c.len_utf8();
         }
-        char_byte_offsets.push(running); // EOF
+        char_byte_offsets.push(running);
 
         let mut l = Self {
             input: effective_input.chars().collect(),
@@ -83,9 +63,9 @@ impl Lexer {
             ch: '\0',
             keywords: token_map(),
             indent_mode,
-            indent_stack: vec![0], // Start with base indentation level 0
+            indent_stack: vec![0],
             pending_tokens: VecDeque::new(),
-            at_line_start: true, // We start at the beginning of input
+            at_line_start: true,
             line: start_line,
             column: 0,
             char_byte_offsets,
@@ -115,12 +95,10 @@ impl Lexer {
         let mut start_line = 1;
         let mut indent_mode = false;
 
-        // Editors on Windows like to save a byte-order mark; it is not code.
         if let Some(rest) = effective_input.strip_prefix('\u{feff}') {
             effective_input = rest;
         }
 
-        // Allow executable Oxigen scripts to start with a Unix shebang line.
         if effective_input.starts_with("#!") {
             if let Some(newline) = effective_input.find('\n') {
                 effective_input = &effective_input[newline + 1..];
@@ -143,8 +121,7 @@ impl Lexer {
 
     /// The shebang and top-level directives (`#[indent]`, `#[location=...]`)
     /// that are stripped before any code is read, one per line, and whether
-    /// they switch on indent mode. `fmt` reprints only what follows them, so
-    /// it has to agree with the lexer on exactly where that is.
+    /// they switch on indent mode.
     pub fn header_directives(input: &str) -> (Vec<String>, bool) {
         let (rest, _, indent_mode) = Self::preprocess_input(input);
         let header = &input[..input.len() - rest.len()];
@@ -201,10 +178,7 @@ impl Lexer {
     }
 
     pub fn next_token(&mut self) -> Token {
-        // A loop rather than recursion after each comment: a long enough run of
-        // `/**/` used to overflow the stack.
         loop {
-            // Return any pending tokens first (from dedent handling)
             if let Some(tok) = self.pending_tokens.pop_front() {
                 return tok;
             }
@@ -242,31 +216,21 @@ impl Lexer {
 
             let span = self.span();
             let mut token = self.lex_token_at(span);
-            // read_string anchors an unterminated string at its opening quote, so only the end moves.
             token.span.end = self.pos();
             return token;
         }
     }
 
-    /// True once every character has been consumed. The current character
-    /// can't tell: a NUL byte in the source is a character like any other,
-    /// and treating it as the end used to drop everything after it.
+    /// True once every character has been consumed.
     fn at_eof(&self) -> bool {
         self.position >= self.input.len()
     }
 
     /// Lexes exactly one token starting at the current character.
     ///
-    /// Split out of `next_token` so string interpolation can reuse the real
-    /// lexer for the expression inside `{ ... }`. That used to be a separate
-    /// hand-written scanner accepting only a whitelist of characters
-    /// (identifiers, numbers, strings, and `( ) , + - * / . [ ]`), which made
-    /// `"{a == b}"`, `"{x % 2}"` and every other operator a syntax error while
-    /// the parser behind it was perfectly capable of handling them.
-    ///
-    /// Callers are responsible for the parts of `next_token` NOT included here:
-    /// the pending-token queue, indent-mode bookkeeping, leading whitespace and
-    /// the newline token.
+    /// Does not handle the pending-token queue, indent-mode bookkeeping,
+    /// leading whitespace or the newline token; those are the caller's
+    /// responsibility.
     fn lex_token_at(&mut self, span: Span) -> Token {
         match self.ch {
             '\0' if !self.at_eof() => {
@@ -280,7 +244,6 @@ impl Lexer {
                 self.illegal("\0", span)
             }
             '\0' => {
-                // At EOF in indent mode, emit RBrace for any remaining open blocks
                 if self.indent_mode && self.indent_stack.len() > 1 {
                     self.indent_stack.pop();
                     while self.indent_stack.len() > 1 {
@@ -411,8 +374,6 @@ impl Lexer {
                 _ => self.single_with_span(TokenType::Plus, span),
             },
             ':' => {
-                // In indent mode, colon at end of line becomes LBrace — but not
-                // inside brackets, where indentation opens no blocks.
                 if self.indent_mode && self.bracket_depth == 0 && self.is_colon_at_eol() {
                     self.read_char();
                     Token {
@@ -467,7 +428,6 @@ impl Lexer {
                 }
                 _ => self.single_with_span(TokenType::Pipe, span),
             },
-            // Oxigen has no statement terminator; Illegal carries its own message so the parser reports the fix.
             ';' => {
                 self.read_char();
                 let span = Span::range(span.start, self.pos());
@@ -550,7 +510,6 @@ impl Lexer {
                 let lit = self.ch.to_string();
                 self.read_char();
                 let span = Span::range(span.start, self.pos());
-                // `?` marks optional parameters and is consumed by the parser, so it is not an error.
                 if lit != "?" {
                     self.diagnostics.push(Diagnostic::error(
                         codes::ILLEGAL_TOKEN,
@@ -612,7 +571,6 @@ impl Lexer {
             self.read_char();
         }
         self.record_comment(span, own_line, start);
-        // Leave self.ch at '\n' or EOF so next_token handles it
     }
 
     fn skip_block_comment(&mut self) {
@@ -633,7 +591,6 @@ impl Lexer {
             self.read_char();
         }
         if !closed {
-            // Running to EOF used to be silent: everything after `/*` was swallowed and the file exited 0.
             self.diagnostics.push(
                 Diagnostic::error(
                     codes::UNTERMINATED_BLOCK_COMMENT,
@@ -710,7 +667,6 @@ impl Lexer {
             }
         }
 
-        // `1.2.3` used to lex as `1.2` then `.3`, surfacing as a field access on FLOAT.
         if is_float && self.ch == '.' && self.peek_char().is_ascii_digit() {
             while self.ch == '.' || self.ch.is_ascii_digit() {
                 self.read_char();
@@ -729,7 +685,6 @@ impl Lexer {
             return self.illegal(&literal, span);
         }
 
-        // `1.5e3`, `2E-4`: without this `e3` lexed as a separate statement.
         if matches!(self.ch, 'e' | 'E') {
             let sign = matches!(self.peek_char(), '+' | '-');
             let digit_at = if sign {
@@ -801,13 +756,11 @@ impl Lexer {
     }
 
     fn read_string(&mut self, delimiter: char, triple: bool, span: Span) -> Token {
-        self.consume_quote_fence(triple); // opening quote(s)
+        self.consume_quote_fence(triple);
 
         let has_interp = self.string_has_interpolation(delimiter, triple);
 
         if has_interp && self.interp_depth >= MAX_INTERP_DEPTH {
-            // Each level recurses through the real lexer; past this, report it
-            // rather than let a hostile file exhaust the stack.
             while !self.at_string_body_end(delimiter, triple) {
                 self.read_char();
             }
@@ -824,7 +777,6 @@ impl Lexer {
         }
 
         if !has_interp {
-            // A single-line string stops at the delimiter, EOF, or a raw newline.
             let mut literal = std::string::String::new();
             while !self.at_string_body_end(delimiter, triple) {
                 if self.ch == '\\' {
@@ -835,10 +787,9 @@ impl Lexer {
                 }
             }
             if !self.at_closing_delimiter(delimiter, triple) {
-                // Do not consume the sentinel, so the rest of the line still tokenizes without a cascade.
                 return self.unterminated_string_token(span);
             }
-            self.consume_quote_fence(triple); // closing quote(s)
+            self.consume_quote_fence(triple);
             return Token {
                 token_type: if triple {
                     TokenType::MultilineString
@@ -850,17 +801,12 @@ impl Lexer {
             };
         }
 
-        // Remember the pending-token count so the queue can roll back cleanly.
         let pending_mark = self.pending_tokens.len();
-        // Brackets inside `{...}` belong to the string; an unbalanced one must
-        // not leave the rest of the file thinking it is inside brackets.
         let depth_mark = self.bracket_depth;
         let mut literal_buf = std::string::String::new();
 
-        // Stop at the closing fence, EOF, or a raw newline for single-line strings.
         while !self.at_string_body_end(delimiter, triple) {
             if self.ch == '{' {
-                // Emit any accumulated literal as a String token
                 if !literal_buf.is_empty() {
                     self.pending_tokens.push_back(Token {
                         token_type: TokenType::String,
@@ -871,7 +817,6 @@ impl Lexer {
                 }
 
                 let expr_span = self.span();
-                // Emit InterpExprStart
                 self.pending_tokens.push_back(Token {
                     token_type: TokenType::InterpExprStart,
                     literal: "{".into(),
@@ -880,10 +825,8 @@ impl Lexer {
 
                 self.read_char();
 
-                // Lex tokens inside {} using a brace depth counter
                 let mut brace_depth = 1;
                 loop {
-                    // Newlines are only valid here inside a triple-quoted string.
                     loop {
                         self.skip_whitespace_except_newline();
                         if triple && self.ch == '\n' {
@@ -897,17 +840,15 @@ impl Lexer {
                         break;
                     }
 
-                    // Depth counts from the first significant character so a nested map brace is not read as the end.
                     if self.ch == '}' {
                         brace_depth -= 1;
                         if brace_depth == 0 {
-                            break; // caller consumes the closing brace
+                            break;
                         }
                     } else if self.ch == '{' {
                         brace_depth += 1;
                     }
 
-                    // The comment arms restart via next_token, which would pop the interpolation tokens queued below.
                     if self.ch == '/' && matches!(self.peek_char(), '/' | '*') {
                         if self.peek_char() == '/' {
                             self.skip_line_comment();
@@ -917,9 +858,6 @@ impl Lexer {
                         continue;
                     }
 
-                    // Use the real lexer so `{ ... }` supports the whole language, not a hand-maintained subset.
-                    // A nested interpolated string queues its own parts, so its start
-                    // token goes in front of them rather than after.
                     let inner_span = self.span();
                     let mark = self.pending_tokens.len();
                     self.interp_depth += 1;
@@ -929,7 +867,6 @@ impl Lexer {
                 }
 
                 let end_span = self.span();
-                // Emit InterpExprEnd
                 self.pending_tokens.push_back(Token {
                     token_type: TokenType::InterpExprEnd,
                     literal: "}".into(),
@@ -947,12 +884,10 @@ impl Lexer {
 
         self.bracket_depth = depth_mark;
         if !self.at_closing_delimiter(delimiter, triple) {
-            // Discard the queued part tokens and report one error at the opening quote.
             self.pending_tokens.truncate(pending_mark);
             return self.unterminated_string_token(span);
         }
 
-        // Emit any trailing literal
         if !literal_buf.is_empty() {
             self.pending_tokens.push_back(Token {
                 token_type: TokenType::String,
@@ -961,16 +896,14 @@ impl Lexer {
             });
         }
 
-        // Emit InterpEnd
         self.pending_tokens.push_back(Token {
             token_type: TokenType::InterpEnd,
             literal: "".into(),
             span: self.span(),
         });
 
-        self.consume_quote_fence(triple); // closing quote(s)
+        self.consume_quote_fence(triple);
 
-        // A multi-line variant when triple-quoted, so the formatter can round-trip it.
         Token {
             token_type: if triple {
                 TokenType::MultilineInterpStart
@@ -984,16 +917,10 @@ impl Lexer {
 
     /// Build the diagnostic token for a string literal that was never closed.
     ///
-    /// A single-line Oxigen string is closed by a matching quote on the same
-    /// line (newlines are written with the `\n` escape), so reaching
-    /// end-of-line or end-of-input first is a missing-quote typo. A
-    /// triple-quoted string (`"""`/`'''`) may span lines, so only end-of-input
-    /// before its closing fence is unterminated. Either way we surface this as
-    /// a `TokenType::Illegal` token whose `literal` is the human-readable
-    /// message and whose `span` points at the OPENING quote — the actual
-    /// location of the mistake — instead of letting the lexer swallow the rest
-    /// of the file and produce a misleading cascade of parser errors. The
-    /// parser turns this `Illegal` token into a reported diagnostic.
+    /// A single-line string is unterminated at end-of-line or end-of-input; a
+    /// triple-quoted string only at end-of-input. The result is a
+    /// `TokenType::Illegal` token whose `literal` is the message and whose
+    /// `span` points at the opening quote.
     fn unterminated_string_token(&mut self, span: Span) -> Token {
         self.diagnostics.push(
             Diagnostic::error(
@@ -1054,7 +981,6 @@ impl Lexer {
                 literal.push(c);
                 self.read_char();
             }
-            // `\{` and `\}` are the only way to write a literal brace; a bare `{` starts an interpolation.
             '{' | '}' => {
                 literal.push(self.ch);
                 self.read_char();
@@ -1078,16 +1004,13 @@ impl Lexer {
     /// Look ahead to check if a string contains `{` before its closing fence.
     ///
     /// For a single-line string the scan stops at the delimiter, EOF, or a raw
-    /// newline (which makes the string unterminated). For a triple-quoted
-    /// string the scan spans newlines and stops only at the closing `"""`/`'''`
-    /// fence or EOF. In both cases a non-interpolated result routes the string
-    /// to the simpler escape-only branch of `read_string`.
+    /// newline. For a triple-quoted string it stops only at the closing
+    /// `"""`/`'''` fence or EOF.
     fn string_has_interpolation(&self, delimiter: char, triple: bool) -> bool {
         let mut pos = self.position;
         while pos < self.input.len() {
             let c = self.input[pos];
             if triple {
-                // Closing fence: three delimiter chars in a row.
                 if c == delimiter
                     && self.input.get(pos + 1).copied() == Some(delimiter)
                     && self.input.get(pos + 2).copied() == Some(delimiter)
@@ -1098,7 +1021,7 @@ impl Lexer {
                 return false;
             }
             if c == '\\' {
-                pos += 2; // skip escaped character
+                pos += 2;
                 continue;
             }
             if c == '{' {
@@ -1139,8 +1062,6 @@ impl Lexer {
         }
     }
 
-    // === Indent mode helpers ===
-
     /// Check if the colon is at end of line (only whitespace until newline/EOF)
     fn is_colon_at_eol(&self) -> bool {
         let mut pos = self.read_position;
@@ -1149,7 +1070,6 @@ impl Lexer {
             if c == '\n' {
                 return true;
             }
-            // A // comment counts as end of line
             if c == '/' && pos + 1 < self.input.len() && self.input[pos + 1] == '/' {
                 return true;
             }
@@ -1158,14 +1078,12 @@ impl Lexer {
             }
             pos += 1;
         }
-        true // EOF counts as end of line
+        true
     }
 
     /// Indentation of the next line that holds code, called at the start of a
-    /// line. Blank lines and lines holding only a comment carry no structure,
-    /// so they are consumed here (their comments still recorded) instead of
-    /// being measured — and consumed once, where re-scanning every following
-    /// blank line from each line start used to make them quadratic.
+    /// line. Blank lines and lines holding only a comment are consumed (their
+    /// comments still recorded).
     fn measure_indentation(&mut self) -> usize {
         loop {
             let mut indent = 0;
@@ -1173,8 +1091,7 @@ impl Lexer {
             while let Some(&c) = self.input.get(pos) {
                 match c {
                     ' ' => indent += 1,
-                    '\t' => indent += 4, // Treat tab as 4 spaces
-                    // A CRLF line ending is a line ending, not indentation.
+                    '\t' => indent += 4,
                     '\r' => {}
                     _ => break,
                 }
@@ -1196,15 +1113,13 @@ impl Lexer {
                 }
                 self.skip_whitespace_except_newline();
                 if self.ch != '\n' && !self.at_eof() {
-                    // Code after a `/* ... */` on the same line: the line is
-                    // indented where the comment started.
                     return indent;
                 }
             }
             if self.at_eof() {
                 return indent;
             }
-            self.read_char(); // the newline
+            self.read_char();
         }
     }
 
@@ -1214,10 +1129,8 @@ impl Lexer {
         let span = self.span();
 
         if indent_level > current_indent {
-            // Indent increased - push new level (LBrace was already emitted by colon)
             self.indent_stack.push(indent_level);
         } else if indent_level < current_indent {
-            // Dedent - pop levels and emit RBrace for each
             while let Some(&top) = self.indent_stack.last() {
                 if top <= indent_level {
                     break;
@@ -1228,17 +1141,12 @@ impl Lexer {
                     literal: "}".into(),
                     span,
                 });
-                // As in brace style, a closed block ends its line. Without this
-                // a line starting with `[` or `(` after a dedent was read as
-                // indexing or calling the block expression just closed.
                 self.pending_tokens.push_back(Token {
                     token_type: TokenType::Newline,
                     literal: "\n".into(),
                     span,
                 });
             }
-            // Landing between two open levels used to be accepted, silently
-            // attaching the line to the outer block.
             if self
                 .indent_stack
                 .last()
@@ -1255,7 +1163,6 @@ impl Lexer {
                 self.indent_stack.push(indent_level);
             }
         }
-        // If equal, no action needed
     }
 }
 

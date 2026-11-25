@@ -1,5 +1,4 @@
-//! Builtin-permissiveness regression: the bytecode VM and JIT must agree on
-//! the result of several builtins that were previously inconsistent:
+//! Tests that the bytecode VM and JIT agree on builtin results:
 //!
 //!   - range(start, end)  — range(n) and range(start, end) both supported.
 //!   - str([1, 2])        — uses the Display form.
@@ -7,8 +6,6 @@
 //!   - rest([])           — [] (empty array).
 //!   - int(" 5 ")         — trims surrounding whitespace.
 //!   - float(True/False)  — Boolean arm.
-//!
-//! Plus a few cases to prove no regression.
 
 #![cfg(feature = "jit")]
 
@@ -98,8 +95,7 @@ fn float_of_false() {
     assert_parity("float(False)");
 }
 
-/// Concrete expected values, so the parity assertions aren't trivially
-/// satisfied by interp and JIT sharing the same wrong answer.
+/// Concrete expected values for the parity cases.
 #[test]
 fn concrete_expected_values() {
     assert_eq!(run_vm("range(2, 5)", None), "[2, 3, 4]");

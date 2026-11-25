@@ -2,8 +2,6 @@ introduce io
 introduce os
 introduce path
 
-// Tests write under the system temp dir, never the repo. TMPDIR is set on
-// macOS; Linux CI generally leaves it unset, hence the /tmp fallback.
 fun tmp_dir(leaf <str>) {
     env_tmp := os.env_get("TMPDIR")
     base := option {
